@@ -23,7 +23,10 @@ from umi.competition_cohort_recovery import (
 )
 from umi.competition_cohort_request_start import REST_MS, RequestStartConfig, SeriesRequestStart
 from umi.competition_execution import execution_boundary
-from umi.competition_reward_decisions import StandingRewardSeries
+from umi.competition_reward_decisions import (
+    StandingRewardSeries,
+    StandingRewardSeriesPredecessor,
+)
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -312,3 +315,82 @@ async def test_six_cohorts_keep_separate_rest_after_repeated_long_outages(rest):
         assert (await h.gate.check(key))["ready"]
     assert len(set(starts)) == 5
     assert starts == sorted(starts)
+
+
+def successor_gate(rest, root):
+    previous = rest.series
+    plans = tuple(
+        previous.cohorts[-1].model_copy(
+            update={"sequence": sequence, "suite_sha256": f"{sequence:02x}" * 32}
+        )
+        for sequence in (11, 12)
+    )
+    authority = StandingCohortRecoveryAuthority(
+        schema="umi-cohort-recovery-authority/2",
+        policy_sha256=digest(rest.policy),
+        cohort_sha256s=tuple(sorted(digest(plan) for plan in plans)),
+        issued_at_block=950,
+        lifetime="until_completed_or_revoked",
+        closure_rule="quorum_certified_phase_completion",
+        timing_rule="targets_without_extension_signatures",
+    )
+    recovery = SignedCohortRecoveryAuthority(authority=authority, signatures=signatures(authority))
+    predecessor = StandingRewardSeriesPredecessor(
+        schema="umi-standing-reward-series-predecessor/1",
+        series_sha256=digest(previous),
+        policy_sha256=previous.policy_sha256,
+        manifest_sha256=previous.manifest_sha256,
+        recovery_sha256=digest(previous.recovery),
+        cohort_sha256=digest(previous.cohorts[-1]),
+        cohort_sequence=previous.cohorts[-1].sequence,
+        control_hotkey=previous.control_hotkey,
+        decision_sha256="d1" * 32,
+        activation_sha256="d2" * 32,
+        decision_committed_at_block=900,
+    )
+    series = StandingRewardSeries.model_validate_json(
+        canonical_json_bytes(
+            previous.model_copy(
+                update={
+                    "schema_": "umi-standing-reward-series/2",
+                    "recovery": recovery,
+                    "cohorts": plans,
+                    "predecessor": predecessor,
+                }
+            )
+        )
+    )
+    config = RequestStartConfig(
+        schema="umi-cohort-request-start-config/2",
+        directory=str(root),
+        first_cohort_not_before_unix_ms=1,
+        predecessor_plan=previous.cohorts[-1],
+        predecessor_recovery=previous.recovery,
+    )
+    return SeriesRequestStart(config, series, rest.provider, rest.gate.history), series
+
+
+async def test_successor_first_cohort_replays_prior_series_close_and_full_rest(rest, tmp_path):
+    gate, series = successor_gate(rest, tmp_path / "successor-rest")
+    key = digest(series.cohorts[0])
+    rest.timestamp += 20 * 60 * 60 * 1000
+    waiting = await gate.check(key)
+    assert waiting["status"] == "waiting_predecessor_requests"
+    assert gate.journal.get("request_rest", key) is None
+
+    rest.closed(index=len(rest.series.cohorts) - 1)
+    started = await gate.check(key)
+    expected = rest.timestamp + gate.head_age + REST_MS
+    assert not started["ready"] and started["not_before_unix_ms"] == expected
+    gate = SeriesRequestStart(gate.config, series, rest.provider, gate.history)
+    rest.timestamp = expected + gate.future_skew
+    rest.block += 1
+    assert (await gate.check(key))["ready"]
+
+
+def test_successor_request_start_rejects_changed_predecessor_inputs(rest, tmp_path):
+    gate, series = successor_gate(rest, tmp_path / "successor-rest-bad")
+    changed = gate.config.predecessor_plan.model_copy(update={"suite_sha256": "ff" * 32})
+    config = gate.config.model_copy(update={"predecessor_plan": changed})
+    with pytest.raises(ValueError, match="predecessor differs"):
+        SeriesRequestStart(config, series, rest.provider, gate.history)

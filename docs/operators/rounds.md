@@ -921,22 +921,24 @@ age deadline. Retries cannot increase credited time.
 
 For a version 2 manifest, reward projection and transaction preparation require
 that reviewed certificate for the exact preceding activation. Evidence must end
-no later than the successor decision's observed block. The first activation
-instead requires the native legacy handoff described below. Approved runtime and
-timing parameters, installed migration and execution remain incomplete. Coverage establishes
-reward opportunity, not a particular emission amount or submission authority.
+no later than the successor decision's observed block. The first activation of
+the initial standing series requires the native legacy handoff described below;
+the first activation of every later standing series requires native replay of
+the predecessor opportunity and its retained journal handoff. Installed rollout
+and outage qualification remain incomplete. Coverage establishes reward
+opportunity, not a particular emission amount or submission authority.
 
 The simpler `select` and `select_admitted` methods check signed ancestry and
 original admission but do not exclude overwritten control writes. Installed
-reward execution must consume the complete history check. That execution
-integration and installed outage/reward-handoff qualification remain pending.
+reward execution consumes the complete history check. Production rollout and
+installed outage/reward-handoff qualification remain pending.
 
 This selection still requires native replay of the referenced package, original
-series admission, prior reward opportunity and any legacy handoff before weight
-submission. The returned selection grants no transaction authority. Signer
-fencing, encoded mortality, nonce recovery and installed continuation belong
-to the execution consumer. Preserve the predecessor's admission and renewal
-checks.
+series admission, prior reward opportunity and the applicable legacy or standing
+handoff before weight submission. The returned selection grants no transaction
+authority. Signer fencing, encoded mortality, nonce recovery and installed
+continuation belong to the execution consumer. Preserve the predecessor's
+admission and renewal checks.
 
 Registration projection preserves fixed integer amounts by hotkey. A departed
 hotkey's share goes to the currently proved burn destination; a returning hotkey
@@ -975,8 +977,8 @@ standing control and inherited weight-state reads, including complete recipient
 discovery. The configured proof helper must support the read protocol; an older
 helper causes a hold. The existing legacy weight provider keeps its read path.
 Runtime-code and finality collection have separate requests and limits.
-Coverage accounting, measured provider budgets and installed qualification remain
-pending.
+Coverage accounting is integrated. Measured provider budgets and installed
+qualification remain pending.
 
 `StandingRewardPreparation` connects complete-history selection to native package
 replay. Supply a `StandingRewardManifest` whose digest matches the independently
@@ -998,9 +1000,10 @@ at the same finalized snapshot, the designated validator, and completed control
 drain time. A revoked or replaced selection cannot use a cached allocation.
 After restart, replay the retained private package and promotion assets again;
 serialized preparation records grant no authority. Version 2 projection requires
-native predecessor-opportunity replay as described above. Legacy handoff, signer
-fencing and transaction recovery still require execution integration and installed
-qualification. Preparation does not authorize weights.
+native predecessor-opportunity replay as described above. The installed execution
+path also requires the applicable handoff, signer fence and transaction recovery;
+production rollout and qualification remain pending. Preparation does not
+authorize weights.
 
 `FinalizedCompetitionWeightProvider.read_mortal_receipt` searches retained signed
 transaction bytes within an independently checked mortal era of 4–4,096 blocks.
@@ -1096,8 +1099,9 @@ and continuously held locks. Missing journals, inconsistent authorities and
 unavailable proofs leave the intent pending. Original attempts and evidence are
 preserved. Phase logs report inventory progress without transaction bytes.
 
-The scoped result is required on every first-cohort projection and transaction
-preparation. It checks the exact activation, designated validator, proof height
+The scoped legacy result is required on every initial-series first-cohort
+projection and transaction preparation. It checks the exact activation,
+designated validator, proof height
 and unchanged writer ownership. Leaving the context invalidates it. Restart
 replays the inventory from retained bytes. The installed host must still select
 the approved new executable at boot and prevent an older binary from ignoring
@@ -1105,16 +1109,34 @@ the new intent; this library does not install that transition. Installed signing
 submission and outage qualification remain pending. Retain these legacy consumers
 until no deployed migration or recovery path needs them.
 
+For a later standing series, `hold_standing_reward_handoff` owns the same
+supervisor process lease and runtime mutex while holding the predecessor
+series-local writer lock. It requires the signed predecessor boundary, the exact
+natively replayed opportunity selected by the successor activation, and the
+retained predecessor host binding. It resolves any signed pending transaction
+through native receipt or mortality review before issuing a process-local
+handoff. The successor binding retains the predecessor binding in bounded
+supervisor history and opens a distinct series journal under the host-wide lock.
+Restart repeats this process from retained state; missing predecessor state,
+changed journal identity or a live transaction remains a retryable hold.
+
 `StandingRewardExecutor` connects these consumers to recurring signing and exact
 byte submission. Its installed caller supplies the approved version 2 manifest,
 native preparation/provider/history owners, retained transaction journal, first
-prepared activation and scoped legacy handoff. Package and decision callbacks
-supply content; the native readers verify it. A later activation also requires
-the native predecessor-opportunity result. Submission uses the configured primary
-RPC and two explicit backups.
+prepared activation and the applicable scoped predecessor handoff. Package and
+decision callbacks supply content; the native readers verify it. A later
+activation also requires the native predecessor-opportunity result. Submission
+uses the configured primary RPC and two explicit backups.
 
-`run` holds a separate private writer lock and serializes iterations. Each
-iteration reconciles an existing transaction before reserving another. It never
+`run` holds both the selected predecessor's series-local writer lock and a writer
+lock shared by every standing series under the validator state root. The local
+lock preserves same-series exclusion during a rolling host upgrade; the shared
+lock prevents two upgraded series from acquiring validator writers concurrently.
+Every host must therefore run a shared-lock-capable release before a successor
+series is installed. Series journals remain disjoint. The configured reward
+coordinator similarly holds one control-writer lock shared by all upgraded series
+under its state root. Each iteration reconciles an existing transaction before
+reserving another. It never
 re-signs or retransmits a recovered attempt, including an unsigned intent or a
 lost commit acknowledgement. Missing inclusion evidence leaves it pending until
 native receipt or expiry review permits a successor. No cumulative timer or
@@ -1131,8 +1153,9 @@ without raw transactions, exception details or endpoint credentials. SDK success
 is reported as `submitted_unconfirmed` until independent recovery verification.
 
 The installed host must bind the journal location, qualify series inputs and
-retain the original writer handoff throughout this loop. Boot/source switching,
-automatic coverage integration and installed outage qualification remain open.
+retain the applicable legacy or standing writer handoff throughout this loop.
+Boot reconstructs both current and immediate-predecessor coverage owners for a
+standing successor. Installed rollout and outage qualification remain open.
 Actual reward coverage must be proved separately; an expired attempt never
 supplies coverage credit.
 

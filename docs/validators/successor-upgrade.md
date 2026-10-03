@@ -244,7 +244,12 @@ chain configuration and predecessor handoff plan. `competition_reward_host`
 reads this root-owned approval before stopping the predecessor and binds the
 transaction journal to the original supervisor database. Startup must reopen
 that journal; missing state cannot become an empty replacement. Capacity
-increases preserve its identity.
+increases preserve its identity. Execution retains the series-local writer lock
+for compatibility and also holds a lock at the shared `standing-rewards` root,
+so two different standing series cannot submit concurrently for the same
+validator once all candidate hosts run the shared-lock-capable release. Upgrade
+the incumbent host before installing a successor series; an older host knows
+only its series-local lock and cannot observe the new shared lock.
 
 `competition_reward_service` owns proof providers and holds the original
 predecessor handoff through executor shutdown. Transient failures retry with retained state;
@@ -281,13 +286,36 @@ replay. It does not copy candidate bundles into its promotion directory. Keep
 the frozen baseline in the local native archive. The credential file must remain
 outside every mutable or replicated store.
 
+Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
+They bind the immediate predecessor series, its opportunity manifest and
+eligibility runtime, the standing handoff plan, and the SHA-256 of the retained
+predecessor host approval. The current validator hotkey must be designated in
+both series. Moving that same validator to another host is supported only by
+copying the complete private supervisor state and predecessor journal, then
+installing the exact successor approval that names the retained predecessor
+approval digest; an empty host or a newly added validator cannot claim
+predecessor authority.
+
+At the first successor activation, the host natively replays the exact reward
+opportunity named by the activation, stops the old worker under its permanent
+handoff intent, and holds the predecessor journal's writer lock. A signed pending
+transaction must reach a proved terminal result; an unsigned retained intent is
+safe under the standing journal's write-before-broadcast rule. The new journal
+is then bound under the host-wide writer lock. The predecessor binding moves to
+a bounded lineage history in the supervisor database, so restart can reopen both
+journals and repeat the same checks without resetting either series. Each retained
+row is content-addressed; after 64 series, the oldest audit-only row is pruned
+while the immediate predecessor is always retained. Leaving the handoff context
+invalidates the process-local authorization.
+
 During initial history/package replay, the original supervisor continues
 predecessor reconciliation. The durable handoff intent stops that continuation
 before successor signing, including after restart. A failed old feed does not
 prevent independent successor recovery. Status logs identify bootstrap progress, holds and transaction
 progress without enabling HTTP-client logging.
 `standing_service_stage` reports entry into initial control collection, replay,
-legacy handoff, journal binding and signer/executor startup. A
+predecessor-opportunity replay, standing or legacy handoff, journal binding and
+signer/executor startup. A
 `standing_service_retry` includes the failed `stage` and exception type without
 exception text or credentials. A stage entry records attempted work; use the
 retained journal and finalized chain update to confirm completion.
@@ -412,6 +440,15 @@ preserved R2 object before reviewing or signing an activation and retains only
 its private receipt. Source schema 2 also requires benchmark materialization on
 a bounded filesystem whose device differs from every configured protected root;
 put that workspace on a dedicated mounted volume before starting the service.
+
+Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
+They include the immediate predecessor series, opportunity manifest and
+eligibility runtime selected by the signed boundary. Every coordinator and
+reviewer reconstructs that predecessor's private history and coverage owner,
+keeps its collector running, and waits for the exact predecessor opportunity
+before reviewing the successor's first activation. Missing evidence, a restart
+or an offline proof source leaves the activation pending; it does not substitute
+the handoff digest, discard the series or require another enrollment window.
 
 The coordinator loads its evaluator key and the reserved control key. Reviewers
 load only their evaluator key and independently replay the original proposal

@@ -20,7 +20,12 @@ import pytest
 from umi import competition_reward_handoff as handoff
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
 from umi.competition_reward_decisions import RewardActivation
-from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan, validate_legacy_handoff
+from umi.competition_reward_handoff_models import (
+    LegacyRewardHandoffPlan,
+    StandingRewardHandoffPlan,
+    validate_legacy_handoff,
+    verify_handoff_plan,
+)
 from umi.competition_reward_preparation import StandingRewardPreparation
 from umi.competition_supervisor import SuccessorSupervisorDirectivePage
 from umi.competition_supervisor_runtime import SuccessorRuntimeLimits, SuccessorSupervisorRuntime
@@ -29,6 +34,7 @@ from umi.protocol import canonical_json_bytes
 from umi.validator_supervisor import advance_supervisor_directive_state
 
 from .test_competition_reward_decisions import series_case as series_case
+from .test_competition_reward_decisions import successor_series
 from .test_competition_supervisor_adapters import (
     _candidate_storage,
     _run,
@@ -197,6 +203,41 @@ async def signed_attempt(c):
 def assert_locked(path):
     with Path(path).open("rb") as f, pytest.raises(BlockingIOError):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_handoff_plan_kind_and_boundary_follow_the_signed_series(series_case):
+    initial = series_case.series
+    legacy = LegacyRewardHandoffPlan(
+        schema="umi-legacy-reward-handoff-plan/1",
+        series_sha256=digest(initial),
+        cohort_sha256=digest(initial.cohorts[0]),
+        legacy_policy_sha256="11" * 32,
+        legacy_round_sha256="12" * 32,
+        legacy_package_sha256="13" * 32,
+    )
+    assert verify_handoff_plan(legacy, initial) == legacy
+
+    successor = successor_series(initial)
+    standing = StandingRewardHandoffPlan(
+        schema="umi-standing-reward-handoff-plan/1",
+        series_sha256=digest(successor),
+        cohort_sha256=digest(successor.cohorts[0]),
+        predecessor=successor.predecessor,
+    )
+    assert verify_handoff_plan(standing, successor) == standing
+    with pytest.raises(ValueError, match="standing handoff"):
+        verify_handoff_plan(
+            standing.model_copy(
+                update={
+                    "predecessor": standing.predecessor.model_copy(
+                        update={"decision_sha256": "ff" * 32}
+                    )
+                }
+            ),
+            successor,
+        )
+    with pytest.raises(ValueError, match="standing handoff plan"):
+        verify_handoff_plan(legacy, successor)
 
 
 async def test_complete_native_inventory_stays_locked_and_preserved_across_restart(migration):

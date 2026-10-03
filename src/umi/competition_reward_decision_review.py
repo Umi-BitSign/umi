@@ -29,7 +29,12 @@ from .competition_reward_decisions import (
     verify_reward_decision_proposal,
     verify_reward_decisions,
 )
-from .competition_reward_handoff_models import LegacyRewardHandoffPlan
+from .competition_reward_handoff_models import (
+    LegacyRewardHandoffPlan,
+    RewardHandoffPlan,
+    StandingRewardHandoffPlan,
+    verify_handoff_plan,
+)
 from .competition_reward_history import OwnedRewardControlHistory, validate_control_history
 from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
@@ -39,6 +44,10 @@ from .competition_reward_opportunity import (
     VerifiedRewardOpportunity,
     check_opportunity_claim,
     validate_opportunity,
+)
+from .competition_reward_series_handoff import (
+    VerifiedStandingPredecessorOpportunity,
+    validate_standing_predecessor_opportunity,
 )
 from .competition_store import CompetitionStore
 from .open_competition import digest
@@ -91,8 +100,10 @@ def review_reward_decision(
     history: OwnedRewardControlHistory,
     package: CohortRewardPackage | None = None,
     promotion_store: CompetitionStore | None = None,
-    approved_handoff: LegacyRewardHandoffPlan | None = None,
-    previous_opportunity: VerifiedRewardOpportunity | None = None,
+    approved_handoff: RewardHandoffPlan | None = None,
+    previous_opportunity: (
+        VerifiedRewardOpportunity | VerifiedStandingPredecessorOpportunity | None
+    ) = None,
     maximum_promotion_bytes: int,
     maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
     verify_model_artifact: ModelArtifactVerifier | None = None,
@@ -128,8 +139,9 @@ def review_reward_decision(
     if decision.kind == "revoke":
         raise ValueError("automatic reward signing cannot infer revocation")
     if not prefix:
-        if history.unresolved_blocks or history.writes or control.control_sha256 is not None:
-            raise ValueError("series admission requires the reserved empty control history")
+        predecessor = None if series.predecessor is None else series.predecessor.decision_sha256
+        if history.unresolved_blocks or history.writes or control.control_sha256 != predecessor:
+            raise ValueError("series admission requires its exact predecessor control history")
     else:
         objects = {digest(v.decision): canonical_json_bytes(v) for v in prefix}
         selected = reader.review_history(control, objects.__getitem__, history)
@@ -139,16 +151,21 @@ def review_reward_decision(
         assert activation is not None
         if decision.sequence == 1:
             if approved_handoff is None:
-                raise ValueError("first reward activation lacks an approved legacy handoff")
-            plan = LegacyRewardHandoffPlan.model_validate_json(
-                canonical_json_bytes(approved_handoff)
-            )
-            if (
-                plan.series_sha256 != digest(series)
-                or plan.cohort_sha256 != activation.cohort_sha256
-                or digest(plan) != activation.prior_opportunity_sha256
-            ):
-                raise ValueError("first reward activation differs from the approved legacy handoff")
+                raise ValueError("first reward activation lacks its approved handoff")
+            plan = verify_handoff_plan(approved_handoff, series)
+            if type(plan) is LegacyRewardHandoffPlan:
+                if digest(plan) != activation.prior_opportunity_sha256:
+                    raise ValueError(
+                        "first reward activation differs from the approved legacy handoff"
+                    )
+            else:
+                assert type(plan) is StandingRewardHandoffPlan
+                validate_standing_predecessor_opportunity(
+                    previous_opportunity,
+                    plan=plan,
+                    activation=activation,
+                    block=decision.observed_at_block,
+                )
         else:
             certificate = validate_opportunity(previous_opportunity)
             prior = prefix[-1].decision.activation

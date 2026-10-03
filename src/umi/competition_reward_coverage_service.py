@@ -257,9 +257,11 @@ class StandingRewardCoverageService:
             index = tuple(digest(c) for c in reader.series.cohorts).index(activation.cohort_sha256)
             if index == 0:
                 raise ValueError("initial opportunity requires the native legacy handoff")
-            prior = SignedRewardControlDecision.model_validate(
-                await run_owned_thread(
-                    reader.journal.get, "reward_control_decision", f"{index:04d}"
+            prior = SignedRewardControlDecision.model_validate_json(
+                canonical_json_bytes(
+                    await run_owned_thread(
+                        reader.journal.get, "reward_control_decision", f"{index:04d}"
+                    )
                 )
             ).decision
             if prior.activation is None:
@@ -275,6 +277,51 @@ class StandingRewardCoverageService:
                     await self._source(prior.activation),
                 )
             self._opportunities[key] = verified
+            return verified
+
+    async def completed_opportunity(
+        self, activation: RewardActivation
+    ) -> VerifiedRewardOpportunity:
+        """Replay one selected activation's own completed coverage.
+
+        A successor series uses this path for its predecessor boundary. The
+        completion may be discovered after an arbitrarily long outage; absence
+        remains pending and never becomes inferred credit.
+        """
+        async with self._lock:
+            reader = self.preparation.reader
+            cohorts = tuple(digest(c) for c in reader.series.cohorts)
+            try:
+                index = cohorts.index(activation.cohort_sha256)
+            except ValueError:
+                raise ValueError("completed opportunity is outside the selected series") from None
+            selected = SignedRewardControlDecision.model_validate_json(
+                canonical_json_bytes(
+                    await run_owned_thread(
+                        reader.journal.get,
+                        "reward_control_decision",
+                        f"{index + 1:04d}",
+                    )
+                )
+            ).decision
+            if selected.kind != "activate" or selected.activation != activation:
+                raise ValueError("completed opportunity differs from signed reward selection")
+            verified = self._completed.get(activation.cohort_sha256)
+            if verified is None:
+                retained = await run_owned_thread(
+                    self.journal.journal.get,
+                    "coverage_completion",
+                    activation.cohort_sha256,
+                )
+                if retained is None:
+                    raise ValueError("predecessor reward opportunity is incomplete")
+                completion = CoverageCompletion.model_validate(retained)
+                verified = await self._review(
+                    completion.certificate_sha256,
+                    activation,
+                    await self._source(activation),
+                )
+                self._completed[activation.cohort_sha256] = verified
             return verified
 
     async def run(self, stop: asyncio.Event, *, poll_seconds: float):

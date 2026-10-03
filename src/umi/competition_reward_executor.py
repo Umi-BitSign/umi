@@ -12,16 +12,24 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_decisions import DecisionSource, RewardActivation
-from .competition_reward_handoff_models import VerifiedLegacyRewardHandoff, validate_legacy_handoff
+from .competition_reward_handoff_models import (
+    StandingRewardHandoffPlan,
+    VerifiedLegacyRewardHandoff,
+    validate_legacy_handoff,
+)
 from .competition_reward_history import RewardControlHistoryReader
-from .competition_reward_host import BoundStandingRewardHost
+from .competition_reward_host import (
+    BoundStandingRewardHost,
+    VerifiedStandingRewardHandoff,
+    validate_standing_reward_handoff,
+)
 from .competition_reward_manifest import StandingRewardOpportunityManifest
 from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
@@ -61,7 +69,7 @@ class StandingRewardExecutor:
         history: RewardControlHistoryReader,
         journal: StandingWeightJournal,
         first: PreparedStandingReward,
-        handoff: VerifiedLegacyRewardHandoff,
+        handoff: VerifiedLegacyRewardHandoff | VerifiedStandingRewardHandoff,
         host: BoundStandingRewardHost,
         packages: Callable[[str], CohortRewardPackage],
         decisions: DecisionSource,
@@ -89,7 +97,7 @@ class StandingRewardExecutor:
             or identity(history.hotkey) != identity(reader.series.control_hotkey)
             or journal.binding["series_sha256"] != preparation.series_sha256
             or journal.binding["chain_config_sha256"] != config_sha
-            or journal.binding["validator_account"] != identity(handoff.intent.validator_hotkey)
+            or journal.binding["validator_account"] != identity(host._approval.validator_hotkey)
             or len(provider.config.proof_rpc_fallback_urls) != 2
         ):
             raise ValueError("standing execution inputs differ from approved context")
@@ -109,7 +117,10 @@ class StandingRewardExecutor:
         self.journal, self.first, self.handoff = journal, first, handoff
         self.host = host
         self.packages, self.decisions, self.opportunity = packages, decisions, opportunity
-        self.hotkey, self.signer = handoff.intent.validator_hotkey, signer
+        self.hotkey, self.signer = host._approval.validator_hotkey, signer
+        self.prior = (
+            handoff.opportunity if type(handoff) is VerifiedStandingRewardHandoff else handoff
+        )
         self.period, self.maximum_history_blocks = mortality_period, maximum_history_blocks
         self.timeout = submission_timeout_seconds
         self.transport = BittensorCompetitionWeightTransport(
@@ -119,7 +130,9 @@ class StandingRewardExecutor:
         self._prepared = {digest(first.activation): first}
         self._lock = asyncio.Lock()
         self._descriptor = None
-        self._writer_path = journal.journal.root / "standing-writer.lock"
+        self._series_descriptor = None
+        self._writer_path = host.writer_path
+        self._series_writer_path = journal.journal.root / "standing-writer.lock"
         self._fence(handoff.through_block, require_writer=False)
 
     def _fence(self, block: int, *, require_writer: bool = True) -> None:
@@ -131,33 +144,55 @@ class StandingRewardExecutor:
         )
         self.preparation._authority()
         self.preparation._check_prepared(self.first)
-        validate_legacy_handoff(
-            self.handoff,
-            series=self.preparation.reader.series,
-            activation=self.first.activation,
-            validator_hotkey=self.hotkey,
-            block=block,
-        )
+        if type(self.handoff) is not VerifiedStandingRewardHandoff:
+            validate_legacy_handoff(
+                self.handoff,
+                series=self.preparation.reader.series,
+                activation=self.first.activation,
+                validator_hotkey=self.hotkey,
+                block=block,
+            )
+        else:
+            series = self.preparation.reader.series
+            plan = StandingRewardHandoffPlan(
+                schema="umi-standing-reward-handoff-plan/1",
+                series_sha256=self.preparation.series_sha256,
+                cohort_sha256=digest(series.cohorts[0]),
+                predecessor=series.predecessor,
+            )
+            validate_standing_reward_handoff(
+                self.handoff,
+                plan=plan,
+                activation=self.first.activation,
+                block=block,
+            )
         if require_writer:
-            if self._descriptor is None:
+            if self._descriptor is None or self._series_descriptor is None:
                 raise ValueError("standing executor does not own its writer lock")
-            held, named = os.fstat(self._descriptor), self._writer_path.lstat()
-            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or held.st_nlink != 1:
-                raise ValueError("standing executor writer lock changed")
+            for descriptor, path in (
+                (self._descriptor, self._writer_path),
+                (self._series_descriptor, self._series_writer_path),
+            ):
+                held, named = os.fstat(descriptor), path.lstat()
+                if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or held.st_nlink != 1:
+                    raise ValueError("standing executor writer lock changed")
 
     @contextmanager
     def hold_writer(self) -> Iterator[None]:
-        """Exclude another executor even within the same legacy handoff scope."""
-        if self._descriptor is not None:
+        """Exclude another executor even within the same predecessor handoff scope."""
+        if self._descriptor is not None or self._series_descriptor is not None:
             raise ValueError("standing executor already owns its writer lock")
-        descriptor = lock_private_file(self._writer_path)
-        self._descriptor = descriptor
-        try:
-            self._fence(self.handoff.through_block)
-            yield
-        finally:
-            self._descriptor = None
-            os.close(descriptor)
+        with ExitStack() as locks:
+            descriptor = lock_private_file(self._writer_path)
+            locks.callback(os.close, descriptor)
+            series_descriptor = lock_private_file(self._series_writer_path)
+            locks.callback(os.close, series_descriptor)
+            self._descriptor, self._series_descriptor = descriptor, series_descriptor
+            try:
+                self._fence(self.handoff.through_block)
+                yield
+            finally:
+                self._descriptor = self._series_descriptor = None
 
     async def _selection(self):
         control = await self.provider.collect_control(self.history.hotkey)
@@ -229,7 +264,7 @@ class StandingRewardExecutor:
             )
             self._prepared[key] = prepared
         prior = (
-            self.handoff
+            getattr(self, "prior", self.handoff)
             if prepared.activation == self.first.activation
             else await self.opportunity(prepared.activation)
         )

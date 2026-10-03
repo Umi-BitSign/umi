@@ -6,6 +6,7 @@ old writer locks, journal identity, crash ordering and restart are real.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
@@ -17,21 +18,34 @@ from types import SimpleNamespace
 
 import pytest
 
+import umi.competition_reward_series_handoff as series_handoff
 from umi import competition_host_activation as activation
 from umi import competition_reward_host as host
 from umi import competition_reward_service as service
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
+from umi.competition_reward_coverage_service import StandingRewardCoverageService
 from umi.competition_reward_handoff import hold_legacy_reward_handoff
+from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_host import StandingRewardHostApproval, bind_standing_reward_host
+from umi.competition_reward_opportunity import (
+    RewardOpportunityCertificate,
+    RewardOpportunityContribution,
+)
+from umi.competition_reward_series_handoff import (
+    StandingRewardPredecessorOpportunity,
+    VerifiedStandingPredecessorOpportunity,
+)
 from umi.competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
+from umi.competition_reward_standing_handoff import hold_standing_reward_handoff
 from umi.competition_reward_transactions import StandingWeightJournal
 from umi.competition_round_journal import RoundJournal
-from umi.open_competition import digest
-from umi.private_files import lock_private_file
+from umi.open_competition import digest, identity
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
 
 from .reward_service_execution_fixture import connect_executor
+from .test_competition_reward_decisions import successor_series
 from .test_competition_reward_handoff import (
     adapter_case as adapter_case,
 )
@@ -147,11 +161,267 @@ async def test_binding_reopens_original_journal_after_restart(installed):
                 bound.journal.journal.root
                 == Path(c.config.state_root) / "standing-rewards" / digest(c.series) / "weights"
             )
+            assert bound.writer_path == (
+                Path(c.config.state_root) / "standing-rewards" / "standing-writer.lock"
+            )
             bound.journal.journal.put("test-preserved", "one", {"retained": True})
             assert bound.journal.journal.get("test-preserved", "one") == {"retained": True}
         with pytest.raises(ValueError):
             c.check(bound)
     assert identities[0] == identities[1]
+
+
+async def test_host_writer_lock_fences_binding_independently_of_series_journal(installed):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as handoff:
+        bound = c.bind(runtime, handoff)
+        assert bound.writer_path.parent == bound.journal.journal.root.parent.parent
+        descriptor = lock_private_file(bound.writer_path)
+        try:
+            with pytest.raises(PrivateStateBusyError):
+                c.bind(runtime, handoff)
+        finally:
+            os.close(descriptor)
+
+
+async def test_initial_host_approval_bytes_exclude_successor_fields(installed):
+    approval = installed.approval
+    raw = canonical_json_bytes(approval)
+    assert b'"standing_handoff_plan_sha256"' not in raw
+    assert b'"predecessor_approval_sha256"' not in raw
+    assert StandingRewardHostApproval.model_validate_json(raw) == approval
+    with pytest.raises(ValueError, match="incomplete handoff"):
+        StandingRewardHostApproval.model_validate_json(
+            canonical_json_bytes(
+                approval.model_copy(
+                    update={
+                        "schema_": "umi-standing-reward-host-approval/2",
+                        "legacy_handoff_plan_sha256": None,
+                        "standing_handoff_plan_sha256": None,
+                    }
+                )
+            )
+        )
+    with pytest.raises(ValueError, match="incomplete handoff"):
+        StandingRewardHostApproval.model_validate_json(
+            canonical_json_bytes(
+                approval.model_copy(
+                    update={
+                        "schema_": "umi-standing-reward-host-approval/2",
+                        "legacy_handoff_plan_sha256": None,
+                        "standing_handoff_plan_sha256": "ab" * 32,
+                    }
+                )
+            )
+        )
+
+
+async def test_successor_binding_retains_predecessor_chain(installed, monkeypatch):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as legacy:
+        initial = c.bind(runtime, legacy)
+        old_binding = initial._retained
+        old_approval_sha256 = hashlib.sha256(canonical_json_bytes(c.approval)).hexdigest()
+        successor_series_sha256 = "ab" * 32
+        successor_plan_sha256 = "bc" * 32
+        successor_approval = c.approval.model_copy(
+            update={
+                "schema_": "umi-standing-reward-host-approval/2",
+                "series_sha256": successor_series_sha256,
+                "legacy_handoff_plan_sha256": None,
+                "standing_handoff_plan_sha256": successor_plan_sha256,
+                "predecessor_approval_sha256": old_approval_sha256,
+            }
+        )
+        c.publish(canonical_json_bytes(successor_approval))
+        c.preparation.series_sha256 = successor_series_sha256
+        handoff = host.VerifiedStandingRewardHandoff(
+            SimpleNamespace(),
+            digest(old_binding),
+            None,
+            None,
+            1,
+            _recheck=lambda: None,
+        )
+        monkeypatch.setattr(host, "_check_context", lambda *args: None)
+
+        migrated = c.bind(runtime, handoff)
+        assert migrated._retained.schema_ == "umi-standing-reward-state-binding/2"
+        assert migrated._retained.predecessor_binding_sha256 == digest(old_binding)
+        assert migrated._history == (old_binding,)
+        assert migrated.journal.journal.root != initial.journal.journal.root
+
+        reopened = c.bind(runtime, handoff)
+        assert reopened._retained == migrated._retained
+        assert reopened._history == migrated._history
+
+
+async def test_successor_binding_rolls_bounded_history(installed, monkeypatch):
+    c = installed
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as legacy:
+        initial = c.bind(runtime, legacy)
+        old_binding = initial._retained
+        old_approval_sha256 = hashlib.sha256(canonical_json_bytes(c.approval)).hexdigest()
+        historical = tuple(
+            host._StateBinding(
+                schema="umi-standing-reward-state-binding/1",
+                approval_sha256=f"{index + 1:064x}",
+                journal_binding_sha256=f"{index + 101:064x}",
+                journal_id=f"{index + 201:064x}",
+            )
+            for index in range(64)
+        )
+        with runtime._db() as db:
+            db.execute(
+                "CREATE TABLE standing_execution_history "
+                "(sha256 TEXT PRIMARY KEY, body BLOB NOT NULL)"
+            )
+            db.executemany(
+                "INSERT INTO standing_execution_history VALUES (?,?)",
+                tuple((digest(value), canonical_json_bytes(value)) for value in historical),
+            )
+
+        successor_approval = c.approval.model_copy(
+            update={
+                "schema_": "umi-standing-reward-host-approval/2",
+                "series_sha256": "ab" * 32,
+                "legacy_handoff_plan_sha256": None,
+                "standing_handoff_plan_sha256": "bc" * 32,
+                "predecessor_approval_sha256": old_approval_sha256,
+            }
+        )
+        c.publish(canonical_json_bytes(successor_approval))
+        c.preparation.series_sha256 = successor_approval.series_sha256
+        handoff = host.VerifiedStandingRewardHandoff(
+            SimpleNamespace(),
+            digest(old_binding),
+            None,
+            None,
+            1,
+            _recheck=lambda: None,
+        )
+        monkeypatch.setattr(host, "_check_context", lambda *args: None)
+
+        migrated = c.bind(runtime, handoff)
+        assert len(migrated._history) == 64
+        assert old_binding in migrated._history
+        assert historical[0] not in migrated._history
+
+
+async def test_native_standing_handoff_migrates_and_reopens_both_journals(installed):
+    c = installed
+    predecessor = c.series
+
+    # Establish the real initial standing journal and its durable host binding.
+    async with c.reopen() as runtime, hold_legacy_reward_handoff(runtime, **c.args) as legacy:
+        old = c.bind(runtime, legacy)
+        old_binding = old._retained
+        old_root = old.journal.journal.root
+    provider = next(iter(c.providers.values()))
+    provider.policy = c.item.policy
+    lineage = [old_binding]
+
+    # Exercise two successor boundaries and reopen each one from retained state.
+    for generation in range(2):
+        old_approval = c.approval
+        old_approval_sha256 = hashlib.sha256(canonical_json_bytes(old_approval)).hexdigest()
+        successor = successor_series(predecessor)
+        plan = StandingRewardHandoffPlan(
+            schema="umi-standing-reward-handoff-plan/1",
+            series_sha256=digest(successor),
+            cohort_sha256=digest(successor.cohorts[0]),
+            predecessor=successor.predecessor,
+        )
+        certificate = RewardOpportunityCertificate(
+            schema="umi-reward-opportunity-certificate/1",
+            series_sha256=digest(predecessor),
+            manifest_sha256=predecessor.manifest_sha256,
+            rule_sha256=f"{generation + 71:02x}" * 32,
+            activation_sha256=successor.predecessor.activation_sha256,
+            contributions=tuple(
+                RewardOpportunityContribution(
+                    validator_account_id=identity(hotkey),
+                    witness_sha256=f"{generation + index + 80:02x}" * 32,
+                    credited_ms=1,
+                    through_block=180,
+                )
+                for index, hotkey in enumerate(predecessor.validators)
+            ),
+        )
+        activation = c.prepared.activation.model_copy(
+            update={
+                "cohort_sha256": digest(successor.cohorts[0]),
+                "prior_opportunity_sha256": digest(certificate),
+            }
+        )
+        opportunity = VerifiedStandingPredecessorOpportunity(
+            digest(plan),
+            successor.predecessor.activation_sha256,
+            digest(activation),
+            certificate,
+            180,
+            _issuer=series_handoff._ISSUER,
+        )
+        object.__setattr__(opportunity, "_binding", series_handoff._binding(opportunity))
+
+        c.series = successor
+        c.preparation.reader.series = successor
+        c.preparation.series_sha256 = digest(successor)
+        c.prepared = SimpleNamespace(
+            activation=activation,
+            reviewed_at_block=c.prepared.reviewed_at_block,
+        )
+        c.approval = old_approval.model_copy(
+            update={
+                "schema_": "umi-standing-reward-host-approval/2",
+                "series_sha256": digest(successor),
+                "legacy_handoff_plan_sha256": None,
+                "standing_handoff_plan_sha256": digest(plan),
+                "predecessor_approval_sha256": old_approval_sha256,
+            }
+        )
+        c.publish(canonical_json_bytes(c.approval))
+
+        retained = []
+        for _ in range(2):
+            async with c.reopen() as runtime:
+                async with hold_standing_reward_handoff(
+                    runtime,
+                    successor=successor,
+                    predecessor=predecessor,
+                    plan=plan,
+                    activation=activation,
+                    opportunity=opportunity,
+                    predecessor_approval_sha256=old_approval_sha256,
+                    provider=provider,
+                    maximum_journal_bytes=128 * 1024**2,
+                ) as handoff:
+                    migrated = c.bind(runtime, handoff)
+                    migrated.recheck(
+                        journal=migrated.journal,
+                        preparation=c.preparation,
+                        first=c.prepared,
+                        handoff=handoff,
+                    )
+                    assert_locked(old_root / "standing-writer.lock")
+                    assert migrated.journal.journal.root != old_root
+                    assert migrated._retained.predecessor_binding_sha256 == digest(old_binding)
+                    assert {digest(item) for item in migrated._history} == {
+                        digest(item) for item in lineage
+                    }
+                    retained.append(migrated._retained)
+                with pytest.raises(ValueError, match="original writer handoff"):
+                    migrated.recheck(
+                        journal=migrated.journal,
+                        preparation=c.preparation,
+                        first=c.prepared,
+                        handoff=handoff,
+                    )
+        assert retained[0] == retained[1]
+        predecessor = successor
+        old_binding = retained[0]
+        old_root = migrated.journal.journal.root
+        lineage.append(old_binding)
 
 
 @pytest.mark.parametrize("name", ["rounds.sqlite3", "rounds.lock", "standing-writer.lock"])
@@ -438,6 +708,149 @@ def service_case(installed, monkeypatch, tmp_path):
         ),
     )
     return c
+
+
+async def test_service_boot_preserves_successor_predecessor_owner(service_case, monkeypatch):
+    c = service_case
+    predecessor_series = c.series
+    predecessor_approval = c.approval
+    predecessor_approval_sha256 = hashlib.sha256(
+        canonical_json_bytes(predecessor_approval)
+    ).hexdigest()
+
+    # Create the predecessor binding through the complete initial-series service.
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **c.service_options)
+    c.stop.clear()
+    predecessor_writer = (
+        Path(c.config.state_root)
+        / "standing-rewards"
+        / digest(predecessor_series)
+        / "weights"
+        / "standing-writer.lock"
+    )
+    monkeypatch.setattr(c.item.worker, "lock_path", predecessor_writer)
+
+    successor = successor_series(predecessor_series)
+    plan = StandingRewardHandoffPlan(
+        schema="umi-standing-reward-handoff-plan/1",
+        series_sha256=digest(successor),
+        cohort_sha256=digest(successor.cohorts[0]),
+        predecessor=successor.predecessor,
+    )
+    certificate = RewardOpportunityCertificate(
+        schema="umi-reward-opportunity-certificate/1",
+        series_sha256=digest(predecessor_series),
+        manifest_sha256=predecessor_series.manifest_sha256,
+        rule_sha256="72" * 32,
+        activation_sha256=successor.predecessor.activation_sha256,
+        contributions=tuple(
+            RewardOpportunityContribution(
+                validator_account_id=identity(hotkey),
+                witness_sha256=f"{index + 90:02x}" * 32,
+                credited_ms=1,
+                through_block=180,
+            )
+            for index, hotkey in enumerate(predecessor_series.validators)
+        ),
+    )
+    activation = c.prepared.activation.model_copy(
+        update={
+            "cohort_sha256": digest(successor.cohorts[0]),
+            "prior_opportunity_sha256": digest(certificate),
+        }
+    )
+    opportunity = VerifiedStandingPredecessorOpportunity(
+        digest(plan),
+        successor.predecessor.activation_sha256,
+        digest(activation),
+        certificate,
+        180,
+        _issuer=series_handoff._ISSUER,
+    )
+    object.__setattr__(opportunity, "_binding", series_handoff._binding(opportunity))
+
+    c.series = successor
+    c.preparation.reader.series = successor
+    c.preparation.series_sha256 = digest(successor)
+    c.prepared = SimpleNamespace(
+        activation=activation,
+        reviewed_at_block=c.prepared.reviewed_at_block,
+    )
+    c.approval = predecessor_approval.model_copy(
+        update={
+            "schema_": "umi-standing-reward-host-approval/2",
+            "series_sha256": digest(successor),
+            "legacy_handoff_plan_sha256": None,
+            "standing_handoff_plan_sha256": digest(plan),
+            "predecessor_approval_sha256": predecessor_approval_sha256,
+        }
+    )
+    c.publish(canonical_json_bytes(c.approval))
+    coverage = object.__new__(StandingRewardCoverageService)
+    coverage.provider = c.provider
+    coverage.preparation = SimpleNamespace(reader=SimpleNamespace(series=predecessor_series))
+    predecessor = object.__new__(StandingRewardPredecessorOpportunity)
+    predecessor.successor = successor
+    predecessor.plan = plan
+    predecessor.coverage = coverage
+    predecessor._check = lambda: None
+
+    async def review(self, selected, *, observed_at_block):
+        assert self is predecessor
+        assert selected == activation
+        assert observed_at_block == c.prepared.reviewed_at_block
+        return opportunity
+
+    async def collect(_hotkey):
+        return SimpleNamespace(snapshot=SimpleNamespace(block_number=1000))
+
+    async def prepare(*_args):
+        return c.prepared
+
+    async def run_coverage(self, stop, *, poll_seconds):
+        assert self is coverage and poll_seconds == 0.001
+        await stop.wait()
+
+    monkeypatch.setattr(StandingRewardPredecessorOpportunity, "review", review)
+    monkeypatch.setattr(StandingRewardCoverageService, "run", run_coverage)
+    monkeypatch.setattr(service, "_prepare_first", prepare)
+    c.provider.collect_control = collect
+
+    def successor_signer():
+        assert_locked(Path(c.config.state_root) / "supervisor-process.lock")
+        assert_locked(predecessor_writer)
+        assert host._retained_binding(c.current_runtime) is not None
+        c.events.append("signer")
+        return object()
+
+    options = c.service_options | {
+        "plan": plan,
+        "load_signer": successor_signer,
+        "predecessor_series": predecessor_series,
+        "predecessor": predecessor,
+        "predecessor_coverage": coverage,
+        "predecessor_approval_sha256": predecessor_approval_sha256,
+    }
+    options.pop("first")
+
+    async with c.reopen() as runtime:
+        c.current_runtime = runtime
+        await run_standing_reward_service(runtime, **options)
+        migrated = host._retained_binding(runtime)
+        history = host._retained_binding_history(runtime)
+        assert migrated.schema_ == "umi-standing-reward-state-binding/2"
+        assert migrated.predecessor_binding_sha256 in {digest(value) for value in history}
+
+
+async def test_initial_service_rejects_partial_successor_ownership(service_case):
+    c = service_case
+    async with c.reopen() as runtime:
+        with pytest.raises(ValueError, match="predecessor ownership is incomplete"):
+            await run_standing_reward_service(
+                runtime, **(c.service_options | {"predecessor_series": c.series})
+            )
 
 
 async def test_service_restarts_with_original_binding_and_orders_shutdown(service_case):

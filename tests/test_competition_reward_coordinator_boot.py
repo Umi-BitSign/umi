@@ -15,8 +15,10 @@ import pytest
 
 from umi import competition_reward_coordinator_boot as boot
 from umi import competition_reward_coordinator_cli as cli
+from umi.competition_reward_decisions import StandingRewardSeries
+from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
 from umi.open_competition import digest, verify_signature
-from umi.private_files import lock_private_file
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_reward_boot import chain as chain
@@ -26,6 +28,7 @@ from .test_competition_reward_boot import direct_reward_config
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_boot import policy as policy
 from .test_competition_reward_boot import series_case as series_case
+from .test_competition_reward_decisions import successor_series
 from .test_open_competition import wallet
 
 
@@ -77,6 +80,51 @@ def test_direct_series_requires_read_only_coordinator_source(config_case, tmp_pa
         boot.RewardCoordinatorConfig.model_validate_json(
             canonical_json_bytes(direct.model_copy(update={"direct_model_review": None}))
         )
+
+
+def test_successor_configuration_binds_complete_predecessor_context(config_case):
+    old = config_case.config
+    successor = successor_series(old.series)
+    manifest = old.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                requirement.model_copy(update={"cohort_sha256": digest(plan)})
+                for requirement, plan in zip(old.manifest.cohorts, successor.cohorts, strict=False)
+            )
+        }
+    )
+    successor = StandingRewardSeries.model_validate_json(
+        canonical_json_bytes(successor.model_copy(update={"manifest_sha256": digest(manifest)}))
+    )
+    handoff = StandingRewardHandoffPlan(
+        schema="umi-standing-reward-handoff-plan/1",
+        series_sha256=digest(successor),
+        cohort_sha256=digest(successor.cohorts[0]),
+        predecessor=successor.predecessor,
+    )
+    candidate = old.model_copy(
+        update={
+            "schema_": "umi-reward-coordinator-config/3",
+            "series": successor,
+            "manifest": manifest,
+            "handoff": handoff,
+            "predecessor_series": old.series,
+            "predecessor_manifest": old.manifest,
+            "predecessor_eligibility": old.eligibility,
+        }
+    )
+    checked = boot.RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(candidate))
+    assert checked == candidate
+    assert b'"predecessor_series"' not in canonical_json_bytes(old)
+    for change in (
+        {"predecessor_series": None},
+        {"predecessor_manifest": old.manifest.model_copy(update={"policy_sha256": "ff" * 32})},
+        {"schema_": "umi-reward-coordinator-config/1"},
+    ):
+        with pytest.raises(ValueError):
+            boot.RewardCoordinatorConfig.model_validate_json(
+                canonical_json_bytes(candidate.model_copy(update=change))
+            )
 
 
 @pytest.mark.parametrize(
@@ -181,6 +229,8 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
 
         async def run(self, stop, *, poll_seconds):
             assert self.kw["publisher"].provider is self.kw["reviewer"].provider
+            with pytest.raises(PrivateStateBusyError):
+                lock_private_file(Path(config.state_directory) / "control-writer.lock")
             await running(self.kw["signer"], self.kw["reviewer"].provider)
             if failure in {"coverage", "coverage_exit"}:
                 await asyncio.Event().wait()
@@ -220,6 +270,9 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         Path(config.state_directory) / digest(config.series) / "service.lock"
     )
     os.close(descriptor)
+    if role == "coordinator":
+        descriptor = lock_private_file(Path(config.state_directory) / "control-writer.lock")
+        os.close(descriptor)
 
 
 def test_cli_failure_omits_exception_values(monkeypatch, capsys):

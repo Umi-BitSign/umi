@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import Field
 
+from .competition_reward_decisions import (
+    StandingRewardSeries,
+    StandingRewardSeriesPredecessor,
+)
 from .open_competition import Hotkey, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -26,6 +30,44 @@ class LegacyRewardHandoffPlan(StrictProtocolModel):
     legacy_policy_sha256: Hex32
     legacy_round_sha256: Hex32
     legacy_package_sha256: Hex32
+
+
+class StandingRewardHandoffPlan(StrictProtocolModel):
+    """Select the exact prior standing series replaced by this series.
+
+    The eventual first activation separately binds the natively replayed prior
+    opportunity certificate. This plan can therefore be installed before that
+    unbounded work completes without weakening the handoff.
+    """
+
+    schema_: Literal["umi-standing-reward-handoff-plan/1"] = Field(alias="schema")
+    series_sha256: Hex32
+    cohort_sha256: Hex32
+    predecessor: StandingRewardSeriesPredecessor
+
+
+RewardHandoffPlan = LegacyRewardHandoffPlan | StandingRewardHandoffPlan
+
+
+def verify_handoff_plan(plan: RewardHandoffPlan, series: StandingRewardSeries):
+    """Bind the selected migration kind to the signed series boundary."""
+    series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
+    expected = series.predecessor
+    if expected is None:
+        if type(plan) is not LegacyRewardHandoffPlan:
+            raise ValueError("initial standing series requires its legacy handoff plan")
+        checked = LegacyRewardHandoffPlan.model_validate_json(canonical_json_bytes(plan))
+    else:
+        if type(plan) is not StandingRewardHandoffPlan:
+            raise ValueError("successor standing series requires its standing handoff plan")
+        checked = StandingRewardHandoffPlan.model_validate_json(canonical_json_bytes(plan))
+        if checked.predecessor != expected:
+            raise ValueError("standing handoff differs from the signed predecessor boundary")
+    if checked.series_sha256 != digest(series) or checked.cohort_sha256 != digest(
+        series.cohorts[0]
+    ):
+        raise ValueError("reward handoff differs from the selected successor series")
+    return checked
 
 
 class LegacyRewardHandoffIntent(StrictProtocolModel):

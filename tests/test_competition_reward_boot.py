@@ -6,6 +6,7 @@ These do not establish live chain effects or a deployed production migration.
 """
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,15 +22,20 @@ from umi.competition_cohort_recovery import (
     ModelDeliveryProfile,
     SignedCohortRecoveryAuthority,
 )
+from umi.competition_reward_decisions import StandingRewardSeries
 from umi.competition_reward_eligibility import RewardEligibilityRuntime
 from umi.competition_reward_files import StandingRewardFiles
-from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
+from umi.competition_reward_handoff_models import (
+    LegacyRewardHandoffPlan,
+    StandingRewardHandoffPlan,
+)
 from umi.competition_reward_host import StandingRewardHostApproval
 from umi.competition_reward_manifest import (
     RewardOpportunityTerms,
     RewardReplayRequirement,
     StandingRewardOpportunityManifest,
 )
+from umi.competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from umi.competition_reward_service import StandingRewardServiceLimits
 from umi.competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from umi.grandpa_finality import FINNEY_GENESIS_HASH
@@ -41,6 +47,7 @@ from .test_competition_reward_decisions import chain_config as chain_config
 from .test_competition_reward_decisions import control as control
 from .test_competition_reward_decisions import policy as policy
 from .test_competition_reward_decisions import series_case as series_case
+from .test_competition_reward_decisions import successor_series
 from .test_open_competition import wallet
 from .test_validator_supervisor import _config
 
@@ -261,6 +268,83 @@ def test_direct_series_requires_read_only_reward_source(inputs, tmp_path):
         )
 
 
+def successor_boot(inputs):
+    old = inputs.value
+    successor = successor_series(old.series)
+    requirements = old.manifest.cohorts[: len(successor.cohorts)]
+    assert len(requirements) == len(successor.cohorts)
+    manifest = old.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                requirement.model_copy(update={"cohort_sha256": digest(plan)})
+                for requirement, plan in zip(requirements, successor.cohorts, strict=True)
+            )
+        }
+    )
+    successor = StandingRewardSeries.model_validate_json(
+        canonical_json_bytes(successor.model_copy(update={"manifest_sha256": digest(manifest)}))
+    )
+    handoff = StandingRewardHandoffPlan(
+        schema="umi-standing-reward-handoff-plan/1",
+        series_sha256=digest(successor),
+        cohort_sha256=digest(successor.cohorts[0]),
+        predecessor=successor.predecessor,
+    )
+    predecessor_approval_sha256 = hashlib.sha256(canonical_json_bytes(inputs.approval)).hexdigest()
+    candidate = old.model_copy(
+        update={
+            "schema_": "umi-standing-reward-boot/3",
+            "series": successor,
+            "manifest": manifest,
+            "handoff": handoff,
+            "predecessor_series": old.series,
+            "predecessor_manifest": old.manifest,
+            "predecessor_eligibility": old.eligibility,
+            "predecessor_approval_sha256": predecessor_approval_sha256,
+        }
+    )
+    approval = inputs.approval.model_copy(
+        update={
+            "schema_": "umi-standing-reward-host-approval/2",
+            "series_sha256": digest(successor),
+            "manifest_sha256": digest(manifest),
+            "legacy_handoff_plan_sha256": None,
+            "standing_handoff_plan_sha256": digest(handoff),
+            "predecessor_approval_sha256": predecessor_approval_sha256,
+        }
+    )
+    return candidate, approval
+
+
+def test_successor_boot_binds_predecessor_and_local_host_approval(inputs):
+    old = inputs.value
+    candidate, approval = successor_boot(inputs)
+    inputs.save(inputs.path, canonical_json_bytes(candidate))
+    inputs.save(Path(candidate.approval_path), canonical_json_bytes(approval))
+    assert boot.load_standing_boot(inputs.path, inputs.anchor) == candidate
+    assert b'"predecessor_series"' not in canonical_json_bytes(old)
+
+    for change in (
+        {"predecessor_series": None},
+        {"schema_": "umi-standing-reward-boot/1"},
+    ):
+        with pytest.raises(ValueError):
+            boot.StandingRewardBootConfig.model_validate_json(
+                canonical_json_bytes(candidate.model_copy(update=change))
+            )
+    unbound = candidate.model_copy(update={"predecessor_approval_sha256": None})
+    unbound_approval = approval.model_copy(update={"predecessor_approval_sha256": None})
+    with pytest.raises(ValueError, match="selected authority"):
+        boot.StandingRewardBootConfig.model_validate_json(canonical_json_bytes(unbound))
+    with pytest.raises(ValueError, match="incomplete handoff"):
+        StandingRewardHostApproval.model_validate_json(canonical_json_bytes(unbound_approval))
+
+    with pytest.raises(ValueError, match="selected authority"):
+        boot.StandingRewardBootConfig.model_validate_json(
+            canonical_json_bytes(old.model_copy(update={"predecessor_series": old.series}))
+        )
+
+
 def test_default_selection_uses_existing_command_and_original_approval(inputs):
     i = inputs
     supervisor = i.path.with_name("validator-supervisor.json")
@@ -396,6 +480,51 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
             await boot.run_installed_standing_rewards(runtime, i.value, asyncio.Event())
     else:
         await boot.run_installed_standing_rewards(runtime, i.value, asyncio.Event())
+    assert events[0] == "lease"
+    assert events[-len(providers) :] == [("closed", digest(p.config)) for p in reversed(providers)]
+
+
+async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch):
+    i = inputs
+    candidate, approval = successor_boot(i)
+    i.save(Path(candidate.approval_path), canonical_json_bytes(approval))
+    events, providers = [], []
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy, self.kwargs = chain, policy, kwargs
+            providers.append(self)
+
+        async def aclose(self):
+            events.append(("closed", digest(self.config)))
+
+    async def run(runtime, **kwargs):
+        events.append("service")
+        assert "first" not in kwargs
+        assert kwargs["provider"] is providers[0]
+        assert kwargs["predecessor_series"] == i.value.series
+        assert kwargs["predecessor_approval_sha256"] == candidate.predecessor_approval_sha256
+        predecessor = kwargs["predecessor"]
+        coverage = kwargs["predecessor_coverage"]
+        assert type(predecessor) is StandingRewardPredecessorOpportunity
+        assert predecessor.coverage is coverage
+        assert predecessor.successor == candidate.series
+        assert predecessor.plan == candidate.handoff
+        assert coverage.provider is providers[0]
+        assert coverage.preparation.reader.series == i.value.series
+        assert coverage.preparation.manifest == i.value.manifest
+        assert coverage.profile == i.value.eligibility
+        assert coverage.history.archive is kwargs["history"].archive
+        assert coverage.history.export_archive is kwargs["history"].export_archive
+
+    runtime = SimpleNamespace(
+        config=i.anchor.config,
+        adapter=object.__new__(ProductionSuccessorRuntimeAdapter),
+        _require_lease=lambda: events.append("lease"),
+    )
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot, "run_standing_reward_service", run)
+    await boot.run_installed_standing_rewards(runtime, candidate, asyncio.Event())
     assert events[0] == "lease"
     assert events[-len(providers) :] == [("closed", digest(p.config)) for p in reversed(providers)]
 
