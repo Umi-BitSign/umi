@@ -108,6 +108,21 @@ def test_late_restart_replays_original_round_without_selecting_a_new_incumbent(
     assert second.observation.block == 330
 
 
+def test_repeated_retained_round_reuses_verified_history_generation(preparation, monkeypatch):
+    h = preparation
+    h.certify()
+    first = run(h)
+    owner = CohortPreparation(CohortAdmissionQueue(h.intake), h.store)
+    expected = history_tip(h.history)
+    assert owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_330) == first
+
+    def repeated_replay(*args, **kwargs):
+        raise AssertionError("an unchanged retained generation must not replay every participant")
+
+    monkeypatch.setattr(owner, "_prepare", repeated_replay)
+    assert owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_340) == first
+
+
 def test_original_round_passes_native_roster_review_after_certification(preparation):
     h = preparation
     h.certify()
