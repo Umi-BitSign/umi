@@ -157,6 +157,7 @@ async def admission_owner_app(
             if service_host is not None and service_host.config.lifecycle is not None
             else None
         )
+        review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
         app.include_router(
             admission_history_routes(
@@ -174,6 +175,7 @@ async def admission_owner_app(
             sign,
             publish_archive=None if lifecycle is None else lifecycle.proofs.publish,
             maximum_bytes=c.maximum_export_bytes,
+            timeout_seconds=review_timeout_seconds,
         )
         app.include_router(intake_review_routes(app.state.intake_review_exporter, token=token))
         app.include_router(
@@ -183,6 +185,7 @@ async def admission_owner_app(
                     c.owner_hotkey,
                     sign,
                     maximum_bytes=c.maximum_export_bytes,
+                    timeout_seconds=review_timeout_seconds,
                 ),
                 token=token,
             )

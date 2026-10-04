@@ -234,6 +234,7 @@ async def test_service_owner_shares_its_capture_with_every_reviewer(owned):
     ) as app:
         assert app.state.admission_workers
         assert all(worker.capture is shared_capture for worker in app.state.admission_workers)
+        assert app.state.intake_review_exporter.timeout_seconds == 2
 
 
 async def test_unexpected_worker_failure_drains_other_workers_before_releasing_owner(
