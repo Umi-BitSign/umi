@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import json
+import logging
 import sqlite3
 from collections import Counter
 from types import SimpleNamespace
@@ -612,6 +614,59 @@ async def test_native_lifecycle_runs_intake_admission_and_preparation(lifecycle)
     assert h.factories[:3] == ["intake", "preparation", "requests"]
     assert h.store.status(h.cohort)[0].phase == "requests"
     assert max(h.calls.values()) == 1
+
+
+async def test_lifecycle_logs_bounded_monitor_observation_before_review(lifecycle, caplog):
+    h = lifecycle
+    for worker in h.admissions:
+        await worker.poll_once()
+    service = h.reopen()
+    with caplog.at_level(logging.INFO, logger="umi.competition_cohort_lifecycle"):
+        value = await service.tick()
+    reports = []
+    for record in caplog.records:
+        try:
+            report = json.loads(record.message)
+        except ValueError:
+            continue
+        if report.get("schema") == "umi-cohort-lifecycle-observation/1":
+            reports.append(report)
+    assert value["status"] == "waiting_phase_progress"
+    assert reports
+    report = reports[-1]
+    assert set(report) == {
+        "schema",
+        "cohort_sha256",
+        "plan_sequence",
+        "phase",
+        "sequence",
+        "target_block",
+        "stage",
+        "status",
+        "progress_completion",
+        "progress_observed_at_block",
+        "unavailable_blocks",
+        "expected_round_sha256",
+        "error_type",
+    }
+    assert report["cohort_sha256"] == h.cohort
+    assert report["phase"] == "intake"
+    assert report["progress_completion"] == "pending"
+    assert report["progress_observed_at_block"] <= h.block
+
+
+async def test_lifecycle_monitor_recovers_published_round_identity_after_restart(lifecycle):
+    h = lifecycle
+    for worker in h.admissions:
+        await worker.poll_once()
+    service = h.reopen()
+    while h.store.status(h.cohort)[0].phase != "requests":
+        await service.tick()
+        h.block += 5
+    expected = service.expected_round_sha256
+    assert expected is not None
+    restarted = h.reopen()
+    assert restarted.expected_round_sha256 == expected
 
 
 async def test_lifecycle_recovers_partial_preparation_vote_and_publication(lifecycle, monkeypatch):

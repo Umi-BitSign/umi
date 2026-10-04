@@ -4,10 +4,10 @@ This monitor sends service-availability alerts from Cloudflare even when the
 coordinator is offline. It observes selected long-running systemd services and,
 when configured, the standing validator's native finalized-chain observations
 and selected filesystem free-space counters.
-It detects missing observations and stalled block height or weight updates even
-when systemd still reports a running process. These host observations do not
-independently certify correct reward allocation or received payments. Intake,
-evaluation and settlement progress require additional monitoring.
+It detects missing observations, stalled block height or weight updates, low
+storage and stalled cohort lifecycle transitions even when systemd still
+reports a running process. These host observations do not independently certify
+correct reward allocation or received payments.
 
 A coordinator timer sends a bounded heartbeat once per minute. The Worker
 requires a private bearer token and exactly the configured service names. A
@@ -43,7 +43,14 @@ delay notifications.
      "services": ["umi-validator@0.service", "umi-validator@54.service"],
      "storage_paths": {
        "coordinator-root/available_bytes": "/"
-     }
+     },
+     "lifecycle_cohorts": {
+       "cohort-5": {
+         "service": "umi-c5-primary-intake.service",
+         "cohort_sha256": "FULL_COHORT_SHA256"
+       }
+     },
+     "public_round_index_url": "https://api.umi.vision/v1/competition/rounds/index"
    }
    ```
 
@@ -81,6 +88,41 @@ is configured, the Worker accepts only schema-three heartbeats containing every
 selected metric. Crossing below a threshold sends `resource_low`; a sustained
 recovery sends the ordinary recovery notice after the notification cooldown.
 The monitor does not delete files, stop services or change cohort state.
+
+## Cohort lifecycle progress
+
+The admission owner emits bounded `umi-cohort-lifecycle-observation/1` records
+before and after native progress review, decision certification and publication.
+For each selected cohort, `lifecycle_cohorts` binds a public monitor label to the
+owning systemd service and exact cohort digest. `public_round_index_url` supplies
+the public index used to detect a prepared round that was not published. The
+sender exports only the selected lifecycle fields and latest public round
+sequence; it never exports signatures, participant records or evidence bytes.
+
+Configure the same labels in the Worker's `LIFECYCLE_LIMITS` variable. Each
+value is the maximum time in milliseconds that one actionable condition may
+remain unchanged, bounded between five minutes and one day:
+
+```json
+{
+  "cohort-5": 1800000
+}
+```
+
+The monitor starts this timer only when the lifecycle observation is missing or
+reports a retry, completed phase progress has not been published, a pending
+observer fails to recognize that its availability-adjusted target has been
+reached, or a cohort in the requests-or-later phase lacks its planned public
+round digest. Ordinary open intake and incomplete work do not start the
+timer. Fresh heartbeats and repeated identical reports cannot reset it; a phase
+or certified sequence change does. The email labels phase targets as
+projections and includes the retained phase, review stage, seal/completion
+state, observed block, public round sequence and configured chain-weight age.
+
+The heartbeat service needs journal access for the selected owner service.
+Deploy the application lifecycle logging, sender configuration and Worker
+configuration together. A malformed, stale, denied or missing report is
+explicitly treated as missing lifecycle evidence rather than health.
 
 ## Successor validator health
 

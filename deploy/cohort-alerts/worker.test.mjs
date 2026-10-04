@@ -4,8 +4,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 const { Miniflare, convertV4MiniflareOptions } = createRequire(import.meta.url)("miniflare");
 
-for (const [withProgress, withResources] of [[false, false], [true, false], [false, true], [true, true]]) {
-test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resources=${withResources})`, async () => {
+for (const [withProgress, withResources, withLifecycle] of [
+  [false, false, false], [true, false, false], [false, true, false], [true, true, false],
+  [false, true, true],
+]) {
+test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resources=${withResources}, lifecycle=${withLifecycle})`, async () => {
   const mf = new Miniflare(convertV4MiniflareOptions({
     modulesRoot: fileURLToPath(new URL(".", import.meta.url)),
     modules: ["worker.mjs", "monitor.mjs"].map(name => ({
@@ -22,6 +25,7 @@ test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resour
       RESOURCE_MINIMUMS: withResources ? JSON.stringify({
         "coordinator-root/available_bytes": 8 * 1024 ** 3,
       }) : "{}",
+      LIFECYCLE_LIMITS: withLifecycle ? JSON.stringify({ "cohort-5": 600000 }) : "{}",
     },
   }));
   try {
@@ -39,13 +43,20 @@ test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resour
     assert.equal((await (await mf.dispatchFetch("https://monitor/status", { headers })).json()).state, "unarmed");
     const response = await mf.dispatchFetch("https://monitor/heartbeat", {
       headers, method: "POST", body: JSON.stringify({
-        schema: `umi-service-heartbeat/${withResources ? 3 : withProgress ? 2 : 1}`,
+        schema: `umi-service-heartbeat/${withLifecycle ? 4 : withResources ? 3 : withProgress ? 2 : 1}`,
         services: { "vali.service": "running" },
         ...(withProgress ? { progress: { "vali.service/finalized_block": 1000,
           "vali.service/weight_update_block": 950 } } : {}),
         ...(withResources ? { resources: {
           "coordinator-root/available_bytes": 9 * 1024 ** 3,
         } } : {}),
+        ...(withLifecycle ? { lifecycles: { "cohort-5": {
+          cohort_sha256: "a".repeat(64), plan_sequence: 5, phase: "intake", sequence: 0,
+          target_block: 100, stage: "progress_sampling", status: "waiting_phase_progress",
+          progress_completion: "pending", progress_observed_at_block: 99, unavailable_blocks: 0,
+          expected_round_sha256: null, error_type: null, public_round_sequence: 3,
+          public_round_present: null,
+        } } } : {}),
       }),
     });
     assert.equal(response.status, 200);
@@ -72,7 +83,7 @@ test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resour
       });
       assert.equal((await (await mf.dispatchFetch("https://monitor/status", { headers })).json()).state,
         "progress_stalled");
-    } else if (withResources) {
+    } else if (withResources && !withLifecycle) {
       await mf.dispatchFetch("https://monitor/heartbeat", {
         headers, method: "POST", body: JSON.stringify({
           schema: "umi-service-heartbeat/3", services: { "vali.service": "running" },
@@ -81,6 +92,13 @@ test(`Workers runtime persists bounded heartbeat (native=${withProgress}, resour
       });
       assert.equal((await (await mf.dispatchFetch("https://monitor/status", { headers })).json()).state,
         "resource_low");
+    } else if (withLifecycle) {
+      assert.equal((await mf.dispatchFetch("https://monitor/heartbeat", {
+        headers, method: "POST", body: JSON.stringify({
+          schema: "umi-service-heartbeat/3", services: { "vali.service": "running" },
+          resources: { "coordinator-root/available_bytes": 9 * 1024 ** 3 },
+        }),
+      })).status, 400);
     }
   } finally {
     await mf.dispose();
