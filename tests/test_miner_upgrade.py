@@ -342,7 +342,6 @@ def test_service_claim_is_signed_once_and_recovers_its_receipt(
 ) -> None:
     import bittensor as bt
 
-    import umi.competition_client as client
     from umi.competition_cohort_service_work import (
         SignedServiceWorkClaim,
         service_claim_key,
@@ -398,10 +397,11 @@ def test_service_claim_is_signed_once_and_recovers_its_receipt(
     monkeypatch.setattr(upgrade, "fetch", lambda *_args, **_kwargs: index)
     sent = []
 
-    async def post(*, origin, path, body, transport=None):
+    async def post(*, origin, path, body, transport=None, timeout_seconds):
         assert origin == config["intake_origin"]
         assert path == f"/v1/competition/service-work/{catalog}/claims"
         assert transport is None
+        assert timeout_seconds == upgrade.SERVICE_CLAIM_TIMEOUT_SECONDS == 3600
         signed = verify_service_claim(SignedServiceWorkClaim.model_validate_json(body))
         sent.append(body)
         return canonical_json_bytes(
@@ -417,6 +417,8 @@ def test_service_claim_is_signed_once_and_recovers_its_receipt(
                 "work_sha256": "42" * 32,
             }
         )
+
+    import umi.competition_client as client
 
     monkeypatch.setattr(client, "post_intake_document", post)
     enrollment = tmp_path / "enrollment"
@@ -494,8 +496,10 @@ def test_endpoint_enrollment_timer_retries_every_fifteen_minutes(
     assert "service-work-admission.json" in service
     assert "admission-certificate.json" not in service
     assert "Environment=HOME=/home/miner" in service
+    assert "TimeoutStartSec=70min" in service
     assert "ProtectSystem=strict" in service
     assert ("systemctl", "enable", "--now", upgrade.ENROLLMENT_TIMER) in calls
+    assert ("systemctl", "start", "--no-block", upgrade.ENROLLMENT_SERVICE) in calls
     assert report == {"retry_seconds": 900, "status": "endpoint_enrollment_retry_scheduled"}
 
 

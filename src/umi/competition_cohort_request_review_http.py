@@ -11,7 +11,15 @@ def request_review_routes(exporter: RequestReviewExporter, *, token: str):
 
 
 class RequestReviewHTTPClient(PhaseReviewHTTPClient[RequestReviewRequest]):
-    def __init__(self, client, origin, *, token, maximum_bytes=64 * 1024**2, timeout_seconds=30):
+    def __init__(
+        self,
+        client,
+        origin,
+        *,
+        token,
+        maximum_bytes=64 * 1024**2,
+        timeout_seconds=2400,
+    ):
         super().__init__(
             client,
             origin,

@@ -42,8 +42,8 @@ def cache_for(provider, policy, **options):
     return VerifiedRegistrationCache(
         provider,
         policy,
-        maximum_cache_age_seconds=60,
-        maximum_head_age_ms=120_000,
+        maximum_cache_age_seconds=300,
+        maximum_head_age_ms=300_000,
         maximum_future_skew_ms=1_000,
         public_wait_seconds=1,
         **options,
@@ -484,7 +484,7 @@ async def test_public_wait_expires_while_shared_background_collection_finishes(p
         maximum_head_age_ms=120_000,
         maximum_future_skew_ms=1_000,
         public_wait_seconds=0.01,
-        background_collection_timeout_seconds=120,
+        background_collection_timeout_seconds=240,
     )
     public = recovery = None
     try:
@@ -499,7 +499,7 @@ async def test_public_wait_expires_while_shared_background_collection_finishes(p
         assert recovered.snapshot == provider.capture.snapshot
         assert _PRIVATE_URL not in recovered.provenance.values()
         assert provider.calls == 1
-        assert provider.budgets == [120]
+        assert provider.budgets == [240]
     finally:
         provider.release.set()
         await cache.aclose()
@@ -531,7 +531,7 @@ async def test_cohort_recovery_recollects_after_cached_capture_expires(policy):
     cache = cache_for(provider, policy, monotonic=lambda: clock.now)
     try:
         await cache.collect_fresh()
-        clock.now += 61.0
+        clock.now += 301.0
         await cache.collect_for_cohort_recovery()
         assert provider.calls == 2
     finally:
@@ -652,7 +652,7 @@ async def test_rate_limit_cooldown_recovers_without_reusing_stale_capture(policy
         provider.failure = None
         first = await cache.collect_fresh()
         assert first.snapshot == provider.capture.snapshot
-        clock.now += 61.0
+        clock.now += 301.0
         provider.failure = ValidatorChainError("proof_rpc_rate_limited")
         await expect_rate_limit(cache)
         provider.failure = None

@@ -41,7 +41,7 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 class CohortEndpointDecisionConfig(CohortAdmissionSignerConfig):
     schema_: Literal["umi-cohort-endpoint-decision-config/1"] = Field(alias="schema")
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 class CohortEndpointDecisionIntent(StrictProtocolModel):

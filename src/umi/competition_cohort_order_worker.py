@@ -55,13 +55,13 @@ class CohortOrderWorker:
         delivery: OrderDeliveryPort,
         *,
         batch_size: int = 16,
-        operation_timeout_seconds: int = 30,
+        operation_timeout_seconds: int = 2400,
     ):
         if provider.policy != queue.policy:
             raise ValueError("order worker finality belongs to another policy")
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("order worker batch is outside bounds")
-        if type(operation_timeout_seconds) is not int or not 1 <= operation_timeout_seconds <= 1200:
+        if type(operation_timeout_seconds) is not int or not 1 <= operation_timeout_seconds <= 3600:
             raise ValueError("order worker operation timeout is outside bounds")
         self.queue, self.provider, self.history = queue, provider, history
         self.reviewers, self.delivery = reviewers, delivery

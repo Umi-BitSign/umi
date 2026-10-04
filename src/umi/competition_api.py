@@ -72,9 +72,15 @@ def create_app(
     cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
     | None = None,
     cohort_model_uploads: CohortModelPayloads | None = None,
+    registration_timeout_seconds: float = 120,
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
+    if (
+        type(registration_timeout_seconds) not in (int, float)
+        or not 1 <= registration_timeout_seconds <= 3600
+    ):
+        raise ValueError("registration timeout must be between 1 and 3600 seconds")
     limits = CompetitionApiLimits.model_validate_json(
         canonical_json_bytes(limits or CompetitionApiLimits())
     )
@@ -121,6 +127,7 @@ def create_app(
                 maximum_body_bytes=MAX_SUBMISSION_BYTES,
                 archive=cohort_archive_provider,
                 models=cohort_model_uploads,
+                capture_timeout_seconds=registration_timeout_seconds,
             )
         )
     public_results_sources = tuple(
@@ -199,7 +206,9 @@ def create_app(
         admission_checked_block = None
         if public_deployment is not None:
             try:
-                snapshot = await asyncio.wait_for(status_snapshot_provider(), timeout=20)
+                snapshot = await asyncio.wait_for(
+                    status_snapshot_provider(), timeout=registration_timeout_seconds
+                )
             except Exception:
                 admission_accepting_new = False
                 admission_phase = "unverified"
@@ -471,7 +480,9 @@ def create_app(
                 raise HTTPException(409, "model contribution intake is not open")
             raise HTTPException(409, "submission track is not open")
         try:
-            snapshot = await asyncio.wait_for(snapshot_provider(), timeout=20)
+            snapshot = await asyncio.wait_for(
+                snapshot_provider(), timeout=registration_timeout_seconds
+            )
         except Exception as error:
             raise HTTPException(
                 503, "registration snapshot unavailable; retry unchanged"

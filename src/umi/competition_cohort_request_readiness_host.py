@@ -35,7 +35,15 @@ class CombinedRequestReadiness:
         self.last_reports = {}
         self.selection_stamp = None
         self.peers = tuple(
-            (identity(peer.signer), RequestReadinessPeer(client, peer.origin, token))
+            (
+                identity(peer.signer),
+                RequestReadinessPeer(
+                    client,
+                    peer.origin,
+                    token,
+                    timeout_seconds=peer.timeout_seconds,
+                ),
+            )
             for peer, token in zip(
                 service.config.admission_owner.reviewers, credentials, strict=True
             )
@@ -161,8 +169,12 @@ def request_readiness_routes(service):
         if service.request_readiness is None:
             raise HTTPException(503, "request workers unavailable; retry later")
         try:
+            dispatch = service.config.dispatch
+            if dispatch is None:
+                raise RuntimeError("request readiness requires configured dispatch")
             value = await wait_for_owned(
-                service.request_readiness.observe(cohort, nonce), timeout=20
+                service.request_readiness.observe(cohort, nonce),
+                timeout=dispatch.operation_timeout_seconds,
             )
         except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
             if service.request_readiness is not None:

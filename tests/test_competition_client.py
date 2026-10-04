@@ -10,6 +10,7 @@ from umi.competition_api import create_app
 from umi.competition_client import (
     MAX_RECEIPT_BYTES,
     CompetitionSubmissionError,
+    post_intake_document,
     submit_signed_submission,
     validate_intake_origin,
 )
@@ -76,6 +77,36 @@ async def test_client_posts_only_canonical_public_body(policy):
         signed=signed,
         transport=httpx.MockTransport(serve),
     )
+
+
+async def test_bounded_document_accepts_long_progression_timeout():
+    requests = []
+
+    def serve(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "accepted"})
+
+    raw = await post_intake_document(
+        origin="https://intake.example",
+        path="/v1/competition/service-work",
+        body=b"{}",
+        transport=httpx.MockTransport(serve),
+        timeout_seconds=3600,
+    )
+    assert json.loads(raw) == {"status": "accepted"}
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("timeout", [0, 3601, True, float("nan")])
+async def test_bounded_document_rejects_invalid_timeout(timeout):
+    with pytest.raises(ValueError, match="intake timeout"):
+        await post_intake_document(
+            origin="https://intake.example",
+            path="/v1/competition/service-work",
+            body=b"{}",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+            timeout_seconds=timeout,
+        )
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308, 409, 413, 429, 500, 503])

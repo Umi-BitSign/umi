@@ -67,7 +67,7 @@ class ModelUploadConfig(StrictProtocolModel):
     maximum_reserved_bytes: Annotated[int, Field(ge=1, le=16 * 1024**4)]
     maximum_metadata_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
     maximum_concurrent_uploads: Annotated[int, Field(ge=1, le=32)] = 2
-    idle_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    idle_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 300
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):

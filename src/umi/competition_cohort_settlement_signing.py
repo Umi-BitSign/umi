@@ -106,7 +106,7 @@ class SettlementPhaseSigner:
         hotkey: str,
         sign: Callable[[StrictProtocolModel], Awaitable[Signature]],
         *,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 2400,
     ):
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self.hotkey, self.account = hotkey, identity(hotkey)

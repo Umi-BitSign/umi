@@ -33,6 +33,8 @@ from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
 
+SANDBOX_RECONCILIATION_TIMEOUT_SECONDS = 300
+
 
 class CohortSandbox(Protocol):
     async def reconcile(
@@ -160,7 +162,10 @@ class CohortExecutor(CohortExecutionAuthority):
             if pending is None:
                 if attempt is not None:
                     # No replacement while an uncertain prior sandbox can still run.
-                    await wait_for_owned(self.sandbox.reconcile(job, attempt), timeout=30)
+                    await wait_for_owned(
+                        self.sandbox.reconcile(job, attempt),
+                        timeout=SANDBOX_RECONCILIATION_TIMEOUT_SECONDS,
+                    )
                     await run_owned_thread(self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
                 attempt = await run_owned_thread(self.journal.begin, job, index, source, started)

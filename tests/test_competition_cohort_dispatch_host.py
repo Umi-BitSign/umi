@@ -122,6 +122,7 @@ async def host(networked, tmp_path, monkeypatch):
 
 async def test_configured_dispatch_uses_native_votes_and_recovers_after_restart(host):
     h, s = host.open(), host.s
+    assert h.timeout_seconds == h.config.operation_timeout_seconds == 2400
     worker = await h.worker(host.catalog)
     # Original selection already exists in this fixture. Live input composition
     # independently checks the same authority, media identity and request window.

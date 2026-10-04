@@ -16,7 +16,15 @@ def preparation_review_routes(exporter: PreparationReviewExporter, *, token: str
 
 
 class PreparationReviewHTTPClient(PhaseReviewHTTPClient[PreparationReviewRequest]):
-    def __init__(self, client, origin, *, token, maximum_bytes=64 * 1024**2, timeout_seconds=30):
+    def __init__(
+        self,
+        client,
+        origin,
+        *,
+        token,
+        maximum_bytes=64 * 1024**2,
+        timeout_seconds=2400,
+    ):
         super().__init__(
             client,
             origin,

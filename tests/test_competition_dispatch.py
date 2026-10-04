@@ -380,7 +380,7 @@ def test_dispatch_concurrency_can_be_raised_without_extending_proof_timeout(disp
         {**dispatch.config.model_dump(by_alias=True), "maximum_concurrency": 128}
     )
     assert config.maximum_concurrency == 128
-    assert config.chain.collection_timeout_seconds == 15
+    assert config.chain.collection_timeout_seconds == 120
 
 
 @pytest.mark.asyncio

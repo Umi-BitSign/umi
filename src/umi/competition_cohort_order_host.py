@@ -35,7 +35,7 @@ class OrderHostConfig(StrictProtocolModel):
     queue: CohortOrderQueueConfig
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
-    operation_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
+    operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 class _Selection(StrictProtocolModel):

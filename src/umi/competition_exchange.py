@@ -139,7 +139,7 @@ class ExchangeConfig(StrictProtocolModel):
             raise ValueError("exchange directories must not overlap")
         if (
             self.chain.policy_sha256 != self.policy_sha256
-            or self.chain.collection_timeout_seconds > 15
+            or self.chain.collection_timeout_seconds > 120
         ):
             raise ValueError("exchange requires a matching bounded owned-finality provider")
         return self

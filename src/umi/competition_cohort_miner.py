@@ -89,7 +89,7 @@ class CohortMinerConfig(CohortIntakeConfig):
     serving_origin: Annotated[str, Field(min_length=1, max_length=4096)]
     maximum_grants: Annotated[int, Field(ge=1, le=65536)] = 4096
     maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 class CohortServiceMinerConfig(CohortMinerConfig):

@@ -40,7 +40,7 @@ class CohortAdmissionSignerConfig(StrictProtocolModel):
     cohorts: Annotated[tuple[CohortIntakeBinding, ...], Field(min_length=1, max_length=512)]
     maximum_votes: Annotated[int, Field(ge=1, le=65536)] = 4096
     maximum_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
-    signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 30
+    signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
 
     @model_validator(mode="after")
     def ordered(self):

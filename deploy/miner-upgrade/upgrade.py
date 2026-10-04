@@ -30,6 +30,7 @@ LAUNCHER = Path("/usr/local/libexec/umi-miner-upgrade")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 ENROLLMENT_SERVICE = "umi-miner-cohort-enrollment.service"
 ENROLLMENT_TIMER = "umi-miner-cohort-enrollment.timer"
+SERVICE_CLAIM_TIMEOUT_SECONDS = 3600
 HEX32 = re.compile(r"^[0-9a-f]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.:@-]+\.service$")
@@ -48,7 +49,7 @@ def fetch(url: str, maximum: int = 4 * 1024 * 1024) -> bytes:
         url,
         headers={"Accept-Encoding": "identity", "User-Agent": "umi-miner-upgrade/1"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=120) as response:
         raw = response.read(maximum + 1)
         if response.status != 200 or not raw or len(raw) > maximum:
             raise ValueError("download size or status differs")
@@ -1056,6 +1057,7 @@ def service_claim_step(enrollment: Path, config: dict, request) -> dict:
                     origin=config["intake_origin"],
                     path=("/v1/competition/service-work/" + catalog_sha256 + "/claims"),
                     body=canonical_json_bytes(signed),
+                    timeout_seconds=SERVICE_CLAIM_TIMEOUT_SECONDS,
                 )
             )
         except CompetitionSubmissionError as error:
@@ -1303,6 +1305,7 @@ def install_endpoint_enrollment(
         f"User={account.pw_name}\n"
         f"Environment=HOME={account.pw_dir}\n"
         f"ExecStart={runtime_python} -I -B {LAUNCHER} --run-enrollment {enrollment}\n"
+        "TimeoutStartSec=70min\n"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"
         "ProtectHome=read-only\n"
@@ -1325,7 +1328,9 @@ def install_endpoint_enrollment(
     _root_file(timer_path, timer_raw, 0o644)
     run("systemctl", "daemon-reload")
     run("systemctl", "enable", "--now", ENROLLMENT_TIMER)
-    run("systemctl", "start", ENROLLMENT_SERVICE, check=False, timeout=180)
+    # The timer owns this retained operation. Do not make the interactive
+    # updater wait for a slow coordinator or terminate its service-start client.
+    run("systemctl", "start", "--no-block", ENROLLMENT_SERVICE, check=False, timeout=30)
     status_path = enrollment / "last-status.json"
     if status_path.exists():
         return document(status_path.read_bytes(), label="endpoint enrollment status")

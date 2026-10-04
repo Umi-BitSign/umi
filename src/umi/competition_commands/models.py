@@ -50,7 +50,7 @@ def run_model_evaluation(args: argparse.Namespace, policy: CompetitionPolicy) ->
         else validate_job(load_json(args.job, ModelEvaluationJob), policy)
     )
     chain = load_json(args.chain_config, CompetitionChainConfig)
-    if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 15:
+    if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 120:
         raise ValueError("execution requires a matching bounded finalized provider")
     state = Path(args.state).absolute()
     chain_state = Path(chain.state_directory).resolve()
@@ -112,7 +112,7 @@ def run_dependence_calibration(args: argparse.Namespace, policy: CompetitionPoli
     bundle = load_json(args.bundle, ModelBundle)
     runtime = load_json(args.runtime, OFFLINE_RUNTIME)
     chain = load_json(args.chain_config, CompetitionChainConfig)
-    if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 15:
+    if chain.policy_sha256 != digest(policy) or chain.collection_timeout_seconds > 120:
         raise ValueError("calibration requires a matching bounded finalized provider")
 
     async def run():

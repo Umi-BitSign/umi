@@ -131,7 +131,7 @@ async def sign_service_allocation(
     hotkey: str,
     sign: Callable[[ServiceAllocationStatement], Awaitable[Signature]],
     *,
-    signing_timeout_seconds: float = 30,
+    signing_timeout_seconds: float = 300,
 ) -> ServiceAllocationVote:
     """Serialize intent, signature and retention; retries never change allocation."""
     if identity(hotkey) not in review.groups or identity(hotkey) in review.recipients:

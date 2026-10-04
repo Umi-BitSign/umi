@@ -89,7 +89,7 @@ class PreparationReviewExporter:
         sign: Callable[[PreparationReviewResponse], Awaitable[Signature]],
         *,
         maximum_bytes: int = MAX_EXPORT_BYTES,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
     ):
         review_export_limits(maximum_bytes, timeout_seconds)
         self.source, self.owner, self.sign = source, identity(owner), sign
@@ -228,7 +228,7 @@ class RemotePreparationProgressReviewer:
         eligible_tracks: tuple[Track, ...] = ("endpoint",),
         maximum_bytes: int = MAX_EXPORT_BYTES,
         maximum_promotion_bytes: int = 16 * 1024**2,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
     ):
         review_export_limits(maximum_bytes, timeout_seconds)
         self.policy, self.cohorts, self.owner = review_selection(provider.policy, cohorts, owner)

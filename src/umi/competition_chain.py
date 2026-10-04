@@ -65,10 +65,10 @@ from .validator_plans import VerifiedFinalizedBlock
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
 # Reconnect silent follow streams before consuming the full freshness budget.
-# Publication journals require observations younger than 60 seconds. Headers
-# already have network/finality age when accepted; restart also takes time.
+# Give a live record up to half of the configured head-age allowance so slow RPC
+# or finality verification cannot cause a permanent fifteen-second retry loop.
 # Bootstrap keeps its separate allowance, and stale heads stay rejected.
-_OBSERVER_RECORD_TIMEOUT_SECONDS = 15.0
+_OBSERVER_RECORD_TIMEOUT_SECONDS = 300.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -132,10 +132,10 @@ class CompetitionChainConfig(StrictProtocolModel):
     proof_binary_sha256: Hex32
     state_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     minimum_finalized_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
-    maximum_head_age_ms: Annotated[int, Field(ge=1, le=120_000)] = 120_000
+    maximum_head_age_ms: Annotated[int, Field(ge=1, le=600_000)] = 300_000
     maximum_future_skew_ms: Annotated[int, Field(ge=0, le=30_000)] = 30_000
-    collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 15
-    startup_timeout_seconds: Annotated[int, Field(ge=1, le=900)] = 600
+    collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 120
+    startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 1800
     maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
@@ -826,7 +826,7 @@ class FinalizedRegistrationProvider:
         """
         if (
             type(timeout_seconds) not in (int, float)
-            or not self.config.collection_timeout_seconds <= timeout_seconds <= 120
+            or not self.config.collection_timeout_seconds <= timeout_seconds <= 600
         ):
             raise ValueError("background registration collection timeout is invalid")
         return await self._collect(timeout_seconds=float(timeout_seconds))

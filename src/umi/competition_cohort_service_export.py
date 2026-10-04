@@ -53,7 +53,7 @@ class ServiceWorkExporter:
         owner: str,
         sign: Callable[[ServiceWorkResponse], Awaitable[Signature]],
         *,
-        timeout_seconds=30,
+        timeout_seconds=2400,
     ):
         review_export_limits(MAX_SERVICE_REQUEST_BYTES, timeout_seconds)
         self.queue, self.owner, self.sign = queue, identity(owner), sign
@@ -89,7 +89,7 @@ class ServiceWorkReader:
         owner: str,
         fetch: Callable[[ServiceWorkLookup], Awaitable[bytes]],
         *,
-        timeout_seconds=30,
+        timeout_seconds=2400,
     ):
         review_export_limits(MAX_SERVICE_REQUEST_BYTES, timeout_seconds)
         self.policy, self.owner, self.fetch = policy, identity(owner), fetch
@@ -124,7 +124,7 @@ def service_work_routes(exporter: ServiceWorkExporter, *, token: str):
 
 
 class ServiceWorkHTTPClient(PhaseReviewHTTPClient[ServiceWorkLookup]):
-    def __init__(self, client, origin, *, token, timeout_seconds=30):
+    def __init__(self, client, origin, *, token, timeout_seconds=2400):
         super().__init__(
             client,
             origin,

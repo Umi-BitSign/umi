@@ -73,7 +73,7 @@ class ServiceWorkTransport:
         blocks,
         origin: ServiceOriginSource,
         *,
-        timeout_seconds: float = 300,
+        timeout_seconds: float = 2400,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         if (

@@ -196,7 +196,7 @@ def test_initial_observer_parser_and_digest_are_bounded_canonical(observer_case)
 async def test_mutated_initial_or_invalid_installation_reject_before_network(observer_case):
     case = observer_case
     case.installation.observer_config = case.installation.observer_config.model_copy(
-        update={"chain": case.item.config.model_copy(update={"collection_timeout_seconds": 16})}
+        update={"chain": case.item.config.model_copy(update={"collection_timeout_seconds": 121})}
     )
     with pytest.raises(ValueError, match="configuration changed"):
         await case.observer.observe()

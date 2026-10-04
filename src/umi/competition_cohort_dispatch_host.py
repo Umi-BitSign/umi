@@ -44,7 +44,7 @@ class ServiceDispatchConfig(StrictProtocolModel):
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
     concurrency: Annotated[int, Field(ge=1, le=32)] = 4
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
-    operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
     def stores(self):
         return tuple(
@@ -79,7 +79,11 @@ class ServiceDispatchHost:
         if origins.policy != service.intake.policy:
             raise ValueError("service dispatch origin policy differs from its admission")
         self.workers, self.last_reports, self.tasks = {}, {}, {}
-        self.maximum_bytes, self.timeout_seconds = MAX_SERVICE_REQUEST_BYTES, 30
+        self.maximum_bytes = MAX_SERVICE_REQUEST_BYTES
+        # The private exporter can replay retained request evidence before it
+        # returns one assignment. Keep that replay inside the same generous
+        # operation budget as the worker that consumes it.
+        self.timeout_seconds = self.config.operation_timeout_seconds
 
     async def respond(self, request: ServiceWorkLookup) -> bytes:
         # The request can select only an already configured queue. Native

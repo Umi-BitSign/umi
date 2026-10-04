@@ -185,6 +185,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     inputs_directory: Directory
     maximum_claims_per_catalog: Annotated[int, Field(ge=1, le=8192)] = 1024
     maximum_queue_bytes: Annotated[int, Field(ge=1024, le=16 * 1024**3)] = 1024**3
+    admission_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
     model_uploads: ModelUploadConfig | None = None
@@ -197,6 +198,10 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        # Older host configs did not carry this local operational budget. Keep
+        # their canonical bytes stable while new deployments set it explicitly.
+        if "admission_timeout_seconds" not in self.model_fields_set:
+            value.pop("admission_timeout_seconds", None)
         if not self.model_review_peers:
             value.pop("model_review_peers", None)
         if self.model_uploads is None:
@@ -513,6 +518,7 @@ class ServiceAdmissionHost:
             prepared_service_roster(self.preparation),
             archive,
             intake=intake,
+            timeout_seconds=c.admission_timeout_seconds,
         )
 
     def _history(self, cohort: str) -> CohortOrderHistory:

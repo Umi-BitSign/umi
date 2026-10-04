@@ -25,7 +25,7 @@ class ServiceWorkAuthority:
         history: Callable[[str], Awaitable[CohortOrderHistory]],
         origins: CohortEndpointFinalityProvider,
         *,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 2400,
     ):
         if provider.policy != queue.policy or origins.policy != queue.policy:
             raise ValueError("service authority providers belong to another policy")

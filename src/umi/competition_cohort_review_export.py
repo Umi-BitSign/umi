@@ -10,7 +10,7 @@ MAX_EXPORT_BYTES = 64 * 1024**2
 def review_export_limits(maximum_bytes: int, timeout_seconds: int) -> None:
     if type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 512 * 1024**2:
         raise ValueError("phase review export capacity is outside bounds")
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 1200:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
         raise ValueError("phase review timeout is outside bounds")
 
 

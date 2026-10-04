@@ -112,8 +112,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
             raise ValueError("service-work admission requires its own configured cohort intake")
         if self.chain.policy_sha256 != self.policy_sha256:
             raise ValueError("intake and chain configuration bind different policies")
-        if self.chain.collection_timeout_seconds > 15:
-            raise ValueError("intake proof collection must finish within 15 seconds")
+        if self.chain.collection_timeout_seconds > 120:
+            raise ValueError("intake proof collection must finish within 120 seconds")
         if self.admission_capacity.maximum_records > 65_536:
             raise ValueError("intake admission capacity exceeds checkpoint capacity")
         state = Path(self.state_directory)
@@ -293,14 +293,22 @@ def create_intake_app(
         if provider_factory is None
         else provider_factory(config.chain, policy)
     )
+    background_collection_timeout = 240 if provider_factory is None else None
     finality_cache = VerifiedRegistrationCache(
         provider,
         policy,
         maximum_cache_age_seconds=config.chain.maximum_head_age_ms / 1000,
         maximum_head_age_ms=config.chain.maximum_head_age_ms,
         maximum_future_skew_ms=config.chain.maximum_future_skew_ms,
-        public_wait_seconds=config.chain.collection_timeout_seconds + 1,
-        background_collection_timeout_seconds=120 if provider_factory is None else None,
+        # Let the first caller receive the shared result instead of disconnecting
+        # while the cache continues exactly the same collection in the background.
+        public_wait_seconds=(
+            config.chain.collection_timeout_seconds
+            if background_collection_timeout is None
+            else background_collection_timeout
+        )
+        + 1,
+        background_collection_timeout_seconds=background_collection_timeout,
     )
     if config.recoverable_service is not None:
         service_host = ServiceAdmissionHost(
@@ -342,6 +350,11 @@ def create_intake_app(
     async def cached_snapshot() -> RegistrationSnapshot:
         return (await finality_cache.cached()).snapshot
 
+    registration_wait_seconds = (
+        config.chain.collection_timeout_seconds
+        if background_collection_timeout is None
+        else background_collection_timeout
+    ) + 1
     app = create_app(
         store,
         current_snapshot,
@@ -355,6 +368,7 @@ def create_intake_app(
         public_results_directory=config.public_results_directory,
         cohort_intake=cohort_intake,
         cohort_model_uploads=None if service_host is None else service_host.payloads,
+        registration_timeout_seconds=registration_wait_seconds,
         cohort_capture_provider=(
             finality_cache.collect_for_cohort_recovery if cohort_intake is not None else None
         ),
@@ -375,7 +389,9 @@ def create_intake_app(
         if service_host.uploads is not None:
             app.include_router(
                 model_upload_routes(
-                    service_host.uploads, finality_cache.collect_for_cohort_recovery
+                    service_host.uploads,
+                    finality_cache.collect_for_cohort_recovery,
+                    capture_timeout_seconds=registration_wait_seconds,
                 )
             )
         if service_host.direct_uploads is not None:

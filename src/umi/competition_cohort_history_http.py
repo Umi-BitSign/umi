@@ -38,7 +38,7 @@ class SignedCohortHistoryResponse(StrictProtocolModel):
 
 
 class CohortHistoryExporter:
-    def __init__(self, intake: CohortIntake, owner: str, sign, *, timeout_seconds=30):
+    def __init__(self, intake: CohortIntake, owner: str, sign, *, timeout_seconds=2400):
         review_export_limits(MAX_EXPORT_BYTES, timeout_seconds)
         self.intake, self.owner, self.sign = intake, identity(owner), sign
         if self.owner not in {identity(e.hotkey) for e in intake.policy.evaluators}:
@@ -95,7 +95,7 @@ class CohortHistoryReader:
         owner: str,
         fetch: Callable[[CohortHistoryRequest], Awaitable[bytes]],
         *,
-        timeout_seconds=300,
+        timeout_seconds=2400,
     ):
         review_export_limits(MAX_EXPORT_BYTES, timeout_seconds)
         self.owner, self.fetch, self.timeout = identity(owner), fetch, timeout_seconds
@@ -124,7 +124,7 @@ class CohortHistoryReader:
 
 
 class CohortHistoryHTTPClient(PhaseReviewHTTPClient[CohortHistoryRequest]):
-    def __init__(self, client, origin, *, token, timeout_seconds=300):
+    def __init__(self, client, origin, *, token, timeout_seconds=2400):
         super().__init__(
             client,
             origin,

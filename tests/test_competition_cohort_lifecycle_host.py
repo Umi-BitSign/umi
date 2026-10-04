@@ -55,7 +55,7 @@ def configured(h, root):
                 signer=wallet(n).hotkey.ss58_address,
                 origin=f"https://{n.lower()}.example",
                 token_file=str(root / (n + "-token")),
-                timeout_seconds=30,
+                timeout_seconds=45,
             )
             for n in ("Charlie", "Dave")
         ),
@@ -171,6 +171,7 @@ async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(ho
         await worker.poll_once()
     async with o.open() as app:
         control = app.state.lifecycle
+        assert control.timeout_seconds == 45
         assert app.state.intake_review_exporter.publish_archive == control.proofs.publish
         node = await control.node(h.cohort)
         driver = await node._driver("intake")

@@ -40,6 +40,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 _Result = TypeVar("_Result")
 _Fingerprint = tuple[int, int, int, int, int]
 _Report = Callable[[dict], None]
+MODEL_DELIVERY_TIMEOUT_SECONDS = 300
 
 
 class _UploadStatus(StrictProtocolModel):
@@ -163,7 +164,7 @@ async def _exchange(
             return bytes(data)
 
     try:
-        return await asyncio.wait_for(send(), timeout=120)
+        return await asyncio.wait_for(send(), timeout=MODEL_DELIVERY_TIMEOUT_SECONDS)
     except (httpx.HTTPError, asyncio.TimeoutError) as error:
         raise CompetitionSubmissionError("model_upload_transport_unavailable") from error
 
@@ -180,7 +181,7 @@ async def fetch_model_delivery_profile(
     async with httpx.AsyncClient(
         base_url=origin,
         transport=transport,
-        timeout=httpx.Timeout(60, connect=10),
+        timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
         follow_redirects=False,
         trust_env=False,
         headers={"Accept": "application/json", "Accept-Encoding": "identity"},
@@ -289,7 +290,7 @@ async def submit_cohort_model(
     async with httpx.AsyncClient(
         base_url=origin,
         transport=transport,
-        timeout=httpx.Timeout(60, connect=10),
+        timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
         follow_redirects=False,
         trust_env=False,
         headers={"Accept": "application/json", "Accept-Encoding": "identity"},

@@ -115,8 +115,11 @@ class LifecycleHost:
         )
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}
-        # Native HTTP routing uses these exporter bounds and the enclosing key.
-        self.maximum_bytes, self.timeout_seconds = owner.maximum_export_bytes, 30
+        # A request export can replay every retained service observation and
+        # object in a cohort. Use the same operational budget as the configured
+        # reviewers instead of cancelling that replay after a fixed 30 seconds.
+        self.maximum_bytes = owner.maximum_export_bytes
+        self.timeout_seconds = min(peer.timeout_seconds for peer in owner.reviewers)
 
     def _peers(self, phase):
         owner = self.service.config.admission_owner
@@ -143,7 +146,11 @@ class LifecycleHost:
             self.service.intake,
             maximum_sample_gap_blocks=self.service.config.admission_owner.maximum_sample_gap_blocks,
         )
-        live = LiveIntakePhaseObserver(phase, self.config.public_origin)
+        live = LiveIntakePhaseObserver(
+            phase,
+            self.config.public_origin,
+            timeout_seconds=self.timeout_seconds,
+        )
         return CohortPhaseDriver(
             CertifiedPhaseObserver(live, self._peers("intake"), self.policy),
             sample_service=live.sample_service,
@@ -213,7 +220,12 @@ class LifecycleHost:
         if cohort not in self.requests:
             self.requests[cohort] = await run_owned_thread(self._request_source, cohort)
         source = self.requests[cohort]
-        live = LiveRequestPhaseObserver(source, self.config.public_origin, client=self.client)
+        live = LiveRequestPhaseObserver(
+            source,
+            self.config.public_origin,
+            client=self.client,
+            timeout_seconds=self.timeout_seconds,
+        )
         publisher = CohortRequestSettlementPublisher(
             source,
             self.provider.collect,

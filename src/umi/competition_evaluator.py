@@ -255,7 +255,7 @@ class EvaluatorConfig(StrictProtocolModel):
             self.round_coordinator_origin is None
             or self.legacy_policy_sha256 is None
             or self.work_signing_chain.policy_sha256 != self.policy_sha256
-            or self.work_signing_chain.collection_timeout_seconds > 15
+            or self.work_signing_chain.collection_timeout_seconds > 120
         ):
             raise ValueError(
                 "work signing requires the round service and matching bounded transport"
@@ -283,7 +283,7 @@ class EvaluatorConfig(StrictProtocolModel):
             raise ValueError("evaluator data, wallet and verifier directories must not overlap")
         if (
             self.chain.policy_sha256 != self.policy_sha256
-            or self.chain.collection_timeout_seconds > 15
+            or self.chain.collection_timeout_seconds > 120
         ):
             raise ValueError("evaluator requires a matching bounded owned-finality provider")
         if (self.dispatch_directory is None) != (self.legacy_policy_sha256 is None):

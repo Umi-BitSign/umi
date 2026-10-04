@@ -39,7 +39,7 @@ class _Responder:
         return canonical_json_bytes(await self.action(request))
 
 
-def endpoint_vote_routes(reviewer, *, token: str, timeout_seconds=1200):
+def endpoint_vote_routes(reviewer, *, token: str, timeout_seconds=2400):
     router = APIRouter()
 
     async def decision(request):
@@ -62,7 +62,7 @@ def endpoint_vote_routes(reviewer, *, token: str, timeout_seconds=1200):
 
 
 class EndpointVotePeer:
-    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=1200):
+    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=2400):
         self.policy, self.cohorts, _ = review_selection(policy, cohorts, signer)
         self.signer = identity(signer)
         self.clients = {

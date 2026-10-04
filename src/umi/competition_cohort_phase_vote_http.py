@@ -79,7 +79,7 @@ class _VoteResponder:
 
 
 def phase_vote_routes(
-    signer: CohortProgressSigner, *, phase: Phase, token: str, timeout_seconds: int = 1200
+    signer: CohortProgressSigner, *, phase: Phase, token: str, timeout_seconds: int = 2400
 ) -> APIRouter:
     responder = _VoteResponder(signer, phase, timeout_seconds)
     router = APIRouter()
@@ -109,7 +109,7 @@ class PhaseVotePeer:
         signer: str,
         phase: Phase,
         token: str,
-        timeout_seconds: int = 1200,
+        timeout_seconds: int = 2400,
     ):
         self.policy, self.cohorts, _account = review_selection(policy, cohorts, signer)
         self.config = PhaseVotePeerIdentity(signer=signer, phase=phase)

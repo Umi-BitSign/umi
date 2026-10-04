@@ -75,7 +75,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     maximum_promotion_bytes: ObjectCapacity
     maximum_state_bytes: Annotated[int, Field(ge=1024 * 1024, le=16 * 1024**3)]
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
-    signing_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
+    signing_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
     original_sources: SettlementOriginalSources | None = None
     request_export_directory: Directory | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None

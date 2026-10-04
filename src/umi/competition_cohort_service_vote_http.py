@@ -41,7 +41,7 @@ class _Responder:
         return canonical_json_bytes(await self.reviewer.attest(request))
 
 
-def service_vote_routes(reviewer: ServiceReviewer, *, token: str, timeout_seconds=1200):
+def service_vote_routes(reviewer: ServiceReviewer, *, token: str, timeout_seconds=2400):
     router = APIRouter()
     responder = _Responder(reviewer, timeout_seconds)
     for kind, model in (("request", ServiceRequestReview), ("retry", ServiceRetryReview)):
@@ -59,7 +59,7 @@ def service_vote_routes(reviewer: ServiceReviewer, *, token: str, timeout_second
 
 class ServiceVotePeer:
     def __init__(
-        self, client, origin, *, policy, cohorts, signer: str, token, timeout_seconds=1200
+        self, client, origin, *, policy, cohorts, signer: str, token, timeout_seconds=2400
     ):
         self.policy, self.cohorts, _ = review_selection(policy, cohorts, signer)
         self.signer = signer

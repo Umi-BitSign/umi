@@ -32,7 +32,7 @@ class CohortReviewPeerConfig(StrictProtocolModel):
     signer: Hotkey
     origin: Annotated[str, Field(min_length=1, max_length=2048)]
     token_file: Directory
-    timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
+    timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
     @model_validator(mode="after")
     def endpoint(self):
@@ -134,7 +134,7 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
         token: str,
         path: str,
         maximum_bytes: int = MAX_EXPORT_BYTES,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
         maximum_request_bytes: int = MAX_REQUEST_BYTES,
     ):
         review_export_limits(maximum_bytes, timeout_seconds)
