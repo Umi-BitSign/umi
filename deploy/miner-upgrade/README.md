@@ -40,6 +40,11 @@ files, starts the updated sidecar when present, and verifies exact sidecar and
 miner health. A failure restores the previous systemd overrides and starts the
 old services. Prior cohort databases and configuration remain intact.
 
+For an endpoint-enabled cohort, the installed timer retains and retries both the
+signed endpoint participation request and the signed service-work claim. It runs
+every 15 minutes and after reboot until the endpoint certificate and service-work
+admission are both retained. Rerunning the updater reuses those exact bytes.
+
 The script installs itself at `/usr/local/libexec/umi-miner-upgrade`. For later
 cohorts, run the same installed updater:
 

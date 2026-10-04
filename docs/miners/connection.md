@@ -48,14 +48,18 @@ starting the miner. It verifies exact policy, transport, model, finality and
 sidecar health. If any check fails, it restores the prior systemd commands and
 restarts the previous miner and sidecar. Rerunning the updater is idempotent.
 
-Endpoint enrollment is a separate durable phase, so a temporary coordinator or
-finality outage does not roll back a healthy miner upgrade. Before its first
-send, the updater stores the exact signed participation request under the current
-private policy state. A systemd timer retries those same bytes every 15 minutes
-and after reboot until the quorum admission certificate is retained. The command
-may therefore finish with `endpoint_enrollment_retry_scheduled` or
-`endpoint_enrollment_pending_attestation`; neither requires a new signature or a
-manual renewal. `endpoint_enrollment_certified` is the completed state.
+Endpoint enrollment and service-work admission are durable phases, so a temporary
+coordinator or finality outage does not roll back a healthy miner upgrade. Before
+each first send, the updater stores the exact signed participation request and
+service-work claim under the current private policy state. A systemd timer retries
+the same bytes every 15 minutes and after reboot until it retains both the quorum
+endpoint certificate and the service-work admission. The command may therefore
+finish with `endpoint_enrollment_retry_scheduled`,
+`endpoint_enrollment_pending_attestation`, or
+`service_work_claim_retry_scheduled`; none requires a new signature or manual
+renewal. `endpoint_enrollment_and_service_claim_certified` confirms that the
+endpoint is admitted and has an assigned service-work slot. It does not promise a
+score or reward before the work is completed and the cohort settles.
 
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
 same installed file for later cohorts; the current manifest supplies the active
