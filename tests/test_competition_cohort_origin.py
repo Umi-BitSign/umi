@@ -366,6 +366,17 @@ def test_exact_released_freshness_growth_migrates_origin_cache_binding(endpoint)
         )
     assert current._cache_binding_hash() != old_binding
 
+    restored = p.provider(
+        maximum_head_age_ms=120_000,
+        startup_timeout_seconds=900,
+        finality_segment_startup_timeout_seconds=None,
+    )
+    with sqlite3.connect(restored._path) as db:
+        assert db.execute("SELECT digest FROM binding").fetchone()[0] == (
+            restored._cache_binding_hash()
+        )
+    assert restored._cache_binding_hash() == old_binding
+
 
 async def test_corrupt_retained_origin_is_not_overwritten(endpoint):
     p = endpoint
