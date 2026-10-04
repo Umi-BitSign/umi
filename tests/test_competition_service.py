@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -1162,6 +1164,44 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
         "access_log": False,
         "backlog": 128,
     }
+
+
+def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monkeypatch):
+    target = logging.getLogger("umi.competition_cohort_lifecycle")
+    before = (tuple(target.handlers), target.level, target.propagate)
+    observed = []
+    runtime = SimpleNamespace(
+        recoverable_service=object(),
+        host="127.0.0.1",
+        port=8098,
+        api_limits=SimpleNamespace(socket_backlog=128),
+    )
+    monkeypatch.setattr(
+        "umi.competition_service.CompetitionServiceConfig.model_validate_json",
+        lambda *_: runtime,
+    )
+    monkeypatch.setattr("umi.competition_service.create_intake_app", lambda *_: object())
+
+    def serve(*_args, **_kwargs):
+        observed.append(
+            (
+                tuple(target.handlers),
+                target.level,
+                target.propagate,
+            )
+        )
+
+    monkeypatch.setattr(
+        "umi.competition_service_supervision.serve_with_finality_supervision", serve
+    )
+    serve_intake(config, policy)
+    assert len(observed) == 1
+    handlers, level, propagate = observed[0]
+    assert len(handlers) == len(before[0]) + 1
+    assert isinstance(handlers[-1], logging.StreamHandler)
+    assert level == logging.INFO
+    assert propagate is False
+    assert (tuple(target.handlers), target.level, target.propagate) == before
 
 
 async def test_client_verified_service_retries_without_personal_credentials(config, policy):
