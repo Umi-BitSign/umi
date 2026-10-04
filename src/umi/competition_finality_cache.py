@@ -246,6 +246,10 @@ class VerifiedRegistrationCache:
         current cohort history and explicit miner consent. This method does not
         admit legacy submissions or relax head freshness and proof validation.
         """
+        try:
+            return self._current()
+        except VerifiedCaptureUnavailable:
+            pass
         raw = await self._collect_raw()
         self._require_open()
         capture = self._validate(raw, require_current_policy=False)

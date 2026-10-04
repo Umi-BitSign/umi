@@ -509,6 +509,35 @@ async def test_public_wait_expires_while_shared_background_collection_finishes(p
         )
 
 
+@pytest.mark.asyncio
+async def test_cohort_recovery_reuses_a_bounded_fresh_verified_capture(policy):
+    provider = CountingProvider()
+    provider.failure = None
+    cache = cache_for(provider, policy)
+    try:
+        public = await cache.collect_fresh()
+        recovery = await cache.collect_for_cohort_recovery()
+        assert recovery == public
+        assert provider.calls == 1
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cohort_recovery_recollects_after_cached_capture_expires(policy):
+    provider = CountingProvider()
+    provider.failure = None
+    clock = SimpleNamespace(now=100.0)
+    cache = cache_for(provider, policy, monotonic=lambda: clock.now)
+    try:
+        await cache.collect_fresh()
+        clock.now += 61.0
+        await cache.collect_for_cohort_recovery()
+        assert provider.calls == 2
+    finally:
+        await cache.aclose()
+
+
 def rate_limit_setup(policy):
     provider = CountingProvider()
     clock = SimpleNamespace(now=100.0)
