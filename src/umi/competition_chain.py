@@ -783,7 +783,22 @@ class FinalizedRegistrationProvider:
         return (await self.collect()).snapshot
 
     async def collect(self) -> RegistrationCapture:
-        return await self._collect()
+        return await self._collect(timeout_seconds=self.config.collection_timeout_seconds)
+
+    async def collect_with_timeout(self, timeout_seconds: float) -> RegistrationCapture:
+        """Collect with an explicit owner-selected background time budget.
+
+        Public request paths continue to use ``collect()`` and the configured
+        request deadline.  Long-running service owners may use this bounded
+        method behind a shared single-flight cache so one slow proof collection
+        can finish without multiplying RPC work.
+        """
+        if (
+            type(timeout_seconds) not in (int, float)
+            or not self.config.collection_timeout_seconds <= timeout_seconds <= 120
+        ):
+            raise ValueError("background registration collection timeout is invalid")
+        return await self._collect(timeout_seconds=float(timeout_seconds))
 
     async def collect_at(self, height: int) -> RegistrationCapture:
         """Reprove recent membership at an exact height from the owned verifier.
@@ -794,15 +809,15 @@ class FinalizedRegistrationProvider:
         height = _uint(height, 2**53 - 1)
         if height < self.config.minimum_finalized_block:
             raise ValueError("requested registration block precedes configured minimum")
-        return await self._collect(height)
+        return await self._collect(height, timeout_seconds=self.config.collection_timeout_seconds)
 
-    async def _collect(self, height: int | None = None) -> RegistrationCapture:
+    async def _collect(
+        self, height: int | None = None, *, timeout_seconds: float
+    ) -> RegistrationCapture:
         if self._closed:
             raise ValueError("registration provider is closed")
         try:
-            return await asyncio.wait_for(
-                self._collect_locked(height), self.config.collection_timeout_seconds
-            )
+            return await asyncio.wait_for(self._collect_locked(height), timeout_seconds)
         except asyncio.TimeoutError as error:
             raise RegistrationProviderTimeout("registration collection timed out") from error
 

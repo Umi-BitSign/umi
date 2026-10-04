@@ -300,6 +300,7 @@ def create_intake_app(
         maximum_head_age_ms=config.chain.maximum_head_age_ms,
         maximum_future_skew_ms=config.chain.maximum_future_skew_ms,
         public_wait_seconds=config.chain.collection_timeout_seconds + 1,
+        background_collection_timeout_seconds=120 if provider_factory is None else None,
     )
     if config.recoverable_service is not None:
         service_host = ServiceAdmissionHost(

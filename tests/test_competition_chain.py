@@ -420,6 +420,29 @@ async def test_collection_timeout_is_bounded(chain, monkeypatch):
         await provider.collect()
 
 
+async def test_background_collection_can_use_a_larger_bounded_budget(chain, monkeypatch):
+    capture = object()
+
+    async def slow_collection(_height=None):
+        await asyncio.sleep(0.03)
+        return capture
+
+    provider = chain.provider
+    original_config = provider.config
+    provider.config = SimpleNamespace(collection_timeout_seconds=0.01)
+    monkeypatch.setattr(provider, "_collect_locked", slow_collection)
+    try:
+        with pytest.raises(RegistrationProviderTimeout, match="timed out"):
+            await provider.collect()
+        assert await provider.collect_with_timeout(0.1) is capture
+        with pytest.raises(ValueError, match="timeout is invalid"):
+            await provider.collect_with_timeout(0.001)
+        with pytest.raises(ValueError, match="timeout is invalid"):
+            await provider.collect_with_timeout(121)
+    finally:
+        provider.config = original_config
+
+
 @pytest.mark.parametrize(
     "updates",
     [
