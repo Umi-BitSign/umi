@@ -785,6 +785,37 @@ class FinalizedRegistrationProvider:
     async def collect(self) -> RegistrationCapture:
         return await self._collect(timeout_seconds=self.config.collection_timeout_seconds)
 
+    async def current_finalized_block(self) -> int:
+        """Return a fresh verifier-owned height without collecting membership.
+
+        Recovery replay and installation sometimes need only an owned current
+        block to prove that retained signed state is not ahead of finality.  A
+        complete SN78 registration proof is both unnecessary for that check and
+        expensive enough to consume the head-freshness budget by itself.
+
+        This boundary still requires the live owned observer, validates the
+        durable finality binding and wall-clock freshness, and checks the
+        registration store's rollback guard.  It cannot be used as a
+        ``RegistrationCapture`` and therefore does not relax public admission or
+        service-claim membership checks.
+        """
+        if self._closed:
+            raise ValueError("registration provider is closed")
+        if self._owned and (self._task is None or self._task.done()):
+            raise ValueError("owned finality observer is not running")
+        ref = await self._finality.verified_finalized_snapshot()
+        if not isinstance(ref, FinalizedSnapshotRef):
+            raise ValueError("owned finalized snapshot is invalid")
+        if ref.block_number < self.config.minimum_finalized_block:
+            raise _AwaitingFinality("finalized head precedes configured minimum")
+        if self._owned and ref.block_number <= self._startup_floor:
+            raise _AwaitingFinality("awaiting a head verified by this observer process")
+        block = await self._finality.verified_block_at(ref.block_number)
+        self._check_finality(ref, block)
+        self._fresh(block.timestamp_ms)
+        await run_owned_thread(self._check_prior, ref)
+        return ref.block_number
+
     async def collect_with_timeout(self, timeout_seconds: float) -> RegistrationCapture:
         """Collect with an explicit owner-selected background time budget.
 

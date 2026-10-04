@@ -124,6 +124,42 @@ class ServiceWorkQueue:
         *,
         expected_tip_sha256: str,
     ) -> None:
+        block = None if capture is None else execution_boundary(capture).block
+        self._install(
+            signed,
+            round_,
+            source,
+            current_block=block,
+            expected_tip_sha256=expected_tip_sha256,
+        )
+
+    def install_at_block(
+        self,
+        signed: SignedServiceWorkCatalog,
+        round_: RecoverableEvaluationRound,
+        source: CohortOrderHistory,
+        current_block: int,
+        *,
+        expected_tip_sha256: str,
+    ) -> None:
+        """Install retained signed inputs under a lightweight owned-finality height."""
+        self._install(
+            signed,
+            round_,
+            source,
+            current_block=current_block,
+            expected_tip_sha256=expected_tip_sha256,
+        )
+
+    def _install(
+        self,
+        signed: SignedServiceWorkCatalog,
+        round_: RecoverableEvaluationRound,
+        source: CohortOrderHistory | None,
+        *,
+        current_block: int | None,
+        expected_tip_sha256: str,
+    ) -> None:
         signed = SignedServiceWorkCatalog.model_validate_json(canonical_json_bytes(signed))
         body = signed.catalog
         if (
@@ -137,21 +173,26 @@ class ServiceWorkQueue:
                 if old.catalog != body or retained_round != round_:
                     raise ValueError("installed service inventory cannot be replaced")
                 return
-            boundary = execution_boundary(capture)
+            if (
+                type(current_block) is not int
+                or not 0 < current_block <= 2**53 - 1
+                or source is None
+            ):
+                raise ValueError("new service inventory requires an owned finalized block")
             review_service_catalog(
                 signed,
                 round_,
                 self.policy,
                 source,
                 expected_tip_sha256=expected_tip_sha256,
-                current_block=boundary.block,
+                current_block=current_block,
             )
             remember_order_history(
                 self.journal,
                 {body.cohort_sha256: body.authority_sha256},
                 self.policy,
                 source,
-                boundary.block,
+                current_block,
             )
             self.journal.put_many(
                 (

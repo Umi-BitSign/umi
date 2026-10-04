@@ -52,7 +52,7 @@ from .competition_cohort_recovery import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
-from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_execution import ExecutionBoundary
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
@@ -534,21 +534,21 @@ class ServiceAdmissionHost:
     async def history(self, cohort: str) -> CohortOrderHistory:
         return await run_owned_thread(self._history, cohort)
 
-    def _install(self, key, catalog, source, capture):
+    def _install(self, key, catalog, source, current_block):
         cohort = self.cohorts[key]
         prepared = self.preparation.retained(
             cohort,
             expected_tip_sha256=history_tip(source.history),
-            current_block=execution_boundary(capture).block,
+            current_block=current_block,
         )
         with self.intake._connection() as (_, store):
             if store.published_history(cohort) != source.history:
                 raise OSError("service installation history changed")
-            self.queues[key].install(
+            self.queues[key].install_at_block(
                 catalog,
                 prepared.roster.round,
                 source,
-                capture,
+                current_block,
                 expected_tip_sha256=history_tip(source.history),
             )
 
@@ -599,8 +599,8 @@ class ServiceAdmissionHost:
                     if state.phase != "requests":
                         pending += 1
                         continue
-                    capture = await self.capture()
-                    await run_owned_thread(self._install, key, catalog, source, capture)
+                    current_block = await self.provider.current_finalized_block()
+                    await run_owned_thread(self._install, key, catalog, source, current_block)
                 ready += 1
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1

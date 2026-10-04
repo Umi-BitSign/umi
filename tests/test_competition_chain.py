@@ -15,6 +15,7 @@ from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_chain import (
     CompetitionChainConfig,
     FinalizedRegistrationProvider,
+    OwnedFinalityStale,
     RegistrationProviderTimeout,
     _PrefetchRpc,
     _RegistrationRpc,
@@ -300,6 +301,18 @@ async def test_complete_registration_uses_one_owned_state_root_and_retains_evide
     assert await chain.provider() == capture.snapshot
     assert len(chain.verifier.checked) == count
     assert "chain_getFinalizedHead" not in {method for method, _ in chain.rpc.calls}
+
+
+async def test_current_finalized_block_does_not_collect_registration_membership(chain):
+    assert await chain.provider.current_finalized_block() == _HEIGHT
+    assert chain.verifier.checked == []
+    assert chain.rpc.calls == []
+
+    chain.clock.now += chain.config.maximum_head_age_ms + 1
+    with pytest.raises(OwnedFinalityStale):
+        await chain.provider.current_finalized_block()
+    assert chain.verifier.checked == []
+    assert chain.rpc.calls == []
 
 
 @pytest.mark.parametrize(

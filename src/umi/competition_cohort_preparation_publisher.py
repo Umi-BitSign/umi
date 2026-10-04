@@ -84,21 +84,32 @@ class CohortPreparationPublisher:
         current = await run_owned_thread(self.owner.queue.intake.history, cohort)
         if current != history:
             raise OSError("preparation publication history changed")
-        capture = await self.provider.collect()
+        current_block = await self.provider.current_finalized_block()
         view = verify_cohort_history(
             history,
             self.owner.queue.policy,
             expected_tip_sha256=history_tip(history),
-            current_block=execution_boundary(capture).block,
+            current_block=current_block,
         )
         if view.state.phase in {"intake", "revoked"}:
             raise ValueError("preparation publication requires active prepared authority")
-        await self._publish(cohort, capture, history_tip(history))
+        prepared = await run_owned_thread(
+            partial(
+                self.owner.retained,
+                cohort,
+                expected_tip_sha256=history_tip(history),
+                current_block=current_block,
+            )
+        )
+        await self._publish_prepared(cohort, prepared)
 
     async def _publish(self, cohort, capture, tip):
         prepared = await run_owned_thread(
             partial(self.owner.prepare, cohort, capture, expected_tip_sha256=tip)
         )
+        await self._publish_prepared(cohort, prepared)
+
+    async def _publish_prepared(self, cohort, prepared):
         await run_owned_thread(
             partial(
                 publish_private_model,

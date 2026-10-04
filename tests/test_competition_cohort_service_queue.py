@@ -264,6 +264,20 @@ def test_original_catalog_bytes_and_journal_need_no_migration(queue_case):
     assert admit(c).ordinal == 1
 
 
+def test_catalog_install_accepts_lightweight_owned_finality_height(queue_case):
+    c = queue_case
+    config = c.cfg.model_copy(update={"directory": c.cfg.directory + "-block-only"})
+    queue = ServiceWorkQueue(config, c.queue.policy)
+    queue.install_at_block(
+        c.catalog,
+        c.round,
+        c.h.source,
+        400,
+        expected_tip_sha256=history_tip(c.h.source.history),
+    )
+    assert queue._catalog() == (c.catalog, c.round)
+
+
 def test_global_work_order_has_no_per_identity_quota(queue_case):
     c = queue_case
     values = [admit(c, name, i) for i, name in enumerate(("Alice", "Alice", "Bob"), 1)]
