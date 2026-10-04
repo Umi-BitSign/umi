@@ -383,11 +383,22 @@ def _directory(path: Path, *, read_only: bool) -> None:
 def _ambient_instruction_paths(working_directory: Path, home: Path) -> tuple[Path, ...]:
     """Return every Claude memory path that could alter the fixed system prompt."""
     paths = [
+        home / ".claude.json",
+        home / ".mcp.json",
         home / ".claude" / "CLAUDE.md",
         home / ".claude" / "CLAUDE.local.md",
         home / ".claude" / "rules",
+        home / ".claude" / "agents",
+        home / ".claude" / "commands",
+        home / ".claude" / "hooks",
+        home / ".claude" / "plugins",
+        home / ".claude" / "projects",
+        home / ".claude" / "skills",
+        home / ".claude" / "settings.json",
+        home / ".claude" / "settings.local.json",
         Path("/etc/claude-code/CLAUDE.md"),
         Path("/etc/claude-code/managed-settings.json"),
+        Path("/etc/claude-code/managed-mcp.json"),
     ]
     current = working_directory
     while True:
@@ -396,9 +407,17 @@ def _ambient_instruction_paths(working_directory: Path, home: Path) -> tuple[Pat
                 current / "CLAUDE.md",
                 current / "CLAUDE.local.md",
                 current / "AGENTS.md",
+                current / ".mcp.json",
                 current / ".claude" / "CLAUDE.md",
                 current / ".claude" / "AGENTS.md",
                 current / ".claude" / "rules",
+                current / ".claude" / "agents",
+                current / ".claude" / "commands",
+                current / ".claude" / "hooks",
+                current / ".claude" / "plugins",
+                current / ".claude" / "skills",
+                current / ".claude" / "settings.json",
+                current / ".claude" / "settings.local.json",
             )
         )
         if current == current.parent:

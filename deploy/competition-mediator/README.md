@@ -26,8 +26,9 @@ The runtime must:
   permission handler, no browser, no slash commands and no session persistence;
 - run from an empty, owned directory with mode `0500`;
 - disable auto memory and refuse user, project, managed-policy or parent-directory
-  `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and `.claude/rules` instruction
-  sources, which Claude Code otherwise loads automatically;
+  memory, settings, MCP, agents, commands, skills, plugins and hooks, including
+  `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.mcp.json` and `.claude/`
+  customization paths, which Claude Code could otherwise load automatically;
 - expose only the credential home and the minimal fixed environment required by
   the CLI;
 - reserve the request in `MediatorJournal` before the call and retain the exact
