@@ -430,6 +430,7 @@ async def test_transport_view_preserves_owned_proofs_and_requires_same_pins(revi
 
 async def test_transport_view_accepts_only_forward_runtime_successors(reviewed):
     from umi.competition_transport_finality import CompetitionTransportFinality
+    from umi.miner_admission import ProofBackedMinerWindowAuthority
 
     provider = reviewed.p.c.provider
     current = provider.config.chain_pin
@@ -458,7 +459,16 @@ async def test_transport_view_accepts_only_forward_runtime_successors(reviewed):
             )
         }
     )
-    CompetitionTransportFinality(provider, transport)
+    view = CompetitionTransportFinality(provider, transport)
+    height = await view.finalized_head_height()
+    original = await provider._finality.verified_block_at(height)
+    block = await view.verified_block_at(height)
+    assert original.chain_observation == current
+    assert block.chain_observation == prior
+    assert block.finality_evidence == original.finality_evidence
+    ProofBackedMinerWindowAuthority(
+        policy=transport, finalized_blocks=view
+    )._validate_verified_block(block, expected_height=height)
 
     for incompatible in (
         prior.model_copy(update={"runtime_spec_version": current.runtime_spec_version}),
