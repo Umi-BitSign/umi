@@ -96,7 +96,7 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
     maximum_uploads_per_cohort: Annotated[int, Field(ge=1, le=4096)] = 1024
-    maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
+    maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=65536)] = 65536
     maximum_metadata_bytes_per_cohort: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
     verification_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
@@ -605,6 +605,10 @@ class ServiceAdmissionHost:
                     if state.phase != "requests":
                         pending += 1
                         continue
+                    if self.provider is None:
+                        raise OSError(
+                            "service installation requires finalized chain state"
+                        ) from None
                     current_block = await self.provider.current_finalized_block()
                     await run_owned_thread(self._install, key, catalog, source, current_block)
                 ready += 1

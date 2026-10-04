@@ -141,6 +141,9 @@ class Provider:
         assert timeout_seconds == 240
         return await self.collect()
 
+    async def current_finalized_block(self):
+        return (await self.collect()).snapshot.block
+
     async def __call__(self):
         return (await self.collect()).snapshot
 

@@ -40,7 +40,10 @@ Interrupted connections, throttling and temporary server failures retry
 automatically. After stopping the command or restarting the machine, rerun it
 with the same request, source files and hotkey. Legacy delivery resumes retained
 offsets; direct delivery reuses its retained reservation and may safely resend
-idempotent parts. If the object store has expired an old unfinished multipart
+idempotent parts. If R2 is unavailable while intake creates the initial
+multipart upload, intake keeps one durable intent and retries it without
+consuming replacement generations or changing the miner request. If the object
+store has expired an old unfinished multipart
 generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
 not change.

@@ -39,7 +39,13 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 class CohortExecutionConfig(CohortOrderSignerConfig):
     schema_: Literal["umi-cohort-execution-config/1"] = Field(alias="schema")
     # Capacity is operational. Raising it does not replace original assignments.
-    maximum_attempts: Annotated[int, Field(ge=1, le=65536)] = 4096
+    # This is a retained operational envelope shared by every case attempt in
+    # the evaluator journal.  Keep the default at the journal's full supported
+    # capacity so ordinary infrastructure retries cannot exhaust a cohort that
+    # contains hundreds of multi-step assignments.  Operators may raise an
+    # existing installation to this value without changing accepted work; the
+    # field is deliberately excluded from the immutable journal binding below.
+    maximum_attempts: Annotated[int, Field(ge=1, le=65536)] = 65536
     read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 

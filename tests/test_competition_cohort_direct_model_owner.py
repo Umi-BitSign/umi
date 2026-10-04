@@ -304,7 +304,7 @@ async def test_distinct_upload_capacity_is_enforced_before_authorization(direct)
 
 
 @pytest.mark.asyncio
-async def test_failed_creation_waits_for_lease_then_advances_generation(direct):
+async def test_failed_creation_waits_for_lease_then_reuses_durable_intent(direct):
     direct.multipart.fail_creates = 1
     with pytest.raises(OSError, match="provider offline"):
         await direct.owner.reserve(direct.request, direct.payload, now_unix_ms=1_800_000_000_000)
@@ -313,9 +313,38 @@ async def test_failed_creation_waits_for_lease_then_advances_generation(direct):
     signed = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_121_000
     )
-    assert signed.reservation.generation == 2
+    assert signed.reservation.generation == 1
     assert len(direct.authorizations) == 1
     assert len(direct.multipart.create_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_reuses_intent_beyond_legacy_retry_limit(direct):
+    identifiers = iter(f"{index:064x}" for index in range(1, 23))
+    direct.owner.new_attempt_id = lambda: next(identifiers)
+    direct.multipart.fail_creates = 20
+    started = 1_800_000_000_000
+
+    for generation in range(1, 21):
+        with pytest.raises(OSError, match="provider offline"):
+            await direct.owner.reserve(
+                direct.request,
+                direct.payload,
+                now_unix_ms=started + (generation - 1) * 121_000,
+            )
+
+    signed = await direct.owner.reserve(
+        direct.request,
+        direct.payload,
+        now_unix_ms=started + 20 * 121_000,
+    )
+
+    assert direct.owner.config.maximum_attempts_per_upload == 65536
+    assert signed.reservation.generation == 1
+    assert len(direct.authorizations) == 1
+    assert len(direct.multipart.create_calls) == 21
+    assert len(direct.owner.journal.keys("direct-intent")) == 1
+    assert len(direct.owner.journal.keys("direct-attempt-index")) == 1
 
 
 @pytest.mark.asyncio
@@ -391,7 +420,9 @@ async def test_expired_generation_recovery_survives_replacement_creation_failure
         await direct.owner.restart(signed, now_unix_ms=1_800_000_150_000)
 
     replacement = await direct.owner.restart(signed, now_unix_ms=1_800_000_242_000)
-    assert replacement.reservation.generation == 3
+    assert replacement.reservation.generation == 2
+    assert len(direct.owner.journal.keys("direct-intent")) == 2
+    assert len(direct.owner.journal.keys("direct-attempt-index")) == 2
     assert len(direct.multipart.create_calls) == 3
 
 

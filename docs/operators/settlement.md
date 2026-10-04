@@ -1112,6 +1112,14 @@ metadata journal, R2 objects and review records across restart or migration.
 Only the signed cohort plan selects direct delivery parameters, so later cohort
 changes do not require a new miner command.
 
+Before a reservation or capability is signed, a failed R2 multipart-creation
+call reuses the same retained intent and object key after its lease. It does not
+append a generation for each provider retry, so a prolonged R2 outage cannot
+consume the metadata journal at the polling rate. An ambiguous provider create
+may leave an unknown incomplete multipart upload, but no miner can receive a
+capability for that unknown provider identifier; the bucket lifecycle aborts
+it. Generations advance only after an issued reservation is explicitly fenced.
+
 A standing series can contain both an older `coordinator_chunked_v1` cohort and
 a successor direct-R2 cohort. In that case version nine carries both
 `model_uploads` and `direct_model_uploads`. The immutable plan digest routes each

@@ -261,6 +261,7 @@ async def test_actual_miner_failure_is_retained_without_infrastructure_retry(exe
 
 async def test_capacity_can_increase_without_replacing_accepted_work(execution):
     e = execution
+    assert e.cfg.maximum_attempts == 65536
     e.fail = True
     with pytest.raises(EvaluationInfrastructureError):
         await e.executor(maximum_attempts=1).advance(e.assignment)
