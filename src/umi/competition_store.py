@@ -1567,7 +1567,12 @@ class CompetitionStore(VoidEvidenceRetention):
                 elif checkpoint.submission_sha256s != submission_ids:
                     # The only recoverable cross-resource state is a verified
                     # append-only DB extension whose receipt was not yet returned.
+                    # Existing records are already bound by their exact admission
+                    # commitments above. Replaying only the newly appended records
+                    # keeps checkpoint repair bounded as intake grows.
                     for submission_id in submission_ids:
+                        if submission_id in retained_records:
+                            continue
                         self._verify_retained_submission(connection, submission_id)
                     checkpoint = build_submission_checkpoint(
                         policy_sha256=digest(self.policy),

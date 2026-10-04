@@ -309,6 +309,34 @@ def test_lifecycle_readiness_and_real_admission(config, policy):
     assert provider.closed
 
 
+def test_checkpoint_append_revalidates_only_the_new_submission(config, policy, monkeypatch):
+    store = checkpoint_store(config, policy)
+    prior = store.retained_submission_head()
+    signed = submission(policy)
+    submission_id = digest(signed.submission)
+    verified = []
+    original = store._verify_retained_submission
+
+    def record_verification(connection, candidate):
+        verified.append(candidate)
+        return original(connection, candidate)
+
+    monkeypatch.setattr(store, "_verify_retained_submission", record_verification)
+    receipt = store.admit(
+        signed,
+        snapshot(),
+        110,
+        registration_source="verifier_attested_finality",
+    )
+
+    assert receipt["submission_sha256"] == submission_id
+    assert verified == [submission_id]
+    current = store.retained_submission_head()
+    assert current["record_count"] == prior["record_count"] + 1
+    assert current["external_checkpoint_durable"] is True
+    assert verified == [submission_id]
+
+
 def test_readiness_flags_are_deployment_bound(config, policy):
     deployment = PublicIntakeDeployment.model_validate(
         {
