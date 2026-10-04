@@ -136,6 +136,7 @@ class CompetitionChainConfig(StrictProtocolModel):
     maximum_future_skew_ms: Annotated[int, Field(ge=0, le=30_000)] = 30_000
     collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 120
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 1800
+    finality_segment_startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None
     maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
@@ -151,6 +152,8 @@ class CompetitionChainConfig(StrictProtocolModel):
             value.pop("runtime_metadata_binary", None)
         if self.runtime_metadata_binary_sha256 is None:
             value.pop("runtime_metadata_binary_sha256", None)
+        if self.finality_segment_startup_timeout_seconds is None:
+            value.pop("finality_segment_startup_timeout_seconds", None)
         if not self.proof_rpc_fallback_urls:
             value.pop("proof_rpc_fallback_urls", None)
         return value
@@ -216,9 +219,18 @@ class CompetitionChainConfig(StrictProtocolModel):
             raise ValueError("registration intake is pinned to Finney genesis")
         if self.minimum_finalized_block < self.finality_pin.bootstrap_block_number:
             raise ValueError("minimum finalized block precedes the finality bootstrap")
+        if (
+            self.finality_segment_startup_timeout_seconds is not None
+            and self.finality_segment_startup_timeout_seconds > self.startup_timeout_seconds
+        ):
+            raise ValueError("finality segment startup timeout exceeds total startup timeout")
         if self.target_triple not in self.finality_pin.release_sha256_by_target:
             raise ValueError("finality release lacks the configured target")
         return self
+
+    @property
+    def effective_finality_segment_startup_timeout_seconds(self) -> int:
+        return self.finality_segment_startup_timeout_seconds or self.startup_timeout_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +513,7 @@ class FinalizedRegistrationProvider:
         self._initialize_cache()
         self._owned = finality is None
         if self._owned:
+            segment_startup_timeout = config.effective_finality_segment_startup_timeout_seconds
             observer = GrandpaFinalityObserver.from_policy_pin(
                 config.finality_pin,
                 target_triple=config.target_triple,
@@ -509,7 +522,7 @@ class FinalizedRegistrationProvider:
                 record_timeout_seconds=min(
                     _OBSERVER_RECORD_TIMEOUT_SECONDS, config.maximum_head_age_ms / 2000
                 ),
-                first_record_timeout_seconds=config.startup_timeout_seconds,
+                first_record_timeout_seconds=segment_startup_timeout,
             )
             finality = DurableGrandpaFinalityPort(
                 observer=observer,
@@ -521,7 +534,7 @@ class FinalizedRegistrationProvider:
                     config.target_triple
                 ],
                 initial_minimum_finalized_block=config.minimum_finalized_block,
-                startup_timeout_seconds=config.startup_timeout_seconds,
+                startup_timeout_seconds=segment_startup_timeout,
                 limits=self._finality_storage_limits(),
             )
             head = finality.persisted_head()
@@ -615,8 +628,42 @@ class FinalizedRegistrationProvider:
     @staticmethod
     def _config_binding_hash(config: CompetitionChainConfig) -> str:
         body = config.model_dump(mode="json", by_alias=True)
+        for field in (
+            "policy_sha256",
+            "maximum_head_age_ms",
+            "collection_timeout_seconds",
+            "startup_timeout_seconds",
+            "finality_segment_startup_timeout_seconds",
+        ):
+            body.pop(field, None)
+        return digest({"chain_config_without_policy": body})
+
+    @staticmethod
+    def _legacy_policy_free_config_binding_hash(config: CompetitionChainConfig) -> str:
+        body = config.model_dump(mode="json", by_alias=True)
         body.pop("policy_sha256", None)
         return digest({"chain_config_without_policy": body})
+
+    def _legacy_operational_profiles(
+        self, config: CompetitionChainConfig
+    ) -> tuple[CompetitionChainConfig, ...]:
+        """Exact released timeout profiles whose full-config cache binding may migrate."""
+        profiles = [
+            config,
+            config.model_copy(update={"finality_segment_startup_timeout_seconds": None}),
+        ]
+        for startup_timeout_seconds in (600, 900):
+            profiles.append(
+                config.model_copy(
+                    update={
+                        "maximum_head_age_ms": 120_000,
+                        "collection_timeout_seconds": 15,
+                        "startup_timeout_seconds": startup_timeout_seconds,
+                        "finality_segment_startup_timeout_seconds": None,
+                    }
+                )
+            )
+        return tuple(profiles)
 
     def _acceptable_cache_bindings(self) -> frozenset[str]:
         """The current binding, plus the legacy per-policy binding this cache would
@@ -630,9 +677,11 @@ class FinalizedRegistrationProvider:
             configs.append(previous)
             accepted.add(self._config_binding_hash(previous))
         for config in configs:
-            for policy_sha256 in admitted_policy_sha256s(self.policy):
-                legacy = config.model_copy(update={"policy_sha256": policy_sha256})
-                accepted.add(digest(legacy))
+            for profile in self._legacy_operational_profiles(config):
+                accepted.add(self._legacy_policy_free_config_binding_hash(profile))
+                for policy_sha256 in admitted_policy_sha256s(self.policy):
+                    legacy = profile.model_copy(update={"policy_sha256": policy_sha256})
+                    accepted.add(digest(legacy))
         return frozenset(accepted)
 
     def _finality_storage_limits(self):

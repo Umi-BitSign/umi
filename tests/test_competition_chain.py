@@ -480,6 +480,18 @@ def test_config_rejects_wrong_genesis(chain_config):
         CompetitionChainConfig.model_validate(body)
 
 
+def test_config_rejects_finality_segment_timeout_beyond_total_startup(chain_config):
+    body = chain_config.model_dump(mode="json", by_alias=True)
+    body.update(
+        {
+            "startup_timeout_seconds": 60,
+            "finality_segment_startup_timeout_seconds": 61,
+        }
+    )
+    with pytest.raises(ValueError, match="segment startup timeout exceeds"):
+        CompetitionChainConfig.model_validate(body)
+
+
 def test_cache_binds_the_chain_configuration_not_the_policy(chain):
     # The registration cache holds verified registrations and finality heads, none of
     # which depend on the competition policy: a policy change alone reopens it, so a
@@ -492,7 +504,7 @@ def test_cache_binds_the_chain_configuration_not_the_policy(chain):
         FinalizedRegistrationProvider(
             config, chain.policy, finality=chain.finality, proofs=chain.proofs
         )
-    # Any other chain-configuration change still invalidates the cache.
+    # Immutable chain-evidence changes still invalidate the cache.
     other = chain.config.model_copy(
         update={"minimum_finalized_block": chain.config.minimum_finalized_block + 1}
     )
@@ -522,6 +534,46 @@ def test_legacy_per_policy_cache_binding_is_upgraded_in_place(chain):
     )
     config = chain.config.model_copy(update={"policy_sha256": digest(successor)})
     FinalizedRegistrationProvider(config, successor, finality=chain.finality, proofs=chain.proofs)
+
+
+def test_released_operational_timeout_binding_is_upgraded_in_place(chain):
+    path = Path(chain.config.state_directory) / "registrations.sqlite3"
+    old = chain.config.model_copy(
+        update={
+            "maximum_head_age_ms": 120_000,
+            "collection_timeout_seconds": 15,
+            "startup_timeout_seconds": 900,
+            "finality_segment_startup_timeout_seconds": None,
+        }
+    )
+    old_body = old.model_dump(mode="json", by_alias=True)
+    old_body.pop("policy_sha256")
+    legacy = digest({"chain_config_without_policy": old_body})
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE binding SET digest=?", (legacy,))
+
+    current = chain.config.model_copy(
+        update={
+            "maximum_head_age_ms": 300_000,
+            "collection_timeout_seconds": 120,
+            "startup_timeout_seconds": 1800,
+            "finality_segment_startup_timeout_seconds": 900,
+        }
+    )
+    provider = FinalizedRegistrationProvider(
+        current, chain.policy, finality=chain.finality, proofs=chain.proofs
+    )
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT digest FROM binding").fetchone()[0] == (
+            provider._cache_binding_hash()
+        )
+
+    another_budget = current.model_copy(
+        update={"collection_timeout_seconds": 119, "startup_timeout_seconds": 1799}
+    )
+    FinalizedRegistrationProvider(
+        another_budget, chain.policy, finality=chain.finality, proofs=chain.proofs
+    )
 
 
 async def test_prefetch_cancellation_drains_bounded_child_reads():
@@ -621,15 +673,26 @@ async def test_two_heads_reuse_one_retained_runtime_artifact(chain):
 
 
 @pytest.mark.parametrize(
-    "startup_seconds,head_age_ms,record_timeout",
-    [(600, 120_000, 60.0), (30, 10_000, 5.0), (60, 60_000, 30.0)],
+    "startup_seconds,head_age_ms,record_timeout,segment_startup_seconds",
+    [
+        (600, 120_000, 60.0, None),
+        (30, 10_000, 5.0, None),
+        (60, 60_000, 30.0, None),
+        (1800, 300_000, 150.0, 900),
+    ],
 )
 async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanly(
-    chain, monkeypatch, startup_seconds, head_age_ms, record_timeout
+    chain,
+    monkeypatch,
+    startup_seconds,
+    head_age_ms,
+    record_timeout,
+    segment_startup_seconds,
 ):
     chain.config = chain.config.model_copy(
         update={
             "startup_timeout_seconds": startup_seconds,
+            "finality_segment_startup_timeout_seconds": segment_startup_seconds,
             "maximum_head_age_ms": head_age_ms,
             "state_directory": chain.config.state_directory + "-owned",
         }
@@ -652,7 +715,9 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         assert pin == chain.config.finality_pin
         assert kwargs["binary_path"] == chain.config.finality_binary
         assert kwargs["chain_spec_path"] == chain.config.chain_spec
-        assert kwargs["first_record_timeout_seconds"] == chain.config.startup_timeout_seconds
+        assert kwargs["first_record_timeout_seconds"] == (
+            chain.config.effective_finality_segment_startup_timeout_seconds
+        )
         assert kwargs["record_timeout_seconds"] == record_timeout
         assert kwargs["record_timeout_seconds"] < chain.config.maximum_head_age_ms / 1000
         return "pinned-test-observer"
@@ -661,6 +726,9 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         assert kwargs["observer"] == "pinned-test-observer"
         assert kwargs["scoring_policy_digest"] == digest(chain.policy)
         assert kwargs["chain_observation"] == chain.config.chain_pin
+        assert kwargs["startup_timeout_seconds"] == (
+            chain.config.effective_finality_segment_startup_timeout_seconds
+        )
         return chain.finality
 
     def proof_verifier(**kwargs):

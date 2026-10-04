@@ -39,12 +39,35 @@ class CohortEndpointFinalityProvider(FinalizedEndpointProvider):
                 "maximum_cache_bytes",
                 "collection_timeout_seconds",
                 "startup_timeout_seconds",
+                "finality_segment_startup_timeout_seconds",
             },
         )
         return digest({"schema": "umi-cohort-origin-cache-binding/1", "chain": body})
 
     def _acceptable_cache_bindings(self) -> frozenset[str]:
-        return frozenset({self._cache_binding_hash()})
+        accepted = {self._cache_binding_hash()}
+        if (
+            self.config.maximum_head_age_ms == 300_000
+            and self.config.finality_segment_startup_timeout_seconds == 900
+        ):
+            previous = self.config.model_copy(
+                update={
+                    "maximum_head_age_ms": 120_000,
+                    "finality_segment_startup_timeout_seconds": None,
+                }
+            )
+            body = previous.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude={
+                    "policy_sha256",
+                    "maximum_cache_bytes",
+                    "collection_timeout_seconds",
+                    "startup_timeout_seconds",
+                },
+            )
+            accepted.add(digest({"schema": "umi-cohort-origin-cache-binding/1", "chain": body}))
+        return frozenset(accepted)
 
 
 class CohortEndpointOrigin:
