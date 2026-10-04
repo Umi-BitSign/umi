@@ -12,6 +12,7 @@ import fcntl
 import os
 import sqlite3
 import stat
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing, contextmanager
@@ -154,6 +155,10 @@ class CohortIntake:
         self.capacity = capacity or AdmissionCapacity()
         self._initialize = initialize
         self.directory = Path(config.directory)
+        # File locks serialize this ledger across processes. Queue callers from
+        # this process first so concurrent API, lifecycle and review threads do
+        # not consume the external-lock timeout while one sibling owns it.
+        self._process_lock = threading.RLock()
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
@@ -192,6 +197,11 @@ class CohortIntake:
 
     @contextmanager
     def _connection(self):
+        with self._process_lock, self._exclusive_connection() as value:
+            yield value
+
+    @contextmanager
+    def _exclusive_connection(self):
         self._directory()
         lease = self._file("intake.lock")
         try:

@@ -354,6 +354,50 @@ def test_concurrent_duplicate_requests_retain_one_receipt(intake, scenario):
         assert db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0] == 1
 
 
+def test_local_intake_callers_queue_before_external_lock_timeout(intake, scenario, monkeypatch):
+    from umi import competition_cohort_intake as module
+
+    entered, release = threading.Event(), threading.Event()
+    local = threading.local()
+    real_monotonic = module.time.monotonic
+
+    def monotonic():
+        if not getattr(local, "accelerated", False):
+            return real_monotonic()
+        local.calls = getattr(local, "calls", 0) + 1
+        return 0 if local.calls == 1 else 11
+
+    def holding_call():
+        with intake._connection():
+            entered.set()
+            assert release.wait(2)
+
+    def queued_call():
+        local.accelerated = True
+        return intake.history(digest(scenario["intake_history"].plan))
+
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
+    first = threading.Thread(target=holding_call)
+    second_result = []
+
+    def second_call():
+        second_result.append(queued_call())
+
+    second = threading.Thread(target=second_call)
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    try:
+        second.join(0.05)
+        assert second.is_alive()
+    finally:
+        release.set()
+        first.join(2)
+        second.join(2)
+    assert not first.is_alive() and not second.is_alive()
+    assert second_result == [scenario["intake_history"]]
+
+
 async def test_native_publisher_drains_commit_before_cancellation(intake, scenario, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     publish = intake.publish
