@@ -13,6 +13,22 @@ import urllib.request
 from pathlib import Path
 
 _STORAGE_METRIC = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}/available_bytes")
+_LIFECYCLE_LABEL = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+_HEX32 = re.compile(r"[0-9a-f]{64}")
+_BOUNDED_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_ERROR_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+_PHASES = {
+    "intake",
+    "preparation",
+    "requests",
+    "reference_commit",
+    "reference_reveal",
+    "evaluation",
+    "evidence",
+    "certification",
+    "complete",
+    "revoked",
+}
 
 
 async def _read_journal(service, *, pattern, since, maximum_entries):
@@ -79,6 +95,15 @@ async def read_successor_journal(service):
     )
 
 
+async def read_lifecycle_journal(service, cohort):
+    return await _read_journal(
+        service,
+        pattern=(f'"cohort_sha256":"{cohort}".*"schema":"umi-cohort-lifecycle-observation/1"'),
+        since="25h",
+        maximum_entries=1,
+    )
+
+
 def standing_progress(service):
     missing = {service + "/finalized_block": None, service + "/weight_update_block": None}
     try:
@@ -118,20 +143,154 @@ def successor_healthy(service, invocation_id):
                 continue
             status = message.get("status")
             reason = message.get("reason")
-            return (
-                status in {"worker_started", "worker_healthy"}
-                or (status, reason)
-                in {
-                    ("started", "successor_worker_started"),
-                    ("healthy", "successor_worker_healthy"),
-                }
-            )
+            return status in {"worker_started", "worker_healthy"} or (status, reason) in {
+                ("started", "successor_worker_started"),
+                ("healthy", "successor_worker_healthy"),
+            }
     except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
         pass
     return False
 
 
-def heartbeat(services, standing_services=(), successor_services=(), storage_paths=None):
+def lifecycle_status(service, cohort):
+    try:
+        lines = asyncio.run(read_lifecycle_journal(service, cohort)).splitlines()
+        for line in lines:
+            entry = json.loads(line)
+            message = json.loads(entry.get("MESSAGE", ""))
+            if not isinstance(message, dict) or message.get("cohort_sha256") != cohort:
+                continue
+            keys = {
+                "schema",
+                "cohort_sha256",
+                "plan_sequence",
+                "phase",
+                "sequence",
+                "target_block",
+                "stage",
+                "status",
+                "progress_completion",
+                "progress_observed_at_block",
+                "unavailable_blocks",
+                "expected_round_sha256",
+                "error_type",
+            }
+            if (
+                set(message) != keys
+                or message.get("schema") != "umi-cohort-lifecycle-observation/1"
+                or _HEX32.fullmatch(cohort) is None
+                or type(message.get("plan_sequence")) is not int
+                or not 1 <= message["plan_sequence"] < 2**53
+                or message.get("phase") not in _PHASES
+                or type(message.get("sequence")) is not int
+                or not 0 <= message["sequence"] < 2**53
+                or (
+                    message.get("target_block") is not None
+                    and (
+                        type(message["target_block"]) is not int
+                        or not 0 <= message["target_block"] < 2**53
+                    )
+                )
+                or _BOUNDED_NAME.fullmatch(message.get("stage", "")) is None
+                or _BOUNDED_NAME.fullmatch(message.get("status", "")) is None
+                or message.get("progress_completion") not in {None, "pending", "complete"}
+                or any(
+                    value is not None and (type(value) is not int or not 0 <= value < 2**53)
+                    for value in (
+                        message.get("progress_observed_at_block"),
+                        message.get("unavailable_blocks"),
+                    )
+                )
+                or (
+                    message.get("progress_completion") is None
+                    and (
+                        message.get("progress_observed_at_block") is not None
+                        or message.get("unavailable_blocks") is not None
+                    )
+                )
+                or (
+                    message.get("progress_completion") is not None
+                    and (
+                        message.get("progress_observed_at_block") is None
+                        or message.get("unavailable_blocks") is None
+                    )
+                )
+                or (
+                    message.get("error_type") is not None
+                    and _ERROR_NAME.fullmatch(message["error_type"]) is None
+                )
+                or (
+                    message.get("expected_round_sha256") is not None
+                    and _HEX32.fullmatch(message["expected_round_sha256"]) is None
+                )
+            ):
+                return None
+            return {key: message[key] for key in keys if key != "schema"}
+    except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
+        pass
+    return None
+
+
+def public_round_index(raw_url):
+    url = urllib.parse.urlsplit(raw_url)
+    if (
+        url.scheme != "https"
+        or url.path != "/v1/competition/rounds/index"
+        or url.query
+        or url.fragment
+        or url.username
+    ):
+        raise ValueError("invalid public round index URL")
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    request = urllib.request.Request(
+        raw_url + "?limit=20", headers={"User-Agent": "umi-cohort-monitor/1"}
+    )
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
+        raw = response.read(65537)
+        if response.status != 200 or len(raw) > 65536:
+            raise ValueError("public round index unavailable")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("invalid public round index")
+    items = value.get("items")
+    if (
+        value.get("schema") != "umi-competition-round-index/1"
+        or not isinstance(items, list)
+        or len(items) > 20
+    ):
+        raise ValueError("invalid public round index")
+    if not items:
+        return 0, set()
+    result, sequences = set(), []
+    for item in items:
+        sequence = item.get("sequence") if isinstance(item, dict) else None
+        round_sha256 = item.get("round_sha256") if isinstance(item, dict) else None
+        if (
+            type(sequence) is not int
+            or not 1 <= sequence < 2**53
+            or not isinstance(round_sha256, str)
+            or _HEX32.fullmatch(round_sha256) is None
+        ):
+            raise ValueError("invalid public round item")
+        result.add(round_sha256)
+        sequences.append(sequence)
+    if sequences != sorted(set(sequences), reverse=True):
+        raise ValueError("public round index is not ordered")
+    return sequences[0], result
+
+
+def heartbeat(
+    services,
+    standing_services=(),
+    successor_services=(),
+    storage_paths=None,
+    lifecycle_cohorts=None,
+    public_round_index_url=None,
+):
     if not services or len(services) > 20 or len(set(services)) != len(services):
         raise ValueError("invalid services")
     if (
@@ -147,6 +306,7 @@ def heartbeat(services, standing_services=(), successor_services=(), storage_pat
     ):
         raise ValueError("invalid successor services")
     storage_paths = {} if storage_paths is None else storage_paths
+    lifecycle_cohorts = {} if lifecycle_cohorts is None else lifecycle_cohorts
     if (
         not isinstance(storage_paths, dict)
         or len(storage_paths) > 10
@@ -160,6 +320,21 @@ def heartbeat(services, standing_services=(), successor_services=(), storage_pat
         )
     ):
         raise ValueError("invalid storage paths")
+    if (
+        not isinstance(lifecycle_cohorts, dict)
+        or len(lifecycle_cohorts) > 10
+        or any(
+            not isinstance(name, str)
+            or _LIFECYCLE_LABEL.fullmatch(name) is None
+            or not isinstance(value, dict)
+            or set(value) != {"service", "cohort_sha256"}
+            or value["service"] not in services
+            or _HEX32.fullmatch(value["cohort_sha256"]) is None
+            for name, value in lifecycle_cohorts.items()
+        )
+        or bool(lifecycle_cohorts) != bool(public_round_index_url)
+    ):
+        raise ValueError("invalid lifecycle cohorts")
     states = {}
     for service in services:
         if not re.fullmatch(r"[A-Za-z0-9@_.-]{1,100}\.service", service):
@@ -223,6 +398,25 @@ def heartbeat(services, standing_services=(), successor_services=(), storage_pat
             resources[name] = available
         result["schema"] = "umi-service-heartbeat/3"
         result["resources"] = resources
+    if lifecycle_cohorts:
+        latest_round, public_rounds = public_round_index(public_round_index_url)
+        result["schema"] = "umi-service-heartbeat/4"
+        result["lifecycles"] = {
+            name: (
+                None
+                if (observed := lifecycle_status(value["service"], value["cohort_sha256"])) is None
+                else {
+                    **observed,
+                    "public_round_sequence": latest_round,
+                    "public_round_present": (
+                        None
+                        if observed["expected_round_sha256"] is None
+                        else observed["expected_round_sha256"] in public_rounds
+                    ),
+                }
+            )
+            for name, value in lifecycle_cohorts.items()
+        }
     return result
 
 
@@ -248,6 +442,8 @@ def main():
                 config.get("standing_services", []),
                 config.get("successor_services", []),
                 config.get("storage_paths", {}),
+                config.get("lifecycle_cohorts", {}),
+                config.get("public_round_index_url"),
             )
         ).encode(),
         headers={

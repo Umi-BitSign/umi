@@ -1,6 +1,7 @@
 """Service-query failures must never fabricate failed-service observations."""
 
 import asyncio
+import io
 import json
 import subprocess
 import sys
@@ -10,13 +11,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from heartbeat import heartbeat, read_journal, standing_progress, successor_healthy
+from heartbeat import (
+    heartbeat,
+    lifecycle_status,
+    public_round_index,
+    read_journal,
+    standing_progress,
+    successor_healthy,
+)
 
 
 class HeartbeatTests(unittest.TestCase):
     systemd_running = (
-        "ActiveState=active\nSubState=running\n"
-        "InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "ActiveState=active\nSubState=running\nInvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
     )
 
     @patch("heartbeat.subprocess.run")
@@ -30,7 +37,8 @@ class HeartbeatTests(unittest.TestCase):
         run.side_effect = [
             subprocess.CompletedProcess([], 0, self.systemd_running, ""),
             subprocess.CompletedProcess(
-                [], 0,
+                [],
+                0,
                 "ActiveState=failed\nSubState=failed\n"
                 "InvocationID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
                 "",
@@ -144,9 +152,7 @@ class HeartbeatTests(unittest.TestCase):
     @patch("heartbeat.read_journal")
     def test_running_service_without_progress_does_not_claim_native_health(self, read, run):
         read.return_value = ""
-        run.return_value = subprocess.CompletedProcess(
-            [], 0, self.systemd_running, ""
-        )
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
         result = heartbeat(["vali.service"], ["vali.service"])
         self.assertEqual(result["schema"], "umi-service-heartbeat/2")
         self.assertEqual(result["services"]["vali.service"], "running")
@@ -182,9 +188,7 @@ class HeartbeatTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertFalse(
-            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        )
+        self.assertFalse(successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         read.return_value = json.dumps(
             {
                 "MESSAGE": json.dumps(
@@ -197,9 +201,7 @@ class HeartbeatTests(unittest.TestCase):
                 "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             }
         )
-        self.assertTrue(
-            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        )
+        self.assertTrue(successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         for status, reason in (
             ("started", "successor_worker_started"),
             ("healthy", "successor_worker_healthy"),
@@ -216,11 +218,7 @@ class HeartbeatTests(unittest.TestCase):
                     "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 }
             )
-            self.assertTrue(
-                successor_healthy(
-                    "vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-            )
+            self.assertTrue(successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         read.return_value = json.dumps(
             {
                 "MESSAGE": json.dumps(
@@ -233,19 +231,13 @@ class HeartbeatTests(unittest.TestCase):
                 "_SYSTEMD_INVOCATION_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             }
         )
-        self.assertFalse(
-            successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        )
-        self.assertFalse(
-            successor_healthy("vali.service", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-        )
+        self.assertFalse(successor_healthy("vali.service", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        self.assertFalse(successor_healthy("vali.service", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
 
     @patch("heartbeat.subprocess.run")
     @patch("heartbeat.read_successor_journal")
     def test_running_successor_without_a_recent_healthy_report_is_failed(self, read, run):
-        run.return_value = subprocess.CompletedProcess(
-            [], 0, self.systemd_running, ""
-        )
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
         read.return_value = json.dumps(
             {
                 "MESSAGE": json.dumps(
@@ -267,6 +259,117 @@ class HeartbeatTests(unittest.TestCase):
         for successor in [["other.service"], ["vali.service", "vali.service"]]:
             with self.assertRaisesRegex(ValueError, "invalid successor services"):
                 heartbeat(["vali.service"], successor_services=successor)
+
+    @patch("heartbeat.public_round_index", return_value=(5, {"b" * 64}))
+    @patch("heartbeat.lifecycle_status")
+    @patch("heartbeat.subprocess.run")
+    def test_lifecycle_heartbeat_is_bounded_and_publication_aware(self, run, status, rounds):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        status.return_value = {
+            "cohort_sha256": "a" * 64,
+            "plan_sequence": 5,
+            "phase": "intake",
+            "sequence": 0,
+            "target_block": 100,
+            "stage": "progress_review",
+            "status": "phase_progress_review_started",
+            "progress_completion": "complete",
+            "progress_observed_at_block": 120,
+            "unavailable_blocks": 20,
+            "expected_round_sha256": "b" * 64,
+            "error_type": None,
+        }
+        result = heartbeat(
+            ["owner.service"],
+            lifecycle_cohorts={
+                "active-cohort": {
+                    "service": "owner.service",
+                    "cohort_sha256": "a" * 64,
+                }
+            },
+            public_round_index_url="https://api.example/v1/competition/rounds/index",
+        )
+        self.assertEqual(result["schema"], "umi-service-heartbeat/4")
+        self.assertEqual(result["lifecycles"]["active-cohort"]["public_round_sequence"], 5)
+        self.assertTrue(result["lifecycles"]["active-cohort"]["public_round_present"])
+        self.assertNotIn("schema", result["lifecycles"]["active-cohort"])
+        rounds.assert_called_once()
+
+    @patch("heartbeat.read_lifecycle_journal")
+    def test_lifecycle_status_rejects_malformed_matching_report(self, read):
+        valid = {
+            "schema": "umi-cohort-lifecycle-observation/1",
+            "cohort_sha256": "a" * 64,
+            "plan_sequence": 5,
+            "phase": "intake",
+            "sequence": 0,
+            "target_block": 100,
+            "stage": "progress_review",
+            "status": "phase_progress_review_started",
+            "progress_completion": "complete",
+            "progress_observed_at_block": 120,
+            "unavailable_blocks": 20,
+            "expected_round_sha256": None,
+            "error_type": None,
+        }
+        read.return_value = json.dumps({"MESSAGE": json.dumps(valid)})
+        self.assertEqual(lifecycle_status("owner.service", "a" * 64)["phase"], "intake")
+        valid["private"] = "must not leave host"
+        read.return_value = json.dumps({"MESSAGE": json.dumps(valid)})
+        self.assertIsNone(lifecycle_status("owner.service", "a" * 64))
+
+    @patch("heartbeat.subprocess.run")
+    def test_lifecycle_configuration_is_explicit_and_bounded(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        for cohorts, url in (
+            (
+                {"bad/name": {"service": "vali.service", "cohort_sha256": "a" * 64}},
+                "https://api.example/v1/competition/rounds/index",
+            ),
+            (
+                {"c5": {"service": "other.service", "cohort_sha256": "a" * 64}},
+                "https://api.example/v1/competition/rounds/index",
+            ),
+            (
+                {"c5": {"service": "vali.service", "cohort_sha256": "short"}},
+                "https://api.example/v1/competition/rounds/index",
+            ),
+            ({"c5": {"service": "vali.service", "cohort_sha256": "a" * 64}}, None),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid lifecycle cohorts"):
+                heartbeat(["vali.service"], lifecycle_cohorts=cohorts, public_round_index_url=url)
+
+    @patch("heartbeat.urllib.request.build_opener")
+    def test_public_round_index_returns_only_bounded_public_identities(self, build):
+        class Response(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        body = json.dumps(
+            {
+                "schema": "umi-competition-round-index/1",
+                "items": [
+                    {"sequence": 5, "round_sha256": "b" * 64, "ignored": "public"},
+                    {"sequence": 3, "round_sha256": "c" * 64},
+                ],
+            }
+        ).encode()
+        build.return_value.open.return_value = Response(body)
+        self.assertEqual(
+            public_round_index("https://api.example/v1/competition/rounds/index"),
+            (5, {"b" * 64, "c" * 64}),
+        )
+        request = build.return_value.open.call_args.args[0]
+        self.assertEqual(
+            request.full_url, "https://api.example/v1/competition/rounds/index?limit=20"
+        )
+        with self.assertRaisesRegex(ValueError, "invalid public round index URL"):
+            public_round_index("http://api.example/v1/competition/rounds/index")
 
 
 class JournalProcessTests(unittest.IsolatedAsyncioTestCase):

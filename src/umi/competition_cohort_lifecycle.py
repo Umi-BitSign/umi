@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from .competition_chain import RegistrationCapture
 from .competition_cohort_availability import CohortAvailabilityObservation
 from .competition_cohort_coordinator import (
+    CohortDecisionInput,
     CohortRecoveryCoordinator,
     HistoryPublisher,
     RecoveryFinality,
@@ -28,6 +29,7 @@ from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
 from .open_competition import CompetitionPolicy, Signature
+from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 PHASES = ("intake", "preparation", "requests")
@@ -68,6 +70,8 @@ class CohortLifecycleService:
         self.drivers: dict[Phase, CohortPhaseDriver] = {}
         self.last_report = None
         self.last_sampling_report = None
+        self.last_progress = None
+        self.expected_round_sha256 = None
         self.phase, self.stage = "intake", "starting"
         self.serial = asyncio.Lock()
         self.controller = CohortRecoveryCoordinator(
@@ -82,7 +86,21 @@ class CohortLifecycleService:
             sample_progress=self._sample,
             attest_progress=self._attest,
         )
-        history, _, _, _ = self.controller._history()
+        history, state, _, _ = self.controller._history()
+        self.plan_sequence = history.plan.sequence
+        self.phase = state.phase
+        self.sequence = state.sequence
+        self.target_block = next(
+            (item.target_block for item in state.targets if item.phase == state.phase), None
+        )
+        for transition in reversed(history.transitions):
+            if transition.transition.phase != "preparation":
+                continue
+            evidence = self.controller.store.source(
+                self.cohort, transition.transition.evidence_sha256, CohortDecisionInput
+            )
+            self.expected_round_sha256 = evidence.progress.progress.phase_result_sha256
+            break
         if not isinstance(history.authority.authority, StandingCohortRecoveryAuthority):
             raise ValueError("automatic cohort lifecycle requires standing authority")
         if request_start is not None and (
@@ -90,6 +108,35 @@ class CohortLifecycleService:
             or history.authority != request_start.series.recovery
         ):
             raise ValueError("request start authority differs from its lifecycle owner")
+
+    def _remember_state(self, state: CohortRecoveryState) -> None:
+        if (self.phase, self.sequence) != (state.phase, state.sequence):
+            self.last_progress = None
+        self.phase, self.sequence = state.phase, state.sequence
+        self.target_block = next(
+            (item.target_block for item in state.targets if item.phase == state.phase), None
+        )
+
+    def _log_lifecycle(self, status: str, *, error_type: str | None = None) -> None:
+        progress = self.last_progress
+        report = {
+            "schema": "umi-cohort-lifecycle-observation/1",
+            "cohort_sha256": self.cohort,
+            "plan_sequence": self.plan_sequence,
+            "phase": self.phase,
+            "sequence": self.sequence,
+            "target_block": self.target_block,
+            "stage": self.stage,
+            "status": status,
+            "progress_completion": None if progress is None else progress.completion,
+            "progress_observed_at_block": (
+                None if progress is None else progress.observed_at_block
+            ),
+            "unavailable_blocks": None if progress is None else progress.unavailable_blocks,
+            "expected_round_sha256": self.expected_round_sha256,
+            "error_type": error_type,
+        }
+        logger.info("%s", canonical_json_bytes(report).decode())
 
     async def _driver(self, phase: Phase) -> CohortPhaseDriver:
         if phase not in PHASES:
@@ -107,6 +154,7 @@ class CohortLifecycleService:
         return self.drivers[phase]
 
     async def _sample(self, state, capture):
+        self._remember_state(state)
         driver = await self._driver(state.phase)
         self.stage = "progress_sampling"
         progress = await driver.observer.sample(state, capture)
@@ -116,25 +164,37 @@ class CohortLifecycleService:
             or progress.recovery_tip_sha256 != state.tip_sha256
         ):
             raise ValueError("phase runtime returned progress for another cohort state")
+        self.last_progress = progress
+        if progress.phase == "preparation" and progress.completion == "complete":
+            self.expected_round_sha256 = progress.phase_result_sha256
+        self._log_lifecycle("phase_progress_sampled")
         return progress
 
     async def _attest(self, progress):
         driver = await self._driver(progress.phase)
         self.stage = "progress_review"
-        return await driver.observer.attest(progress)
+        self.last_progress = progress
+        self._log_lifecycle("phase_progress_review_started")
+        result = await driver.observer.attest(progress)
+        self._log_lifecycle("phase_progress_review_completed")
+        return result
 
     async def _certify(self, transition, evidence):
         if transition.phase != evidence.progress.progress.phase:
             raise ValueError("phase decision differs from its reserved progress")
         driver = await self._driver(transition.phase)
         self.stage = "decision_certification"
-        return await driver.observer.certify(transition, evidence)
+        self._log_lifecycle("phase_decision_review_started")
+        result = await driver.observer.certify(transition, evidence)
+        self._log_lifecycle("phase_decision_review_completed")
+        return result
 
     async def _publish(self, history: CohortRecoveryHistory) -> None:
         # Publish authority first. A result publisher sees the same selected
         # history as admission and rejects revocation or a conflicting change.
-        self.phase = self.controller.store.status(self.cohort)[0].phase
+        self._remember_state(self.controller.store.status(self.cohort)[0])
         self.stage = "history_publication"
+        self._log_lifecycle("history_publication_started")
         await self.publish_history(history)
         if any(t.transition.operation == "revoke" for t in history.transitions):
             return
@@ -146,6 +206,7 @@ class CohortLifecycleService:
             driver = await self._driver(phase)
             if driver.publish_closed is not None:
                 self.stage = "result_publication"
+                self._log_lifecycle("result_publication_started")
                 await driver.publish_closed(history)
             # Replaying publication also repairs a missing derived file. A
             # memory-only acknowledgement must not prevent that recovery.
@@ -153,7 +214,7 @@ class CohortLifecycleService:
     async def tick(self) -> dict:
         async with self.serial:
             history, state, _, _ = self.controller._history()
-            self.phase = state.phase
+            self._remember_state(state)
             if state.phase == "preparation" and self.request_start is not None:
                 self.stage = "request_start"
                 readiness = await self.request_start.check(self.cohort)
@@ -166,6 +227,7 @@ class CohortLifecycleService:
             if state.phase in PHASES:
                 result = await self.controller.tick()
                 _, state, _, _ = self.controller._history()
+                self._remember_state(state)
             else:
                 await self._publish(history)
                 result = self.controller._report(state, state.phase)
@@ -264,6 +326,7 @@ class CohortLifecycleService:
                     self.stage,
                     result["status"],
                 )
+                self._log_lifecycle(result["status"], error_type=result.get("error_type"))
                 if report is not None:
                     report(result)
                 if result["status"] in {"settlement_handoff_published", "revoked"}:

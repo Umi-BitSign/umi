@@ -22,6 +22,7 @@
     "ALERT_FROM": "cohorts@alerts.example.com",
     "EXPECTED_SERVICES": "umi-validator@0.service,umi-validator@54.service",
     "PROGRESS_LIMITS": "{}",
-    "RESOURCE_MINIMUMS": "{}"
+    "RESOURCE_MINIMUMS": "{}",
+    "LIFECYCLE_LIMITS": "{}"
   }
 }

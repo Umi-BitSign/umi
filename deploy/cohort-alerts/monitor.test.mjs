@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Monitor, STALE_AFTER_MS, REMINDER_MS, NOTICE_COOLDOWN_MS } from "./monitor.mjs";
 
-function fixture(limits = {}, resourceMinimums = {}) {
+function fixture(limits = {}, resourceMinimums = {}, lifecycleLimits = {}) {
   let now = 1_000_000;
   let alarm = null;
   const data = new Map();
@@ -18,7 +18,7 @@ function fixture(limits = {}, resourceMinimums = {}) {
     return { messageId: `id-${messages.length}` };
   };
   const make = (send = notify) => new Monitor(storage, send, ["vali.service"], () => now,
-    limits, resourceMinimums);
+    limits, resourceMinimums, lifecycleLimits);
   return { data, storage, messages, make, advance: n => { now += n; } };
 }
 const healthy = { schema: "umi-service-heartbeat/1", services: { "vali.service": "running" } };
@@ -196,4 +196,95 @@ test("native monitoring cannot be silently disabled or accept arbitrary counters
   await f.make().alarm();
   assert.equal(f.messages[0].state, "progress_stalled");
   assert.deepEqual(f.messages[0].stalled, Object.keys(progressLimits));
+});
+
+const lifecycleLimits = { "active-cohort": 10 * 60_000 };
+const lifecycle = (overrides = {}) => ({ ...healthy, schema: "umi-service-heartbeat/4",
+  lifecycles: { "active-cohort": {
+    cohort_sha256: "a".repeat(64), plan_sequence: 5, phase: "intake", sequence: 0,
+    target_block: 100, stage: "progress_review", status: "phase_progress_review_started",
+    progress_completion: "pending", progress_observed_at_block: 99, unavailable_blocks: 0,
+    expected_round_sha256: null, error_type: null, public_round_sequence: 4,
+    public_round_present: null, ...overrides,
+  } } });
+
+test("completed phase progress alerts only after its bounded review interval", async () => {
+  const f = fixture({}, {}, lifecycleLimits);
+  await f.make().heartbeat(lifecycle({ progress_completion: "complete",
+    progress_observed_at_block: 120 }));
+  f.advance(10 * 60_000 - 1);
+  await f.make().heartbeat(lifecycle({ progress_completion: "complete",
+    progress_observed_at_block: 120 }));
+  await f.make().alarm();
+  assert.equal(f.messages.length, 0);
+  f.advance(1);
+  await f.make().alarm();
+  assert.equal(f.messages[0].state, "lifecycle_stalled");
+  assert.deepEqual(f.messages[0].lifecycle, ["active-cohort"]);
+  assert.equal(f.messages[0].lifecycles["active-cohort"].issue,
+    "completed_progress_unpublished");
+});
+
+test("missing follow-up evidence cannot reset an existing lifecycle incident", async () => {
+  const f = fixture({}, {}, lifecycleLimits);
+  await f.make().heartbeat(lifecycle({ progress_completion: "complete",
+    progress_observed_at_block: 120 }));
+  f.advance(5 * 60_000);
+  await f.make().heartbeat({ ...healthy, schema: "umi-service-heartbeat/4",
+    lifecycles: { "active-cohort": null } });
+  f.advance(5 * 60_000);
+  await f.make().heartbeat({ ...healthy, schema: "umi-service-heartbeat/4",
+    lifecycles: { "active-cohort": null } });
+  const status = await f.make().status();
+  assert.equal(status.state, "lifecycle_stalled");
+  assert.equal(status.lifecycles["active-cohort"].issue, "observation_missing");
+  assert.equal(status.lifecycles["active-cohort"].phase, "intake");
+});
+
+test("phase transition clears a lifecycle incident and missing round publication alerts", async () => {
+  const f = fixture({}, {}, lifecycleLimits);
+  await f.make().heartbeat(lifecycle({ progress_completion: "complete",
+    progress_observed_at_block: 120 }));
+  f.advance(10 * 60_000);
+  await f.make().heartbeat(lifecycle({ progress_completion: "complete",
+    progress_observed_at_block: 120 }));
+  await f.make().alarm();
+  await f.make().heartbeat(lifecycle({ phase: "requests", sequence: 2, target_block: 300,
+    stage: "phase_start", status: "phase_decision_published", progress_completion: null,
+    progress_observed_at_block: null, unavailable_blocks: null,
+    expected_round_sha256: "b".repeat(64), public_round_present: false }));
+  assert.equal((await f.make().status()).state, "healthy");
+  f.advance(10 * 60_000);
+  await f.make().heartbeat(lifecycle({ phase: "requests", sequence: 2, target_block: 300,
+    stage: "phase_start", status: "phase_decision_published", progress_completion: null,
+    progress_observed_at_block: null, unavailable_blocks: null,
+    expected_round_sha256: "b".repeat(64), public_round_present: false }));
+  const missing = await f.make().status();
+  assert.equal(missing.state, "lifecycle_stalled");
+  assert.equal(missing.lifecycles["active-cohort"].issue, "public_round_missing");
+  await f.make().heartbeat(lifecycle({ phase: "requests", sequence: 2, target_block: 300,
+    stage: "phase_start", status: "phase_decision_published", progress_completion: null,
+    progress_observed_at_block: null, unavailable_blocks: null,
+    expected_round_sha256: "b".repeat(64), public_round_present: true,
+    public_round_sequence: 5 }));
+  assert.equal((await f.make().status()).state, "healthy");
+});
+
+test("lifecycle reports reject arbitrary fields and invalid limits", async () => {
+  for (const limits of [null, [], { "bad/name": 600000 }, { c5: 1 }]) {
+    assert.throws(() => fixture({}, {}, limits).make(), /invalid_lifecycle_limits/);
+  }
+  const f = fixture({}, {}, lifecycleLimits);
+  for (const value of [healthy, lifecycle({ phase: "unknown" }),
+    lifecycle({ cohort_sha256: "secret" }), lifecycle({ private: "secret" })]) {
+    await assert.rejects(f.make().heartbeat(value));
+  }
+});
+
+test("enabling lifecycle tracking handles the prior stored heartbeat", async () => {
+  const f = fixture({}, {}, lifecycleLimits);
+  f.data.set("heartbeat", { ...healthy, received_at: 1_000_000 });
+  f.advance(10 * 60_000);
+  const status = await f.make().status();
+  assert.equal(status.state, "heartbeat_missing");
 });
