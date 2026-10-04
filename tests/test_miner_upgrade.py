@@ -337,6 +337,129 @@ def test_endpoint_request_waits_for_a_current_finalized_intake(scenario) -> None
         )
 
 
+def test_service_claim_is_signed_once_and_recovers_its_receipt(
+    scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bittensor as bt
+
+    import umi.competition_client as client
+    from umi.competition_cohort_service_work import (
+        SignedServiceWorkClaim,
+        service_claim_key,
+        verify_service_claim,
+    )
+
+    miner_wallet = wallet("Alice")
+    history = scenario["intake_history"]
+    policy = scenario["policy"]
+    config = {
+        "cohort_sha256": digest(history.plan),
+        "endpoint_url": "https://miner.example",
+        "hotkey_name": "default",
+        "intake_origin": "https://intake.example",
+        "miner_hotkey": miner_wallet.hotkey.ss58_address,
+        "model_revision": "10" * 32,
+        "policy_sha256": digest(policy),
+        "public_model_track": False,
+        "schema": "umi-miner-cohort-enrollment/1",
+        "service_authority_sha256": digest(history.authority.authority),
+        "wallet_name": "miner",
+        "wallet_path": "/unused",
+    }
+    status = {
+        "admission_accepting_new": True,
+        "admission_checked_block": 210,
+        "admission_phase": "open",
+        "policy_sha256": digest(policy),
+        "schema": "umi-competition-status/2",
+    }
+    monkeypatch.setattr(bt, "Wallet", lambda **_kwargs: miner_wallet)
+    _, request, _ = upgrade._new_participation_request(
+        config,
+        canonical_json_bytes(policy),
+        status,
+        canonical_json_bytes(history),
+    )
+    catalog = "32" * 32
+    index = canonical_json_bytes(
+        {
+            "schema": "umi-public-service-work-catalogs/1",
+            "catalogs": [
+                {
+                    "authority_sha256": config["service_authority_sha256"],
+                    "catalog_sha256": catalog,
+                    "cohort_sha256": config["cohort_sha256"],
+                    "policy_sha256": config["policy_sha256"],
+                    "status": "installed",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(upgrade, "fetch", lambda *_args, **_kwargs: index)
+    sent = []
+
+    async def post(*, origin, path, body, transport=None):
+        assert origin == config["intake_origin"]
+        assert path == f"/v1/competition/service-work/{catalog}/claims"
+        assert transport is None
+        signed = verify_service_claim(SignedServiceWorkClaim.model_validate_json(body))
+        sent.append(body)
+        return canonical_json_bytes(
+            {
+                "admission_sha256": "41" * 32,
+                "catalog_sha256": catalog,
+                "chain_submission_authorized": False,
+                "claim_sha256": service_claim_key(signed.claim),
+                "ordinal": 7,
+                "schema": "umi-public-service-work-admission/1",
+                "service_credit_authorized": False,
+                "status": "accepted",
+                "work_sha256": "42" * 32,
+            }
+        )
+
+    monkeypatch.setattr(client, "post_intake_document", post)
+    enrollment = tmp_path / "enrollment"
+    enrollment.mkdir(mode=0o700)
+    first = upgrade.service_claim_step(enrollment, config, request)
+    second = upgrade.service_claim_step(enrollment, config, request)
+    assert (
+        first
+        == second
+        == {
+            "catalog_sha256": catalog,
+            "ordinal": 7,
+            "status": "service_work_admission_accepted",
+            "work_sha256": "42" * 32,
+        }
+    )
+    assert len(sent) == 1
+    assert (enrollment / "service-work-claim.json").read_bytes() == sent[0]
+
+
+def test_service_claim_waits_for_its_installed_cohort_catalog(
+    scenario, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = {
+        "cohort_sha256": digest(scenario["intake_history"].plan),
+        "intake_origin": "https://intake.example",
+        "policy_sha256": digest(scenario["policy"]),
+        "service_authority_sha256": digest(scenario["intake_history"].authority.authority),
+    }
+    monkeypatch.setattr(
+        upgrade,
+        "fetch",
+        lambda *_args, **_kwargs: canonical_json_bytes(
+            {
+                "schema": "umi-public-service-work-catalogs/1",
+                "catalogs": [{"catalog_sha256": "32" * 32, "status": "pending_installation"}],
+            }
+        ),
+    )
+    with pytest.raises(upgrade.ServiceClaimRetry, match="not installed"):
+        upgrade._service_catalog(config)
+
+
 def test_endpoint_enrollment_timer_retries_every_fifteen_minutes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -368,6 +491,8 @@ def test_endpoint_enrollment_timer_retries_every_fifteen_minutes(
     assert "OnUnitInactiveSec=15min" in timer
     assert "Persistent=true" in timer
     assert "ConditionPathExists=!" in service
+    assert "service-work-admission.json" in service
+    assert "admission-certificate.json" not in service
     assert "Environment=HOME=/home/miner" in service
     assert "ProtectSystem=strict" in service
     assert ("systemctl", "enable", "--now", upgrade.ENROLLMENT_TIMER) in calls

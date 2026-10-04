@@ -128,8 +128,7 @@ def deployed_manifest(manifest: dict, status: dict) -> dict:
         and deployed.get("repository") == "https://github.com/Umi-BitSign/umi"
         and deployed.get("eligible_tracks") == manifest.get("eligible_tracks")
         and isinstance(policy, dict)
-        and status.get("policy_sha256")
-        == policy.get("value_sha256")
+        and status.get("policy_sha256") == policy.get("value_sha256")
         and GIT_REVISION.fullmatch(str(deployed.get("umi_git_revision")))
     ):
         selected = document(canonical(manifest), label="upgrade manifest")
@@ -800,6 +799,10 @@ class EnrollmentRetry(RuntimeError):
     """A durable endpoint enrollment should be retried without changing its bytes."""
 
 
+class ServiceClaimRetry(EnrollmentRetry):
+    """A durable service claim should be retried without changing its bytes."""
+
+
 def endpoint_enrollment_config(
     arguments: list[str],
     manifest: dict,
@@ -941,6 +944,174 @@ def _new_participation_request(config: dict, policy_raw: bytes, status: dict, hi
     return policy, request, canonical_json_bytes(request)
 
 
+def _new_service_claim(config: dict, request, catalog_sha256: str):
+    import bittensor as bt
+
+    from umi.competition_cohort_service_work import (
+        ServiceWorkClaim,
+        SignedServiceWorkClaim,
+        verify_service_claim,
+    )
+    from umi.open_competition import digest, identity, sign_object
+    from umi.protocol import canonical_json_bytes
+
+    submission = request.signed_submission.submission
+    if (
+        not HEX32.fullmatch(catalog_sha256)
+        or submission.track != "endpoint"
+        or identity(submission.hotkey) != identity(config["miner_hotkey"])
+        or digest(submission) != request.consent.consent.submission_sha256
+    ):
+        raise ValueError("service claim inputs differ from endpoint participation")
+    nonce = sha256(
+        canonical(
+            {
+                "catalog_sha256": catalog_sha256,
+                "cohort_sha256": config["cohort_sha256"],
+                "schema": "umi-miner-service-claim-nonce/1",
+                "submission_sha256": digest(submission),
+            }
+        )
+    )
+    wallet = bt.Wallet(
+        name=config["wallet_name"],
+        hotkey=config["hotkey_name"],
+        path=config["wallet_path"],
+    )
+    signer = bt.resolve_signer(wallet, role="hotkey")
+    if identity(signer.ss58_address) != identity(config["miner_hotkey"]):
+        raise ValueError("configured wallet does not control the enrolled miner hotkey")
+    claim = ServiceWorkClaim(
+        schema="umi-cohort-service-work-claim/1",
+        catalog_sha256=catalog_sha256,
+        hotkey=config["miner_hotkey"],
+        submission_sha256=digest(submission),
+        nonce=nonce,
+    )
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, wallet))
+    return verify_service_claim(signed), canonical_json_bytes(signed)
+
+
+def _service_catalog(config: dict) -> str:
+    index = document(
+        fetch(config["intake_origin"] + "/v1/competition/service-work"),
+        label="service work catalog index",
+    )
+    catalogs = index.get("catalogs")
+    if index.get("schema") != "umi-public-service-work-catalogs/1" or not isinstance(
+        catalogs, list
+    ):
+        raise ValueError("service work catalog index differs")
+    matching = [
+        item
+        for item in catalogs
+        if isinstance(item, dict)
+        and item.get("status") == "installed"
+        and item.get("cohort_sha256") == config["cohort_sha256"]
+        and item.get("policy_sha256") == config["policy_sha256"]
+        and item.get("authority_sha256") == config["service_authority_sha256"]
+        and HEX32.fullmatch(str(item.get("catalog_sha256")))
+    ]
+    if not matching:
+        raise ServiceClaimRetry("selected service catalog is not installed yet")
+    if len(matching) != 1:
+        raise ValueError("service work catalog selection is ambiguous")
+    return matching[0]["catalog_sha256"]
+
+
+def service_claim_step(enrollment: Path, config: dict, request) -> dict:
+    from umi.competition_client import CompetitionSubmissionError, post_intake_document
+    from umi.competition_cohort_service_work import (
+        SignedServiceWorkClaim,
+        service_claim_key,
+        verify_service_claim,
+    )
+    from umi.open_competition import digest, identity
+    from umi.protocol import canonical_json_bytes
+
+    catalog_sha256 = _service_catalog(config)
+    claim_path = enrollment / "service-work-claim.json"
+    if claim_path.exists():
+        signed = verify_service_claim(
+            SignedServiceWorkClaim.model_validate_json(worker_read(claim_path))
+        )
+        claim = signed.claim
+        if (
+            claim.catalog_sha256 != catalog_sha256
+            or identity(claim.hotkey) != identity(config["miner_hotkey"])
+            or claim.submission_sha256 != digest(request.signed_submission.submission)
+        ):
+            raise ValueError("retained service claim differs from selected participation")
+    else:
+        signed, raw = _new_service_claim(config, request, catalog_sha256)
+        worker_write(claim_path, raw)
+    receipt_path = enrollment / "service-work-admission.json"
+    new_receipt = False
+    if receipt_path.exists():
+        receipt = _worker_document(receipt_path, label="service work admission")
+    else:
+        try:
+            raw = asyncio.run(
+                post_intake_document(
+                    origin=config["intake_origin"],
+                    path=("/v1/competition/service-work/" + catalog_sha256 + "/claims"),
+                    body=canonical_json_bytes(signed),
+                )
+            )
+        except CompetitionSubmissionError as error:
+            if error.status_code is None or error.status_code in {
+                404,
+                408,
+                425,
+                429,
+                500,
+                502,
+                503,
+                504,
+            }:
+                raise ServiceClaimRetry(
+                    "service work admission is temporarily unavailable"
+                ) from error
+            raise
+        receipt = document(raw, label="service work admission")
+        new_receipt = True
+    required = {
+        "admission_sha256",
+        "catalog_sha256",
+        "chain_submission_authorized",
+        "claim_sha256",
+        "ordinal",
+        "schema",
+        "service_credit_authorized",
+        "status",
+        "work_sha256",
+    }
+    if (
+        set(receipt) != required
+        or receipt.get("schema") != "umi-public-service-work-admission/1"
+        or receipt.get("status") != "accepted"
+        or receipt.get("catalog_sha256") != catalog_sha256
+        or receipt.get("claim_sha256") != service_claim_key(signed.claim)
+        or any(
+            HEX32.fullmatch(str(receipt.get(field))) is None
+            for field in ("admission_sha256", "work_sha256")
+        )
+        or type(receipt.get("ordinal")) is not int
+        or not 1 <= receipt["ordinal"] <= 8192
+        or receipt.get("service_credit_authorized") is not False
+        or receipt.get("chain_submission_authorized") is not False
+    ):
+        raise ValueError("service work admission receipt differs from its claim")
+    if new_receipt:
+        worker_write(receipt_path, canonical(receipt))
+    return {
+        "catalog_sha256": catalog_sha256,
+        "ordinal": receipt["ordinal"],
+        "status": "service_work_admission_accepted",
+        "work_sha256": receipt["work_sha256"],
+    }
+
+
 def enrollment_step(enrollment: Path) -> dict:
     from umi.competition_client import CompetitionSubmissionError
     from umi.competition_cohort_client import (
@@ -993,6 +1164,7 @@ def enrollment_step(enrollment: Path) -> dict:
     if digest(policy) != config["policy_sha256"]:
         raise ValueError("enrollment policy differs")
     request_path = enrollment / "participation-request.json"
+    origin = config["intake_origin"]
     if request_path.exists():
         request = CohortParticipationRequest.model_validate_json(worker_read(request_path))
         sub, consent = request.signed_submission.submission, request.consent.consent
@@ -1007,7 +1179,6 @@ def enrollment_step(enrollment: Path) -> dict:
         ):
             raise ValueError("retained participation request differs")
     else:
-        origin = config["intake_origin"]
         status = document(
             fetch(origin + "/v1/competition/status"), label="public competition status"
         )
@@ -1063,16 +1234,24 @@ def enrollment_step(enrollment: Path) -> dict:
             "status": "endpoint_enrollment_pending_attestation",
         }
     worker_write(enrollment / "admission-certificate.json", canonical_json_bytes(observed))
+    service = service_claim_step(enrollment, config, request)
     return {
         "cohort_sha256": config["cohort_sha256"],
         "policy_sha256": config["policy_sha256"],
-        "status": "endpoint_enrollment_certified",
+        "service_work": service,
+        "status": "endpoint_enrollment_and_service_claim_certified",
     }
 
 
 def run_enrollment(enrollment: Path) -> None:
     try:
         report = enrollment_step(enrollment)
+    except ServiceClaimRetry as error:
+        report = {
+            "error_type": type(error).__name__,
+            "retry_seconds": 900,
+            "status": "service_work_claim_retry_scheduled",
+        }
     except (EnrollmentRetry, urllib.error.URLError, TimeoutError) as error:
         report = {
             "error_type": type(error).__name__,
@@ -1118,7 +1297,7 @@ def install_endpoint_enrollment(
         "Description=Durable UMI cohort endpoint enrollment\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
-        f"ConditionPathExists=!{enrollment / 'admission-certificate.json'}\n\n"
+        f"ConditionPathExists=!{enrollment / 'service-work-admission.json'}\n\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"User={account.pw_name}\n"
