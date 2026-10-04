@@ -18,6 +18,29 @@ if TYPE_CHECKING:
     from .competition_historical_registration import HistoricalRegistrationProvider
 
 
+def _compatible_live_chain_runtime(frozen, current) -> bool:
+    """Accept the exact pin or a later runtime on the same chain family.
+
+    A cohort can outlive a Subtensor runtime upgrade. The current registration
+    provider verifies storage against the current metadata and runtime-code pin,
+    while the frozen transport policy continues to bind scoring and request
+    semantics. Runtime-dependent hashes may therefore advance together with a
+    strictly newer spec version. Chain identity and SCALE/extrinsic families do
+    not migrate implicitly.
+    """
+
+    if frozen == current:
+        return True
+    return (
+        frozen is not None
+        and frozen.network == current.network
+        and frozen.genesis_block_hash == current.genesis_block_hash
+        and frozen.transaction_version == current.transaction_version
+        and frozen.state_version == current.state_version
+        and frozen.runtime_spec_version < current.runtime_spec_version
+    )
+
+
 class CompetitionTransportFinality:
     def __init__(self, provider: HistoricalRegistrationProvider, transport: ScoringPolicy):
         self.provider = provider
@@ -25,11 +48,11 @@ class CompetitionTransportFinality:
         pins, config = self.transport.implementation_pins, provider.config
         if (
             pins.pin_profile != "live_shadow_calibration"
-            or pins.live_chain != config.chain_pin
+            or not _compatible_live_chain_runtime(pins.live_chain, config.chain_pin)
             or pins.finality_verifier != config.finality_pin
             or self.transport.netuid != provider.policy.netuid
         ):
-            raise ValueError("transport and registration require identical chain and verifier pins")
+            raise ValueError("transport and registration require compatible chain runtime pins")
         self.policy_hash = scoring_policy_hash(self.transport)
 
     async def finalized_head_height(self):
