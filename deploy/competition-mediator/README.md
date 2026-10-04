@@ -29,6 +29,9 @@ The runtime must:
   memory, settings, MCP, agents, commands, skills, plugins and hooks, including
   `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.mcp.json` and `.claude/`
   customization paths, which Claude Code could otherwise load automatically;
+- provision a fresh service home with only `.claude/.credentials.json`; the
+  pinned CLI may create its own `.claude.json`, backup and session metadata,
+  but installation must never copy those files from an operator home;
 - expose only the credential home and the minimal fixed environment required by
   the CLI;
 - reserve the request in `MediatorJournal` before the call and retain the exact

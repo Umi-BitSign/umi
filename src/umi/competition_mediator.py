@@ -383,7 +383,6 @@ def _directory(path: Path, *, read_only: bool) -> None:
 def _ambient_instruction_paths(working_directory: Path, home: Path) -> tuple[Path, ...]:
     """Return every Claude memory path that could alter the fixed system prompt."""
     paths = [
-        home / ".claude.json",
         home / ".mcp.json",
         home / ".claude" / "CLAUDE.md",
         home / ".claude" / "CLAUDE.local.md",

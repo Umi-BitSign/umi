@@ -227,7 +227,6 @@ def test_provider_process_receives_only_the_fixed_environment(tmp_path):
 @pytest.mark.parametrize(
     "relative",
     (
-        Path("home/.claude.json"),
         Path("home/.mcp.json"),
         Path("home/.claude/CLAUDE.md"),
         Path("home/.claude/CLAUDE.local.md"),
@@ -276,6 +275,22 @@ def test_ambient_claude_memory_is_terminal_without_execution(tmp_path, relative)
     assert result.scoring_authorized is False
     assert raw == b""
     assert not capture.exists()
+
+
+def test_cli_generated_account_cache_does_not_break_the_next_call(tmp_path):
+    cli, _, home, work, value = setup(tmp_path)
+    account_cache = home / ".claude.json"
+    account_cache.write_text('{"firstStartVersion":"2.1.285"}\n')
+    account_cache.chmod(0o600)
+    result, _ = execute(
+        request(),
+        value,
+        cli=cli,
+        system_prompt=_PROMPT,
+        working_directory=work,
+        home=home,
+    )
+    assert isinstance(result, MediatorReceipt)
 
 
 @pytest.mark.parametrize("character", ["\x00", "\x01", "\x1f"])
