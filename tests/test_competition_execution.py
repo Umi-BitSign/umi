@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -25,6 +26,8 @@ from umi.competition_evidence import (
     replay_independent_evaluation,
     sign_evaluator_run,
 )
+from umi.competition_mediator import provider_request
+from umi.competition_mediator_source import ApprovedMediatorContext, requests_from_execution
 from umi.competition_runner import OfflineCaseExecution, validate_case_execution
 from umi.open_competition import (
     AttestedResult,
@@ -205,6 +208,145 @@ async def test_paired_execution_retains_outputs_and_replays_into_independent_evi
             }
     assert b"references" not in canonical_json_bytes(first)
     assert b"/Users/" not in canonical_json_bytes(first)
+
+
+@pytest.mark.asyncio
+async def test_mediator_export_validates_source_and_strips_protected_metadata(setup, tmp_path):
+    policy, job, suite, *_ = setup
+    evidence, _ = await run_job(setup, tmp_path)
+    contexts = tuple(
+        ApprovedMediatorContext(
+            schema="umi-approved-mediator-context/1",
+            case_id=case.case_id,
+            source="synthetic",
+            provenance_sha256=hashlib.sha256(b"synthetic qualification context").hexdigest(),
+            text="Public synthetic context only.",
+        )
+        for case in suite.cases
+    )
+
+    requests = requests_from_execution(evidence, policy, contexts)
+    candidate_steps = tuple(step for step in evidence.steps if step.role == "candidate")
+    assert len(requests) == len(candidate_steps) == 3
+    for request, step, context in zip(requests, candidate_steps, contexts, strict=True):
+        assert request.source_evidence_sha256 == digest(evidence)
+        assert request.source_output_sha256 == digest(step.execution.output)
+        assert request.approved_context_sha256 == digest(context)
+        raw = canonical_json_bytes(provider_request(request))
+        assert set(json.loads(raw)) == {
+            "schema",
+            "source_hypothesis",
+            "public_context",
+        }
+        for protected in (
+            step.execution.output.case_id,
+            step.execution.video_sha256,
+            job.evaluator_hotkey,
+            "fingerspelling",
+            "short_utterance",
+            "continuous",
+            "references",
+            "score",
+            "leaderboard",
+        ):
+            assert protected.encode() not in raw
+
+
+@pytest.mark.asyncio
+async def test_mediator_export_skips_failed_and_empty_candidate_outputs(setup, tmp_path):
+    policy, _, suite, *_ = setup
+    evidence, _ = await run_job(setup, tmp_path)
+    first, second, *remaining = evidence.steps
+    failed_execution = first.execution.model_copy(
+        update={
+            "output": first.execution.output.model_copy(
+                update={"status": "miner_failure", "hypothesis": "", "elapsed_ms": 1}
+            ),
+            "stdout_hex": "",
+            "reason": "process_failed",
+            "returncode": 1,
+        }
+    )
+    empty_execution = evidence.steps[2].execution.model_copy(
+        update={
+            "output": evidence.steps[2].execution.output.model_copy(update={"hypothesis": ""}),
+            "stdout_hex": b"\n".hex(),
+        }
+    )
+    evidence = evidence.model_copy(
+        update={
+            "steps": (
+                first.model_copy(update={"execution": failed_execution}),
+                second,
+                evidence.steps[2].model_copy(update={"execution": empty_execution}),
+                *remaining[1:],
+            )
+        }
+    )
+    contexts = tuple(
+        ApprovedMediatorContext(
+            schema="umi-approved-mediator-context/1",
+            case_id=case.case_id,
+            source="synthetic",
+            provenance_sha256="55" * 32,
+            text="",
+        )
+        for case in suite.cases
+    )
+    requests = requests_from_execution(evidence, policy, contexts)
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_mediator_export_rejects_missing_duplicate_and_unassigned_context(setup, tmp_path):
+    policy, _, suite, *_ = setup
+    evidence, _ = await run_job(setup, tmp_path)
+    contexts = tuple(
+        ApprovedMediatorContext(
+            schema="umi-approved-mediator-context/1",
+            case_id=case.case_id,
+            source="public",
+            provenance_sha256="66" * 32,
+            text="Approved public context.",
+        )
+        for case in suite.cases
+    )
+    with pytest.raises(ValueError, match="lacks approved context"):
+        requests_from_execution(evidence, policy, contexts[:-1])
+    with pytest.raises(ValueError, match="duplicate"):
+        requests_from_execution(evidence, policy, (*contexts, contexts[0]))
+    unassigned = contexts[0].model_copy(update={"case_id": "ff" * 32})
+    with pytest.raises(ValueError, match="not assigned"):
+        requests_from_execution(evidence, policy, (*contexts[1:], unassigned))
+
+
+@pytest.mark.asyncio
+async def test_mediator_export_rejects_unreplayable_source_evidence(setup, tmp_path):
+    policy, _, suite, *_ = setup
+    evidence, _ = await run_job(setup, tmp_path)
+    first = evidence.steps[0]
+    tampered_output = first.execution.output.model_copy(update={"hypothesis": "changed"})
+    tampered_execution = first.execution.model_copy(update={"output": tampered_output})
+    evidence = evidence.model_copy(
+        update={
+            "steps": (
+                first.model_copy(update={"execution": tampered_execution}),
+                *evidence.steps[1:],
+            )
+        }
+    )
+    contexts = tuple(
+        ApprovedMediatorContext(
+            schema="umi-approved-mediator-context/1",
+            case_id=case.case_id,
+            source="synthetic",
+            provenance_sha256="77" * 32,
+            text="",
+        )
+        for case in suite.cases
+    )
+    with pytest.raises(ValueError, match="retained stdout"):
+        requests_from_execution(evidence, policy, contexts)
 
 
 @pytest.mark.asyncio
