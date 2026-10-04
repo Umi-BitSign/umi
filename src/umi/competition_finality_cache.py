@@ -16,7 +16,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from .competition_chain import OwnedFinalityStale, RegistrationCacheFull, RegistrationCapture
+from .competition_chain import (
+    OwnedFinalityStale,
+    RegistrationCacheFull,
+    RegistrationCapture,
+    RegistrationProviderTimeout,
+)
 from .competition_submission_checkpoint import SubmissionCheckpointError
 from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
@@ -103,6 +108,10 @@ _CHAIN_REFRESH_REASONS = frozenset(
 _REFRESH_FAILURE_CLASSES = {
     OwnedFinalityStale: ("OwnedFinalityStale", "owned_finality_stale"),
     RegistrationCacheFull: ("RegistrationCacheFull", "registration_cache_capacity"),
+    RegistrationProviderTimeout: (
+        "RegistrationProviderTimeout",
+        "registration_collection_timeout",
+    ),
     SubmissionCheckpointError: ("SubmissionCheckpointError", "submission_checkpoint_failure"),
     VerifiedCaptureUnavailable: ("VerifiedCaptureUnavailable", "verified_capture_unavailable"),
     OSError: ("OSError", "refresh_io_failure"),
@@ -154,6 +163,7 @@ class VerifiedRegistrationCache:
         maximum_head_age_ms: int,
         maximum_future_skew_ms: int,
         public_wait_seconds: float,
+        background_collection_timeout_seconds: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
     ) -> None:
@@ -162,14 +172,26 @@ class VerifiedRegistrationCache:
             or maximum_head_age_ms <= 0
             or maximum_future_skew_ms < 0
             or public_wait_seconds <= 0
+            or (
+                background_collection_timeout_seconds is not None
+                and (
+                    type(background_collection_timeout_seconds) not in (int, float)
+                    or not 0 < background_collection_timeout_seconds <= 120
+                )
+            )
         ):
             raise ValueError("verified registration cache intervals must be positive")
+        if background_collection_timeout_seconds is not None and not callable(
+            getattr(provider, "collect_with_timeout", None)
+        ):
+            raise ValueError("background registration collector is unavailable")
         self._provider = provider
         self._policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         self._maximum_age = float(maximum_cache_age_seconds)
         self._maximum_head_age_ms = maximum_head_age_ms
         self._maximum_future_skew_ms = maximum_future_skew_ms
         self._public_wait = float(public_wait_seconds)
+        self._background_collection_timeout = background_collection_timeout_seconds
         self._monotonic = monotonic
         self._wall_clock_ms = wall_clock_ms
         self._guard = asyncio.Lock()
@@ -215,7 +237,7 @@ class VerifiedRegistrationCache:
 
     async def collect_fresh(self) -> RegistrationCapture:
         """Return one newly collected capture, sharing an existing collection."""
-        return self._remember(await self._collect_raw())
+        return self._remember(await self._collect_raw(wait_seconds=self._public_wait))
 
     async def collect_for_cohort_recovery(self) -> RegistrationCapture:
         """Collect owned fresh evidence outside the legacy policy interval.
@@ -230,7 +252,7 @@ class VerifiedRegistrationCache:
         self._check_head_age(capture)
         return capture
 
-    async def _collect_raw(self) -> RegistrationCapture:
+    async def _collect_raw(self, *, wait_seconds: float | None = None) -> RegistrationCapture:
         self._require_open()
         async with self._guard:
             self._require_open()
@@ -242,16 +264,25 @@ class VerifiedRegistrationCache:
                 ):
                     raise ValidatorChainError("proof_rpc_rate_limited")
                 self._rate_limit_until = None
-                task = asyncio.create_task(
-                    self._provider.collect(), name="competition-finality-collection"
+                collection = (
+                    self._provider.collect()
+                    if self._background_collection_timeout is None
+                    else self._provider.collect_with_timeout(self._background_collection_timeout)
                 )
+                task = asyncio.create_task(collection, name="competition-finality-collection")
                 self._inflight = task
                 task.add_done_callback(self._collection_finished)
         # The cache owns collection after a caller disconnects. wait() neither
         # cancels it nor logs its eventual exception; the completion callback
         # consumes that exception without exposing private provider details.
-        await asyncio.wait((task,))
+        done, _ = await asyncio.wait((task,), timeout=wait_seconds)
+        if not done:
+            raise VerifiedCaptureUnavailable("verified registration capture is unavailable")
         return task.result()
+
+    async def _collect_background(self) -> RegistrationCapture:
+        """Refresh without applying an HTTP caller's shorter wait budget."""
+        return self._remember(await self._collect_raw())
 
     def _collection_finished(self, task: asyncio.Task) -> None:
         # The event loop invokes callbacks serially. Clear even when every
@@ -353,7 +384,7 @@ class VerifiedRegistrationCache:
         last_failure = None
         while not self._stop.is_set():
             try:
-                await self.collect_fresh()
+                await self._collect_background()
                 if last_failure is not None:
                     _LOGGER.info("registration_refresh_recovered")
                     last_failure = None

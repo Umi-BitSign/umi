@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from umi.competition_chain import OwnedFinalityStale, RegistrationCacheFull
+from umi.competition_chain import (
+    OwnedFinalityStale,
+    RegistrationCacheFull,
+    RegistrationProviderTimeout,
+)
 from umi.competition_finality_cache import (
     VerifiedCaptureUnavailable,
     VerifiedRegistrationCache,
@@ -336,6 +340,10 @@ def test_unrecognized_chain_reason_is_not_forwarded(reason):
     [
         (OwnedFinalityStale, ("OwnedFinalityStale", "owned_finality_stale")),
         (RegistrationCacheFull, ("RegistrationCacheFull", "registration_cache_capacity")),
+        (
+            RegistrationProviderTimeout,
+            ("RegistrationProviderTimeout", "registration_collection_timeout"),
+        ),
         (SubmissionCheckpointError, ("SubmissionCheckpointError", "submission_checkpoint_failure")),
         (TimeoutError, ("TimeoutError", "refresh_timeout")),
         (asyncio.TimeoutError, ("TimeoutError", "refresh_timeout")),
@@ -396,7 +404,7 @@ async def test_refresh_logs_reason_transitions_and_resets_after_recovery(
             failure.__notes__ = [_PRIVATE_URL]
             raise failure
 
-    monkeypatch.setattr(cache, "collect_fresh", collect)
+    monkeypatch.setattr(cache, "_collect_background", collect)
     cache._refresh_interval = 0.001
     with caplog.at_level("INFO", logger="umi.competition_finality_cache"):
         await cache._run()
@@ -452,6 +460,53 @@ class CountingProvider(ControlledProvider):
         if self.failure is not None:
             raise self.failure
         return self.capture
+
+
+class BackgroundBudgetProvider(CountingProvider):
+    def __init__(self):
+        super().__init__()
+        self.failure = None
+        self.release.clear()
+        self.budgets = []
+
+    async def collect_with_timeout(self, timeout_seconds):
+        self.budgets.append(timeout_seconds)
+        return await self.collect()
+
+
+@pytest.mark.asyncio
+async def test_public_wait_expires_while_shared_background_collection_finishes(policy):
+    provider = BackgroundBudgetProvider()
+    cache = VerifiedRegistrationCache(
+        provider,
+        policy,
+        maximum_cache_age_seconds=60,
+        maximum_head_age_ms=120_000,
+        maximum_future_skew_ms=1_000,
+        public_wait_seconds=0.01,
+        background_collection_timeout_seconds=120,
+    )
+    public = recovery = None
+    try:
+        public = asyncio.create_task(cache.collect_fresh())
+        await asyncio.wait_for(provider.started.wait(), 1)
+        recovery = asyncio.create_task(cache.collect_for_cohort_recovery())
+        with pytest.raises(VerifiedCaptureUnavailable, match="unavailable"):
+            await public
+        assert provider.calls == 1
+        provider.release.set()
+        recovered = await recovery
+        assert recovered.snapshot == provider.capture.snapshot
+        assert _PRIVATE_URL not in recovered.provenance.values()
+        assert provider.calls == 1
+        assert provider.budgets == [120]
+    finally:
+        provider.release.set()
+        await cache.aclose()
+        await asyncio.gather(
+            *(task for task in (public, recovery) if task is not None),
+            return_exceptions=True,
+        )
 
 
 def rate_limit_setup(policy):
