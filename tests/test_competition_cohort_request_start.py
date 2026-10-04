@@ -1,7 +1,9 @@
 """Native series/history verification with synthetic finalized-clock captures."""
 
 import asyncio
+import json
 import shutil
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -221,6 +223,47 @@ async def test_late_certification_restart_and_migration_keep_exact_rest(rest, tm
     h.block += 1
     assert (await h.gate.check(key))["ready"]
     assert canonical_json_bytes(h.gate.journal.get("request_rest", key)) == saved
+
+
+async def test_reviewed_head_age_growth_and_rollback_preserve_rest(rest):
+    h = rest
+    h.closed()
+    key = digest(h.series.cohorts[1])
+    await h.gate.check(key)
+    saved = canonical_json_bytes(h.gate.journal.get("request_rest", key))
+
+    def binding_head_age():
+        with sqlite3.connect(h.gate.journal.path) as db:
+            raw = db.execute("SELECT body FROM binding").fetchone()[0]
+        return json.loads(raw)["maximum_head_age_ms"]
+
+    assert binding_head_age() == 120_000
+    h.provider.config.maximum_head_age_ms = 300_000
+    h.gate = h.reopen()
+    assert binding_head_age() == 300_000
+    h.timestamp += REST_MS + 300_000 + h.gate.future_skew
+    h.block += 1
+    assert (await h.gate.check(key))["ready"]
+    assert canonical_json_bytes(h.gate.journal.get("request_rest", key)) == saved
+
+    h.provider.config.maximum_head_age_ms = 120_000
+    h.gate = h.reopen()
+    assert binding_head_age() == 120_000
+    assert (await h.gate.check(key))["ready"]
+    assert canonical_json_bytes(h.gate.journal.get("request_rest", key)) == saved
+
+
+def test_unreviewed_head_age_change_remains_rejected(rest):
+    rest.provider.config.maximum_head_age_ms = 60_000
+    with pytest.raises(ValueError, match="round journal configuration changed"):
+        rest.reopen()
+
+
+def test_head_age_migration_does_not_admit_another_binding_change(rest):
+    rest.provider.config.maximum_head_age_ms = 300_000
+    rest.provider.config.maximum_future_skew_ms = 60_000
+    with pytest.raises(ValueError, match="round journal configuration changed"):
+        rest.reopen()
 
 
 async def test_lost_ack_and_concurrent_checks_never_restart_the_rest(rest, monkeypatch):

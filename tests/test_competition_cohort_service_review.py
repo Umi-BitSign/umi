@@ -428,6 +428,55 @@ async def test_transport_view_preserves_owned_proofs_and_requires_same_pins(revi
         CompetitionTransportFinality(provider, bad)
 
 
+async def test_transport_view_accepts_only_forward_runtime_successors(reviewed):
+    from umi.competition_transport_finality import CompetitionTransportFinality
+
+    provider = reviewed.p.c.provider
+    current = provider.config.chain_pin
+    exact = reviewed.p.transport_policy.model_copy(
+        update={
+            "implementation_pins": reviewed.p.transport_policy.implementation_pins.model_copy(
+                update={
+                    "live_chain": current,
+                    "finality_verifier": provider.config.finality_pin,
+                }
+            )
+        }
+    )
+    prior = current.model_copy(
+        update={
+            "runtime_spec_version": current.runtime_spec_version - 1,
+            "metadata_sha256": "01" * 32,
+            "subtensor_revision": "runtime-code-sha256:" + "02" * 32,
+            "live_chain_fixture_set_sha256": "03" * 32,
+        }
+    )
+    transport = exact.model_copy(
+        update={
+            "implementation_pins": exact.implementation_pins.model_copy(
+                update={"live_chain": prior}
+            )
+        }
+    )
+    CompetitionTransportFinality(provider, transport)
+
+    for incompatible in (
+        prior.model_copy(update={"runtime_spec_version": current.runtime_spec_version}),
+        prior.model_copy(update={"genesis_block_hash": "04" * 32}),
+        prior.model_copy(update={"transaction_version": current.transaction_version + 1}),
+        current.model_copy(update={"runtime_spec_version": current.runtime_spec_version + 1}),
+    ):
+        changed = transport.model_copy(
+            update={
+                "implementation_pins": transport.implementation_pins.model_copy(
+                    update={"live_chain": incompatible}
+                )
+            }
+        )
+        with pytest.raises(ValueError):
+            CompetitionTransportFinality(provider, changed)
+
+
 @pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
 async def test_instantiated_service_host_recovers_vote_with_input_files_and_owner_offline(
     reviewed, tmp_path, monkeypatch

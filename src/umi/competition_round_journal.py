@@ -57,6 +57,7 @@ class RoundJournal:
         maximum_rounds: int = 1024,
         maximum_bytes: int = 1024**3,
         maximum_record_bytes: int = MAX_BYTES,
+        compatible_bindings: Iterable[object] = (),
     ) -> None:
         if (
             type(maximum_rounds) is not int
@@ -86,6 +87,9 @@ class RoundJournal:
             raw = canonical_json_bytes(binding)
             if len(raw) > MAX_BYTES:
                 raise ValueError("round journal binding exceeds its byte bound")
+            compatible = {canonical_json_bytes(value) for value in compatible_bindings}
+            if raw in compatible or any(len(value) > MAX_BYTES for value in compatible):
+                raise ValueError("round journal compatible binding is invalid")
             sizes = db.execute("SELECT LENGTH(body) FROM binding LIMIT 2").fetchall()
             if len(sizes) > 1:
                 raise ValueError("round journal configuration changed")
@@ -95,7 +99,9 @@ class RoundJournal:
                 raise ValueError("round RPC migration lacks original binding")
             if old and (transport_history or bytes(old[0][0]) != raw):
                 prior = bytes(old[0][0])
-                if transport_history or (
+                if not transport_history and prior in compatible:
+                    db.execute("UPDATE binding SET body = ?", (raw,))
+                elif transport_history or (
                     isinstance(binding, dict)
                     and binding.get("schema") == "umi-round-coordinator-config/2"
                     and prior not in _predecessor_bindings(binding)

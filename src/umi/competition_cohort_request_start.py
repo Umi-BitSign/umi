@@ -32,7 +32,12 @@ from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 REST_MS = 5 * 60 * 60 * 1000
+_REVIEWED_HEAD_AGE_MS = (120_000, 300_000)
 Timestamp = Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+
+def _compatible_head_ages(value: int) -> tuple[int, ...]:
+    return _REVIEWED_HEAD_AGE_MS if value in _REVIEWED_HEAD_AGE_MS else (value,)
 
 
 class RequestStartConfig(StrictProtocolModel):
@@ -106,17 +111,24 @@ class SeriesRequestStart:
         self.cohorts = tuple(digest(p) for p in series.cohorts)
         self.head_age = provider.config.maximum_head_age_ms
         self.future_skew = provider.config.maximum_future_skew_ms
+        binding = {
+            "schema": "umi-cohort-request-start-owner/1",
+            "series": digest(series),
+            "first_cohort_not_before_unix_ms": config.first_cohort_not_before_unix_ms,
+            "minimum_rest_ms": REST_MS,
+            "maximum_head_age_ms": self.head_age,
+            "maximum_future_skew_ms": self.future_skew,
+        }
+        compatible = tuple(
+            dict(binding, maximum_head_age_ms=value)
+            for value in _compatible_head_ages(self.head_age)
+            if value != self.head_age
+        )
         self.journal = RoundJournal(
             Path(config.directory),
-            {
-                "schema": "umi-cohort-request-start-owner/1",
-                "series": digest(series),
-                "first_cohort_not_before_unix_ms": config.first_cohort_not_before_unix_ms,
-                "minimum_rest_ms": REST_MS,
-                "maximum_head_age_ms": self.head_age,
-                "maximum_future_skew_ms": self.future_skew,
-            },
+            binding,
             maximum_rounds=len(self.cohorts),
+            compatible_bindings=compatible,
         )
         self.serial = asyncio.Lock()
 
@@ -213,7 +225,11 @@ class SeriesRequestStart:
                 saved = RequestRestObservation.model_validate(old)
             if (
                 saved.predecessor_closure_sha256 != digest(closure)
-                or saved.not_before_unix_ms != saved.chain_timestamp_ms + self.head_age + REST_MS
+                or saved.not_before_unix_ms
+                not in {
+                    saved.chain_timestamp_ms + age + REST_MS
+                    for age in _compatible_head_ages(self.head_age)
+                }
                 or observed.block < saved.observed.block
                 or timestamp < saved.chain_timestamp_ms
                 or (observed.block == saved.observed.block and observed != saved.observed)
