@@ -96,7 +96,11 @@ def phase_review_routes(
 
         acquired = False
         try:
-            await asyncio.wait_for(capacity.acquire(), timeout=1)
+            # Exporters already bound their own operation to timeout_seconds.
+            # Let concurrent reviewers queue behind that bounded operation;
+            # rejecting the queue after one second can starve every retry when
+            # a large retained export legitimately takes longer to produce.
+            await capacity.acquire()
             acquired = True
             raw = await asyncio.wait_for(body(), timeout=10)
             try:
