@@ -294,6 +294,7 @@ async def test_publisher_waits_for_admission_then_restores_missing_delivery(prep
     provider = SimpleNamespace(
         policy=h.intake.policy,
         collect=AsyncMock(return_value=capture_at(330)),
+        current_finalized_block=AsyncMock(return_value=100_330),
         ensure_observer_running=lambda: None,
     )
     output = tmp_path / "outbox"
@@ -306,6 +307,13 @@ async def test_publisher_waits_for_admission_then_restores_missing_delivery(prep
     path = output / (h.cohort + ".json")
     raw = path.read_bytes()
     assert read_private_model(path, PreparedCohortRound).roster.round.prepared_at_block == 330
+    provider.collect.side_effect = AssertionError(
+        "retained lifecycle publication must not recollect registration membership"
+    )
+    await publisher.publish_history(h.history)
+    assert path.read_bytes() == raw
+    provider.current_finalized_block.assert_awaited_once_with()
+    provider.collect.side_effect = None
     path.unlink()
     provider.collect.return_value = capture_at(100_330)
     restarted = CohortPreparationPublisher(

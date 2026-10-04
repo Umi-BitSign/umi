@@ -199,6 +199,10 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
             self.ensure_observer_running()
             return capture(h.block)
 
+        async def current_finalized_block(self):
+            self.ensure_observer_running()
+            return h.block
+
         async def retained_archive(self, observation):
             capture(observation.block)
             return archives[observation.block]
