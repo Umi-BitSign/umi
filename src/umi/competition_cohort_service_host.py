@@ -130,6 +130,13 @@ class CohortModelPayloadRouter:
         if ("direct_r2_multipart_v1" in required) != (direct is not None):
             raise ValueError("direct model payload routing differs from the signed series")
 
+    @property
+    def maximum_concurrent_uploads(self) -> int:
+        # Only the legacy PUT route streams payload bytes through this process.
+        # Direct-only series still construct the common API middleware, where a
+        # single unused slot keeps the router interface complete.
+        return 1 if self.legacy is None else self.legacy.config.maximum_concurrent_uploads
+
     def _mechanism(self, request):
         cohort = request.consent.consent.cohort_sha256
         try:

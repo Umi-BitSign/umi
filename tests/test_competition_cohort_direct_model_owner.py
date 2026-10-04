@@ -824,8 +824,9 @@ async def test_http_routes_exchange_only_metadata_and_require_miner_signature(di
 
 def test_mixed_series_routes_each_request_to_its_signed_delivery_profile(direct):
     class Payloads:
-        def __init__(self):
+        def __init__(self, maximum_concurrent_uploads=1):
             self.requests = []
+            self.config = SimpleNamespace(maximum_concurrent_uploads=maximum_concurrent_uploads)
 
         def require_payload(self, request):
             self.requests.append(request)
@@ -851,7 +852,7 @@ def test_mixed_series_routes_each_request_to_its_signed_delivery_profile(direct)
             "model_delivery": direct.owner.config.delivery,
         }
     )
-    legacy, direct_payloads = Payloads(), Payloads()
+    legacy, direct_payloads = Payloads(7), Payloads()
     router = CohortModelPayloadRouter(
         (legacy_plan, direct_plan), legacy=legacy, direct=direct_payloads
     )
@@ -869,5 +870,9 @@ def test_mixed_series_routes_each_request_to_its_signed_delivery_profile(direct)
     assert direct_payloads.requests == [direct_request]
     assert router.review_artifact(legacy_request) is None
     assert router.review_artifact(direct_request) == ("direct", direct_request)
+    assert router.maximum_concurrent_uploads == 7
     assert "model_upload_url" in router.delivery_route(digest(legacy_plan))
     assert "direct_model_upload_url" in router.delivery_route(digest(direct_plan))
+
+    direct_only = CohortModelPayloadRouter((direct_plan,), direct=direct_payloads)
+    assert direct_only.maximum_concurrent_uploads == 1
