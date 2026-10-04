@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import sqlite3
 from typing import Annotated, Generic, Protocol, TypeVar
 
@@ -24,6 +25,7 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 MAX_REQUEST_BYTES = 16384
 RequestT = TypeVar("RequestT", bound=StrictProtocolModel, contravariant=True)
+logger = logging.getLogger(__name__)
 
 
 class CohortReviewPeerConfig(StrictProtocolModel):
@@ -108,6 +110,11 @@ def phase_review_routes(
                 output, media_type="application/json", headers={"cache-control": "no-store"}
             )
         except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
+            logger.warning(
+                "phase_review_unavailable path=%s error_type=%s",
+                path,
+                type(error).__name__,
+            )
             raise HTTPException(503, "phase review unavailable; retry unchanged") from error
         finally:
             if acquired:
