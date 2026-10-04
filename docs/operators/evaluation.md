@@ -121,14 +121,18 @@ connection; a possibly sent transaction is never resent. SDK policy refusals are
 terminal, and uncertain effects still require native reconciliation. Keep those
 deployment scopes explicit.
 
-The owned observer uses `startup_timeout_seconds` for its first verified record
-(600 seconds by default, configurable up to 900). The source implementation now
-reconnects a silent follow stream after 15 seconds or half the configured head-age
-limit, whichever is shorter. Publication journals have a stricter 60-second
-freshness check; the reconnect allowance also needs room for a header's existing
-age and restart time. It recovers from the last retained head after reaping the
-old process. Signing and execution still require
-a fresh verified head. See [observer recovery and release qualification](rounds.md#open-competition-round-coordinator--capacity-operations-and-verification);
+The owned provider uses `startup_timeout_seconds` as the total wait for a usable
+verified capture. `finality_segment_startup_timeout_seconds` separately binds the
+observer's first-record deadline and its retained GRANDPA segment; when omitted,
+it defaults to the total startup timeout for a fresh installation. Keep the
+explicit segment value unchanged when reopening an existing finality store while
+raising the outer wait budget. The source implementation reconnects a silent
+follow stream after 15 seconds or half the configured head-age limit, whichever
+is shorter. Publication journals have a stricter 60-second freshness check; the
+reconnect allowance also needs room for a header's existing age and restart time.
+It recovers from the last retained head after reaping the old process. Signing
+and execution still require a fresh verified head. See
+[observer recovery and release qualification](rounds.md#open-competition-round-coordinator--capacity-operations-and-verification);
 an installed service needs the corresponding qualified release to use this behavior.
 
 The source finality store uses private SQLite schema 3 for transactionally

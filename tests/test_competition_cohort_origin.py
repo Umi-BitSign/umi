@@ -226,7 +226,7 @@ async def test_native_current_origin_checks_still_apply(endpoint, damage):
     elif damage == "proof":
         p.c.rpc.bad_proof = True
     else:
-        p.c.clock.now += 120001
+        p.c.clock.now += p.config.maximum_head_age_ms + 1
     with pytest.raises((ValueError, RuntimeError)):
         await p.collect()
     assert rows(p) == []
@@ -343,6 +343,28 @@ async def test_changed_security_configuration_does_not_adopt_origin_cache(endpoi
     with pytest.raises(ValueError):
         p.provider(**change)
     assert rows(p) == [(capture.evidence,)]
+
+
+def test_exact_released_freshness_growth_migrates_origin_cache_binding(endpoint):
+    p = endpoint
+    old = p.provider(
+        maximum_head_age_ms=120_000,
+        startup_timeout_seconds=900,
+        finality_segment_startup_timeout_seconds=None,
+    )
+    with sqlite3.connect(old._path) as db:
+        old_binding = db.execute("SELECT digest FROM binding").fetchone()[0]
+
+    current = p.provider(
+        maximum_head_age_ms=300_000,
+        startup_timeout_seconds=1800,
+        finality_segment_startup_timeout_seconds=900,
+    )
+    with sqlite3.connect(current._path) as db:
+        assert db.execute("SELECT digest FROM binding").fetchone()[0] == (
+            current._cache_binding_hash()
+        )
+    assert current._cache_binding_hash() != old_binding
 
 
 async def test_corrupt_retained_origin_is_not_overwritten(endpoint):
