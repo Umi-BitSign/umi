@@ -292,6 +292,16 @@ class CohortRecoveryCoordinator:
                     # This observation was current when the native phase was
                     # sampled. Signing may finish arbitrarily later; preserve
                     # its original freshness boundary across every restart.
+                    if (
+                        isinstance(history.authority.authority, StandingCohortRecoveryAuthority)
+                        and intent.progress.completion == "pending"
+                    ):
+                        # Pending standing-authority progress cannot authorize
+                        # any transition. Avoid a full independent evidence
+                        # export and durable signature on every poll; complete
+                        # progress still requires the ordinary quorum review.
+                        self.store.finish_progress(self.cohort, state.tip_sha256, intent)
+                        return self._report(state, "waiting_phase_progress")
                     progress = await self.attest_progress(intent.progress)
                     if progress.progress != intent.progress:
                         raise ValueError("progress certifier changed the reserved observation")

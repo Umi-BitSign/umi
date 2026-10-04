@@ -742,24 +742,19 @@ async def test_recurring_lifecycle_resumes_after_long_finality_outage(lifecycle)
     assert max(h.calls.values()) == 1
 
 
-async def test_service_sampling_continues_while_progress_signing_is_slow(lifecycle):
+async def test_service_sampling_advances_pending_without_reviewer_signatures(lifecycle):
     h = lifecycle
     for worker in h.admissions:
         await worker.poll_once()
-    entered, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    h.paused_signers[("Charlie", "intake")] = entered, release
-    samples = []
+    stop = asyncio.Event()
+    samples, pending_calls = [], []
+    initial_calls = sum(h.calls.values())
 
     def sampled(value):
-        if (
-            value["status"] == "service_sample_retained"
-            and entered.is_set()
-            and not release.is_set()
-        ):
+        if value["status"] == "service_sample_retained":
             samples.append(h.block)
+            pending_calls.append(sum(h.calls.values()))
             h.block += 5
-            if h.block >= 360:
-                release.set()
 
     def report(value):
         if h.request_entered.is_set():
@@ -774,10 +769,12 @@ async def test_service_sampling_continues_while_progress_signing_is_slow(lifecyc
         60,
     )
     assert result["status"] == "stopped"
-    assert samples[-1] - samples[0] >= 100
-    assert h.prepared.roster.intake_seal.observation.block <= 360
-    # Only the initial unobserved interval was unavailable. Delayed review
-    # did not consume the healthy service window or reset its epoch.
+    assert len(samples) >= 20
+    assert set(pending_calls) == {initial_calls}
+    assert h.prepared.roster.intake_seal.observation.block <= h.block
+    # Only the initial unobserved interval was unavailable. Repeated pending
+    # observations did not invoke reviewers, consume the healthy window or
+    # reset its epoch; only the completed transition was signed.
     with h.intake._connection() as (_, store):
         from umi.competition_cohort_availability import CohortServiceAvailability
 
@@ -789,14 +786,28 @@ async def test_service_sampling_continues_while_progress_signing_is_slow(lifecyc
 async def test_shutdown_drains_sampler_and_blocked_signer(lifecycle):
     h = lifecycle
     entered, release, sampling, drained, stop = (asyncio.Event() for _ in range(5))
-    h.paused_signers[("Charlie", "intake")] = entered, release
     service = h.reopen()
     factory = service.factories["intake"]
 
+    # A pending standing-authority observation is intentionally unsigned. Seal
+    # intake first, without attesting it, so run() blocks on a real completed
+    # transition signature while its sampler is cancelled and drained.
+    native = await factory()
+    state, _ = service.controller.store.status(h.cohort)
+    while True:
+        progress = await native.observer.sample(state, await h.provider.collect())
+        if progress.completion == "complete":
+            break
+        h.block += 5
+    h.paused_signers[("Charlie", "intake")] = entered, release
+
     async def driver():
         native = await factory()
+        regular_sample = native.sample_service
 
         async def sample(state, capture):
+            if not entered.is_set():
+                return await regular_sample(state, capture)
             sampling.set()
             try:
                 await asyncio.Event().wait()
@@ -806,7 +817,7 @@ async def test_shutdown_drains_sampler_and_blocked_signer(lifecycle):
 
         return CohortPhaseDriver(native.observer, sample_service=sample)
 
-    service.factories["intake"] = driver
+    service.drivers["intake"] = await driver()
     task = asyncio.create_task(service.run(stop, poll_seconds=0.01, sample_seconds=0.01))
     try:
         await asyncio.wait_for(asyncio.gather(entered.wait(), sampling.wait()), 10)
@@ -837,6 +848,14 @@ async def test_timed_phase_without_sampler_cannot_start(lifecycle):
         await service.tick()
     assert not h.calls
     assert not service.drivers
+
+
+async def test_pending_standing_progress_does_not_request_reviewer_signatures(lifecycle):
+    h = lifecycle
+    service = h.reopen()
+    assert (await service.tick())["status"] == "waiting_phase_progress"
+    assert not h.calls
+    assert h.store.status(h.cohort)[0].phase == "intake"
 
 
 async def test_sampler_records_readiness_failures_and_unknown_gaps(lifecycle):
