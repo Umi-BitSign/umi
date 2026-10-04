@@ -86,7 +86,10 @@ detected manipulation, malformed output, or later verifier disagreement fails
 closed without a score.
 
 Run a reviewed release's live gate only from its private service account and
-private state root:
+private state root. `python` below must be the reviewed release's virtual-
+environment interpreter, and preparation must import both `pydantic` and
+`umi.competition_mediator_qualification` with that interpreter before starting
+the transient service. Do not fall back to the host's system Python:
 
 ```sh
 python -I -B -m umi.competition_mediator_qualification \
@@ -103,7 +106,9 @@ python -I -B -m umi.competition_mediator_qualification \
 ```
 
 `runtime/runner-release.json` must be the reviewed manifest whose exact SHA-256
-is bound in `invocation.json`. The working directory itself is empty and mode
-`0500`. An exact rerun reads terminal results from the journal; an interrupted
-request remains `prior_outcome_unknown` and is never sent again under the same
-identity.
+is bound in `invocation.json`. Provision it as an owned regular file with no
+group or other write bit, and verify that mode after transfer; a writable or
+changed manifest fails closed as `runner_changed` before contacting the
+provider. The working directory itself is empty and mode `0500`. An exact rerun
+reads terminal results from the journal; an interrupted request remains
+`prior_outcome_unknown` and is never sent again under the same identity.

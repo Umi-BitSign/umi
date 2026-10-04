@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -335,6 +337,68 @@ def test_checkpoint_append_revalidates_only_the_new_submission(config, policy, m
     assert current["record_count"] == prior["record_count"] + 1
     assert current["external_checkpoint_durable"] is True
     assert verified == [submission_id]
+
+
+def test_checkpoint_reads_reuse_the_process_verified_exact_head(config, policy, monkeypatch):
+    store = checkpoint_store(config, policy)
+    store.durable_admission_status()
+    store.durable_admission_status()
+    scans = []
+    original = store._submission_checkpoint_records
+
+    def record_scan(connection):
+        scans.append(True)
+        return original(connection)
+
+    monkeypatch.setattr(store, "_submission_checkpoint_records", record_scan)
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        observed = list(pool.map(lambda _: store.durable_admission_status(), range(64)))
+    assert all(item == observed[0] for item in observed)
+    # The first concurrent SQLite read may rotate the WAL identity. One reader
+    # performs the full replay and the other readers reuse that exact result.
+    assert scans == [True]
+
+    signed = submission(policy)
+    store.admit(
+        signed,
+        snapshot(),
+        110,
+        registration_source="verifier_attested_finality",
+    )
+    assert scans == [True, True]
+    current = store.durable_admission_status()
+    assert current["retained_submission_head"]["record_count"] == 2
+    assert scans == [True, True]
+
+
+def test_concurrent_checkpoint_reads_queue_before_the_cross_process_timeout(
+    config, policy, monkeypatch
+):
+    store = checkpoint_store(config, policy)
+    checkpoint = store._submission_checkpoint
+    assert checkpoint is not None
+    checkpoint.lock_timeout_seconds = 0.01
+    store._synchronized_submission_checkpoint_head_sha256 = None
+    store._synchronized_submission_state_fingerprint = None
+    scan_started = threading.Event()
+    original = store._submission_checkpoint_records
+    scans = 0
+
+    def slow_scan(connection):
+        nonlocal scans
+        scans += 1
+        scan_started.set()
+        time.sleep(0.05)
+        return original(connection)
+
+    monkeypatch.setattr(store, "_submission_checkpoint_records", slow_scan)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(store.durable_admission_status)
+        assert scan_started.wait(timeout=1)
+        second = pool.submit(store.durable_admission_status)
+        assert first.result(timeout=2) == second.result(timeout=2)
+    assert scans == 1
 
 
 def test_readiness_flags_are_deployment_bound(config, policy):

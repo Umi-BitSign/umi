@@ -351,6 +351,22 @@ def test_runner_release_change_is_terminal_without_execution(tmp_path):
     assert not capture.exists()
 
 
+def test_group_writable_runner_release_is_terminal_without_execution(tmp_path):
+    cli, capture, home, work, value = setup(tmp_path)
+    (tmp_path / "runner-release.json").chmod(0o660)
+    result, raw = execute(
+        request(),
+        value,
+        cli=cli,
+        system_prompt=_PROMPT,
+        working_directory=work,
+        home=home,
+    )
+    assert result.reason == "runner_changed"
+    assert raw == b""
+    assert not capture.exists()
+
+
 def test_provider_model_change_is_not_misreported_as_schema_failure(tmp_path):
     cli, _, home, work, value = setup(tmp_path, stdout=provider(model="different-model"))
     result, raw = execute(

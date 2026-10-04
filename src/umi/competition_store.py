@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -294,6 +295,15 @@ class CompetitionStore(VoidEvidenceRetention):
         self.path = directory / "competition.sqlite3"
         self._submission_checkpoint: SubmissionHeadCheckpointFile | None = None
         self._submission_checkpoint_binding: str | None = None
+        # Every mutation of the live intake ledger is serialized through this
+        # store and its external checkpoint lock.  Remember the exact head that
+        # this process has already replayed so read-only API calls only need to
+        # authenticate the small checkpoint file.  A new admission clears the
+        # marker before its SQLite transaction, and process restart performs a
+        # complete replay before setting it again.
+        self._synchronized_submission_checkpoint_head_sha256: str | None = None
+        self._synchronized_submission_state_fingerprint: tuple | None = None
+        self._submission_checkpoint_process_lock = threading.RLock()
         if submission_head_checkpoint_directory is None:
             if (
                 initial_checkpoint_submission_sha256s is not None
@@ -611,6 +621,18 @@ class CompetitionStore(VoidEvidenceRetention):
         os.chmod(self.path, 0o600)
 
     @contextmanager
+    def _submission_checkpoint_locked(self):
+        checkpoint = self._submission_checkpoint
+        if checkpoint is None:
+            yield
+            return
+        # Queue this process's API threads before starting the bounded
+        # cross-process flock timer.  A busy local reader must not cause its
+        # siblings to report a false external-lock failure.
+        with self._submission_checkpoint_process_lock, checkpoint.locked():
+            yield
+
+    @contextmanager
     def _connection(self):
         owns_checkpoint_lock = bool(
             self._hold_submission_checkpoint_lock
@@ -618,7 +640,7 @@ class CompetitionStore(VoidEvidenceRetention):
             and self._submission_checkpoint_lock_depth == 0
         )
         checkpoint_lock = (
-            self._submission_checkpoint.locked() if owns_checkpoint_lock else nullcontext()
+            self._submission_checkpoint_locked() if owns_checkpoint_lock else nullcontext()
         )
         with checkpoint_lock:
             if owns_checkpoint_lock:
@@ -1279,16 +1301,18 @@ class CompetitionStore(VoidEvidenceRetention):
         if not self.lineage.admits(sub.policy_sha256):
             raise ValueError("submission belongs to another policy")
         sub_id, key = digest(sub), identity(sub.hotkey)
-        checkpoint_lock = (
-            self._submission_checkpoint.locked()
-            if self._submission_checkpoint is not None
-            else nullcontext()
-        )
+        checkpoint_lock = self._submission_checkpoint_locked()
         with checkpoint_lock:
             if self._submission_checkpoint is not None:
                 # Resolve a prior DB-commit/checkpoint-write crash before this
                 # request can return either a new or historical receipt.
                 self._synchronize_submission_checkpoint_locked()
+                # The following transaction may append a row.  Clear the
+                # process-local read marker before SQLite can move ahead of the
+                # independently fsynced checkpoint.  Rejections and historical
+                # retries merely force one conservative replay on the next read.
+                self._synchronized_submission_checkpoint_head_sha256 = None
+                self._synchronized_submission_state_fingerprint = None
             with self._transaction() as connection:
                 launch = self._require_current_public_launch(connection)
                 old = connection.execute(
@@ -1475,6 +1499,27 @@ class CompetitionStore(VoidEvidenceRetention):
             rows.close()
         return tuple(submission_ids), tuple(record_ids)
 
+    def _submission_state_fingerprint(self) -> tuple:
+        """Identify SQLite content files without opening or trusting their rows."""
+
+        values = []
+        for path in (self.path, Path(f"{self.path}-wal")):
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                values.append(None)
+            else:
+                values.append(
+                    (
+                        info.st_dev,
+                        info.st_ino,
+                        info.st_size,
+                        info.st_mtime_ns,
+                        info.st_ctime_ns,
+                    )
+                )
+        return tuple(values)
+
     def _synchronize_submission_checkpoint_locked(
         self,
         *,
@@ -1485,6 +1530,14 @@ class CompetitionStore(VoidEvidenceRetention):
         checkpoint_binding = self._submission_checkpoint_binding
         if checkpoint_file is None or checkpoint_binding is None:
             raise RuntimeError("submission checkpoint is not configured")
+        checkpoint = checkpoint_file.load()
+        if (
+            checkpoint is not None
+            and checkpoint.head_sha256 == self._synchronized_submission_checkpoint_head_sha256
+            and self._submission_state_fingerprint()
+            == self._synchronized_submission_state_fingerprint
+        ):
+            return checkpoint
         with self._transaction() as connection:
             self._require_current_public_launch(connection)
             self._bind_submission_head(connection)
@@ -1503,7 +1556,6 @@ class CompetitionStore(VoidEvidenceRetention):
                 raise SubmissionCheckpointError(
                     "competition state requires another submission checkpoint"
                 )
-            checkpoint = checkpoint_file.load()
             if checkpoint is None:
                 if stored_binding is not None:
                     raise SubmissionCheckpointError("submission checkpoint is missing")
@@ -1586,13 +1638,15 @@ class CompetitionStore(VoidEvidenceRetention):
                     "INSERT INTO metadata VALUES ('submission_head_checkpoint_binding', ?)",
                     (checkpoint_binding,),
                 )
-            return checkpoint
+        self._synchronized_submission_checkpoint_head_sha256 = checkpoint.head_sha256
+        self._synchronized_submission_state_fingerprint = self._submission_state_fingerprint()
+        return checkpoint
 
     def retained_submission_head(self) -> dict:
         """Return the verified rolling head and its external durability proof."""
 
         if self._submission_checkpoint is not None:
-            with self._submission_checkpoint.locked():
+            with self._submission_checkpoint_locked():
                 checkpoint = self._synchronize_submission_checkpoint_locked()
             return self._submission_checkpoint.status(checkpoint)
         with self._connection() as connection:
@@ -1613,11 +1667,7 @@ class CompetitionStore(VoidEvidenceRetention):
 
     def retained_registration_blocks(self) -> frozenset[int]:
         """Protect evidence for every receipt, including superseded submissions."""
-        checkpoint_lock = (
-            self._submission_checkpoint.locked()
-            if self._submission_checkpoint is not None
-            else nullcontext()
-        )
+        checkpoint_lock = self._submission_checkpoint_locked()
         with checkpoint_lock:
             if self._submission_checkpoint is not None:
                 self._synchronize_submission_checkpoint_locked()
@@ -1647,7 +1697,7 @@ class CompetitionStore(VoidEvidenceRetention):
         """Read capacity and the durable head from one checkpoint-locked state."""
 
         if self._submission_checkpoint is not None:
-            with self._submission_checkpoint.locked():
+            with self._submission_checkpoint_locked():
                 checkpoint = self._synchronize_submission_checkpoint_locked()
                 with self._connection() as connection:
                     admission = self._admission_capacity_status(connection)
@@ -1669,11 +1719,7 @@ class CompetitionStore(VoidEvidenceRetention):
     def submissions(self, *, offset: int = 0, limit: int = 100) -> list[dict]:
         if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
             raise ValueError("invalid admission-log page")
-        checkpoint_lock = (
-            self._submission_checkpoint.locked()
-            if self._submission_checkpoint is not None
-            else nullcontext()
-        )
+        checkpoint_lock = self._submission_checkpoint_locked()
         with checkpoint_lock:
             if self._submission_checkpoint is not None:
                 self._synchronize_submission_checkpoint_locked()
@@ -1691,11 +1737,7 @@ class CompetitionStore(VoidEvidenceRetention):
     def admission_summaries(self, *, offset: int = 0, limit: int = 20) -> list[dict]:
         if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
             raise ValueError("invalid admission-log page")
-        checkpoint_lock = (
-            self._submission_checkpoint.locked()
-            if self._submission_checkpoint is not None
-            else nullcontext()
-        )
+        checkpoint_lock = self._submission_checkpoint_locked()
         with checkpoint_lock:
             if self._submission_checkpoint is not None:
                 self._synchronize_submission_checkpoint_locked()
@@ -1728,11 +1770,7 @@ class CompetitionStore(VoidEvidenceRetention):
             c not in "0123456789abcdef" for c in submission_sha256
         ):
             raise ValueError("invalid submission digest")
-        checkpoint_lock = (
-            self._submission_checkpoint.locked()
-            if self._submission_checkpoint is not None
-            else nullcontext()
-        )
+        checkpoint_lock = self._submission_checkpoint_locked()
         with checkpoint_lock:
             if self._submission_checkpoint is not None:
                 self._synchronize_submission_checkpoint_locked()
