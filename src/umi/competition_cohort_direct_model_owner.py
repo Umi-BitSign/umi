@@ -17,7 +17,6 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
-from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -79,7 +78,10 @@ class DirectModelUploadOwnerConfig(StrictProtocolModel):
     owner_hotkey: Hotkey
     delivery: ModelDeliveryProfile
     maximum_uploads: Annotated[int, Field(ge=1, le=4096)] = 1024
-    maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
+    # Provider creation failures reuse one durable attempt. Generations advance
+    # only after a signed reservation is explicitly fenced, so an R2 outage
+    # does not consume this recovery envelope on every retry.
+    maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=65536)] = 65536
     maximum_metadata_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120
     verification_batch_size: Annotated[int, Field(ge=1, le=16)] = 2
@@ -253,7 +255,10 @@ class DirectModelUploadOwner:
                     None if c.standing_review_policy is None else digest(c.standing_review_policy)
                 ),
             },
-            maximum_rounds=min(65536, c.maximum_uploads * c.maximum_attempts_per_upload),
+            # Attempt generations share the journal's bounded byte accounting,
+            # but receive its full record-count envelope. Provider creation
+            # retries do not add generations or records.
+            maximum_rounds=65536,
             maximum_bytes=c.maximum_metadata_bytes,
         )
 
@@ -292,12 +297,11 @@ class DirectModelUploadOwner:
         return key, payload
 
     def _attempts(self, upload_sha256: str) -> list[_DirectModelUploadIntent]:
-        values = []
-        for generation in range(1, self.config.maximum_attempts_per_upload + 1):
+        def retained(generation: int) -> _DirectModelUploadIntent | None:
             index_key = _attempt_index_key(upload_sha256, generation)
             raw_index = self.journal.get("direct-attempt-index", index_key)
             if raw_index is None:
-                continue
+                return None
             index = _DirectModelAttemptIndex.model_validate_json(canonical_json_bytes(raw_index))
             if index.upload_sha256 != upload_sha256 or index.generation != generation:
                 raise ValueError("direct upload attempt index changed")
@@ -311,10 +315,26 @@ class DirectModelUploadOwner:
                 or intent.generation != generation
             ):
                 raise ValueError("direct upload attempt identity changed")
-            values.append(intent)
-        if any(a.generation == b.generation for a, b in pairwise(values)):
-            raise ValueError("direct upload attempt generation repeated")
-        return values
+            return intent
+
+        # Generations are published contiguously in one journal transaction.
+        # Locate the current generation in logarithmic reads, so removing the
+        # old sixteen-attempt liveness cap cannot turn retries into a full scan.
+        lower, upper = 0, self.config.maximum_attempts_per_upload + 1
+        while lower + 1 < upper:
+            generation = (lower + upper) // 2
+            if retained(generation) is None:
+                upper = generation
+            else:
+                lower = generation
+        if lower == 0:
+            return []
+        current = retained(lower)
+        if current is None:
+            raise ValueError("direct upload attempt index is incomplete")
+        if retained(lower + 1) is not None:
+            raise ValueError("direct upload attempt generation search changed")
+        return [current]
 
     def _signed_reservation(
         self, attempt: _DirectModelUploadIntent
@@ -481,9 +501,26 @@ class DirectModelUploadOwner:
                 provider = self._provider(current)
                 if provider is not None and not superseded:
                     return await self._finish_reservation(current, signed_payload, provider)
-                if signed is None and now_unix_ms < current.retry_after_unix_ms:
-                    raise DirectModelUploadPending("direct upload creation is pending")
-            if len(attempts) >= self.config.maximum_attempts_per_upload:
+                if signed is None:
+                    if now_unix_ms < current.retry_after_unix_ms:
+                        raise DirectModelUploadPending("direct upload creation is pending")
+                    # No capability or signed reservation exists yet. Reuse the
+                    # exact durable intent so a provider outage cannot consume
+                    # unbounded local journal generations. An ambiguous remote
+                    # create may leave an inaccessible incomplete multipart
+                    # upload, which the bucket lifecycle expires; miners can
+                    # never receive a capability for that unknown provider ID.
+                    provider_upload_id = await self.multipart.create(
+                        current.object_key, at=_at(now_unix_ms)
+                    )
+                    provider = _DirectModelProviderUpload(
+                        schema="umi-direct-model-provider-upload/1",
+                        intent_sha256=digest(current),
+                        provider_upload_id=provider_upload_id,
+                    )
+                    self.journal.put("direct-provider", current.attempt_id, provider)
+                    return await self._finish_reservation(current, signed_payload, provider)
+            if attempts and attempts[-1].generation >= self.config.maximum_attempts_per_upload:
                 raise OSError("direct upload attempt capacity exhausted")
 
             generation = 1 if not attempts else attempts[-1].generation + 1

@@ -89,7 +89,12 @@ async def test_host_waits_for_certified_preparation_then_recovers_original_queue
 
     def start():
         return ServiceAdmissionHost(
-            cfg, h.intake, h.owner.promotion, h.provider.collect, h.provider.retained_archive
+            cfg,
+            h.intake,
+            h.owner.promotion,
+            h.provider.collect,
+            h.provider.retained_archive,
+            provider=h.provider,
         )
 
     host = start()
@@ -112,6 +117,26 @@ async def test_host_waits_for_certified_preparation_then_recovers_original_queue
     assert (await host.poll_once())["catalogs_installed"] == 1
     assert await host.api.admit(key, claim) == receipt
     assert h.precommitted_bytes == tuple(canonical_json_bytes(v) for v in h.precommitted)
+
+
+async def test_host_without_finality_provider_holds_catalog_installation(lifecycle, tmp_path):
+    h = lifecycle
+    cfg = host_config(h, tmp_path / "host")
+    host = ServiceAdmissionHost(
+        cfg, h.intake, h.owner.promotion, h.provider.collect, h.provider.retained_archive
+    )
+    key = digest(h.precommitted[0].catalog)
+    publish_private_model(
+        Path(cfg.inputs_directory) / "catalogs" / (key + ".json"), h.precommitted[0]
+    )
+    await prepare(h)
+
+    report = await host.poll_once()
+
+    assert report["catalogs_installed"] == 0
+    assert report["catalogs_pending"] == 1
+    assert report["last_error_type"] == "OSError"
+    assert host.queues[key].journal.get("service_catalog", key) is None
 
 
 async def test_host_coalesces_fresh_reads_and_delegates_historical_finality(lifecycle, tmp_path):
