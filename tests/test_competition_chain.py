@@ -335,7 +335,7 @@ async def test_current_finalized_block_does_not_collect_registration_membership(
 )
 async def test_invalid_chain_evidence_never_yields_registration(chain, mutation):
     if mutation == "stale":
-        chain.clock.now += 120_001
+        chain.clock.now += chain.config.maximum_head_age_ms + 1
     elif mutation == "future":
         chain.clock.now -= 31_002
     elif mutation == "genesis":
@@ -373,7 +373,7 @@ async def test_freshness_is_rechecked_after_proofs(chain, monkeypatch, during_pr
     async def delayed(runtime, specs):
         result = await original(runtime, specs)
         if during_proofs == "time":
-            chain.clock.now = _NOW + 120_001
+            chain.clock.now = _NOW + chain.config.maximum_head_age_ms + 1
         else:
             chain.finality.advance_after_reads = chain.policy.maximum_snapshot_age_blocks + 1
         return result
@@ -404,7 +404,7 @@ async def test_rollback_guard_survives_provider_restart(chain, change):
 
 async def test_cached_snapshot_still_checks_wall_clock_freshness(chain):
     await chain.provider.collect()
-    chain.clock.now += 120_001
+    chain.clock.now += chain.config.maximum_head_age_ms + 1
     with pytest.raises(ValueError, match="stale"):
         await chain.provider()
 
@@ -451,7 +451,7 @@ async def test_background_collection_can_use_a_larger_bounded_budget(chain, monk
         with pytest.raises(ValueError, match="timeout is invalid"):
             await provider.collect_with_timeout(0.001)
         with pytest.raises(ValueError, match="timeout is invalid"):
-            await provider.collect_with_timeout(121)
+            await provider.collect_with_timeout(601)
     finally:
         provider.config = original_config
 
@@ -622,7 +622,7 @@ async def test_two_heads_reuse_one_retained_runtime_artifact(chain):
 
 @pytest.mark.parametrize(
     "startup_seconds,head_age_ms,record_timeout",
-    [(600, 120_000, 15.0), (30, 10_000, 5.0), (60, 60_000, 15.0)],
+    [(600, 120_000, 60.0), (30, 10_000, 5.0), (60, 60_000, 30.0)],
 )
 async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanly(
     chain, monkeypatch, startup_seconds, head_age_ms, record_timeout

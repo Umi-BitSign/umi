@@ -11,7 +11,12 @@ from .concurrency import run_owned_thread
 from .open_competition import Signature
 
 
-def model_upload_routes(owner: CohortModelUploads, capture):
+def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_seconds=120):
+    if (
+        type(capture_timeout_seconds) not in (int, float)
+        or not 1 <= capture_timeout_seconds <= 3600
+    ):
+        raise ValueError("model upload capture timeout must be between 1 and 3600 seconds")
     router = APIRouter()
     slots = asyncio.Semaphore(owner.config.maximum_concurrent_uploads)
 
@@ -46,7 +51,7 @@ def model_upload_routes(owner: CohortModelUploads, capture):
                 raise ValueError("wrong cohort")
             key = await run_owned_thread(owner.retry, signed)
             if key is None:
-                current = await asyncio.wait_for(capture(), timeout=20)
+                current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
                 key = await run_owned_thread(owner.reserve, signed, current)
             return await run_owned_thread(owner.status, key)
         except asyncio.TimeoutError as error:

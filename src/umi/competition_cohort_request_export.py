@@ -81,7 +81,7 @@ class RequestReviewExporter:
         sign: Callable[[RequestReviewResponse], Awaitable[Signature]],
         *,
         maximum_bytes: int = MAX_EXPORT_BYTES,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
     ):
         review_export_limits(maximum_bytes, timeout_seconds)
         self.source, self.owner, self.sign = source, identity(owner), sign

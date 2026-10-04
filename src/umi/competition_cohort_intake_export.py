@@ -120,7 +120,7 @@ class IntakeReviewExporter:
         *,
         publish_archive: Callable[[ExecutionBoundary], Awaitable[None]] | None = None,
         maximum_bytes: int = MAX_EXPORT_BYTES,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
     ):
         _bounds(maximum_bytes, timeout_seconds)
         self.source, self.owner, self.sign = source, identity(owner), sign
@@ -334,7 +334,7 @@ class RemoteIntakeProgressReviewer:
         *,
         maximum_sample_gap_blocks: int = 10,
         maximum_bytes: int = MAX_EXPORT_BYTES,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 2400,
     ):
         _bounds(maximum_bytes, timeout_seconds)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:

@@ -63,7 +63,7 @@ class _Responder:
 
 
 def order_routes(
-    signer: CohortOrderSigner, inbox: CohortOrderInbox, *, token: str, timeout_seconds=1200
+    signer: CohortOrderSigner, inbox: CohortOrderInbox, *, token: str, timeout_seconds=2400
 ):
     if (
         signer.journal.policy != inbox.policy
@@ -110,7 +110,7 @@ def order_routes(
 
 
 class _OrderPeer:
-    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=1200):
+    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=2400):
         self.policy, self.cohorts, _ = review_selection(policy, cohorts, signer)
         self.signer = identity(signer)
         self.clients = {

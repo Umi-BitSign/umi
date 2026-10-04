@@ -124,11 +124,11 @@ class LiveIntakePhaseObserver:
         origin: str,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout_seconds: float = 25,
+        timeout_seconds: float = 2400,
     ):
         self.phase, self.origin = phase, validate_intake_origin(origin)
-        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60:
-            raise ValueError("readiness request timeout must be positive and at most 60 seconds")
+        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 3600:
+            raise ValueError("readiness request timeout must be positive and at most one hour")
         self.transport, self.timeout = transport, timeout_seconds
 
     async def _ready(self, state: CohortRecoveryState, capture: RegistrationCapture) -> bool:

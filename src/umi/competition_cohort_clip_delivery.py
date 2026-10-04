@@ -31,7 +31,7 @@ class ClipDeliveryConfig(StrictProtocolModel):
     videos_directory: Directory
     origin: str
     upload_token_file: Directory
-    timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 120
+    timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
     maximum_bytes: Annotated[int, Field(ge=1024**2, le=1024**3)] = 64 * 1024**2
 
     _origin = field_validator("origin")(validate_intake_origin)

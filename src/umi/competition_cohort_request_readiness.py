@@ -28,8 +28,8 @@ class RequestReadiness(StrictProtocolModel):
 
 
 class LiveRequestPhaseObserver:
-    def __init__(self, source, origin: str, *, client: httpx.AsyncClient, timeout_seconds=25):
-        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60:
+    def __init__(self, source, origin: str, *, client: httpx.AsyncClient, timeout_seconds=2400):
+        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 3600:
             raise ValueError("request readiness timeout must be bounded")
         self.source, self.origin = source, validate_intake_origin(origin)
         self.client, self.timeout = client, timeout_seconds

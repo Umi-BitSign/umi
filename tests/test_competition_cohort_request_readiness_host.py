@@ -79,7 +79,7 @@ async def ready(installed, tmp_path, monkeypatch):
         b.workers = dict.fromkeys(b.tasks)
         b.sandbox = SimpleNamespace(archive=archive, videos=videos)
         n.apps[name.lower() + ".example"].include_router(
-            evaluator_request_readiness_routes(host, token="peer-" + name * 8)
+            evaluator_request_readiness_routes(host, token="peer-" + name * 8, timeout_seconds=60)
         )
     source = await h.benchmark.history(order.round.cohort_sha256)
     probe = RequestProbe(
@@ -99,6 +99,7 @@ async def ready(installed, tmp_path, monkeypatch):
         h.peers[next(iter(h.peers))].clients["request"].client,
         "https://" + n.q.s.own.lower() + ".example",
         "peer-" + n.q.s.own * 8,
+        timeout_seconds=60,
     )
     try:
         yield n
@@ -210,7 +211,9 @@ async def test_peer_rejects_stale_corrupt_or_redirected_reply(ready, fault):
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        peer = RequestReadinessPeer(client, "https://reviewer.example", "v" * 32)
+        peer = RequestReadinessPeer(
+            client, "https://reviewer.example", "v" * 32, timeout_seconds=60
+        )
         if fault in {"redirect", "oversize"}:
             with pytest.raises((OSError, ValueError)):
                 await peer.ready(n.probe, n.observation, 10)
@@ -231,11 +234,15 @@ async def test_public_clock_tracks_coordinator_and_evaluator_recovery(ready):
     task = b.tasks["execution"]
     own = n.q.s.own
     peer = SimpleNamespace(
-        signer=b.inbox.config.signer, origin="https://" + own.lower() + ".example"
+        signer=b.inbox.config.signer,
+        origin="https://" + own.lower() + ".example",
+        timeout_seconds=60,
     )
     service = SimpleNamespace(
         config=SimpleNamespace(
-            manifest=h.manifest, admission_owner=SimpleNamespace(reviewers=(peer,))
+            manifest=h.manifest,
+            admission_owner=SimpleNamespace(reviewers=(peer,)),
+            dispatch=SimpleNamespace(operation_timeout_seconds=60),
         ),
         intake=SimpleNamespace(policy=h.policy, bindings={cohort}),
         runtime_tasks=(task,),

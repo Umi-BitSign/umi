@@ -70,7 +70,7 @@ class ServiceRetryReview(StrictProtocolModel):
 class ServiceReviewConfig(CohortAdmissionSignerConfig):
     schema_: Literal["umi-service-review-config/1"] = Field(alias="schema")
     owner: Hotkey
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 300
+    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 class ServiceReviewIntent(StrictProtocolModel):

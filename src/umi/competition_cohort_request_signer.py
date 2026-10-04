@@ -119,7 +119,7 @@ class EndpointRequestIntent(StrictProtocolModel):
 
 class EndpointRequestSignerConfig(CohortAdmissionSignerConfig):
     schema_: Literal["umi-cohort-endpoint-request-signer/1"] = Field(alias="schema")
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 def _vote_key(slot, hotkey):

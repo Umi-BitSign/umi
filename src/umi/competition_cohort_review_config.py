@@ -55,7 +55,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
-    review_timeout_seconds: Annotated[int, Field(ge=1, le=1200)] = 1200
+    review_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
     service_signing: ServiceReviewConfig | None = None
     admission_signing: CohortAdmissionSignerConfig | None = None
     model_signing: ModelReviewConfig | None = None

@@ -76,18 +76,18 @@ def journal_stamp(journal):
 
 
 class _Exporter:
-    maximum_bytes, timeout_seconds = 16384, 20
+    maximum_bytes = 16384
 
-    def __init__(self, endpoint):
-        self.endpoint = endpoint
+    def __init__(self, endpoint, timeout_seconds):
+        self.endpoint, self.timeout_seconds = endpoint, timeout_seconds
 
     async def respond(self, probe):
         return canonical_json_bytes(await self.endpoint.request_readiness(probe))
 
 
-def evaluator_request_readiness_routes(endpoint, *, token: str) -> APIRouter:
+def evaluator_request_readiness_routes(endpoint, *, token: str, timeout_seconds: int) -> APIRouter:
     return phase_review_routes(
-        _Exporter(endpoint),
+        _Exporter(endpoint, timeout_seconds),
         token=token,
         path=PATH,
         request_model=RequestProbe,
@@ -96,7 +96,7 @@ def evaluator_request_readiness_routes(endpoint, *, token: str) -> APIRouter:
 
 
 class RequestReadinessPeer:
-    def __init__(self, client, origin, token):
+    def __init__(self, client, origin, token, *, timeout_seconds: int):
         self.client = PhaseReviewHTTPClient(
             client,
             origin,
@@ -104,7 +104,7 @@ class RequestReadinessPeer:
             path=PATH,
             maximum_bytes=16384,
             maximum_request_bytes=MAX_PROBE_BYTES,
-            timeout_seconds=20,
+            timeout_seconds=timeout_seconds,
         )
 
     async def ready(self, probe, observation, gap):

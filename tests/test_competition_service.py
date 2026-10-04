@@ -137,6 +137,10 @@ class Provider:
             raise self.error
         return self.capture
 
+    async def collect_with_timeout(self, timeout_seconds):
+        assert timeout_seconds == 240
+        return await self.collect()
+
     async def __call__(self):
         return (await self.collect()).snapshot
 
@@ -179,8 +183,11 @@ def test_default_intake_provider_enables_receipt_aware_retention(config, policy,
         return Provider(chain, selected_policy)
 
     monkeypatch.setattr("umi.competition_service.FinalizedRegistrationProvider", factory)
-    create_intake_app(config, policy)
+    app = create_intake_app(config, policy)
     assert captured["retained_capture_blocks"]() == frozenset({105})
+    cache = app.state.registration_snapshot_cache
+    assert cache._background_collection_timeout == 240
+    assert cache._public_wait == 241
 
 
 async def test_refresh_failures_log_class_once_and_recovery_without_private_details(
@@ -199,7 +206,7 @@ async def test_refresh_failures_log_class_once_and_recovery_without_private_deta
             raise RegistrationCacheFull("PRIVATE path or RPC credentials")
         cache._stop.set()
 
-    monkeypatch.setattr(cache, "collect_fresh", collect)
+    monkeypatch.setattr(cache, "_collect_background", collect)
     cache._refresh_interval = 0.001
     with caplog.at_level("INFO", logger="umi.competition_finality_cache"):
         await cache._run()
@@ -1110,8 +1117,8 @@ def test_config_disallows_overlapping_state(config, relative):
 
 def test_config_proof_deadline_fits_request_timeout(config):
     raw = config.model_dump(mode="json", by_alias=True)
-    raw["chain"]["collection_timeout_seconds"] = 16
-    with pytest.raises(ValueError, match="15 seconds"):
+    raw["chain"]["collection_timeout_seconds"] = 121
+    with pytest.raises(ValueError, match="120"):
         CompetitionServiceConfig.model_validate_json(canonical_json_bytes(raw))
 
 

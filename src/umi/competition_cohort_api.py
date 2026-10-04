@@ -40,7 +40,13 @@ def cohort_routes(
     maximum_body_bytes: int,
     archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]] | None = None,
     models: CohortModelPayloads | None = None,
+    capture_timeout_seconds: float = 120,
 ) -> APIRouter:
+    if (
+        type(capture_timeout_seconds) not in (int, float)
+        or not 1 <= capture_timeout_seconds <= 3600
+    ):
+        raise ValueError("cohort capture timeout must be between 1 and 3600 seconds")
     router = APIRouter()
     queue = CohortAdmissionQueue(intake)
 
@@ -99,7 +105,7 @@ def cohort_routes(
     async def readiness(cohort: str, nonce: str = Query(pattern=r"^[0-9a-f]{32}$")):
         allowed(cohort)
         try:
-            current = await asyncio.wait_for(capture(), timeout=20)
+            current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
             value = await run_owned_thread(
                 partial(
                     intake_readiness,
@@ -189,7 +195,7 @@ def cohort_routes(
         if prior is not None:
             return await preserve(signed, prior)
         try:
-            current = await asyncio.wait_for(capture(), timeout=20)
+            current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
         except Exception as error:
             raise HTTPException(
                 503, "registration observation unavailable; retry unchanged"

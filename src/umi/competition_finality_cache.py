@@ -176,7 +176,7 @@ class VerifiedRegistrationCache:
                 background_collection_timeout_seconds is not None
                 and (
                     type(background_collection_timeout_seconds) not in (int, float)
-                    or not 0 < background_collection_timeout_seconds <= 120
+                    or not 0 < background_collection_timeout_seconds <= 600
                 )
             )
         ):

@@ -40,7 +40,7 @@ class CohortExecutionConfig(CohortOrderSignerConfig):
     schema_: Literal["umi-cohort-execution-config/1"] = Field(alias="schema")
     # Capacity is operational. Raising it does not replace original assignments.
     maximum_attempts: Annotated[int, Field(ge=1, le=65536)] = 4096
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 300
+    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
 
 
 class CohortExecutionAssignment(StrictProtocolModel):

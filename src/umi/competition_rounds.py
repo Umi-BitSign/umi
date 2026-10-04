@@ -234,7 +234,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
                 )
             )
             if self.work.transport_chain.policy_sha256 != self.policy_sha256 or (
-                self.work.transport_chain.collection_timeout_seconds > 15
+                self.work.transport_chain.collection_timeout_seconds > 120
             ):
                 raise ValueError("work preparation requires bounded matching transport finality")
         if any(
@@ -244,7 +244,7 @@ class RoundCoordinatorConfig(StrictProtocolModel):
         ):
             raise ValueError("round coordinator directories must not overlap")
         if self.chain.policy_sha256 != self.policy_sha256 or (
-            self.chain.collection_timeout_seconds > 15
+            self.chain.collection_timeout_seconds > 120
         ):
             raise ValueError("round coordinator requires a matching bounded finality provider")
         if (

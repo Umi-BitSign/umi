@@ -167,7 +167,7 @@ class ServiceWorkAdmissionAPI:
         archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]],
         *,
         intake: CohortIntake | None = None,
-        timeout_seconds: float = 20,
+        timeout_seconds: float = 2400,
     ):
         if (
             not queues
@@ -175,8 +175,8 @@ class ServiceWorkAdmissionAPI:
             or len({digest(queue.policy) for queue in queues.values()}) != 1
         ):
             raise ValueError("service API requires explicit catalog selectors and one policy")
-        if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60:
-            raise ValueError("service API timeout must be positive and at most 60 seconds")
+        if type(timeout_seconds) not in (int, float) or not 1 <= timeout_seconds <= 3600:
+            raise ValueError("service API timeout must be between 1 and 3600 seconds")
         if not all(callable(port) for port in (capture, history, roster, archive)):
             raise ValueError("service API requires all owned admission ports")
         if intake is not None and any(intake.policy != q.policy for q in queues.values()):

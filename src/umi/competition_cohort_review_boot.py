@@ -227,7 +227,13 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     )
                 )
                 benchmark.workers["endpoints"] = endpoint.worker
-                app.include_router(evaluator_request_readiness_routes(endpoint, token=vote_token))
+                app.include_router(
+                    evaluator_request_readiness_routes(
+                        endpoint,
+                        token=vote_token,
+                        timeout_seconds=config.review_timeout_seconds,
+                    )
+                )
                 app.state.endpoint = endpoint
                 await origins.start()
         await provider.start()

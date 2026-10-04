@@ -78,7 +78,7 @@ def activate(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
     if (
         config.policy_sha256 != digest(policy)
         or chain.policy_sha256 != digest(policy)
-        or chain.collection_timeout_seconds > 15
+        or chain.collection_timeout_seconds > 120
     ):
         raise ValueError(
             "runtime port configuration must bind the target policy and bounded provider"

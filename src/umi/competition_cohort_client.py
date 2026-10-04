@@ -20,6 +20,8 @@ from .competition_cohort_recovery import verify_recovery_quorum
 from .open_competition import CompetitionPolicy, digest
 from .protocol import canonical_json_bytes
 
+PARTICIPATION_TIMEOUT_SECONDS = 300
+
 
 async def submit_cohort_participation(
     *,
@@ -43,6 +45,7 @@ async def submit_cohort_participation(
         path=f"/v1/competition/cohorts/{consent.cohort_sha256}/participation",
         body=canonical_json_bytes(request),
         transport=transport,
+        timeout_seconds=PARTICIPATION_TIMEOUT_SECONDS,
     )
     try:
         receipt = CohortParticipationReceipt.model_validate_json(raw)

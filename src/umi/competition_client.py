@@ -130,6 +130,7 @@ async def post_intake_document(
     path: str,
     body: bytes,
     transport: httpx.AsyncBaseTransport | None = None,
+    timeout_seconds: float = 25,
 ) -> bytes:
     """Send one bounded document to a fixed intake path; never retry or re-sign."""
     origin = validate_intake_origin(origin)
@@ -137,12 +138,14 @@ async def post_intake_document(
         raise ValueError("invalid competition intake path")
     if len(body) > MAX_SUBMISSION_BYTES:
         raise ValueError("signed submission exceeds intake byte limit")
+    if type(timeout_seconds) not in (int, float) or not 1 <= timeout_seconds <= 3600:
+        raise ValueError("intake timeout must be between 1 and 3600 seconds")
 
     async def send() -> bytes:
         async with (
             httpx.AsyncClient(
                 transport=transport,
-                timeout=httpx.Timeout(20, connect=5),
+                timeout=httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10)),
                 follow_redirects=False,
                 trust_env=False,
             ) as client,
@@ -175,6 +178,6 @@ async def post_intake_document(
             return bytes(chunks)
 
     try:
-        return await asyncio.wait_for(send(), timeout=25)
+        return await asyncio.wait_for(send(), timeout=timeout_seconds)
     except (httpx.HTTPError, asyncio.TimeoutError) as error:
         raise CompetitionSubmissionError("intake_transport_unavailable") from error

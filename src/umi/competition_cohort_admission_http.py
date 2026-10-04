@@ -49,7 +49,7 @@ class SignedAdmissionHistoryResponse(StrictProtocolModel):
 
 
 class AdmissionHistoryExporter:
-    def __init__(self, queue: CohortAdmissionQueue, owner: str, sign, *, timeout_seconds=30):
+    def __init__(self, queue: CohortAdmissionQueue, owner: str, sign, *, timeout_seconds=2400):
         review_export_limits(MAX_EXPORT_BYTES, timeout_seconds)
         _, _, self.owner = review_selection(queue.policy, queue.intake.config.cohorts, owner)
         self.queue, self.sign = queue, sign
@@ -82,7 +82,7 @@ def admission_history_routes(exporter: AdmissionHistoryExporter, *, token: str):
 
 
 class AdmissionHistoryReader:
-    def __init__(self, owner: str, fetch, *, timeout_seconds=300):
+    def __init__(self, owner: str, fetch, *, timeout_seconds=2400):
         review_export_limits(MAX_EXPORT_BYTES, timeout_seconds)
         self.owner, self.fetch, self.timeout = identity(owner), fetch, timeout_seconds
 
@@ -110,7 +110,7 @@ class AdmissionHistoryReader:
 
 
 class AdmissionHistoryHTTPClient(PhaseReviewHTTPClient[CohortHistoryRequest]):
-    def __init__(self, client, origin, *, token, timeout_seconds=300):
+    def __init__(self, client, origin, *, token, timeout_seconds=2400):
         super().__init__(
             client,
             origin,
@@ -139,7 +139,7 @@ class _VoteResponder:
         return canonical_json_bytes(await self.signer.attest(raw))
 
 
-def admission_vote_routes(signer: CohortAdmissionSigner, *, token: str, timeout_seconds=1200):
+def admission_vote_routes(signer: CohortAdmissionSigner, *, token: str, timeout_seconds=2400):
     return phase_review_routes(
         _VoteResponder(signer, timeout_seconds),
         token=token,
@@ -152,7 +152,7 @@ def admission_vote_routes(signer: CohortAdmissionSigner, *, token: str, timeout_
 class AdmissionVotePeer:
     """Admission worker vote port; owns no validator key or signing journal."""
 
-    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=1200):
+    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=2400):
         self.policy, self.cohorts, self.account = review_selection(policy, cohorts, signer)
         self.signer = signer
         self.timeout = timeout_seconds

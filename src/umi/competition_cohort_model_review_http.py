@@ -30,7 +30,7 @@ class _VoteResponder:
         return canonical_json_bytes(await self.reviewer.attest(request))
 
 
-def model_review_routes(reviewer, *, token, timeout_seconds=1200):
+def model_review_routes(reviewer, *, token, timeout_seconds=2400):
     return phase_review_routes(
         _VoteResponder(reviewer, timeout_seconds),
         token=token,
@@ -41,7 +41,7 @@ def model_review_routes(reviewer, *, token, timeout_seconds=1200):
 
 
 class ModelReviewPeer:
-    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=1200):
+    def __init__(self, client, origin, *, policy, cohorts, signer, token, timeout_seconds=2400):
         self.policy, self.cohorts, self.account = review_selection(policy, cohorts, signer)
         self.signer, self.timeout = signer, timeout_seconds
         self.transport = PhaseReviewHTTPClient[ModelReviewRequest](

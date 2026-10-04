@@ -190,7 +190,7 @@ class SuccessorContainerLimits:
     maximum_tree_depth: int = 12
     maximum_command_output_bytes: int = 1024 * 1024
     command_timeout_seconds: float = 300
-    stop_timeout_seconds: int = 30
+    stop_timeout_seconds: int = 300
     temporary_bytes: int = 64 * 1024 * 1024
 
     def __post_init__(self):
