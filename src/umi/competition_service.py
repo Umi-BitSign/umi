@@ -472,15 +472,21 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
     handler, loggers = logging.StreamHandler(), []
     try:
         if config.recoverable_service is not None:
-            for suffix in (
-                "admission_host",
-                "lifecycle_host",
-                "dispatch_host",
-                "order_host",
-                "service_host",
-                "request_readiness_host",
+            for name in (
+                "umi.competition_cohort_lifecycle",
+                *(
+                    "umi.competition_cohort_" + suffix
+                    for suffix in (
+                        "admission_host",
+                        "lifecycle_host",
+                        "dispatch_host",
+                        "order_host",
+                        "service_host",
+                        "request_readiness_host",
+                    )
+                ),
             ):
-                logger = logging.getLogger("umi.competition_cohort_" + suffix)
+                logger = logging.getLogger(name)
                 loggers.append((logger, logger.level, logger.propagate))
                 logger.addHandler(handler)
                 logger.setLevel(logging.INFO)
