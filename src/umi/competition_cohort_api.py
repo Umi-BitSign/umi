@@ -25,6 +25,9 @@ from .open_competition import digest
 
 
 class CohortModelPayloads(Protocol):
+    @property
+    def maximum_concurrent_uploads(self) -> int: ...
+
     def require_payload(self, request: CohortParticipationRequest) -> None: ...
 
     def delivery_route(self, cohort: str) -> dict[str, str]: ...

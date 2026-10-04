@@ -139,9 +139,7 @@ def create_app(
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
         "readiness": asyncio.Semaphore(limits.maximum_concurrent_readiness),
         "model_upload": asyncio.Semaphore(
-            1
-            if cohort_model_uploads is None
-            else cohort_model_uploads.config.maximum_concurrent_uploads
+            1 if cohort_model_uploads is None else cohort_model_uploads.maximum_concurrent_uploads
         ),
     }
 
