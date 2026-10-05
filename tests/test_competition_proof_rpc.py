@@ -93,7 +93,6 @@ async def test_adding_explicit_fallback_preserves_captures_artifacts_and_highwat
         "proof_binary_sha256",
         "minimum_finalized_block",
         "chain_pin",
-        "collection_timeout_seconds",
     ],
 )
 def test_fallback_addition_cannot_launder_an_unrelated_binding_change(chain, change):
@@ -113,6 +112,46 @@ def test_fallback_addition_cannot_launder_an_unrelated_binding_change(chain, cha
             config, chain.policy, finality=chain.finality, proofs=chain.proofs
         )
     assert tables(chain.provider._path) == before
+
+
+@pytest.mark.parametrize("legacy_binding", [False, True])
+async def test_larger_proof_budget_preserves_verified_cache_with_fallbacks(chain, legacy_binding):
+    capture = await chain.provider.collect()
+    before = tables(chain.provider._path)
+    if legacy_binding:
+        with sqlite3.connect(chain.provider._path) as db:
+            db.execute("UPDATE binding SET digest=?", (digest(chain.config),))
+    config = CompetitionChainConfig.model_validate_json(
+        canonical_json_bytes(
+            with_fallback(chain.config).model_copy(update={"collection_timeout_seconds": 240})
+        )
+    )
+    provider = FinalizedRegistrationProvider(
+        config,
+        chain.policy,
+        finality=chain.finality,
+        proofs=chain.proofs,
+        now_ms=lambda: chain.clock.now,
+    )
+    assert await provider.collect() == capture
+    assert tables(provider._path) == before
+    assert provider.config.maximum_head_age_ms == chain.config.maximum_head_age_ms
+    assert provider.config.chain_pin == chain.config.chain_pin
+    assert provider.config.finality_pin == chain.config.finality_pin
+
+
+def test_collection_budget_and_failover_share_the_same_bounded_limit(chain_config):
+    config = CompetitionChainConfig.model_validate_json(
+        canonical_json_bytes(chain_config.model_copy(update={"collection_timeout_seconds": 600}))
+    )
+    transports = tuple(SimpleNamespace(bulk_storage_reads=False) for _ in range(3))
+    assert FailoverProofRpc(transports, timeout_seconds=config.collection_timeout_seconds)
+    with pytest.raises(ValueError):
+        CompetitionChainConfig.model_validate_json(
+            canonical_json_bytes(config.model_copy(update={"collection_timeout_seconds": 601}))
+        )
+    with pytest.raises(ValueError, match="bounded explicit transports"):
+        FailoverProofRpc(transports, timeout_seconds=601)
 
 
 def test_legacy_signed_config_bytes_unchanged_and_legacy_cache_adopted(chain):
@@ -461,7 +500,15 @@ async def test_concurrent_requests_share_retry_after_and_do_not_burst_providers(
     now += 0.2
     await asyncio.gather(router.request("chain_getHeader", ("fixed",)), return_exceptions=True)
     assert transports[0].calls == transports[1].calls == 2
-    assert all(record.message == "competition_proof_rpc_throttled" for record in caplog.records)
+    assert caplog.records
+    for record in caplog.records:
+        report = json.loads(record.message)
+        assert report == {
+            "status": "competition_proof_rpc_throttled",
+            "provider_index": record.provider_index,
+            "retry_after_seconds": 10.0,
+        }
+        assert report["provider_index"] in range(3)
     assert "private-provider-detail" not in caplog.text and "secret" not in caplog.text
 
 

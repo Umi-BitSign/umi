@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_order_http import OrderDeliveryPeer, OrderReviewPeer
@@ -165,6 +166,14 @@ class CohortOrderHost:
         return len(slots)
 
     def _retained(self, cohort):
+        orders = self._retained_orders(cohort)
+        return None if orders is None else len(orders)
+
+    def _retained_orders(self, cohort):
+        with canonical_json_reuse():
+            return self._read_retained_orders(cohort)
+
+    def _read_retained_orders(self, cohort):
         raw = self.queue.journal.get("order_host_roster", cohort)
         if raw is None:
             return None
@@ -181,7 +190,7 @@ class CohortOrderHost:
             p.submission_sha256 for p in orders[0].round.participants
         ):
             raise ValueError("retained benchmark roster omits an accepted participant")
-        return len(orders)
+        return orders
 
     async def select(self, cohort):
         if cohort in self.selected:

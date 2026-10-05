@@ -1,6 +1,7 @@
 """Combine owned dispatch readiness with fresh, authenticated evaluator probes."""
 
 import asyncio
+import hashlib
 import logging
 import sqlite3
 
@@ -12,7 +13,6 @@ from .competition_cohort_intake import history_tip
 from .competition_cohort_request_probe import (
     RequestProbe,
     RequestReadinessPeer,
-    journal_stamp,
     tasks_running,
 )
 from .competition_cohort_request_readiness import RequestReadiness
@@ -57,25 +57,62 @@ class CombinedRequestReadiness:
 
     def _orders(self, source):
         cohort = source.cohort
-        stamp = journal_stamp(self.orders.queue.journal)
+        stamp = self._selection_stamp(cohort)
         if stamp != self.selection_stamp:
             self.selected.clear()
         if cohort not in self.selected:
-            if self.orders._retained(cohort) is None:
-                raise FileNotFoundError("complete benchmark roster is not selected")
-            selected = self.orders.queue.journal.get("order_host_roster", cohort)
             with canonical_json_reuse():
-                self.selected[cohort] = tuple(
-                    self.orders.queue.intent(slot).order for slot in selected["slots"]
-                )
+                orders = self.orders._retained_orders(cohort)
+            if orders is None:
+                raise FileNotFoundError("complete benchmark roster is not selected")
+            self.selected[cohort] = orders
         orders = self.selected[cohort]
         if any(order.round != source.roster.round for order in orders):
             raise ValueError("request readiness changed the prepared round")
-        if journal_stamp(self.orders.queue.journal) != stamp:
+        if self._selection_stamp(cohort) != stamp:
             self.selected.clear()
             raise OSError("order selection changed during readiness; retry")
         self.selection_stamp = stamp
         return orders
+
+    def _selection_stamp(self, cohort):
+        """Invalidate on exact selection inputs, not unrelated delivery receipts.
+
+        This fingerprint supplies no authority. A cold/changed selection still
+        passes native order verification; observe() checks current cohort
+        history and owned finality on every request.
+        """
+        stamp = hashlib.sha256(b"umi-request-readiness-selection-v1\0")
+        with self.orders.queue.journal.transaction() as db:
+            rows = db.execute(
+                "SELECT kind,id,body FROM records WHERE "
+                "(kind='order_host_roster' AND id=?) OR kind='order_history' "
+                "ORDER BY kind,id",
+                (cohort,),
+            )
+            for row in rows:
+                for value in row:
+                    raw = value.encode() if isinstance(value, str) else value
+                    stamp.update(len(raw).to_bytes(8, "big"))
+                    stamp.update(raw)
+            rows = db.execute(
+                "SELECT q.slot,r.body FROM order_queue q LEFT JOIN records r "
+                "ON r.kind='intent' AND r.id=q.slot WHERE q.cohort=? ORDER BY q.slot",
+                (cohort,),
+            )
+            for slot, body in rows:
+                raw = slot.encode()
+                stamp.update(len(raw).to_bytes(8, "big"))
+                stamp.update(raw)
+                stamp.update(b"0" if body is None else b"1")
+                if body is not None:
+                    stamp.update(len(body).to_bytes(8, "big"))
+                    stamp.update(body)
+            for (hold,) in db.execute("SELECT id FROM holds ORDER BY id"):
+                raw = hold.encode()
+                stamp.update(len(raw).to_bytes(8, "big"))
+                stamp.update(raw)
+        return stamp.hexdigest()
 
     def _running(self, catalogs):
         return (
