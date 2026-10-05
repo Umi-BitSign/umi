@@ -8,9 +8,10 @@ Retain the original assignment, request, votes, responses and journals. Recover
 an original response, or certify a fenced replacement for the same obligation.
 Do not edit an issued request or its signed transport policy.
 
-The source includes a cohort attempt-window extension. Deployment must select a
-qualified reviewer and miner release before enabling it; the current public
-miner manifest still selects the legacy window runtime. Enable
+The cohort attempt-window extension requires a qualified compatible reviewer
+and miner release before enabling it. The current updater manifest identifies
+the compatible source; the matching public deployment must advertise that
+release before miners select it through the updater. Enable
 `request_window_version: 2` in the benchmark endpoint host and service dispatch
 host only after qualifying those consumers. Omission retains version 1.
 
