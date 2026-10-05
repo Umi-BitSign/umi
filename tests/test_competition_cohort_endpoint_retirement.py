@@ -146,9 +146,7 @@ async def test_lost_http_ack_recovers_same_signed_retirement(retiring, monkeypat
     assert p.model.calls == 0
 
 
-async def test_hanging_retirement_control_exchange_is_bounded_and_retryable(
-    retiring, monkeypatch
-):
+async def test_hanging_retirement_control_exchange_is_bounded_and_retryable(retiring, monkeypatch):
     p = retiring
     expire_both(p, monkeypatch)
     journal = p.delivery_recovery.journal

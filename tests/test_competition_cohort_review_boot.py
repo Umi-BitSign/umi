@@ -1007,6 +1007,7 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
     async with boot.phase_review_app(c) as app:
         assert app.state.endpoint is None
         assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
+        assert app.state.benchmark.worker.defer_endpoint_until_terminal is False
         assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 
@@ -1020,6 +1021,7 @@ async def test_endpoint_boot_owns_origin_provider_and_native_workers(
         assert app.state.endpoint is not None
         assert app.state.benchmark.workers["endpoints"] is app.state.endpoint.worker
         assert app.state.endpoint.recovery.journal is app.state.benchmark.execution
+        assert app.state.benchmark.worker.defer_endpoint_until_terminal is True
         assert providers.events.count("started") == 2
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
             for kind in ("request", "decision"):

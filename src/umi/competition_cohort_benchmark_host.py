@@ -143,6 +143,7 @@ class BenchmarkHost:
             CohortExecutor(self.execution, provider, self.history, self.sandbox),
             batch_size=c.batch_size,
             concurrency=c.concurrency,
+            defer_endpoint_until_terminal=getattr(config, "endpoint", None) is not None,
         )
         self.journal = RoundJournal(
             Path(c.directory),
