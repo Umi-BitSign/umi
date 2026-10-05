@@ -13,12 +13,16 @@ from .miner_admission import (
 class CohortRequestWindowAuthority:
     """Use only with a job already authenticated from its exact signed grant."""
 
-    def __init__(self, *, policy, finalized_blocks, job, attempt_number):
+    def __init__(self, *, policy, finalized_blocks, job, attempt_number, legacy_authorize=None):
         self.policy, self.blocks = policy, finalized_blocks
         self.job, self.attempt_number = job, attempt_number
-        self.legacy = ProofBackedMinerWindowAuthority(
-            policy=policy, finalized_blocks=finalized_blocks
-        )
+        if legacy_authorize is not None and not callable(legacy_authorize):
+            raise TypeError("legacy admission must be callable")
+        self.authorize_legacy = legacy_authorize
+        if self.authorize_legacy is None:
+            self.authorize_legacy = ProofBackedMinerWindowAuthority(
+                policy=policy, finalized_blocks=finalized_blocks
+            ).authorize
 
     async def authorize(self, request):
         try:
@@ -28,7 +32,7 @@ class CohortRequestWindowAuthority:
         except (OSError, TimeoutError) as error:
             raise MinerAdmissionError("finalized_history_unavailable", retryable=True) from error
         if request.window_id != window.schedule(self.policy).window_id:
-            return await self.legacy.authorize(request)
+            return await self.authorize_legacy(request)
         try:
             window.check(request, self.policy)
         except ValueError as error:

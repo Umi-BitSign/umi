@@ -498,7 +498,10 @@ async def test_request_capacity_can_grow_without_new_selection(signing):
     assert s.signer().journal.load(request_slot(s.plan.body)).plan == s.plan
 
 
-async def test_fresh_replacement_works_inside_legacy_blackout(signing, monkeypatch):
+@pytest.mark.parametrize("close_during_admission", [False, True])
+async def test_fresh_replacement_works_inside_legacy_blackout(
+    signing, monkeypatch, close_during_admission
+):
     import bittensor as bt
 
     from umi.competition_cohort_request_window import capture_request_window
@@ -534,12 +537,12 @@ async def test_fresh_replacement_works_inside_legacy_blackout(signing, monkeypat
         p.transport_policy,
         legacy.video,
     )
-    request = plan.body.requests[0]
-    assert request.response_close_round > bt.timelock.current_round()
+    signed_request = plan.body.requests[0]
+    assert signed_request.response_close_round > bt.timelock.current_round()
     assert canonical_json_bytes(p.grant) == parent_bytes
     # Both clock representations use exactly the same issuance and nominal budget.
-    round_ms = QUICKNET_GENESIS_MS + (request.response_close_round - 1) * QUICKNET_PERIOD_MS
-    block_ms = (request.deadline_block - request.issued_block) * (
+    round_ms = QUICKNET_GENESIS_MS + (signed_request.response_close_round - 1) * QUICKNET_PERIOD_MS
+    block_ms = (signed_request.deadline_block - signed_request.issued_block) * (
         p.transport_policy.clock.target_block_interval_seconds * 1000
     )
     assert 0 <= round_ms - issuance.timestamp_ms - block_ms < QUICKNET_PERIOD_MS
@@ -552,6 +555,33 @@ async def test_fresh_replacement_works_inside_legacy_blackout(signing, monkeypat
     outcome = await worker.advance(plan)
     assert outcome.status == "certified"
     selected = outcome.selection
+    if close_during_admission:
+        from umi.competition_cohort_request_admission import CohortRequestWindowAuthority
+
+        from .test_competition_cohort_order_signer import source_for
+
+        delivered = await CohortEndpointGrantDelivery(p.delivery_recovery).deliver(
+            selection_slot(selected)
+        )
+        assert delivered.status == "retained", delivered
+        original = CohortRequestWindowAuthority.authorize
+        prior = p.e.r.h.source
+
+        async def close_after_check(authority, candidate):
+            admitted = await original(authority, candidate)
+            p.e.r.h.source = source_for(p.e.r.h.batch, p.e.r.h.batch["history"])
+            return admitted
+
+        monkeypatch.setattr(CohortRequestWindowAuthority, "authorize", close_after_check)
+        response = await request(p, TRANSLATE_PATH, signed_request)
+        assert response.status_code == 422, response.text
+        p.miner = p.rebuild()
+        p.e.r.h.source = prior
+        response = await request(p, TRANSLATE_PATH, signed_request)
+        assert response.status_code == 422, response.text
+        assert p.model.calls == p.fetcher.calls == 0
+        assert canonical_json_bytes(p.grant) == parent_bytes
+        return
     dispatch = CohortEndpointDispatcher(p.delivery_recovery, p.finality)
     result = await dispatch.dispatch(selection_slot(selected), plan.body.case_id)
     assert result["status"] == "recovered", result

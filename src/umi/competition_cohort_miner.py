@@ -450,6 +450,7 @@ class CohortMinerAuthorizationAuthority:
                         window_authority = CohortRequestWindowAuthority(
                             policy=self.transport,
                             finalized_blocks=self.finalized_blocks,
+                            legacy_authorize=self.legacy.authorize,
                             job=grant.body.assignment,
                             attempt_number=grant.body.attempt_number,
                         )
@@ -457,6 +458,7 @@ class CohortMinerAuthorizationAuthority:
                         window_authority = CohortRequestWindowAuthority(
                             policy=self.transport,
                             finalized_blocks=self.finalized_blocks,
+                            legacy_authorize=self.legacy.authorize,
                             job=grant.attempt.order.job,
                             attempt_number=grant.attempt.order.attempt_number,
                         )
