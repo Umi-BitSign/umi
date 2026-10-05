@@ -765,7 +765,10 @@ class FinalizedRegistrationProvider:
             raise RuntimeError("owned_finality_provider_closed")
         if self._owned and (self._task is None or self._task.done()):
             if self._task is not None and not self._task.cancelled():
-                self._task.exception()  # Retrieve it, but never expose its text.
+                error = self._task.exception()
+                # Private diagnostics retain typed causes and source locations;
+                # callers still never expose exception text or provider inputs.
+                raise RuntimeError("owned_finality_observer_stopped") from error
             raise RuntimeError("owned_finality_observer_stopped")
 
     async def wait_ready(self) -> RegistrationCapture:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_review_boot import run_phase_review_service
 from .competition_cohort_review_config import load_phase_review_config
+from .competition_progress import _failure_details
 from .open_competition import digest
 
 
@@ -67,6 +68,7 @@ def main(argv=None):
             "benchmark_endpoints_worker_stopped",
         }:
             report["reason_code"] = reason_code
+        report["details"] = _failure_details(error)
         print(json.dumps(report))
         raise SystemExit(1) from None
     finally:

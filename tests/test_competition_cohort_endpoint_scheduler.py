@@ -160,6 +160,12 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     q.media_fail = True
     report = await q.worker().poll_once()
     assert report["retry_count"] > 0 and "bearer-secret" not in repr(report)
+    assert report["last_retry_details"][0]["reason_code"] == "os_error"
+    assert report["last_retry_details"][0]["source_frames"]
+    assert all(
+        frame["module"].startswith("umi.")
+        for frame in report["last_retry_details"][0]["source_frames"]
+    )
     assert q.p.model.calls == 0 and not q.s.calls
     assert q.worker().schedule.load(q.slot) is not None
     assert q.worker().schedule.complete(q.slot) is None

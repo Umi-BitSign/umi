@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import sqlite3
 from typing import Annotated, Generic, Protocol, TypeVar
@@ -18,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import Field, model_validator
 
 from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_limits
+from .competition_progress import _failure_details
 from .concurrency import wait_for_owned
 from .open_competition import Hotkey
 from .private_files import Directory
@@ -115,9 +117,10 @@ def phase_review_routes(
             )
         except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
             logger.warning(
-                "phase_review_unavailable path=%s error_type=%s",
+                "phase_review_unavailable path=%s error_type=%s details=%s",
                 path,
                 type(error).__name__,
+                json.dumps(_failure_details(error), separators=(",", ":")),
             )
             raise HTTPException(503, "phase review unavailable; retry unchanged") from error
         finally:

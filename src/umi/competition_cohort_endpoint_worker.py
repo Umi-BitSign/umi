@@ -17,6 +17,7 @@ from .competition_cohort_endpoint_archive import export_endpoint_archive
 from .competition_cohort_endpoint_schedule import CohortEndpointSchedule
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_inbox import CohortOrderInbox
+from .competition_progress import _failure_details
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .policy import ScoringPolicy
@@ -98,7 +99,7 @@ class CohortEndpointWorker:
         retries = []
 
         def failed(stage, slot, error):
-            retries.append((stage, slot, type(error).__name__))
+            retries.append((stage, slot, type(error).__name__, _failure_details(error)))
 
         slots = ()
         try:
@@ -147,7 +148,7 @@ class CohortEndpointWorker:
                     return "pending", type(error).__name__
 
         results = await self._gather(case(row) for row in rows)
-        last = retries[-1] if retries else ("", "", "")
+        last = retries[-1] if retries else ("", "", "", [])
         reasons = [reason for status, reason in (*prepared, *results) if status == "pending"]
         return {
             "status": "cohort_endpoint_scheduler",
@@ -161,6 +162,7 @@ class CohortEndpointWorker:
             "last_retry_stage": last[0],
             "last_retry_slot": last[1],
             "last_retry_type": last[2],
+            "last_retry_details": last[3],
             "last_pending_reason": reasons[-1] if reasons else "",
             "request_closure_authorized": False,
             "chain_submission_authorized": False,
@@ -201,6 +203,7 @@ class CohortEndpointWorker:
                     result = {
                         "status": "cohort_endpoint_scheduler_retry",
                         "error_type": type(error).__name__,
+                        "retry_details": _failure_details(error),
                         "request_closure_authorized": False,
                         "chain_submission_authorized": False,
                     }

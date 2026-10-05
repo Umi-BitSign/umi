@@ -402,7 +402,9 @@ def test_cli_reports_phase_failure_without_private_exception_text(selected, monk
     with pytest.raises(SystemExit):
         cli.main(["run", "--config", str(selected.path)])
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"status": "failed", "error_type": "ValueError"}
+    report = json.loads(captured.out)
+    assert report["status"] == "failed" and report["error_type"] == "ValueError"
+    assert report["details"][0]["reason_code"] == "validation_failed"
     assert '"event":"failed"' in captured.err
     assert "PRIVATE_EXCEPTION_TEXT" not in captured.out + captured.err
 
@@ -420,11 +422,18 @@ def test_cli_reports_allowlisted_service_reason_without_private_cause(
     with pytest.raises(SystemExit):
         cli.main(["run", "--config", str(selected.path)])
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {
+    report = json.loads(captured.out)
+    details = report.pop("details")
+    assert report == {
         "status": "failed",
         "error_type": "PhaseReviewServiceFailure",
         "reason_code": "primary_finality_observer_stopped",
     }
+    assert [d["reason_code"] for d in details] == [
+        "primary_finality_observer_stopped",
+        "validation_failed",
+    ]
+    assert details[0]["source_frames"][-1]["module"] == "umi.competition_cohort_review_cli"
     assert "PRIVATE_CAUSE_TEXT" not in captured.out + captured.err
 
 

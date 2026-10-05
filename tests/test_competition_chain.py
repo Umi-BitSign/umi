@@ -780,6 +780,24 @@ async def test_owned_lifecycle_requires_new_process_observation_and_stops_cleanl
         await owned.start()
 
 
+async def test_observer_failure_preserves_typed_cause_without_restarting(chain):
+    failure = GrandpaFinalitySupervisorError("observer_startup_timeout")
+
+    async def failed():
+        raise failure
+
+    provider = chain.provider
+    provider._owned = True
+    provider._task = asyncio.create_task(failed())
+    with pytest.raises(GrandpaFinalitySupervisorError):
+        await provider._task
+    task = provider._task
+    with pytest.raises(RuntimeError, match="owned_finality_observer_stopped") as caught:
+        provider.ensure_observer_running()
+    assert caught.value.__cause__ is failure
+    assert provider._task is task
+
+
 async def test_wait_ready_retries_only_missing_owned_head_then_returns_capture(chain, monkeypatch):
     original = chain.finality.verified_finalized_snapshot
     calls = 0

@@ -140,7 +140,11 @@ configuration. Complete these checks in order:
    each signed plan, alternating coordinator/evaluator outages, restart replay,
    five-hour rests, 24-hour validator opportunities and previous-row continuity.
 4. **Capacity:** Run the intended host and container runtime with production-size
-   evidence and generous test watchdogs. Test watchdogs may detect harness stalls;
+   evidence and generous test watchdogs. Verify the pinned CPU image and an actual
+   bounded invocation as the evaluator service account under its exact systemd
+   mount, namespace, privilege and cgroup settings. A successful shell invocation
+   does not qualify a sandboxed service. Keep evaluator container storage separate
+   from validator storage and wallets. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
