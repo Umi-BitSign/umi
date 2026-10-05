@@ -108,7 +108,9 @@ def signing(decisions, tmp_path):
         return await signer(name).attest(plan)
 
     s.signer = signer
-    s.worker = lambda: CohortEndpointRequestWorker(signer(), p.delivery_recovery, peer)
+    s.worker = lambda **options: CohortEndpointRequestWorker(
+        signer(), p.delivery_recovery, peer, **options
+    )
     return s
 
 
@@ -499,8 +501,9 @@ async def test_request_capacity_can_grow_without_new_selection(signing):
 
 
 @pytest.mark.parametrize("close_during_admission", [False, True])
+@pytest.mark.parametrize("miner_scope", ["all", "matched", "empty", "other"])
 async def test_fresh_replacement_works_inside_legacy_blackout(
-    signing, monkeypatch, close_during_admission
+    signing, monkeypatch, close_during_admission, miner_scope
 ):
     import bittensor as bt
 
@@ -528,14 +531,36 @@ async def test_fresh_replacement_works_inside_legacy_blackout(
     with pytest.raises(ValueError, match="outside its verified window"):
         await capture_request_window(p.transport_policy, p.finality, issuance.height)
 
-    worker = s.worker()
-    worker.fresh_windows = True
+    selected_miners = {
+        "all": None,
+        "matched": (p.e.job.submission.submission.hotkey,),
+        "empty": (),
+        "other": (wallet(s.own).hotkey.ss58_address,),
+    }[miner_scope]
+    worker = s.worker(fresh_windows=True, fresh_window_miner_hotkeys=selected_miners)
+    if miner_scope in {"empty", "other"}:
+        with pytest.raises(ValueError, match="outside its verified window"):
+            await worker.replacement(
+                p.grant, certificate, review.retirement.retirement, p.transport_policy, legacy.video
+            )
+        assert worker.signer.journal.load(request_slot(template.attempt.order)) is None
+        assert canonical_json_bytes(p.grant) == parent_bytes
+        assert p.model.calls == p.fetcher.calls == 0
+        return
     plan = await worker.replacement(
         p.grant,
         certificate,
         review.retirement.retirement,
         p.transport_policy,
         legacy.video,
+    )
+    # Removing the canary selection cannot reinterpret a retained request.
+    worker.fresh_window_miner_hotkeys = frozenset()
+    assert (
+        await worker.replacement(
+            p.grant, certificate, review.retirement.retirement, p.transport_policy, legacy.video
+        )
+        == plan
     )
     signed_request = plan.body.requests[0]
     assert signed_request.response_close_round > bt.timelock.current_round()

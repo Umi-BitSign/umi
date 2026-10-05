@@ -43,7 +43,7 @@ from .competition_reward_boot import _disjoint
 from .competition_runner import verify_runtime
 from .competition_transport_finality import CompetitionTransportFinality
 from .concurrency import run_owned_thread
-from .open_competition import digest, identity
+from .open_competition import Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -52,6 +52,9 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 class EndpointHostConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-endpoint-host/1"] = Field(alias="schema")
     request_window_version: Literal[1, 2] = 1
+    request_window_miner_hotkeys: Annotated[tuple[Hotkey, ...], Field(max_length=4096)] | None = (
+        None
+    )
     requests: EndpointRequestSignerConfig
     decisions: CohortEndpointDecisionConfig
     origins: CompetitionChainConfig
@@ -162,6 +165,7 @@ class EndpointHost:
             request_vote,
             video_source=video,
             fresh_windows=c.request_window_version == 2,
+            fresh_window_miner_hotkeys=c.request_window_miner_hotkeys,
         )
         decisions = CohortEndpointCaseCoordinator(
             CohortEndpointRetirement(self.recovery),
