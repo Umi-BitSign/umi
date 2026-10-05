@@ -14,6 +14,12 @@ the compatible source; the matching public deployment must advertise that
 release before miners select it through the updater. Enable
 `request_window_version: 2` in the benchmark endpoint host and service dispatch
 host only after qualifying those consumers. Omission retains version 1.
+For a mixed-version rollout, set `request_window_miner_hotkeys` to the explicit
+list of qualified miner hotkeys in each host. Version2 then applies only to new
+requests for those miners; other miners retain version1. An empty list enables
+no new version2 requests. Omitting the list selects all miners only when the
+host explicitly enables version2 and every selected miner has been qualified.
+A selection change never alters a retained request or its recovery.
 
 ## Linked attempt deadlines
 

@@ -49,6 +49,7 @@ class CohortEndpointRequestWorker:
         *,
         video_source: EndpointVideoSource | None = None,
         fresh_windows: bool = False,
+        fresh_window_miner_hotkeys: tuple[str, ...] | None = None,
     ):
         if (
             signer.journal.policy != recovery.journal.policy
@@ -61,6 +62,11 @@ class CohortEndpointRequestWorker:
         if type(fresh_windows) is not bool:
             raise TypeError("fresh_windows must be a boolean")
         self.fresh_windows = fresh_windows
+        self.fresh_window_miner_hotkeys = (
+            None
+            if fresh_window_miner_hotkeys is None
+            else frozenset(identity(key) for key in fresh_window_miner_hotkeys)
+        )
 
     async def video(self, job: RecoverableExecutionJob, case: ExecutionCase) -> Video:
         if self.video_source is None:
@@ -78,7 +84,10 @@ class CohortEndpointRequestWorker:
         async def capture():
             blocks = self.signer.blocks_for(transport)
             height = await blocks.finalized_head_height()
-            if self.fresh_windows:
+            if self.fresh_windows and (
+                self.fresh_window_miner_hotkeys is None
+                or identity(job.submission.submission.hotkey) in self.fresh_window_miner_hotkeys
+            ):
                 window = await capture_cohort_attempt_window(
                     transport, blocks, height, job, attempt_number
                 )
