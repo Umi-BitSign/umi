@@ -46,6 +46,24 @@ from .test_competition_cohort_endpoint_scheduler import signing as signing
 from .test_open_competition import wallet
 
 
+async def test_legacy_endpoint_configuration_keeps_canonical_bytes(installed):
+    config = next(iter(installed.configs.values())).endpoint
+    raw = canonical_json_bytes(config)
+    assert b'"request_window_version"' not in raw
+    assert b'"request_window_miner_hotkeys"' not in raw
+    recovered = EndpointHostConfig.model_validate_json(raw)
+    assert recovered.request_window_version == 1
+    assert recovered.request_window_miner_hotkeys is None
+    assert canonical_json_bytes(recovered) == raw
+
+    selected = recovered.model_copy(
+        update={"request_window_version": 2, "request_window_miner_hotkeys": ()}
+    )
+    retained = EndpointHostConfig.model_validate_json(canonical_json_bytes(selected))
+    assert retained.request_window_version == 2
+    assert retained.request_window_miner_hotkeys == ()
+
+
 @pytest.fixture
 async def installed(scheduled, tmp_path, monkeypatch):
     q, p, s = scheduled, scheduled.p, scheduled.s

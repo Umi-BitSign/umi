@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import httpx
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_clip_delivery import ClipDeliveryConfig, CohortClipDelivery
@@ -49,6 +49,15 @@ class ServiceDispatchConfig(StrictProtocolModel):
     concurrency: Annotated[int, Field(ge=1, le=32)] = 4
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_window_config(self, handler):
+        value = handler(self)
+        if self.request_window_version == 1:
+            value.pop("request_window_version", None)
+        if self.request_window_miner_hotkeys is None:
+            value.pop("request_window_miner_hotkeys", None)
+        return value
 
     def stores(self):
         return tuple(

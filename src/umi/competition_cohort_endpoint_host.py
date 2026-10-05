@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import bittensor as bt
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .competition_artifacts import preserved_bundle_available
 from .competition_chain import CompetitionChainConfig
@@ -62,6 +62,15 @@ class EndpointHostConfig(StrictProtocolModel):
     objects_directory: Directory
     transport_directory: Directory
     reviewers: Annotated[tuple[CohortReviewPeerConfig, ...], Field(min_length=1, max_length=64)]
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_window_config(self, handler):
+        value = handler(self)
+        if self.request_window_version == 1:
+            value.pop("request_window_version", None)
+        if self.request_window_miner_hotkeys is None:
+            value.pop("request_window_miner_hotkeys", None)
+        return value
 
     def stores(self):
         return tuple(
