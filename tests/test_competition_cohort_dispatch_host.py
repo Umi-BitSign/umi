@@ -45,7 +45,7 @@ from .test_competition_cohort_service_worker import loop as loop
 
 
 async def test_legacy_service_configuration_keeps_canonical_bytes(host):
-    raw = canonical_json_bytes(host.config)
+    raw = canonical_json_bytes(host.open().config)
     assert b'"request_window_version"' not in raw
     assert b'"request_window_miner_hotkeys"' not in raw
     recovered = ServiceDispatchConfig.model_validate_json(raw)
