@@ -343,7 +343,18 @@ async def test_shutdown_bounds_control_drain_and_retains_owned_writes(owned, mon
             stop.set()
             await asyncio.wait_for(cancelled.wait(), timeout=10)
             if durable:
+                # Give uvicorn time to finish lifespan shutdown while the owned
+                # write is still held; checking on the cancellation tick misses
+                # an early lease release in the following scheduler turns.
+                await asyncio.sleep(0.2)
                 assert not task.done() and not written.is_set()
+                from umi.private_files import PrivateStateBusyError
+
+                with pytest.raises(PrivateStateBusyError):
+                    async with boot.admission_owner_app(
+                        o.config, o.preparation, o.h.archive.reviewer
+                    ):
+                        pytest.fail("owner lease released while an HTTP write remained active")
                 release.set()
             await asyncio.wait_for(task, timeout=10)
             response = await request

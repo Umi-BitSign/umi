@@ -11,6 +11,7 @@ from umi.competition_service_supervision import run_supervised_server
 class Server:
     def __init__(self):
         self.started = self.should_exit = self.closed = False
+        self.server_state = SimpleNamespace(tasks=set())
 
     async def serve(self):
         self.started = True
@@ -19,6 +20,41 @@ class Server:
                 await asyncio.sleep(0.001)
         finally:
             self.closed = True
+
+
+async def test_supervisor_retains_cancelled_request_cleanup_on_repeated_cancellation():
+    server = Server()
+    entered, cancelling, release, finished = (asyncio.Event() for _ in range(4))
+
+    async def request():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelling.set()
+            await release.wait()
+            finished.set()
+
+    request_task = asyncio.create_task(request())
+    server.server_state.tasks.add(request_task)
+    await entered.wait()
+    running = asyncio.create_task(run_supervised_server(server, (), poll_seconds=0.001))
+    try:
+        await asyncio.sleep(0.01)
+        server.should_exit = True
+        await asyncio.wait_for(cancelling.wait(), timeout=3)
+        running.cancel()
+        await asyncio.sleep(0.01)
+        running.cancel()
+        await asyncio.sleep(0.01)
+        assert not running.done() and not finished.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=3)
+        assert finished.is_set() and request_task.done()
+    finally:
+        release.set()
+        await asyncio.gather(running, request_task, return_exceptions=True)
 
 
 def provider(task, *, owned=True, closed=False):
