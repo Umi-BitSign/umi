@@ -51,6 +51,9 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 
+# Inbound control calls may be cancelled on stop; owned native writes still drain.
+OWNER_REQUEST_DRAIN_SECONDS = 120
+
 
 class AdmissionOwnerConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-admission-owner/1"] = Field(alias="schema")
@@ -256,7 +259,7 @@ async def run_admission_owner(
                 port=config.listen_port,
                 access_log=False,
                 log_config=None,
-                timeout_graceful_shutdown=None,
+                timeout_graceful_shutdown=OWNER_REQUEST_DRAIN_SECONDS,
             )
         )
 

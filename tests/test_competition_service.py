@@ -1425,3 +1425,46 @@ def test_operational_successor_intake_keeps_predecessor_submissions(
     )
     with pytest.raises(ValueError, match="different competition policy"):
         create_intake_app(terms_config, terms, provider_factory=Provider)
+
+
+@pytest.mark.asyncio
+async def test_status_advertises_deployment_without_waiting_for_cold_proofs(config, policy):
+    import asyncio
+
+    provider = Provider(config.chain, policy)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = provider.collect
+
+    async def slow_collection():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    provider.collect = slow_collection
+    app = create_intake_app(config, policy, provider_factory=lambda *_: provider)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            inflight = app.state.registration_snapshot_cache._inflight
+            response = await asyncio.wait_for(client.get("/v1/competition/status"), timeout=5)
+            assert response.status_code == 200
+            value = response.json()
+            assert (
+                value["deployment"]["umi_git_revision"] == config.public_deployment.umi_git_revision
+            )
+            assert value["admission_phase"] == "unverified"
+            assert not value["admission_accepting_new"]
+            assert value["admission_checked_block"] is None
+            assert app.state.registration_snapshot_cache._inflight is inflight
+            assert not inflight.done() and not provider.closed
+        finally:
+            release.set()
+        await app.state.registration_snapshot_cache.collect_fresh()
+        response = await client.get("/v1/competition/status")
+        assert response.status_code == 200
+        assert response.json()["admission_phase"] == "open"
+        assert response.json()["admission_checked_block"] == provider.capture.snapshot.block
+    assert provider.closed

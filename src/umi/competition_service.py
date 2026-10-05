@@ -350,7 +350,9 @@ def create_intake_app(
         return (await finality_cache.collect_fresh()).snapshot
 
     async def cached_snapshot() -> RegistrationSnapshot:
-        return (await finality_cache.cached()).snapshot
+        # Report the selected deployment even while the owned proof collector
+        # warms up. Missing fresh evidence keeps admission explicitly unverified.
+        return (await finality_cache.cached(wait_for_inflight=False)).snapshot
 
     registration_wait_seconds = (
         config.chain.collection_timeout_seconds

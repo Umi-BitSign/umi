@@ -305,13 +305,14 @@ class VerifiedRegistrationCache:
                 # canceled before the provider reported its rate limit.
                 self._rate_limit_until = self._monotonic() + _RATE_LIMIT_COOLDOWN_SECONDS
 
-    async def cached(self) -> RegistrationCapture:
-        """Return a recent cached capture without initiating proof collection."""
+    async def cached(self, *, wait_for_inflight: bool = True) -> RegistrationCapture:
+        """Return a recent capture; status may decline to await cold collection."""
         self._require_open()
         try:
             return self._current()
         except VerifiedCaptureUnavailable:
-            pass
+            if not wait_for_inflight:
+                raise
         async with self._guard:
             self._require_open()
             task = self._inflight
