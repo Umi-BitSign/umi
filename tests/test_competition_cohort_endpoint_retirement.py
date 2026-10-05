@@ -6,6 +6,7 @@ and host fencing are not simulated by these tests.
 
 import asyncio
 import hashlib
+import json
 import time
 from dataclasses import replace
 
@@ -118,6 +119,30 @@ async def test_expired_unstarted_request_retirement_is_durable(retiring, monkeyp
 async def test_unexpired_request_stays_pending(retiring):
     p = retiring
     assert (await p.retire()).reason == "retirement_not_acknowledged"
+    assert p.retirement.retained(p.retire_slot, p.case_id) is None
+    assert p.model.calls == p.fetcher.calls == 0
+
+
+@pytest.mark.parametrize("status", [403, 404, 409, 503])
+async def test_retirement_logs_http_status_without_private_transport_data(retiring, caplog, status):
+    p = retiring
+    caplog.set_level("INFO", logger="umi.competition_cohort_endpoint_retirement")
+    p.delivery_recovery.transport = httpx.MockTransport(
+        lambda request: httpx.Response(status, text="PRIVATE endpoint rejection body")
+    )
+    result = await p.retire()
+    assert result.reason == "retirement_not_acknowledged" and result.value is None
+    reports = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition_cohort_endpoint_retirement"
+    ]
+    assert len(reports) == 1
+    assert reports[0]["http_status"] == status
+    assert reports[0]["status"] == "endpoint_retirement_http_pending"
+    assert reports[0]["chain_submission_authorized"] is False
+    assert "PRIVATE" not in caplog.text
+    assert "example.com" not in caplog.text
     assert p.retirement.retained(p.retire_slot, p.case_id) is None
     assert p.model.calls == p.fetcher.calls == 0
 

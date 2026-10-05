@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -37,6 +38,8 @@ from .validator import (
     _pinned_public_origin,
     _read_response_body,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CohortRetiredEndpointCase(StrictProtocolModel):
@@ -171,6 +174,19 @@ class CohortEndpointRetirement:
                                 "resource_limit", "retirement header bound"
                             )
                         if response.status_code != 200:
+                            # Numeric transport diagnostics carry no authority.
+                            # Never expose the endpoint, headers or response body.
+                            logger.info(
+                                canonical_json_bytes(
+                                    {
+                                        "status": "endpoint_retirement_http_pending",
+                                        "selection_sha256": digest(selected),
+                                        "case_record_sha256": key,
+                                        "http_status": response.status_code,
+                                        "chain_submission_authorized": False,
+                                    }
+                                ).decode()
+                            )
                             return None
                         return await _read_response_body(response, 16 * 1024, prefix=bytearray())
                     finally:
