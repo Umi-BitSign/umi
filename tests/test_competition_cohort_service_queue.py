@@ -481,7 +481,8 @@ def test_catalog_authentication_and_fixed_work_are_required(queue_case, damage):
 
 def test_replay_refuses_missing_or_changed_retained_evidence(queue_case):
     c = queue_case
-    admit(c)
+    accepted = admit(c)
+    assert c.queue.entries() == (accepted,)
     with c.queue.journal.transaction() as db:
         db.execute("UPDATE service_claims SET admission=?", ("ff" * 32,))
     with pytest.raises(ValueError, match="index"):

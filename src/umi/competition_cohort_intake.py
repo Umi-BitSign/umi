@@ -22,6 +22,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
@@ -197,7 +198,10 @@ class CohortIntake:
 
     @contextmanager
     def _connection(self):
-        with self._process_lock, self._exclusive_connection() as value:
+        # Replaying a whole accepted roster repeats identical canonical inputs.
+        # Reuse serialization only while this operation owns the current state;
+        # every schema, signature and authority check still runs on each read.
+        with self._process_lock, canonical_json_reuse(), self._exclusive_connection() as value:
             yield value
 
     @contextmanager

@@ -6,6 +6,7 @@ import sqlite3
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_request_probe import (
@@ -63,9 +64,10 @@ class CombinedRequestReadiness:
             if self.orders._retained(cohort) is None:
                 raise FileNotFoundError("complete benchmark roster is not selected")
             selected = self.orders.queue.journal.get("order_host_roster", cohort)
-            self.selected[cohort] = tuple(
-                self.orders.queue.intent(slot).order for slot in selected["slots"]
-            )
+            with canonical_json_reuse():
+                self.selected[cohort] = tuple(
+                    self.orders.queue.intent(slot).order for slot in selected["slots"]
+                )
         orders = self.selected[cohort]
         if any(order.round != source.roster.round for order in orders):
             raise ValueError("request readiness changed the prepared round")

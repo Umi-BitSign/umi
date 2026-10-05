@@ -144,7 +144,11 @@ configuration. Complete these checks in order:
    bounded invocation as the evaluator service account under its exact systemd
    mount, namespace, privilege and cgroup settings. A successful shell invocation
    does not qualify a sandboxed service. Keep evaluator container storage separate
-   from validator storage and wallets. Test watchdogs may detect harness stalls;
+   from validator storage and wallets. Bound model concurrency across every
+   evaluator on the host by their combined per-case memory limits, leaving
+   headroom for chain observers and owner services. Include rootless case scopes
+   when checking aggregate consumption; they may be outside the reviewer unit's
+   cgroup. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
