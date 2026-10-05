@@ -132,7 +132,7 @@ class ServiceDispatchHost:
                 latest = await run_owned_thread(
                     requests.latest,
                     assignment.admission.claim,
-                    self.key.hotkey.ss58_address,
+                    transport.evaluator,
                 )
                 number = 1 if latest is None else latest.attempt_number + 1
                 window = await capture_cohort_attempt_window(
