@@ -56,7 +56,18 @@ def main(argv=None):
             logger.propagate = False
         asyncio.run(_run(config))
     except Exception as error:
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__}))
+        report = {"status": "failed", "error_type": type(error).__name__}
+        reason_code = getattr(error, "reason_code", None)
+        if reason_code in {
+            "primary_finality_observer_stopped",
+            "endpoint_finality_observer_stopped",
+            "phase_review_listener_stopped",
+            "benchmark_execution_worker_stopped",
+            "benchmark_exports_worker_stopped",
+            "benchmark_endpoints_worker_stopped",
+        }:
+            report["reason_code"] = reason_code
+        print(json.dumps(report))
         raise SystemExit(1) from None
     finally:
         for logger, level, propagate in loggers:

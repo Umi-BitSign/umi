@@ -407,6 +407,27 @@ def test_cli_reports_phase_failure_without_private_exception_text(selected, monk
     assert "PRIVATE_EXCEPTION_TEXT" not in captured.out + captured.err
 
 
+def test_cli_reports_allowlisted_service_reason_without_private_cause(
+    selected, monkeypatch, capsys
+):
+    async def failed(config):
+        try:
+            raise ValueError("PRIVATE_CAUSE_TEXT")
+        except ValueError as error:
+            raise boot.PhaseReviewServiceFailure("primary_finality_observer_stopped") from error
+
+    monkeypatch.setattr(cli, "_run", failed)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(selected.path)])
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "status": "failed",
+        "error_type": "PhaseReviewServiceFailure",
+        "reason_code": "primary_finality_observer_stopped",
+    }
+    assert "PRIVATE_CAUSE_TEXT" not in captured.out + captured.err
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -673,7 +694,10 @@ async def test_host_drains_listener_before_provider_and_lease(
     task = asyncio.create_task(boot.run_phase_review_service(selected.config, stop))
     await asyncio.wait_for(entered.wait(), 3)
     if failure == "listener":
-        with pytest.raises(RuntimeError, match="listener"):
+        with pytest.raises(
+            boot.PhaseReviewServiceFailure,
+            match="phase_review_listener_stopped",
+        ):
             await task
         assert events[-1] == "closed"
         return
@@ -695,8 +719,15 @@ async def test_host_drains_listener_before_provider_and_lease(
         lock_private_file(Path(selected.config.signing.directory) / "service.lock")
     finish.set()
     if failure in ("cancel", "observer"):
-        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
-            await task
+        if failure == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(
+                boot.PhaseReviewServiceFailure,
+                match="primary_finality_observer_stopped",
+            ):
+                await task
     else:
         await task
     assert events[-2:] == ["drained", "closed"]
