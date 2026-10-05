@@ -98,7 +98,9 @@ def config(chain_config, tmp_path, policy, public_deployment):
 
 class Provider:
     def __init__(self, _config, _policy):
-        self.background_budget = max(240, _config.collection_timeout_seconds)
+        self.background_budget = (
+            max(240, _config.collection_timeout_seconds) if _config is not None else 240
+        )
         self.started = False
         self.closed = False
         self.start_error = None
