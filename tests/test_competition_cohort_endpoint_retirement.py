@@ -4,7 +4,9 @@ RPC, owned finality, DNS and inference use fixtures. Replacement certification
 and host fencing are not simulated by these tests.
 """
 
+import asyncio
 import hashlib
+import time
 from dataclasses import replace
 
 import bittensor as bt
@@ -142,6 +144,28 @@ async def test_lost_http_ack_recovers_same_signed_retirement(retiring, monkeypat
     monkeypatch.setattr(miner_module, "sign_object", forbidden)
     assert (await p.retire()).status == "retained"
     assert p.model.calls == 0
+
+
+async def test_hanging_retirement_control_exchange_is_bounded_and_retryable(
+    retiring, monkeypatch
+):
+    p = retiring
+    expire_both(p, monkeypatch)
+    journal = p.delivery_recovery.journal
+    journal.config = journal.config.model_copy(update={"read_timeout_seconds": 1})
+    inner = p.delivery_recovery.transport
+
+    class Hang(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.Event().wait()
+
+    p.delivery_recovery.transport = Hang()
+    started = time.monotonic()
+    result = await p.retire()
+    assert time.monotonic() - started < 2
+    assert (result.status, result.reason) == ("pending", "retirement_transport_unavailable")
+    p.delivery_recovery.transport = inner
+    assert (await p.retire()).status == "retained"
 
 
 @pytest.mark.parametrize("after_commit", [False, True])

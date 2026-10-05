@@ -22,6 +22,7 @@ from .competition_cohort_endpoint_recovery import (
     recovery_slot,
 )
 from .competition_cohort_endpoint_selection import case_record_key, selection_grant
+from .competition_cohort_execution_journal import control_exchange_timeout_seconds
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .config import Limits
@@ -129,7 +130,7 @@ class CohortEndpointRetirement:
             limits = Limits.from_policy(selected.transport_policy)
             if len(body) > limits.maximum_request_body_bytes:
                 raise ValueError("retirement request exceeds transport bound")
-            timeout = journal.config.read_timeout_seconds
+            timeout = control_exchange_timeout_seconds(journal.config)
 
             async def exchange():
                 origin, host, sni = await _pinned_public_origin(
