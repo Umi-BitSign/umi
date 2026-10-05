@@ -588,3 +588,15 @@ async def test_endpoint_order_delivery_populates_the_real_dispatch_inbox(
         assert destination.read_bytes() == canonical_json_bytes(item.publication)
         assert destination.stat().st_mode & 0o077 == 0
         await driver.aclose()
+
+
+@pytest.mark.parametrize("budget", [240, 600, 601])
+def test_config_accepts_extended_owned_finality_budget(relay, budget):
+    raw = relay.config.model_dump(mode="json", by_alias=True)
+    raw["chain"]["collection_timeout_seconds"] = budget
+    if budget > 600:
+        with pytest.raises(ValueError):
+            exchange.ExchangeConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = exchange.ExchangeConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.chain.collection_timeout_seconds == budget

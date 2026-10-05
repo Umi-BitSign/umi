@@ -35,7 +35,10 @@ Use one hotkey per worker and a dedicated configuration with schema
 
 - `policy_sha256`: digest of the reviewed competition policy.
 - `chain`: the existing owned-finality `CompetitionChainConfig`, with the same
-  policy hash and `collection_timeout_seconds` no greater than 15.
+  policy hash and `collection_timeout_seconds` from 1 through 600 seconds
+  (default 120). Increasing a wait does not relax head freshness or signed
+  deadlines. Existing journal bindings must be retained; do not edit a bound
+  configuration or reset its state to increase this value.
 - `evaluator_hotkey`, `wallet_name`, `hotkey_name`, `wallet_path`: the named
   evaluator hotkey. The command never requests the coldkey.
 - `state_directory`, `order_directory`, `reveal_directory`, `peer_directory`,

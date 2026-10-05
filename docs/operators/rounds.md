@@ -410,10 +410,13 @@ Add `work` to the private `umi-round-coordinator-config/2` configuration:
 All these directories and both observers' state directories must be separate,
 absolute, owned by the service user and mode `0700`. Files use mode `0600`.
 The transport observer must use the transport policy's actual chain and verifier
-pins; its collection timeout cannot exceed 15 seconds. The issue margin is an
+pins; its collection timeout can be from 1 through 600 seconds (default 120). The issue margin is an
 integer from 1 through 300,000 ms and must be shorter than the transport policy's
 issue allowance when endpoint work is prepared. Choose it to cover observed
-signing and delivery latency. An undersized margin does not extend a deadline.
+signing and delivery latency. An undersized margin does not extend a deadline. A larger proof budget does not
+relax head freshness or authorize signatures after their signed issue cutoff.
+Retain existing journal bindings: a larger accepted configuration range is not
+a migration authorizing edits to an installed bound configuration.
 
 Creating a proposal requires a fresh owned issuance block. Endorsing an existing
 proposal instead requires a fresh owned head and verified historical issuance
@@ -464,7 +467,8 @@ In each [continuous evaluator](evaluation.md#open-competition-evaluator), config
 - `round_coordinator_origin`: the credential-free HTTPS origin for both cutoff
   and work discovery.
 - `work_signing_chain`: a dedicated transport-bound owned observer, with its
-  own separate state directory and collection timeout at most 15 seconds.
+  own separate state directory and collection timeout from 1 through 600 seconds
+  (default 120).
 - `work_minimum_issue_ms`: the same reviewed issue margin as the coordinator.
 - The existing endpoint `legacy_policy_sha256` and `dispatch_directory`, plus
   that exact transport policy passed to `run-evaluator`.

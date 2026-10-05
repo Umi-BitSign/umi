@@ -98,6 +98,7 @@ def config(chain_config, tmp_path, policy, public_deployment):
 
 class Provider:
     def __init__(self, _config, _policy):
+        self.background_budget = max(240, _config.collection_timeout_seconds)
         self.started = False
         self.closed = False
         self.start_error = None
@@ -138,7 +139,7 @@ class Provider:
         return self.capture
 
     async def collect_with_timeout(self, timeout_seconds):
-        assert timeout_seconds == 240
+        assert timeout_seconds == self.background_budget
         return await self.collect()
 
     async def __call__(self):
@@ -175,7 +176,13 @@ def test_retention_protects_exact_snapshot_blocks_including_replaced_receipts(co
     assert store.submission_by_digest(digest(first.submission))["receipt"] == receipt
 
 
-def test_default_intake_provider_enables_receipt_aware_retention(config, policy, monkeypatch):
+@pytest.mark.parametrize("budget, background", [(120, 240), (600, 600)])
+async def test_default_intake_provider_enables_receipt_aware_retention(
+    config, policy, monkeypatch, budget, background
+):
+    config = config.model_copy(
+        update={"chain": config.chain.model_copy(update={"collection_timeout_seconds": budget})}
+    )
     captured = {}
 
     def factory(chain, selected_policy, **kwargs):
@@ -186,8 +193,11 @@ def test_default_intake_provider_enables_receipt_aware_retention(config, policy,
     app = create_intake_app(config, policy)
     assert captured["retained_capture_blocks"]() == frozenset({105})
     cache = app.state.registration_snapshot_cache
-    assert cache._background_collection_timeout == 240
-    assert cache._public_wait == 241
+    assert cache._background_collection_timeout == background
+    assert cache._public_wait == background + 1
+    async with app.router.lifespan_context(app):
+        capture = await cache.collect_fresh()
+    assert capture.snapshot == snapshot()
 
 
 async def test_refresh_failures_log_class_once_and_recovery_without_private_details(
@@ -1115,11 +1125,16 @@ def test_config_disallows_overlapping_state(config, relative):
         CompetitionServiceConfig.model_validate_json(canonical_json_bytes(raw))
 
 
-def test_config_proof_deadline_fits_request_timeout(config):
+@pytest.mark.parametrize("budget", [120, 240, 600, 601])
+def test_config_proof_deadline_fits_request_timeout(config, budget):
     raw = config.model_dump(mode="json", by_alias=True)
-    raw["chain"]["collection_timeout_seconds"] = 121
-    with pytest.raises(ValueError, match="120"):
-        CompetitionServiceConfig.model_validate_json(canonical_json_bytes(raw))
+    raw["chain"]["collection_timeout_seconds"] = budget
+    if budget > 600:
+        with pytest.raises(ValueError):
+            CompetitionServiceConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = CompetitionServiceConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.chain.collection_timeout_seconds == budget
 
 
 def test_startup_rejects_round_longer_than_submission_lifetime(config, policy):

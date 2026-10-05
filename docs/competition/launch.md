@@ -182,3 +182,11 @@ transaction are intermediate evidence. None alone proves a live reward row.
 Retain predecessor signed artifacts and evidence for replay. Remove obsolete
 migration instructions after no installed service or recovery consumer depends
 on them; Git history is the record of superseded launch plans.
+
+Owned-finality collection budgets accept 1 through 600 seconds, with a
+120-second default. Intake shares one background collection per refresh, using
+at least 240 seconds or the configured budget when larger; callers wait through
+that same collection. These operation budgets do not relax verified head age,
+cohort authority or signed issue deadlines. Retain existing journal bindings and
+use a qualified migration before changing a bound installed configuration;
+never reset evidence to change a timeout.

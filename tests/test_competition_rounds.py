@@ -1005,3 +1005,44 @@ async def test_recovery_cannot_change_a_store_preparation_intake_opening(setup, 
     setup.plan_path.write_bytes(canonical_json_bytes(changed))
     assert (await setup.coordinator.cycle())["held"] == 1
     assert not setup.coordinator.proposals()
+
+
+@pytest.mark.parametrize("budget", [240, 600, 601])
+def test_config_accepts_extended_owned_finality_budget(setup, budget):
+    raw = setup.config.model_dump(mode="json", by_alias=True)
+    raw["chain"]["collection_timeout_seconds"] = budget
+    if budget > 600:
+        with pytest.raises(ValueError):
+            rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.chain.collection_timeout_seconds == budget
+
+
+@pytest.mark.parametrize("budget", [600, 601])
+def test_work_preparation_accepts_extended_owned_finality_budget(setup, tmp_path, budget):
+    raw = setup.config.model_dump(mode="json", by_alias=True)
+    raw["work"] = {
+        **{
+            field: str(tmp_path / ("budget-work-" + field))
+            for field in (
+                "state_directory",
+                "asset_directory",
+                "order_directory",
+                "publication_directory",
+            )
+        },
+        "transport_chain": {
+            **raw["chain"],
+            "state_directory": str(tmp_path / "budget-transport-chain"),
+            "collection_timeout_seconds": budget,
+        },
+        "legacy_policy_sha256": "cd" * 32,
+        "minimum_issue_ms": 60000,
+    }
+    if budget > 600:
+        with pytest.raises(ValueError):
+            rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = rounds.RoundCoordinatorConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.work.transport_chain.collection_timeout_seconds == budget
