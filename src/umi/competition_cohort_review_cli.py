@@ -48,6 +48,7 @@ def main(argv=None):
         for name in (
             "umi.competition_cohort_review_boot",
             "umi.competition_cohort_benchmark_host",
+            "umi.competition_cohort_endpoint_retirement",
             "umi.competition.progress",
         ):
             logger = logging.getLogger(name)

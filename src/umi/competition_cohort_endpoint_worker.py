@@ -126,7 +126,6 @@ class CohortEndpointWorker:
                     failed("prepare", slot, error)
                     return "pending", type(error).__name__
 
-        prepared = await self._gather(prepare(slot) for slot in slots)
         rows = ()
         try:
             rows = await run_owned_thread(schedule.pending, self.batch_size)
@@ -147,7 +146,19 @@ class CohortEndpointWorker:
                     failed("case", obligation, error)
                     return "pending", type(error).__name__
 
-        results = await self._gather(case(row) for row in rows)
+        # Already selected work must advance before slow discovery/preparation
+        # of another inbox page. A cold history replay or unavailable new miner
+        # cannot postpone retirement and response recovery for existing cases.
+        if rows:
+            results = await self._gather(case(row) for row in rows)
+            prepared = await self._gather(prepare(slot) for slot in slots)
+        else:
+            prepared = await self._gather(prepare(slot) for slot in slots)
+            try:
+                rows = await run_owned_thread(schedule.pending, self.batch_size)
+            except _RETRY as error:
+                failed("case_scan", "", error)
+            results = await self._gather(case(row) for row in rows)
         last = retries[-1] if retries else ("", "", "", [])
         reasons = [reason for status, reason in (*prepared, *results) if status == "pending"]
         return {

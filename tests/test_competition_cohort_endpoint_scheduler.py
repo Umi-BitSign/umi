@@ -455,3 +455,30 @@ async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
 
     with pytest.raises(FileNotFoundError):
         tuple(endpoint_archive_cases(archive, missing_parent, p.c.policy))
+
+
+async def test_selected_case_advances_before_slow_assignment_preparation(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = worker._prepare
+
+    async def slow_prepare(slot):
+        entered.set()
+        await release.wait()
+        return await original(slot)
+
+    monkeypatch.setattr(worker, "_prepare", slow_prepare)
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        # The real signed response and terminal reference must exist while the
+        # next preparation is still waiting. Merely starting a task is not enough.
+        assert p.model.calls == 1
+        assert any(worker.schedule.reference(q.slot, c.case_id) for c in p.e.job.cases)
+    finally:
+        release.set()
+        report = await task
+    assert report["cases_completed"] == 1
+    assert not report["request_closure_authorized"]

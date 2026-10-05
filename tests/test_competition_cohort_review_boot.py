@@ -1092,3 +1092,30 @@ async def test_failed_endpoint_origin_start_closes_both_owned_providers(
             pytest.fail("failed provider started")
     assert providers.events.count("closed") == 2
     os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))
+
+
+def test_cli_enables_numeric_retirement_diagnostics(selected, monkeypatch, capsys):
+    import logging
+
+    logger = logging.getLogger("umi.competition_cohort_endpoint_retirement")
+    old_level, old_propagate, old_handlers = logger.level, logger.propagate, tuple(logger.handlers)
+
+    async def run(config):
+        logger.info(
+            canonical_json_bytes(
+                {"status": "endpoint_retirement_http_pending", "http_status": 503}
+            ).decode()
+        )
+
+    monkeypatch.setattr(cli, "_run", run)
+    cli.main(["run", "--config", str(selected.path)])
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {
+        "status": "endpoint_retirement_http_pending",
+        "http_status": 503,
+    }
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == (
+        old_level,
+        old_propagate,
+        old_handlers,
+    )
