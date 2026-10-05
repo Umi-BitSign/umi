@@ -23,6 +23,7 @@ from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
 from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
 from umi.competition_cohort_endpoint_worker import CohortEndpointWorker
 from umi.competition_cohort_execution_journal import CohortExecutionJournal
+from umi.endpoint_protocol import COHORT_GRANT_PATH
 from umi.miner import create_app
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -166,6 +167,24 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     terminal, _ = await finish(q)
     assert terminal.job_sha256 == digest(q.p.e.job)
     assert q.policy_calls == 1
+
+
+async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled):
+    q, p = scheduled, scheduled.p
+    original = p.delivery_recovery.transport
+
+    class RejectGrant(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == COHORT_GRANT_PATH:
+                return httpx.Response(422)
+            return await original.handle_async_request(request)
+
+    p.delivery_recovery.transport = RejectGrant()
+    report = await q.worker().poll_once()
+    assert report["last_pending_reason"] == "miner_grant_http_422"
+    assert report["retry_count"] == 0
+    assert p.model.calls == 0
+    assert q.worker().schedule.complete(q.slot) is None
 
 
 @pytest.mark.parametrize(

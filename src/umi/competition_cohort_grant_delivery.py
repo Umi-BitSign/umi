@@ -119,7 +119,7 @@ class CohortEndpointGrantDelivery:
                                 "resource_limit", "grant response header bound"
                             )
                         if response.status_code != 200:
-                            return None
+                            return response.status_code
                         return await _read_response_body(response, 64 * 1024, prefix=bytearray())
                     finally:
                         await response.aclose()
@@ -134,8 +134,8 @@ class CohortEndpointGrantDelivery:
                 ComponentResponseError,
             ):
                 return CohortGrantDeliveryOutcome("pending", "miner_grant_delivery_unavailable")
-            if raw is None:
-                return CohortGrantDeliveryOutcome("pending", "miner_grant_not_acknowledged")
+            if isinstance(raw, int):
+                return CohortGrantDeliveryOutcome("pending", f"miner_grant_http_{raw}")
             try:
                 receipt = SignedCohortMinerGrantReceipt.model_validate_json(raw)
                 if canonical_json_bytes(receipt) != raw:

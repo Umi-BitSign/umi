@@ -256,6 +256,16 @@ async def test_native_late_grant_inference_restart_and_original_response_recover
     assert (await grant(p)).content == ack.content
 
 
+async def test_grant_accepts_equivalent_serving_origin_spelling(granted):
+    p = granted
+    p.miner = p.rebuild(
+        directory=p.miner_cfg.directory + "-equivalent-origin",
+        serving_origin=p.miner_cfg.serving_origin.rstrip("/") + "/",
+    )
+    ack = await grant(p)
+    assert ack.status_code == 200, ack.text
+
+
 @pytest.mark.parametrize(
     "damage",
     [

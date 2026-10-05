@@ -188,7 +188,8 @@ class CohortMinerAuthorizationAuthority:
                 identity(validator_hotkey) != identity(body.evaluator_hotkey)
                 or identity(sub.hotkey) != identity(self.config.miner_hotkey)
                 or sub.model_revision != self.config.model_revision
-                or sub.endpoint_url != self.config.serving_origin
+                or public_https_origin(sub.endpoint_url)
+                != public_https_origin(self.config.serving_origin)
                 or body.assignment.catalog.catalog.service_terms_sha256
                 != self.config.service_terms_sha256
                 or self.cohorts.get(body.assignment.round.cohort_sha256)
@@ -219,7 +220,8 @@ class CohortMinerAuthorizationAuthority:
             or job.mode != "endpoint_incumbent"
             or identity(sub.hotkey) != identity(self.config.miner_hotkey)
             or sub.model_revision != self.config.model_revision
-            or sub.endpoint_url != self.config.serving_origin
+            or public_https_origin(sub.endpoint_url)
+            != public_https_origin(self.config.serving_origin)
         ):
             raise ValueError("cohort grant differs from miner assignment or serving configuration")
         if isinstance(grant, CohortMinerGrant) and attempt.order.attempt_number != 1:

@@ -366,6 +366,16 @@ async def accept(c, grant=None):
     return await request(c.p, COHORT_GRANT_PATH, c.grant if grant is None else grant)
 
 
+async def test_service_grant_accepts_equivalent_serving_origin_spelling(service):
+    c, p = service, service.p
+    p.miner = p.rebuild(
+        directory=p.miner_cfg.directory + "-equivalent-origin",
+        serving_origin=p.miner_cfg.serving_origin.rstrip("/") + "/",
+    )
+    ack = await accept(c)
+    assert ack.status_code == 200, ack.text
+
+
 @pytest.mark.parametrize("stage", ["selection", "certificate"])
 @pytest.mark.parametrize("after_commit", [False, True])
 async def test_service_owner_recovers_selection_and_certificate_writes(
