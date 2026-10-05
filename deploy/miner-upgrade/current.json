@@ -16,7 +16,7 @@
   "public_model_track_required": false,
   "runtime": {
     "repository": "https://github.com/Umi-BitSign/umi.git",
-    "revision": "9d3c5d6b8a4d228e830c9b4fd68826b7eb186184"
+    "revision": "c99c2580e0df9d27043e273a373ed57b11e2b06c"
   },
   "schema": "umi-miner-upgrade-manifest/1",
   "service_authority_sha256": "57d4bc831ba36a0bb45f690476f07df5cf12df923d403314fd03efbde22e6fad",
