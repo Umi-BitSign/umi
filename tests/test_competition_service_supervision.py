@@ -19,6 +19,10 @@ class Server:
             while not self.should_exit:
                 await asyncio.sleep(0.001)
         finally:
+            # Match Uvicorn: cancel overdue requests without waiting for their
+            # cancellation handlers. The supervisor must then retain ownership.
+            for task in self.server_state.tasks:
+                task.cancel()
             self.closed = True
 
 

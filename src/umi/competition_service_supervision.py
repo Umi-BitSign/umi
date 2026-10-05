@@ -13,13 +13,12 @@ async def drain_server_requests(server):
 
     Uvicorn cancels overdue requests but can return before their cancellation
     handlers finish. Call this after serving stops, before releasing host locks.
+    Do not cancel requests again: their existing cancellation handlers own the
+    remaining writes, and another cancellation could interrupt that cleanup.
     """
 
     async def drain():
         tasks = tuple(server.server_state.tasks)
-        for task in tasks:
-            if not task.done() and not task.cancelling():
-                task.cancel()
         for task in tasks:
             with suppress(asyncio.CancelledError, Exception):
                 await await_owned_task(task)
