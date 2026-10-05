@@ -575,6 +575,7 @@ async def test_fresh_replacement_works_inside_legacy_blackout(
         monkeypatch.setattr(CohortRequestWindowAuthority, "authorize", close_after_check)
         response = await request(p, TRANSLATE_PATH, signed_request)
         assert response.status_code == 422, response.text
+        monkeypatch.setattr(CohortRequestWindowAuthority, "authorize", original)
         p.miner = p.rebuild()
         p.e.r.h.source = prior
         response = await request(p, TRANSLATE_PATH, signed_request)
