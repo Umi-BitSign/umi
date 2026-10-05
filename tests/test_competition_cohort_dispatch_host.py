@@ -44,6 +44,23 @@ from .test_competition_cohort_service_review import reviewed as reviewed
 from .test_competition_cohort_service_worker import loop as loop
 
 
+async def test_legacy_service_configuration_keeps_canonical_bytes(host):
+    raw = canonical_json_bytes(host.open().config)
+    assert b'"request_window_version"' not in raw
+    assert b'"request_window_miner_hotkeys"' not in raw
+    recovered = ServiceDispatchConfig.model_validate_json(raw)
+    assert recovered.request_window_version == 1
+    assert recovered.request_window_miner_hotkeys is None
+    assert canonical_json_bytes(recovered) == raw
+
+    selected = recovered.model_copy(
+        update={"request_window_version": 2, "request_window_miner_hotkeys": ()}
+    )
+    retained = ServiceDispatchConfig.model_validate_json(canonical_json_bytes(selected))
+    assert retained.request_window_version == 2
+    assert retained.request_window_miner_hotkeys == ()
+
+
 @pytest.fixture
 async def host(networked, tmp_path, monkeypatch):
     s, c, p = networked, networked.c, networked.p
