@@ -236,7 +236,12 @@ def _digest(value: StrictProtocolModel) -> str:
     return _sha256(canonical_json_bytes(value))
 
 
+def _trusted_dependency_owner(info: os.stat_result) -> bool:
+    return info.st_uid == os.getuid() or (info.st_uid == 0 and not info.st_mode & 0o222)
+
+
 def _regular_digest(path: Path, *, executable: bool, maximum_bytes: int) -> str:
+    """Accept private owned files or a sealed root-owned release dependency."""
     private_path(str(path))
     if path.is_symlink():
         raise ValueError("mediator dependency must not be a symlink")
@@ -246,12 +251,12 @@ def _regular_digest(path: Path, *, executable: bool, maximum_bytes: int) -> str:
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_uid != os.getuid()
+            or not _trusted_dependency_owner(info)
             or info.st_mode & 0o022
             or (executable and not info.st_mode & 0o111)
             or not 1 <= info.st_size <= maximum_bytes
         ):
-            raise ValueError("mediator dependency must be an owned bounded regular file")
+            raise ValueError("mediator dependency must be an owned or sealed root-owned file")
         digest = hashlib.sha256()
         while chunk := os.read(descriptor, min(1024 * 1024, maximum_bytes + 1)):
             digest.update(chunk)

@@ -42,7 +42,12 @@ The runtime must:
 Run the deployed worker as a dedicated `umi-mediator` account. Its credential
 home, journal and output root are the only writable paths. The unit must have no
 supplementary groups and no readable validator wallets, cohort signer roots or
-settlement state. Use `ProtectSystem=strict`, `ProtectHome=true`,
+settlement state. Install the pinned CLI as a root-owned file with mode `0555`
+and the runner manifest as root-owned `0444`; writable root-owned dependencies
+and dependencies owned by another non-root account are refused. Keep their
+parent release tree root-owned and non-writable by the service account. The
+private journal, home and empty working directory remain service-owned. Use
+`ProtectSystem=strict`, `ProtectHome=true`,
 `NoNewPrivileges=true`, `PrivateTmp=true`, `PrivateDevices=true`, an empty
 capability set, `ProtectProc=invisible`, native-only system calls and namespaces,
 and explicit `ReadOnlyPaths`/`ReadWritePaths` for the immutable release and
