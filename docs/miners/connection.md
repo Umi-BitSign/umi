@@ -9,6 +9,12 @@ cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
 phase and admission state before signing or diagnosing a submission. Send a new
 submission only when `admission_accepting_new` is true.
 
+The [request-window recovery contract](../competition/transport-cadence.md)
+explains retained attempts and the new linked-deadline extension. That extension
+requires a compatible selected release; its source implementation does not
+change the current public runtime pin. Do not delete grant, request, response or
+retirement state to upgrade or recover delayed work.
+
 The previous certified allocation remains effective until the active cohort
 produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance

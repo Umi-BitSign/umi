@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 from weakref import WeakValueDictionary
@@ -968,6 +969,7 @@ async def _retire_cohort_request(
         if prior is not None:
             return response(prior)
         if not ledger.retirement_requested(binding, grant_sha256):
+            expired_opportunity = False
             try:
                 cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
             except MinerResourceError as error:
@@ -984,11 +986,19 @@ async def _retire_cohort_request(
                 )
                 if type(head) is not int or head < 0:
                     raise ValueError("invalid finalized head")
-                if head <= request.deadline_block:
+                if head < request.issued_block:
                     return pending()
+                expired_opportunity = head <= request.deadline_block
             else:
                 _validate_cached_response(runtime, request, validator_hotkey, cached)
-            await run_owned_thread(ledger.request_retirement, binding, grant_sha256)
+            await run_owned_thread(
+                partial(
+                    ledger.request_retirement,
+                    binding,
+                    grant_sha256,
+                    expired_opportunity=expired_opportunity,
+                )
+            )
         lock = _assignment_lock(runtime, binding.assignment_id)
         if lock.locked():
             return pending()
@@ -1001,6 +1011,9 @@ async def _retire_cohort_request(
             cached = ledger.recovered_response(request, validator_hotkey=validator_hotkey)
             if cached is not None:
                 _validate_cached_response(runtime, request, validator_hotkey, cached)
+            # A /2 receipt explicitly fences the already expired response
+            # opportunity. Existing /1 intents and all retained replies replay
+            # unchanged; no evaluator can cancel a live response opportunity.
             body = await run_owned_thread(ledger.prepare_retirement, binding, grant_sha256)
             signature = await run_owned_thread(sign_object, body, runtime.wallet)
             value = SignedEndpointRetirementReceipt(receipt=body, signature=signature)
@@ -1131,6 +1144,9 @@ def create_app(
                 serving_origin_finality_verified=False,
                 window_authority=type(runtime.competition_authority).__name__,
             )
+            if isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
+                result["cohort_request_window_versions"] = [1, 2]
+                result["cohort_retirement_receipt_versions"] = [1, 2]
             if isinstance(runtime.competition_authority, FeedEndpointAuthorizationAuthority):
                 result["assignment_discovery"] = runtime.competition_authority.status()
         return result

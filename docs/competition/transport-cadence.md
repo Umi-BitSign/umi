@@ -1,102 +1,83 @@
 [Documentation](../README.md) / Transport cadence
 
-# Align transport windows with recurring cohorts
+# Cohort request windows and recovery
 
-A public cohort schedule and the request transport have separate clocks. A
-2,880-block cohort cadence can drift through a 2,160-block transport cadence:
-one cohort may fit while the next has too little time left to issue its requests.
-Moving the transport activation block can align one cohort, but does not remove
-that recurring mismatch.
+Cohort progress and an individual execution attempt have different lifetimes.
+An outage may expire a bounded attempt; it must not expire accepted cohort work.
+Retain the original assignment, request, votes, responses and journals. Recover
+an original response, or certify a fenced replacement for the same obligation.
+Do not edit an issued request or its signed transport policy.
 
-`ScoringPolicy.competition_transport` accepts an explicit `window_stride_blocks`.
-For a 2,880-block public cadence and a six-hour issue allowance:
+The source includes a cohort attempt-window extension. Deployment must select a
+qualified reviewer and miner release before enabling it; the current public
+miner manifest still selects the legacy window runtime. Enable
+`request_window_version: 2` in the benchmark endpoint host and service dispatch
+host only after qualifying those consumers. Omission retains version 1.
 
-```python
-transport = ScoringPolicy.competition_transport(
-    activation_block=reviewed_activation_block,
-    implementation_pins=reviewed_pins,
-    validator=reviewed_evaluator,
-    issue_allowance_seconds=21600,
-    window_stride_blocks=2880,
-)
+## Linked attempt deadlines
+
+A version-2 cohort attempt uses the independently verified issuance block as its
+single clock anchor. Its nominal block budget is:
+
+```text
+blocks = ceil((issue_allowance_seconds + response_window_seconds)
+              / target_block_interval_seconds)
+deadline_block = issuance.height + blocks
+response_close_time = issuance.timestamp + blocks * target_block_interval_seconds
+response_close_round = first Quicknet round at or after response_close_time
+reveal_round = first Quicknet round at or after response_close_time + reveal_margin
 ```
 
-The stride must be a whole multiple of the 360-block launch window, at least
-the minimum stride needed for the configured challenge lifecycle. Omitting it
-preserves the previous minimum-stride calculation and canonical policy bytes.
-Legacy scoring policies retain their fixed launch clock.
+Both representations derive from this one budget. Quicknet adds less than one
+round of rounding. Actual chain speed can differ from its nominal interval;
+recovery must therefore handle drift, rather than require the two clocks to
+expire simultaneously. The new window identity binds the cohort, authorized
+work, attempt number, transport digest and exact verified issuance. It does not
+wait for a legacy selection-window opening. A fresh window is created only for
+new work or a certified replacement; retained requests replay unchanged.
 
-Changing only the stride preserves request deadlines, response and reveal
-allowances, authentication freshness, retry limits and reward settings. Extending
-the issue allowance instead would also extend the request's block deadline,
-which can exceed the cohort's already frozen evaluation close.
+Each reviewer retains its independently verified issuance proof before signing.
+The miner verifies its own issuance proof and current cohort authority before
+inference. Request IDs, case/video binding, origin authentication, nonce freshness,
+resource bounds and reviewer quorum remain mandatory. Per-item service work and
+benchmark endpoint work use the same clock calculation.
 
-For a future cohort, the issue allowance can be between 300 and 86,400 seconds.
-Extend the public signing and evaluation phases along with the transport clock;
-choose a cadence long enough for response, reveal and evidence collection.
-Authentication freshness remains unchanged: dispatch signs a fresh nonce when it
-claims each request. Longer queues do not make old authentication reusable.
+## Preserve and fence old attempts
 
-Future competition transports can also set `response_window_seconds` between
-300 and 3600. The default remains 300, preserving existing policy bytes. An
-18-hour issue allowance with `response_window_seconds=900` and
-`window_stride_blocks=7200` leaves 15 minutes after issue close for the last
-request to finish. The minimum stride calculation includes this response time.
-Compared with the default response window, 900 seconds moves response and reveal
-600 seconds later and increases the request's block deadline by 50 blocks.
-Recheck the public evaluation close and capacity with those deadlines. Legacy
-scoring policies retain their 300-second response window.
+Legacy `/1` request witnesses and `/1` retirement receipts retain their exact
+bytes and original interpretation. A `/1` no-response receipt still needs both
+original expiry conditions. Keep their decoders while any accepted assignment,
+recovery journal or replay consumer references them.
 
-Dispatch HTTP timeouts accept up to 900 seconds; their default remains 180. A
-615-second timeout for a 600-second inference allowance fits within the explicit
-900-second response window. Capacity admission charges the full configured HTTP
-timeout and checks the response and block deadlines before signing new work.
+The explicit `umi-endpoint-retirement/2` receipt instead reports
+`expired_response_opportunity`. Only the assigned miner may sign it, after the
+original response round has expired, its exact grant is retained, protocol work
+is durably fenced and the assignment lock has drained. Its no-response archive
+and receipt intent are frozen atomically with the fence. Interrupted signing
+recovers the same intent after restart without a new chain read. Retained
+responses still use their original signed bytes and cannot become absence.
 
-The 18-hour issue and 15-minute response profile also needs a larger scheduling
-journal budget. Configure `SchedulingCapacity.maximum_bytes=32 * 1024**3`
-consistently for its journal owners. The default remains 1 GiB and the ceiling is
-64 GiB. Reservations retain the full 4 MiB proof plus 64 KiB document allowance
-for every unobserved height through the request deadline, including announcement
-heights, as well as publication and outcome allowances. Unfinished or unknown
-claims keep their proof credit. Budget physical disk and operational reserve
-separately; the configured byte limit does not allocate disk space.
+Reviewers independently verify the exact request/grant/miner binding, the expiry
+observation, signature and fence before certifying a replacement. This extension
+does not authorize cancellation of a live response opportunity, reward missing
+work, or erase an unknown original transaction or execution outcome.
 
-A version-2 launch amendment with reason `extend_future_cohort_windows` names
-the first old cycle being replaced. It requires the evaluator quorum, preserves
-the original intake opening and eligible tracks, and cannot shorten any phase
-or the cadence. Apply it after the preceding cycle's validity ends and before
-the original next roster cutoff. The store rejects an extension of any already
-prepared or active cohort and retains prior rounds, receipts, checkpoint history
-and evidence. A quiesced migration fences stale writers. Version-1 amendments
-retain their existing bytes and first-cohort scope.
+## Select the compatible release
 
-A terms-changing successor policy uses a version-3 launch amendment with reason
-`start_successor_policy_series`. The predecessor intake archive retains the
-exact prior public launch body as well as its digest. The successor evaluator
-quorum signs the prior policy digest, prior launch digest, new launch identity
-and effective block together. The transition may change eligible tracks and
-the intake opening, but the prior launch must already be retired and the new
-schedule must remain inside the successor policy interval. Apply it only to a
-fresh successor ledger bound to that one immediate predecessor archive. The
-ledger retains the two launch identities and signed transition; archived
-admissions remain read-only and are not copied into the current submission log.
+Qualify delayed certification, legacy-window blackout, either clock expiring
+first, interrupted fence/signing, miner and reviewer restart, exact retained
+responses and completed native work. A process being active or a grant delivery
+receipt is insufficient. Keep the old allocation until a correct successor row
+is certified and its finalized submission is verified.
 
-Before signing, project the full intended miner count with measured costs,
-publication/signing delays, faster block progress, slower operations and recovery.
-Require explicit reserve against issue, response and block deadlines. Then run
-the actual host rehearsal with advancing clocks; a projection alone does not
-qualify a deployment. Apply only to future unconsumed cohorts; existing signed
-assignments keep their original deadlines.
+Update the canonical miner release manifest together with the compatible source
+and current connection guide. Existing miners use the same updater and retain
+their hotkey, model and private state. Do not issue extension requests to an old
+runtime that cannot verify them. Health capability fields are diagnostics, not
+proof of successful inference or admission.
 
-This produces a different transport digest. It requires a reviewed deployment,
-compatible miner and replay releases, signed connection inputs, and new state
-namespaces wherever journals bind the old transport. Older releases reject a
-stride that differs from their minimum-stride calculation. Preserve previous
-assignments, responses, receipts and nonce history during migration; changing a
-policy does not alter any outstanding assignment.
-
-Align the activation phase as well as the stride. Qualify capacity against each
-cohort's actual cutoff, the full pending workload, measured costs and fresh owned
-finality. Regression tests using prior timing bounds are not a fresh deployment
-or inference qualification. Published policies and running cohorts do not change
-when this source support is installed.
+For an unopened future policy, `ScoringPolicy.competition_transport` can set the
+legacy stride and time allowances. Such a policy changes its digest and requires
+new signed terms and binding inputs. It never alters accepted work from the
+predecessor policy. A stride adjustment alone cannot repair delayed certification
+or divergent expiry of an already retained request.

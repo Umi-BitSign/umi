@@ -16,7 +16,12 @@ from pathlib import Path
 
 from .config import Limits
 from .encoding import account_id32, raw_sha256
-from .endpoint_retirement import EndpointRetirementReceipt, SignedEndpointRetirementReceipt
+from .endpoint_retirement import (
+    EndpointRetirementReceipt,
+    ExpiredOpportunityRetirementReceipt,
+    SignedEndpointRetirementReceipt,
+    parse_retirement_receipt,
+)
 from .open_competition import identity, verify_signature
 from .protocol import TranslationRequest, base64url_decode, canonical_json_bytes, request_digest
 
@@ -649,11 +654,18 @@ class SQLiteMinerResourceLedger:
                 raise MinerResourceError("retirement_grant_conflict")
             return row is not None
 
-    def request_retirement(self, binding: MinerAssignmentBinding, grant_sha256: str) -> None:
+    def request_retirement(
+        self,
+        binding: MinerAssignmentBinding,
+        grant_sha256: str,
+        *,
+        expired_opportunity: bool = False,
+    ) -> None:
         """Fence new protocol work and reserve the response archive atomically.
 
-        An already running protocol task can finish before finalization. The
-        caller must hold its assignment lock before preparing the receipt.
+        An already running protocol task must drain before signing. A /2
+        intent freezes the archive and fence atomically, so restart needs no
+        new chain read to decide which expiry semantics were authorized.
         """
         raw_sha256(grant_sha256, field="grant digest")
         with self._transaction() as db:
@@ -701,41 +713,67 @@ class SQLiteMinerResourceLedger:
             )
             # Older miners must fail their schema check rather than ignore a fence.
             db.execute("UPDATE metadata SET value=? WHERE key='schema'", (_RETIREMENT_SCHEMA,))
+            if expired_opportunity:
+                self._prepare_retirement(db, binding, grant_sha256, expired_opportunity=True)
 
     def prepare_retirement(
-        self, binding: MinerAssignmentBinding, grant_sha256: str
+        self,
+        binding: MinerAssignmentBinding,
+        grant_sha256: str,
+        *,
+        expired_opportunity: bool = False,
     ) -> EndpointRetirementReceipt:
         """Freeze the exact response selection under the protocol assignment lock."""
         with self._transaction() as db:
-            row = self._retirement(db, binding)
-            if row is None or row["grant_sha256"] != grant_sha256:
-                raise MinerResourceError("retirement_not_requested")
-            archived = db.execute(
-                "SELECT * FROM response_recovery WHERE assignment_id=?", (binding.assignment_id,)
-            ).fetchone()
-            if archived is None:
-                raise MinerResourceError("retirement_archive_missing")
-            self._validate_recovery_binding(archived, binding)
-            response = self._recovery_response(archived)
-            body = EndpointRetirementReceipt(
-                schema="umi-endpoint-retirement/1",
-                grant_sha256=grant_sha256,
-                request_digest=binding.request_digest,
-                miner_hotkey=self._miner_hotkey,
-                evaluator_hotkey=binding.validator_hotkey,
-                result="no_response_retained" if response is None else "response_retained",
-                response_sha256=None
+            return self._prepare_retirement(
+                db, binding, grant_sha256, expired_opportunity=expired_opportunity
+            )
+
+    def _prepare_retirement(self, db, binding, grant_sha256, *, expired_opportunity):
+        row = self._retirement(db, binding)
+        if row is None or row["grant_sha256"] != grant_sha256:
+            raise MinerResourceError("retirement_not_requested")
+        archived = db.execute(
+            "SELECT * FROM response_recovery WHERE assignment_id=?", (binding.assignment_id,)
+        ).fetchone()
+        if archived is None:
+            raise MinerResourceError("retirement_archive_missing")
+        self._validate_recovery_binding(archived, binding)
+        response = self._recovery_response(archived)
+        # A signing interruption must recover the exact frozen receipt, even
+        # if either clock moves across the original block deadline later.
+        if row["receipt_intent"] is not None:
+            return parse_retirement_receipt(row["receipt_intent"])
+        receipt_type = (
+            ExpiredOpportunityRetirementReceipt
+            if expired_opportunity and response is None
+            else EndpointRetirementReceipt
+        )
+        body = receipt_type(
+            schema="umi-endpoint-retirement/2"
+            if receipt_type is ExpiredOpportunityRetirementReceipt
+            else "umi-endpoint-retirement/1",
+            grant_sha256=grant_sha256,
+            request_digest=binding.request_digest,
+            miner_hotkey=self._miner_hotkey,
+            evaluator_hotkey=binding.validator_hotkey,
+            result=(
+                "expired_response_opportunity"
+                if receipt_type is ExpiredOpportunityRetirementReceipt
+                else "no_response_retained"
                 if response is None
-                else hashlib.sha256(response.body).hexdigest(),
-            )
-            encoded = canonical_json_bytes(body)
-            if row["receipt_intent"] is not None and row["receipt_intent"] != encoded:
-                raise MinerResourceError("retirement_response_conflict")
-            db.execute(
-                "UPDATE request_retirements SET receipt_intent=? WHERE assignment_id=?",
-                (encoded, binding.assignment_id),
-            )
-            return body
+                else "response_retained"
+            ),
+            response_sha256=None if response is None else hashlib.sha256(response.body).hexdigest(),
+        )
+        encoded = canonical_json_bytes(body)
+        if row["receipt_intent"] is not None and row["receipt_intent"] != encoded:
+            raise MinerResourceError("retirement_response_conflict")
+        db.execute(
+            "UPDATE request_retirements SET receipt_intent=? WHERE assignment_id=?",
+            (encoded, binding.assignment_id),
+        )
+        return body
 
     def retirement_receipt(
         self, binding: MinerAssignmentBinding, grant_sha256: str
@@ -948,7 +986,7 @@ class SQLiteMinerResourceLedger:
             ):
                 raise MinerResourceError("retirement_archive_missing")
             if row["receipt_intent"] is not None:
-                body = EndpointRetirementReceipt.model_validate_json(row["receipt_intent"])
+                body = parse_retirement_receipt(row["receipt_intent"])
                 response = self._recovery_response(archived)
                 if (
                     canonical_json_bytes(body) != row["receipt_intent"]

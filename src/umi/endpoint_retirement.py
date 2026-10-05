@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from .open_competition import Hotkey, Signature, identity, verify_signature
 from .protocol import (
@@ -35,8 +35,49 @@ class EndpointRetirementReceipt(StrictProtocolModel):
         return self
 
 
+class ExpiredOpportunityRetirementReceipt(EndpointRetirementReceipt):
+    """The miner fenced an expired response opportunity, not an unexpired one.
+
+    This explicit extension never changes a retained /1 absence receipt. The
+    original block deadline may still be ahead, but no original protocol work
+    can execute after this durable, signed miner fence.
+    """
+
+    schema_: Literal["umi-endpoint-retirement/2"] = Field(alias="schema")
+    result: Literal["expired_response_opportunity"]
+    response_sha256: None = None
+
+
+RetirementReceipt = Annotated[
+    EndpointRetirementReceipt | ExpiredOpportunityRetirementReceipt,
+    Field(discriminator="schema_"),
+]
+_receipt_adapter = TypeAdapter(RetirementReceipt)
+
+
+def parse_retirement_receipt(raw):
+    return _receipt_adapter.validate_json(raw)
+
+
+def retirement_absence_elapsed(receipt, request, *, observed_block, observed_round):
+    """Verify the explicit semantics; never relax legacy /1 absence expiry."""
+    if type(observed_block) is not int or type(observed_round) is not int:
+        return False
+    if receipt.result == "no_response_retained":
+        return (
+            observed_block > request.deadline_block
+            and observed_round >= request.response_close_round
+        )
+    if receipt.result == "expired_response_opportunity":
+        return (
+            observed_block >= request.issued_block
+            and observed_round >= request.response_close_round
+        )
+    return False
+
+
 class SignedEndpointRetirementReceipt(StrictProtocolModel):
-    receipt: EndpointRetirementReceipt
+    receipt: RetirementReceipt
     signature: Signature
 
 

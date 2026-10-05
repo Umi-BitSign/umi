@@ -149,6 +149,29 @@ async def test_request_quorum_retains_proofs_and_recovers_offline(signing):
     assert len(s.calls) == 2
 
 
+async def test_elapsed_historical_window_does_not_freeze_new_intent(signing, monkeypatch):
+    import bittensor as bt
+
+    s = signing
+    worker = s.worker()
+    close = s.plan.body.requests[0].response_close_round
+    videos = tuple(request.video for request in s.plan.body.requests)
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: close)
+    with pytest.raises(OSError, match="response window already elapsed"):
+        await worker.initial(s.plan.assignment, s.plan.transport, videos)
+    assert not s.calls
+    with worker.signer.journal.journal.transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+
+    # The same assignment remains usable once a live window is available.
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: close - 1)
+    plan = await worker.initial(s.plan.assignment, s.plan.transport, videos)
+    assert plan.body.job == s.plan.body.job
+    assert all(request.response_close_round == close for request in plan.body.requests)
+    assert worker.signer.journal.load(request_slot(plan.body)).plan == plan
+    assert len(s.calls) == 1
+
+
 async def test_partial_signature_finishes_after_transport_expiry(signing, monkeypatch):
     s = signing
     s.fail_sign = True
@@ -473,3 +496,71 @@ async def test_request_capacity_can_grow_without_new_selection(signing):
     s.overrides = {"maximum_bytes": 128 * 1024**2}
     await s.signer().attest(s.plan)
     assert s.signer().journal.load(request_slot(s.plan.body)).plan == s.plan
+
+
+async def test_fresh_replacement_works_inside_legacy_blackout(signing, monkeypatch):
+    import bittensor as bt
+
+    from umi.competition_cohort_request_window import capture_request_window
+    from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, quicknet_round_at_ms
+
+    s, p = signing, signing.p
+    review = await s.d.evidence(index=1)
+    certificate = (
+        await coordinator(s.d).advance(p.retire_slot, review.retirement.case_id)
+    ).certificate
+    parent_bytes = canonical_json_bytes(p.grant)
+    template = next_grant(s.d, p.grant, review, certificate, monkeypatch)
+    legacy = template.attempt.order.requests[0]
+    issuance = p.finality.blocks[legacy.issued_block]
+    # Proof collection or an outage crossed the old fixed issuance opportunity.
+    issuance = replace(
+        issuance,
+        timestamp_ms=(QUICKNET_GENESIS_MS + (legacy.response_close_round + 1) * QUICKNET_PERIOD_MS),
+    )
+    p.finality.blocks[issuance.height] = issuance
+    monkeypatch.setattr(
+        bt.timelock, "current_round", lambda: quicknet_round_at_ms(issuance.timestamp_ms)
+    )
+    with pytest.raises(ValueError, match="outside its verified window"):
+        await capture_request_window(p.transport_policy, p.finality, issuance.height)
+
+    worker = s.worker()
+    worker.fresh_windows = True
+    plan = await worker.replacement(
+        p.grant,
+        certificate,
+        review.retirement.retirement,
+        p.transport_policy,
+        legacy.video,
+    )
+    request = plan.body.requests[0]
+    assert request.response_close_round > bt.timelock.current_round()
+    assert canonical_json_bytes(p.grant) == parent_bytes
+    # Both clock representations use exactly the same issuance and nominal budget.
+    round_ms = QUICKNET_GENESIS_MS + (request.response_close_round - 1) * QUICKNET_PERIOD_MS
+    block_ms = (request.deadline_block - request.issued_block) * (
+        p.transport_policy.clock.target_block_interval_seconds * 1000
+    )
+    assert 0 <= round_ms - issuance.timestamp_ms - block_ms < QUICKNET_PERIOD_MS
+    saved = worker.signer.journal.load(request_slot(plan.body))
+    assert saved.windows[0].schema_ == "umi-cohort-attempt-window/2"
+    # Restart the reviewer and replay the retained proof, before actual delivery.
+    assert await s.signer().recover(request_slot(plan.body)) == worker.signer.journal.vote(
+        request_slot(plan.body), worker.signer.journal.config.signer
+    )
+    outcome = await worker.advance(plan)
+    assert outcome.status == "certified"
+    selected = outcome.selection
+    dispatch = CohortEndpointDispatcher(p.delivery_recovery, p.finality)
+    result = await dispatch.dispatch(selection_slot(selected), plan.body.case_id)
+    assert result["status"] == "recovered", result
+    assert p.model.calls == 1
+    assert p.delivery_recovery.retained(selection_slot(selected), plan.body.case_id) is not None
+    transmissions = len(p.transmissions)
+    result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        selection_slot(selected), plan.body.case_id
+    )
+    assert result["status"] == "recovered"
+    assert p.model.calls == 1 and len(p.transmissions) == transmissions
+    assert canonical_json_bytes(p.grant) == parent_bytes

@@ -51,6 +51,7 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 class EndpointHostConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-endpoint-host/1"] = Field(alias="schema")
+    request_window_version: Literal[1, 2] = 1
     requests: EndpointRequestSignerConfig
     decisions: CohortEndpointDecisionConfig
     origins: CompetitionChainConfig
@@ -156,7 +157,11 @@ class EndpointHost:
             return await self.peer(who).decision_vote(review)
 
         requests = CohortEndpointRequestWorker(
-            self.signer, self.recovery, request_vote, video_source=video
+            self.signer,
+            self.recovery,
+            request_vote,
+            video_source=video,
+            fresh_windows=c.request_window_version == 2,
         )
         decisions = CohortEndpointCaseCoordinator(
             CohortEndpointRetirement(self.recovery),

@@ -11,7 +11,7 @@ from __future__ import annotations
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
 from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
-from .competition_cohort_request_window import EndpointRequestWindow
+from .competition_cohort_request_window import CohortAttemptRequestWindow, EndpointRequestWindow
 from .competition_cohort_service_grant import (
     ServiceMinerGrant,
     ServiceRequestBody,
@@ -102,7 +102,7 @@ class ServiceWorkRequests:
         claim: SignedServiceWorkClaim,
         evaluator: str,
         video: Video | None,
-        window: EndpointRequestWindow | None,
+        window: CohortAttemptRequestWindow | EndpointRequestWindow | None,
         source: CohortOrderHistory | None,
         capture: RegistrationCapture | None,
         *,

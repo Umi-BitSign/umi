@@ -43,6 +43,7 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_request_admission import CohortRequestWindowAuthority
 from .competition_cohort_service_grant import (
     ServiceMinerGrant,
     review_service_request_current,
@@ -445,8 +446,23 @@ class CohortMinerAuthorizationAuthority:
                 with self.journal.locked():
                     grant = await run_owned_thread(self._lookup, request, validator_hotkey)
                     before, _ = await self._current(grant)
+                    if isinstance(grant, ServiceMinerGrant):
+                        window_authority = CohortRequestWindowAuthority(
+                            policy=self.transport,
+                            finalized_blocks=self.finalized_blocks,
+                            job=grant.body.assignment,
+                            attempt_number=grant.body.attempt_number,
+                        )
+                    else:
+                        window_authority = CohortRequestWindowAuthority(
+                            policy=self.transport,
+                            finalized_blocks=self.finalized_blocks,
+                            job=grant.attempt.order.job,
+                            attempt_number=grant.attempt.order.attempt_number,
+                        )
                     admission = await wait_for_owned(
-                        self.legacy.authorize(request), timeout=self.config.read_timeout_seconds
+                        window_authority.authorize(request),
+                        timeout=self.config.read_timeout_seconds,
                     )
                     after, head = await self._current(grant)
                     if before != after:

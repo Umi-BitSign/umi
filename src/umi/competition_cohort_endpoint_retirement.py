@@ -29,7 +29,11 @@ from .concurrency import run_owned_thread
 from .config import Limits
 from .endpoint_protocol import COHORT_RETIRE_PATH
 from .endpoint_response_recovery import retrieve_endpoint_response
-from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
+from .endpoint_retirement import (
+    SignedEndpointRetirementReceipt,
+    retirement_absence_elapsed,
+    verify_retirement_receipt,
+)
 from .open_competition import digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import (
@@ -79,9 +83,11 @@ class CohortEndpointRetirement:
             miner_hotkey=job.submission.submission.hotkey,
             evaluator_hotkey=job.evaluator_hotkey,
         )
-        if receipt.receipt.result == "no_response_retained" and (
-            value.observed_block <= request.deadline_block
-            or value.observed_round < request.response_close_round
+        if receipt.receipt.result != "response_retained" and not retirement_absence_elapsed(
+            receipt.receipt,
+            request,
+            observed_block=value.observed_block,
+            observed_round=value.observed_round,
         ):
             raise ValueError("absence receipt precedes request expiry")
         return value

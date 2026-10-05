@@ -15,7 +15,7 @@ from pydantic import Field
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_clip_delivery import ClipDeliveryConfig, CohortClipDelivery
 from .competition_cohort_origin import CohortEndpointFinalityProvider
-from .competition_cohort_request_window import capture_request_window
+from .competition_cohort_request_window import capture_cohort_attempt_window, capture_request_window
 from .competition_cohort_service_authority import ServiceWorkAuthority
 from .competition_cohort_service_export import ServiceWorkExporter, ServiceWorkLookup
 from .competition_cohort_service_peers import ServiceWorkPeerReviews
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 class ServiceDispatchConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-service-dispatch-config/1"] = Field(alias="schema")
+    request_window_version: Literal[1, 2] = 1
     origins: CompetitionChainConfig
     clips: ClipDeliveryConfig
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
@@ -120,7 +121,18 @@ class ServiceDispatchHost:
             item = assignment.catalog.catalog.work[assignment.admission.ordinal - 1]
             video = await self.clips(item.video_sha256)
             height = await blocks.finalized_head_height()
-            window = await capture_request_window(source.transport, blocks, height)
+            if self.config.request_window_version == 2:
+                latest = await run_owned_thread(
+                    requests.latest,
+                    assignment.admission.claim,
+                    self.key.hotkey.ss58_address,
+                )
+                number = 1 if latest is None else latest.attempt_number + 1
+                window = await capture_cohort_attempt_window(
+                    source.transport, blocks, height, assignment, number
+                )
+            else:
+                window = await capture_request_window(source.transport, blocks, height)
             return ServiceRequestInputs(video=video, window=window)
 
         peers = ServiceWorkPeerReviews(

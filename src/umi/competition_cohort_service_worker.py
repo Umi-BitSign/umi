@@ -19,7 +19,7 @@ from functools import partial
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
 from .competition_cohort_order_signer import CohortOrderHistory
-from .competition_cohort_request_window import EndpointRequestWindow
+from .competition_cohort_request_window import CohortAttemptRequestWindow, EndpointRequestWindow
 from .competition_cohort_service_grant import (
     ServiceMinerGrant,
     ServiceRequestBody,
@@ -41,7 +41,7 @@ _RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError
 @dataclass(frozen=True)
 class ServiceRequestInputs:
     video: Video
-    window: EndpointRequestWindow
+    window: CohortAttemptRequestWindow | EndpointRequestWindow
 
 
 ServiceInputs = Callable[[ServiceWorkAssignment], Awaitable[ServiceRequestInputs]]

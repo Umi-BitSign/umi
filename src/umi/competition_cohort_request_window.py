@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .competition_cohort_attempt_clock import cohort_attempt_schedule
 from .competition_cohort_endpoint import endpoint_attempt_wire_ids
 from .miner_admission import ProofBackedMinerWindowAuthority
+from .open_competition import digest
 from .policy import LiveChainObservationPin, ScoringPolicy, scoring_policy_hash
 from .protocol import PROTOCOL_VERSION, Hex32, StrictProtocolModel, Task, TranslationRequest, Video
 from .validator_plans import MAX_FINALITY_EVIDENCE_BYTES, VerifiedFinalizedBlock
@@ -50,41 +52,7 @@ class RetainedRequestBlock(StrictProtocolModel):
         )
 
 
-class EndpointRequestWindow(StrictProtocolModel):
-    announcement: RetainedRequestBlock
-    issuance: RetainedRequestBlock
-
-    def schedule(self, transport: ScoringPolicy):
-        announcement, issuance = self.announcement.verified(), self.issuance.verified()
-        if issuance.height < transport.activation_block:
-            raise ValueError("request issuance precedes transport activation")
-        index = (
-            issuance.height - transport.activation_block
-        ) // transport.clock.window_stride_blocks
-        height = transport.activation_block + index * transport.clock.window_stride_blocks
-        # This native validator checks chain identity and finality verifier pins.
-        authority = ProofBackedMinerWindowAuthority(policy=transport, finalized_blocks=_NoReads())
-        authority._validate_verified_block(announcement, expected_height=height)
-        authority._validate_verified_block(issuance, expected_height=issuance.height)
-        clock = WindowClock(
-            activation_block=transport.activation_block,
-            **transport.clock.model_dump(
-                exclude={"weight_commit_buffer_blocks", "weight_commit_submission_blocks"}
-            ),
-        )
-        schedule = clock.derive(
-            index,
-            netuid=transport.netuid,
-            announcement_block_hash=announcement.block_hash,
-            announcement_timestamp_ms=announcement.timestamp_ms,
-            scoring_policy_hash=scoring_policy_hash(transport),
-        )
-        start = QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS
-        stop = QUICKNET_GENESIS_MS + (schedule.issue_close_round - 1) * QUICKNET_PERIOD_MS
-        if issuance.height <= schedule.closing_block or not start <= issuance.timestamp_ms < stop:
-            raise ValueError("request issuance is outside its verified window")
-        return schedule
-
+class _RequestWindowMethods:
     def check(self, request: TranslationRequest, transport: ScoringPolicy):
         schedule = self.schedule(transport)
         issuance = self.issuance
@@ -128,6 +96,70 @@ class EndpointRequestWindow(StrictProtocolModel):
         )
 
 
+class EndpointRequestWindow(_RequestWindowMethods, StrictProtocolModel):
+    announcement: RetainedRequestBlock
+    issuance: RetainedRequestBlock
+
+    def schedule(self, transport: ScoringPolicy):
+        announcement, issuance = self.announcement.verified(), self.issuance.verified()
+        if issuance.height < transport.activation_block:
+            raise ValueError("request issuance precedes transport activation")
+        index = (
+            issuance.height - transport.activation_block
+        ) // transport.clock.window_stride_blocks
+        height = transport.activation_block + index * transport.clock.window_stride_blocks
+        # This native validator checks chain identity and finality verifier pins.
+        authority = ProofBackedMinerWindowAuthority(policy=transport, finalized_blocks=_NoReads())
+        authority._validate_verified_block(announcement, expected_height=height)
+        authority._validate_verified_block(issuance, expected_height=issuance.height)
+        clock = WindowClock(
+            activation_block=transport.activation_block,
+            **transport.clock.model_dump(
+                exclude={"weight_commit_buffer_blocks", "weight_commit_submission_blocks"}
+            ),
+        )
+        schedule = clock.derive(
+            index,
+            netuid=transport.netuid,
+            announcement_block_hash=announcement.block_hash,
+            announcement_timestamp_ms=announcement.timestamp_ms,
+            scoring_policy_hash=scoring_policy_hash(transport),
+        )
+        start = QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS
+        stop = QUICKNET_GENESIS_MS + (schedule.issue_close_round - 1) * QUICKNET_PERIOD_MS
+        if issuance.height <= schedule.closing_block or not start <= issuance.timestamp_ms < stop:
+            raise ValueError("request issuance is outside its verified window")
+        return schedule
+
+
+class CohortAttemptRequestWindow(_RequestWindowMethods, StrictProtocolModel):
+    schema_: Literal["umi-cohort-attempt-window/2"] = Field(alias="schema")
+    issuance: RetainedRequestBlock
+    cohort_sha256: Hex32
+    job_sha256: Hex32
+    attempt_number: Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+    def schedule(self, transport: ScoringPolicy):
+        issuance = self.issuance.verified()
+        authority = ProofBackedMinerWindowAuthority(policy=transport, finalized_blocks=_NoReads())
+        authority._validate_verified_block(issuance, expected_height=issuance.height)
+        return cohort_attempt_schedule(
+            transport,
+            issuance,
+            cohort_sha256=self.cohort_sha256,
+            job_sha256=self.job_sha256,
+            attempt_number=self.attempt_number,
+        )
+
+    def check_context(self, job, attempt_number):
+        if (
+            self.cohort_sha256 != job.round.cohort_sha256
+            or self.job_sha256 != digest(job)
+            or self.attempt_number != attempt_number
+        ):
+            raise ValueError("attempt window differs from its authorized job")
+
+
 class _NoReads:
     """Only policy-pin validation is used during offline replay."""
 
@@ -158,3 +190,38 @@ async def capture_request_window(transport, finalized_blocks, issued_block):
         raise ValueError("request window port returned another issuance")
     window.schedule(transport)
     return window
+
+
+async def capture_cohort_attempt_window(
+    transport, finalized_blocks, issued_block, job, attempt_number
+):
+    head = await finalized_blocks.finalized_head_height()
+    if type(issued_block) is not int or type(head) is not int or head < issued_block:
+        raise OSError("attempt issuance is not finalized")
+    issuance = await finalized_blocks.verified_block_at(issued_block)
+    if issuance is None:
+        raise OSError("attempt issuance proof unavailable")
+    window = CohortAttemptRequestWindow(
+        schema="umi-cohort-attempt-window/2",
+        issuance=RetainedRequestBlock.capture(issuance),
+        cohort_sha256=job.round.cohort_sha256,
+        job_sha256=digest(job),
+        attempt_number=attempt_number,
+    )
+    if window.issuance.height != issued_block:
+        raise ValueError("attempt window port returned another issuance")
+    window.schedule(transport)
+    return window
+
+
+async def capture_plan_request_window(plan, finalized_blocks, issued_block):
+    window = await capture_cohort_attempt_window(
+        plan.transport, finalized_blocks, issued_block, plan.body.job, plan.body.attempt_number
+    )
+    requests = [r for r in plan.body.requests if r.issued_block == issued_block]
+    if requests and all(r.window_id == window.schedule(plan.transport).window_id for r in requests):
+        for request in requests:
+            window.check(request, plan.transport)
+        return window
+    # Existing requests retain their exact original proof shape and semantics.
+    return await capture_request_window(plan.transport, finalized_blocks, issued_block)

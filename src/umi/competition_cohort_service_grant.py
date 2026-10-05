@@ -18,7 +18,7 @@ from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpoint
 from .competition_cohort_intake import history_tip
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import verify_recovery_quorum
-from .competition_cohort_request_window import EndpointRequestWindow
+from .competition_cohort_request_window import CohortAttemptRequestWindow, EndpointRequestWindow
 from .competition_cohort_service_work import (
     MAX_SERVICE_REQUEST_BYTES,
     ServiceWorkAssignment,
@@ -46,7 +46,7 @@ class ServiceRequestBody(StrictProtocolModel):
     evaluator_hotkey: Hotkey
     attempt_number: Annotated[int, Field(ge=1, le=2**53 - 1)] = 1
     request: TranslationRequest
-    window: EndpointRequestWindow
+    window: CohortAttemptRequestWindow | EndpointRequestWindow
     parent_grant_slot: Hex32 | None = None
     parent_grant_sha256: Hex32 | None = None
     prior_decision: SignedCohortEndpointCaseDecision | None = None
@@ -149,6 +149,8 @@ def validate_service_body(
         service_wire_ids(assignment, body.evaluator_hotkey, body.attempt_number),
         transport,
     )
+    if isinstance(body.window, CohortAttemptRequestWindow):
+        body.window.check_context(assignment, body.attempt_number)
     body.window.check(body.request, transport)
     if body.attempt_number > 1:
         prior = body.prior_decision.decision
@@ -165,7 +167,8 @@ def validate_service_body(
             or prior.attempt_number + 1 != body.attempt_number
             or prior.disposition != "retry_required"
             or prior.response_sha256 is not None
-            or retirement.receipt.result != "no_response_retained"
+            or retirement.receipt.result
+            not in {"no_response_retained", "expired_response_opportunity"}
             or retirement.receipt.response_sha256 is not None
         ):
             raise ValueError("service replacement lacks certified unresolved work")
