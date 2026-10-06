@@ -55,6 +55,11 @@ than silently accepting changed content. The record is host bookkeeping and is
 not part of the published model bundle. Current policy, authorization and chain
 state checks still run.
 
+During legacy upload completion, each finished staging file likewise retains a
+private verification record. Later completion passes and restarted uploaders
+reuse it while other files are still arriving. These temporary records are
+removed with the upload staging tree after the complete archive is preserved.
+
 For a cohort whose signed model-delivery profile selects direct R2 multipart
 delivery, acceptance version 2 also carries the owner's signed immutable R2
 reservation. Before publishing acceptance, the owner uses server-side multipart

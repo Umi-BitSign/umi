@@ -22,6 +22,7 @@ from .competition_artifacts import (
     _artifact,
     _copy_verified,
     _directory,
+    _file_identity,
     preserve_bundle,
     verify_preserved_bundle,
 )
@@ -103,6 +104,16 @@ class ModelUploadChunk(StrictProtocolModel):
     offset: Annotated[int, Field(ge=0, le=1024**4)]
     size_bytes: Annotated[int, Field(ge=0, le=CHUNK_BYTES)]
     sha256: Hex32
+
+
+class CompletedUploadFileVerification(StrictProtocolModel):
+    """Private host verification of one completed immutable staging file."""
+
+    schema_: Literal["umi-completed-upload-file-verification/1"] = Field(alias="schema")
+    model_sha256: Hex32
+    file_index: Annotated[int, Field(ge=0, lt=4096)]
+    artifact_sha256: Hex32
+    file_identity: Annotated[tuple[str, ...], Field(min_length=9, max_length=9)]
 
 
 def authorize_model_delivery(
@@ -248,8 +259,50 @@ class CohortModelUploads:
             raise ValueError("unsafe completed model staging directory")
         shutil.rmtree(model)
         ensure_private_directory(model)
+        for index in range(len(bundle.files)):
+            (staging / ("verified-file-" + str(index) + ".json")).unlink(missing_ok=True)
         with _directory(staging) as descriptor:
             os.fsync(descriptor)
+
+    def _completed_file_verification(self, bundle, index, info):
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o400:
+            raise ValueError("completed upload file must be owned and sealed")
+        return CompletedUploadFileVerification(
+            schema="umi-completed-upload-file-verification/1",
+            model_sha256=digest(bundle),
+            file_index=index,
+            artifact_sha256=bundle.files[index].sha256,
+            file_identity=tuple(_file_identity(info)),
+        )
+
+    def _remember_completed_file(self, bundle, staging, index, stream):
+        publish_private_model(
+            staging / ("verified-file-" + str(index) + ".json"),
+            self._completed_file_verification(bundle, index, os.fstat(stream.fileno())),
+            maximum_bytes=8192,
+        )
+
+    def _verify_completed_file(self, bundle, staging, index, stream):
+        try:
+            retained = read_private_model(
+                staging / ("verified-file-" + str(index) + ".json"),
+                CompletedUploadFileVerification,
+                maximum_bytes=8192,
+            )
+        except FileNotFoundError:
+            retained = None
+        if retained is not None:
+            if retained != self._completed_file_verification(
+                bundle, index, os.fstat(stream.fileno())
+            ):
+                raise ValueError("completed upload file changed after verification")
+            return
+        # Older completed files or a crash before publishing the record require
+        # one verification, after which subsequent completion passes reuse it.
+        _copy_verified(stream, bundle.files[index], None)
+        os.fchmod(stream.fileno(), 0o400)
+        os.fsync(stream.fileno())
+        self._remember_completed_file(bundle, staging, index, stream)
 
     def put_chunk(self, chunk: ModelUploadChunk, signature: Signature, data: bytes):
         chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
@@ -321,9 +374,7 @@ class CohortModelUploads:
                         _directory(staging / "model") as descriptor,
                         _artifact(descriptor, record) as (stream, _),
                     ):
-                        _copy_verified(stream, record, None)
-                        os.fchmod(stream.fileno(), 0o400)
-                        os.fsync(stream.fileno())
+                        self._verify_completed_file(bundle, staging, index, stream)
                     continue
                 partial = staging / ("partial-" + str(index))
                 try:
@@ -358,6 +409,7 @@ class CohortModelUploads:
                         os.fsync(descriptor)
                     with _directory(staging) as descriptor:
                         os.fsync(descriptor)
+                    self._remember_completed_file(bundle, staging, index, stream)
             preserve_bundle(bundle, staging / "model", self.archive, self.intake.policy)
             self._release_preserved_staging(bundle, staging)
             return True

@@ -120,6 +120,51 @@ def upload_all(h, owner, key):
     assert owner.poll_once()["models_preserved"] == 1
 
 
+def test_completed_upload_prefix_is_not_rehashed_after_restart(delivery, monkeypatch):
+    from umi import competition_cohort_model_upload as upload
+
+    h = delivery
+    owner = h.owner
+    key = owner.reserve(h.request, capture_at(210))
+    bundle = h.request.signed_submission.submission.model_bundle
+    first = bundle.files[0]
+    put(owner, key, 0, (h.source / first.path).read_bytes())
+    assert not owner.complete(key)
+
+    def rehash_forbidden(*args, **kwargs):
+        raise AssertionError("completed upload prefix was hashed again")
+
+    monkeypatch.setattr(upload, "_copy_verified", rehash_forbidden)
+    # A new uploader instance has no in-memory state to trust.
+    restarted = CohortModelUploads(owner.config, owner.intake, owner.archive)
+    assert not restarted.complete(key)
+    assert not restarted.complete(key)
+
+
+def test_changed_completed_upload_prefix_cannot_reuse_verification(delivery, monkeypatch):
+    from umi import competition_cohort_model_upload as upload
+
+    h = delivery
+    owner = h.owner
+    key = owner.reserve(h.request, capture_at(210))
+    bundle = h.request.signed_submission.submission.model_bundle
+    first = bundle.files[0]
+    put(owner, key, 0, (h.source / first.path).read_bytes())
+    assert not owner.complete(key)
+    _, staging = owner._paths(key)
+    target = staging / "model" / first.path
+    target.chmod(0o600)
+    target.write_bytes(b"x" * target.stat().st_size)
+    target.chmod(0o400)
+
+    def rehash_forbidden(*args, **kwargs):
+        raise AssertionError("changed content was hashed instead of held")
+
+    monkeypatch.setattr(upload, "_copy_verified", rehash_forbidden)
+    with pytest.raises(ValueError, match="changed after verification"):
+        owner.complete(key)
+
+
 def assert_staging_released(owner, key):
     _, staging = owner._paths(key)
     assert list((staging / "model").iterdir()) == []
