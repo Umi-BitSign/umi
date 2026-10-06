@@ -1787,6 +1787,13 @@ drains that work before returning. Every response retains its fresh challenge,
 owner signature, cohort binding and complete native input checks. No signature,
 authority, finality or schema-validation result is cached.
 
+Authenticated owner-history reads receive bounded preference at the intake
+thread gate. They can pass queued background operations, but at most eight
+preferred reads run before queued normal work gets a turn. Each queue keeps FIFO
+order; recursive entry retains the current owner. The original filesystem lock,
+database ownership and binding checks still run under exclusive admission. The
+gate stores waiting tickets only, never payloads or authority results.
+
 Origin confirmation checks authenticated cohort history before and after its
 owned finalized observation. If another operation advances the shared journal
 while that history check waits, confirmation recollects finality once and repeats

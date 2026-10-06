@@ -12,7 +12,6 @@ import fcntl
 import os
 import sqlite3
 import stat
-import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing, contextmanager
@@ -48,6 +47,7 @@ from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .thread_gate import ThreadGate
 
 
 class CohortIntakeBinding(StrictProtocolModel):
@@ -159,7 +159,7 @@ class CohortIntake:
         # File locks serialize this ledger across processes. Queue callers from
         # this process first so concurrent API, lifecycle and review threads do
         # not consume the external-lock timeout while one sibling owns it.
-        self._process_lock = threading.RLock()
+        self._process_lock = ThreadGate()
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
@@ -197,11 +197,15 @@ class CohortIntake:
         return fd
 
     @contextmanager
-    def _connection(self):
+    def _connection(self, *, prefer_history: bool = False):
         # Replaying a whole accepted roster repeats identical canonical inputs.
         # Reuse serialization only while this operation owns the current state;
         # every schema, signature and authority check still runs on each read.
-        with self._process_lock, canonical_json_reuse(), self._exclusive_connection() as value:
+        with (
+            self._process_lock.hold(preferred=prefer_history),
+            canonical_json_reuse(),
+            self._exclusive_connection() as value,
+        ):
             yield value
 
     @contextmanager
