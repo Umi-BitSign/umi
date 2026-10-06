@@ -1380,6 +1380,10 @@ requires current authenticated phase history and the miner's own finalized
 transport-window validation. Cohort signatures cannot override issuance hashes,
 window IDs, reveal rounds or request deadlines. Local replay has no overall
 network timeout. Temporary source or storage-capacity failures remain retryable.
+Clip transport read, connection and timeout failures also leave work pending
+without stopping the endpoint scheduler. Retrying reuses the retained capability
+and clip bytes. A lost upload acknowledgement is checked against the same object
+before another upload; digest or size mismatches still fail verification.
 
 The evaluator's `CohortEndpointRetirement` authenticates the original request to
 `POST /v1/competition/cohorts/assignments/retire` at its freshly proved origin.
