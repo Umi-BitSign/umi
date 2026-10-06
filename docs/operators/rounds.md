@@ -1749,6 +1749,16 @@ signing. Response signatures are checked against the exact submitted body.
 Both finality observers and all workers drain before releasing the host key and
 exclusive lease.
 
+Case batches prioritize assignments with a durable signed request selection over
+registered assignments still waiting for preparation. The independent inbox
+cursor continues preparing those registrations; priority does not authorize a
+request, erase an obligation or change either cursor's durable rotation.
+
+Retained execution and request-journal operations reuse only successful canonical
+serialization within one bounded operation. They still parse current stored
+content and run signature, policy, history and binding checks. Reuse closes at
+operation return and never acts as an authorization or freshness cache.
+
 Scheduler reports retain up to eight distinct `retry_examples` with the stage,
 exception type and source frames. These supplement the last retry so a later
 preparation failure cannot hide an earlier case failure. They omit exception

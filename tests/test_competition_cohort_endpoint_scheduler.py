@@ -308,6 +308,30 @@ async def test_unavailable_miner_does_not_starve_peer_after_restart(scheduled):
     assert len(rows) == 1
 
 
+async def test_selected_request_precedes_unprepared_assignment_after_cursor_wrap(scheduled):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    worker.schedule.register(q.p.e.box.assignment(other), q.p.transport_policy)
+    # The ordinary cursor would select the unrelated assignment first. Its
+    # registration alone is not a runnable, signed request selection.
+    with worker.schedule.journal.transaction() as db:
+        db.execute(
+            "INSERT INTO endpoint_schedule_cursor VALUES ('cases',?) "
+            "ON CONFLICT(name) DO UPDATE SET position=excluded.position",
+            (q.slot,),
+        )
+    rows = worker.schedule.pending(1)
+    assert len(rows) == 1 and rows[0][1] == q.slot
+    assert worker.schedule.load(other) is not None
+    assert worker.schedule.journal.get("endpoint_recovery_selection", other) is None
+    assert q.p.model.calls == 0
+    terminal, _ = await finish(q, maximum_polls=16, batch_size=1, concurrency=1)
+    assert terminal is not None
+    assert worker.schedule.complete(other) is None
+
+
 async def test_queue_selects_one_case_per_assignment_and_rotates_durably(scheduled):
     q = scheduled
     other = await add_second_assignment(q)

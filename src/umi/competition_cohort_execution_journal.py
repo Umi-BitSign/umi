@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_execution import RecoverableExecutionEvidence, RecoverableExecutionJob
 from .competition_cohort_order_queue import SignedOrderDeliveryReceipt, check_delivery_receipt
 from .competition_cohort_order_signer import (
@@ -187,6 +188,7 @@ class CohortExecutionJournal:
         self.journal.put_many((("assignment", slot, value),), index=index)
         return job
 
+    @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:
         value = self.journal.get("assignment", slot)
         if value is None:
@@ -375,6 +377,7 @@ class CohortExecutionJournal:
             ),
         )
 
+    @canonical_json_reuse()
     def evidence(self, slot: str) -> RecoverableExecutionEvidence | None:
         assignment = self.assignment(slot)
         job = self.validate_assignment(assignment)

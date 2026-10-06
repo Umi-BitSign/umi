@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_endpoint import (
     RecoverableEndpointOrder,
@@ -208,6 +209,7 @@ class EndpointRequestJournal:
             window.check(request, plan.transport)
         return value
 
+    @canonical_json_reuse()
     def load(self, slot):
         raw = self.journal.get("request_intent", slot)
         if raw is None:
@@ -271,6 +273,7 @@ class EndpointRequestJournal:
             raise ValueError("request vote changed its reviewer key")
         return signature
 
+    @canonical_json_reuse()
     def collect(self, slot, signature):
         intent = self.load(slot)
         if intent is None:
@@ -301,6 +304,7 @@ class EndpointRequestJournal:
             raise ValueError("request certificate differs from retained intent")
         return value
 
+    @canonical_json_reuse()
     def certify(self, slot):
         old = self.certificate(slot)
         if old is not None:

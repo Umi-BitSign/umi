@@ -144,12 +144,18 @@ class CohortEndpointSchedule:
                 "SELECT position FROM endpoint_schedule_cursor WHERE name='cases'"
             ).fetchone()
             cursor = "" if row is None else row[0]
+            # Prioritize durable selected requests over registered assignments
+            # still awaiting preparation. The inbox cursor independently revisits
+            # those assignments; they cannot displace dispatch/recovery work.
             # Rotate assignments and each assignment's cases independently.
             # A global obligation cursor can repeatedly wrap past all but the
             # first case of an assignment when another has larger hashes.
             rows = db.execute(
                 "WITH pending AS (SELECT q.obligation,q.slot,q.case_id,"
                 "CASE WHEN q.slot>? THEN 0 ELSE 1 END AS band,"
+                "CASE WHEN EXISTS (SELECT 1 FROM records s "
+                "WHERE s.kind='endpoint_recovery_selection' AND s.id=q.slot) "
+                "THEN 0 ELSE 1 END AS ready_band,"
                 "ROW_NUMBER() OVER (PARTITION BY q.slot ORDER BY "
                 "CASE WHEN q.obligation>COALESCE(c.position,'') THEN 0 ELSE 1 END,"
                 "q.obligation) AS rank "
@@ -158,7 +164,7 @@ class CohortEndpointSchedule:
                 "(SELECT 1 FROM records r WHERE r.kind='endpoint_terminal_case' "
                 "AND r.id=q.obligation)) "
                 "SELECT obligation,slot,case_id FROM pending WHERE rank=1 "
-                "ORDER BY band,slot LIMIT ?",
+                "ORDER BY ready_band,band,slot LIMIT ?",
                 (cursor, limit),
             ).fetchall()
             if rows:
