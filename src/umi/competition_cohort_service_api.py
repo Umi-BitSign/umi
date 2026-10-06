@@ -46,6 +46,7 @@ from .competition_registration_archive import (
     MAX_METADATA_BYTES,
     RegistrationArchive,
 )
+from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .private_files import PrivateStateBusyError
@@ -307,13 +308,37 @@ class ServiceWorkAdmissionAPI:
             expected_tip_sha256=history_tip(source.history),
             index=index,
         )
-        if self.intake is None:
-            # In-process fixtures or a host with equivalent external ownership.
-            return admit()
-        with self.intake._connection() as (_, store):
-            if store.published_history(digest(source.history.plan)) != source.history:
-                raise OSError("intake published history changed before service admission")
-            return admit()
+        with canonical_json_reuse():
+            if self.intake is None:
+                # In-process fixtures or a host with equivalent external ownership.
+                return admit()
+            with self.intake._connection() as (_, store):
+                if store.published_history(digest(source.history.plan)) != source.history:
+                    raise OSError("intake published history changed before service admission")
+                return admit()
+
+    async def _commit_current(
+        self, queue, signed, submission, participant, source, capture, raw, metadata
+    ):
+        try:
+            return await run_owned_thread(
+                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
+            )
+        except FinalizedHeadRegression:
+            # Preparation and the last history fetch may outlive a shared head.
+            # Keep the already verified immutable roster, but recollect current
+            # history before the new owned capture. The locked commit still
+            # checks publication and replays participant, phase and proof binding.
+            # Retry only once: a genuinely lagging provider must remain held.
+            await self._unchanged(queue, source)
+            capture = await self._call(self.capture())
+            await run_owned_thread(self._remember, queue, source, capture)
+            boundary = execution_boundary(capture)
+            raw, metadata = await self._call(self.archive(boundary))
+            await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
+            return await run_owned_thread(
+                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
+            )
 
     async def admit(self, catalog: str, signed: SignedServiceWorkClaim):
         queue = self.selected(catalog)
@@ -344,8 +369,7 @@ class ServiceWorkAdmissionAPI:
                 raw, metadata = await self._call(self.archive(boundary))
                 await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
                 await self._unchanged(queue, source)
-                admission = await run_owned_thread(
-                    self._commit,
+                admission = await self._commit_current(
                     queue,
                     signed,
                     member.record.request.signed_submission,

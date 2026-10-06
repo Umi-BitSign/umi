@@ -643,9 +643,15 @@ previous thread and yield the listener between attempts. Cancellation releases
 the admission owner after thread cleanup. Permission, I/O, record-validation and
 authority failures are not retried by this mutex wait. The final claim commit
 still checks the current published history under the intake lock; waiting does
-not authorize stale history or change accepted claims. Capacity and history
-reads reuse canonical serialization only within their synchronous operation,
-without caching validation, signatures or admission decisions.
+not authorize stale history or change accepted claims. If another owned operation
+advances the shared finalized head during preparation, the claim recollects once:
+it checks that history is unchanged, obtains a fresh owned registration capture
+and its exact archive, and repeats the locked native admission. The verified
+original roster is retained; current participant eligibility, certified phase,
+publication and proof binding are checked again. A lagging provider or a second
+head advance holds the unchanged signed claim for a later retry. Capacity, history
+reads and the synchronous commit reuse canonical serialization only within their
+operation, without caching validation, signatures or admission decisions.
 
 The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
