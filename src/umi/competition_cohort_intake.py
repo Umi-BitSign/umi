@@ -32,6 +32,7 @@ from .competition_cohort_intake_records import (
 )
 from .competition_cohort_intake_seal import (
     CohortIntakeSeal,
+    _build_intake_seal_from_participations,
     build_intake_seal,
     verify_intake_closure,
 )
@@ -489,6 +490,10 @@ class CohortIntake:
             return self._receipt(raw, store, request)
 
     def _records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
+        for consent, raw, _ in self._parsed_records(db, history, track=track, hotkey=hotkey):
+            yield consent, raw
+
+    def _parsed_records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
         tips = {digest(history.genesis), *(digest(s.transition) for s in history.transitions)}
         clauses = ["cohort=?"]
         parameters = [digest(history.plan)]
@@ -519,7 +524,7 @@ class CohortIntake:
             ):
                 raise ValueError("retained consent index differs from its body")
             if tip in tips:
-                yield consent, raw
+                yield consent, raw, retained
 
     def _seal(self, db, history, tip):
         row = db.execute(
@@ -538,17 +543,22 @@ class CohortIntake:
         if tip not in tips:
             raise ValueError("sealed intake does not belong to the current history")
         prefix = history.model_copy(update={"transitions": history.transitions[: tips.index(tip)]})
-        expected = build_intake_seal(
+        expected = _build_intake_seal_from_participations(
             prefix,
             self.policy,
             seal.observation,
             seal.snapshot,
-            self._records(db, prefix),
+            ((key, retained) for key, _, retained in self._parsed_records(db, prefix)),
             expected_tip_sha256=tip,
         )
         if seal != expected:
             raise ValueError("retained intake seal differs from its original records")
-        model_acceptances_for_seal(db, seal, prefix, self.policy, self._records(db, prefix))
+        # The complete membership above already replays every endpoint and model.
+        # Model acceptance verification needs only original model records and
+        # still validates the indexed track before using their certificates.
+        model_acceptances_for_seal(
+            db, seal, prefix, self.policy, self._records(db, prefix, track="model")
+        )
         return seal
 
     def sealed(self, cohort: str, tip: str | None = None) -> CohortIntakeSeal | None:

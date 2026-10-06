@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,7 +122,7 @@ def test_miner_command_preserves_existing_cohort_state_paths(tmp_path: Path) -> 
         "8091",
     ]
     result = upgrade.miner_command(current, "/new/bin/python", tmp_path, manifest)
-    assert result[:3] == ["/new/bin/python", "-m", "umi.miner"]
+    assert result[:5] == ["/new/bin/python", "-I", "-B", "-m", "umi.miner"]
     assert upgrade.option(result, "--nonce-db") == "/old/nonces.sqlite3"
     assert upgrade.option(result, "--assignment-db") == "/old/assignments.sqlite3"
     assert upgrade.option(result, "--finality-state") == "/old/finality.sqlite3"
@@ -158,6 +159,52 @@ def test_python_module_entrypoint_accepts_interpreter_flags(tmp_path: Path) -> N
     assert result[:5] == ["/new/bin/python", "-I", "-B", "-m", "umi.miner"]
     assert upgrade.miner_python(current) == "/old/bin/python"
     assert not upgrade.python_module_miner(["/bin/sh", "-m", "umi.miner"])
+
+
+@pytest.mark.parametrize("console", [False, True])
+def test_upgraded_miner_imports_selected_runtime_despite_old_source_environment(
+    tmp_path: Path, console: bool
+) -> None:
+    runtime = tmp_path / "runtime"
+    venv.EnvBuilder(with_pip=False).create(runtime)
+    python = runtime / "bin/python"
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site = runtime / "lib" / version / "site-packages"
+    old = tmp_path / "old-source"
+    for root, label in ((site, "selected"), (old, "old")):
+        package = root / "umi"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "miner.py").write_text(
+            "import json, os; print(json.dumps({'source': "
+            + repr(label)
+            + ", 'working_directory': os.getcwd()}))"
+        )
+    environment = dict(os.environ, PYTHONPATH=str(old), PYTHONDONTWRITEBYTECODE="1")
+    environment.pop("PYTHONHOME", None)
+    baseline = subprocess.run(
+        [str(python), "-m", "umi.miner"],
+        cwd=old,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert json.loads(baseline.stdout)["source"] == "old"
+    environment["PYTHONHOME"] = str(old / "obsolete-python")
+    current = ["/old/bin/umi-miner"] if console else ["/old/bin/python", "-m", "umi.miner"]
+    command = upgrade.miner_command(current, str(python), tmp_path / "state", _manifest())
+    result = subprocess.run(
+        command,
+        cwd=old,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert json.loads(result.stdout) == {"source": "selected", "working_directory": str(old)}
 
 
 def test_startup_binds_current_cohort_and_track_independent_identity(tmp_path: Path) -> None:
@@ -663,7 +710,16 @@ def test_model_only_upgrade_records_intent_without_touching_endpoint(
 @pytest.mark.parametrize("public_track", ["no", "yes"])
 @pytest.mark.parametrize("layout", ["standard", "manual_cohort"])
 @pytest.mark.parametrize(
-    "prior_runtime", ["old", "missing", "current", "rolled_back", "legacy", "missing_transport"]
+    "prior_runtime",
+    [
+        "old",
+        "missing",
+        "current",
+        "current_unisolated",
+        "rolled_back",
+        "legacy",
+        "missing_transport",
+    ],
 )
 def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     prior_runtime: str,
@@ -684,7 +740,7 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     )
     actual_python = (
         target_python
-        if prior_runtime in {"current", "missing_transport"}
+        if prior_runtime in {"current", "current_unisolated", "missing_transport"}
         else tmp_path / "old/bin/python"
     )
     if prior_runtime == "legacy":
@@ -704,6 +760,8 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
         "--hotkey",
         "miner",
     ]
+    if prior_runtime != "current_unisolated":
+        arguments[1:1] = ["-I", "-B"]
     miner = upgrade.Service("umi-miner.service", 10, "miner", arguments)
     account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="miner")
     root = tmp_path / "state"

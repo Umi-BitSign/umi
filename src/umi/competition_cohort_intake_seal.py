@@ -15,7 +15,11 @@ from pydantic import Field, model_validator
 
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
-from .competition_cohort_intake_records import read_participation, replay_participation
+from .competition_cohort_intake_records import (
+    RetainedCohortParticipation,
+    read_participation,
+    replay_participation,
+)
 from .competition_cohort_recovery import CohortRecoveryTransition, verify_recovery_quorum
 from .competition_execution import ExecutionBoundary
 from .open_competition import (
@@ -79,6 +83,33 @@ def build_intake_seal(
     *,
     expected_tip_sha256: str,
 ) -> CohortIntakeSeal:
+    return _build_intake_seal_from_participations(
+        history,
+        policy,
+        observation,
+        snapshot,
+        ((key, read_participation(raw)) for key, raw in records),
+        expected_tip_sha256=expected_tip_sha256,
+    )
+
+
+def _build_intake_seal_from_participations(
+    history: CohortRecoveryHistory,
+    policy: CompetitionPolicy,
+    observation: ExecutionBoundary,
+    snapshot: RegistrationSnapshot,
+    records: Iterable[tuple[str, RetainedCohortParticipation]],
+    *,
+    expected_tip_sha256: str,
+) -> CohortIntakeSeal:
+    """Replay native decoded records from the caller's current locked snapshot.
+
+    The public byte boundary above still parses every record. The intake owner
+    already parses its rows to verify their indexes and can pass those models
+    directly, avoiding a second decode of each large registration snapshot.
+    Admission signatures, history and registration checks still run per record.
+    No parsed model or authority decision is retained between operations.
+    """
     view = verify_cohort_history(
         history,
         policy,
@@ -94,8 +125,7 @@ def build_intake_seal(
     previous = ""
     count = 0
     hasher = hashlib.sha256(b"umi-cohort-intake-records-v1\0")
-    for key, raw in records:
-        retained = read_participation(raw)
+    for key, retained in records:
         admission = replay_participation(retained, history, policy)
         if (
             key <= previous
