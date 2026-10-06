@@ -25,6 +25,30 @@ The supervisor reuses immutable package verification within one process, checkin
 all file bytes and bounds on each load. Restart verifies the package again. Reward
 authority and current chain state are checked separately for each execution.
 
+While the chain weight interval is pending, an already stopped supervisor may
+reuse its completed transaction audit only within the same process and while the
+registry, weight journal and every audited sealed package remain unchanged.
+Container absence is checked again, and startup still collects a fresh owned
+proof and repeats all preflight gates. Changed inputs, uncertain state or process
+restart require full recovery. Waiting never authorizes a transaction.
+
+Public cohort authority reads have two signing slots and wait up to30 seconds
+for capacity (bounded by the exporter timeout). A queued read rechecks that its
+owner is still selected before signing. Every fresh challenge and complete native
+history still verifies; an offline owner or changed signer remains a503 hold.
+
+The outer API capacity wait is an operational setting, separate from economic
+policy, and can be configured up to120 seconds. A busy host can use a60-second
+wait without increasing concurrent reads, submissions or registration captures.
+Queued requests perform their normal admission checks after acquiring a slot;
+waiting does not create a receipt or bypass freshness, proof or capacity checks.
+
+HTTP services allow five minutes for request shutdown before cancellation and
+retain ownership until durable cleanup finishes. Original provider/task failures
+are reported before cleanup begins and survive a shutdown grace timeout, without
+exception messages or private inputs.
+A listening port and an active process do not establish certified completion.
+
 ### Worker source fixes for an existing certified allocation
 
 A certified allocation can pin an older OCI release. An approved source fix

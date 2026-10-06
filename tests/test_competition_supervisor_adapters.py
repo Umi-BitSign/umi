@@ -904,6 +904,38 @@ async def test_weight_start_needs_separate_authority_and_fixed_mode(adapter_case
     assert not case.item.encoded  # The host adapter has no signing or broadcast code.
 
 
+async def test_rate_wait_reuses_unchanged_audit_but_requires_fresh_proof(adapter_case):
+    from umi.competition_weight_timing import WeightRateLimitWait
+
+    case = adapter_case
+    case.select("competition_weights")
+    case.item.rpc.values[("SubtensorModule", "LastUpdate", (78,))][54] = 168
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    with pytest.raises(WeightRateLimitWait) as held:
+        await case.adapter.start_weights(case.selection)
+    assert held.value.next_eligible_block == 178
+    assert await case.adapter.retry_stopped_start()
+    assert "launch" not in case.container.events and not case.item.encoded
+    _advance(case.item, 178)
+    await case.adapter.start_weights(case.selection)
+    assert case.container.events[-1] == "launch"
+    assert not await case.adapter.retry_stopped_start()
+
+
+async def test_rate_wait_cannot_reuse_audit_after_journal_change(adapter_case):
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    assert await case.adapter.retry_stopped_start()
+    case.adapter.path.touch()
+    assert not await case.adapter.retry_stopped_start()
+    with pytest.raises(ValueError, match="recovery inputs changed"):
+        await case.adapter.start_weights(case.selection)
+    assert "launch" not in case.container.events
+
+
 async def test_recovered_failed_worker_is_not_restarted_or_resubmitted(adapter_case):
     case = adapter_case
     case.select("competition_weights")

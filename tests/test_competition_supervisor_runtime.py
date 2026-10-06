@@ -294,6 +294,44 @@ async def test_wallet_free_start_preserves_v3_bytes_and_original_lock(case):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("audit_unchanged", [False, True])
+async def test_rate_wait_does_not_repeat_recovery_for_unchanged_stopped_audit(
+    case, monkeypatch, audit_unchanged
+):
+    from umi.competition_weight_timing import WeightRateLimitWait
+
+    case.fetcher.pending = [next_directive(case, mode="competition_weights")]
+    case.observation.block = 150
+    original = case.adapter.start_weights
+    waiting = True
+
+    async def start(selection):
+        if waiting:
+            raise WeightRateLimitWait(150, 160)
+        await original(selection)
+
+    async def can_retry():
+        assert case.adapter.alive is None
+        return audit_unchanged
+
+    monkeypatch.setattr(case.adapter, "start_weights", start)
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", can_retry, raising=False)
+    async with case.make() as engine:
+        first = await engine.reconcile()
+        assert first.status == ("waiting" if audit_unchanged else "holding")
+        recoveries = sum(event[0] == "recover" for event in case.adapter.events)
+        case.fetcher.pending = []
+        second = await engine.reconcile()
+        assert second.status == first.status
+        later = sum(event[0] == "recover" for event in case.adapter.events)
+        assert later == recoveries + (0 if audit_unchanged else 1)
+        waiting = False
+        case.observation.block = 160
+        final = await engine.reconcile()
+        assert final.status == "started"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "operation",
     ["stage", "preflight", "start_replay", "worker_is_healthy", "recover_stopped_transactions"],

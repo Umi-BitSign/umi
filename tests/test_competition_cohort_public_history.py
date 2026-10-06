@@ -7,7 +7,11 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from umi.competition_cohort_history_http import CohortHistoryExporter, CohortHistoryReader
+from umi.competition_cohort_history_http import (
+    CohortHistoryExporter,
+    CohortHistoryReader,
+    CohortHistoryRequest,
+)
 from umi.competition_cohort_public_history import PublicCohortHistoryClient, public_history_routes
 from umi.open_competition import sign_object
 
@@ -122,20 +126,25 @@ async def test_public_history_rejects_unavailable_or_changed_response(
     assert len(calls) == 1
 
 
-async def test_public_signing_is_bounded_and_absent_owner_stops_new_reads(lifecycle):
+@pytest.mark.parametrize("owner_change", ["unchanged", "offline", "replaced"])
+async def test_public_signing_queues_with_bound_and_rechecks_owner(lifecycle, owner_change):
     h = lifecycle
     state, app = public(h)
     entered, release = asyncio.Event(), asyncio.Event()
     original = state.owner.sign
-    active = 0
+    active = maximum_active = 0
 
     async def held(body):
-        nonlocal active
+        nonlocal active, maximum_active
         active += 1
+        maximum_active = max(maximum_active, active)
         if active == 2:
             entered.set()
-        await release.wait()
-        return await original(body)
+        try:
+            await release.wait()
+            return await original(body)
+        finally:
+            active -= 1
 
     state.owner.sign = held
     path = f"/v1/competition/cohorts/{h.cohort}/authority?challenge={'01' * 32}"
@@ -143,11 +152,33 @@ async def test_public_signing_is_bounded_and_absent_owner_stops_new_reads(lifecy
         transport=httpx.ASGITransport(app), base_url="https://intake.example"
     ) as caller:
         tasks = [asyncio.create_task(caller.get(path)) for _ in range(2)]
+        queued = None
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            assert (await caller.get(path)).status_code == 503
-            state.owner = None
-            assert (await caller.get(path)).status_code == 503
+            queued = asyncio.create_task(caller.get(path))
+            await asyncio.sleep(0.15)  # The released 100 ms capacity wait rejects this reader.
+            assert not queued.done() and maximum_active == 2
+            owner = state.owner
+            if owner_change == "offline":
+                state.owner = None
+            elif owner_change == "replaced":
+                state.owner = CohortHistoryExporter(
+                    h.intake, wallet("Charlie").hotkey.ss58_address, original
+                )
+            release.set()
+            response = await asyncio.wait_for(queued, 5)
+            assert response.status_code == (200 if owner_change == "unchanged" else 503)
+            if owner_change == "unchanged":
+                request = CohortHistoryRequest(
+                    schema="umi-cohort-history-request/1",
+                    cohort_sha256=h.cohort,
+                    challenge="01" * 32,
+                )
+                reader = CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, lambda _: None)
+                assert reader._verify(response.content, request) == owner.read(h.cohort)
+            assert maximum_active == 2
         finally:
             release.set()
             assert all(response.status_code == 200 for response in await asyncio.gather(*tasks))
+            if queued is not None:
+                await asyncio.gather(queued, return_exceptions=True)

@@ -230,6 +230,9 @@ class _DeferredAdapter:
     async def start_weights(self, selection):
         return await self._get().start_weights(selection)
 
+    async def retry_stopped_start(self):
+        return await self._get().retry_stopped_start()
+
 
 def _container_limits():
     from .competition_container import SuccessorContainerLimits

@@ -53,6 +53,8 @@ _PHASES = frozenset(
     }
 )
 _REASONS = {
+    "owned_finality_observer_stopped": "owned_finality_observer_stopped",
+    "owned_service_task_stopped": "owned_service_task_stopped",
     "successor activation headroom is insufficient": "activation_headroom_insufficient",
     "successor directive is not active": "directive_not_active",
     "successor validator permit is absent": "validator_permit_absent",

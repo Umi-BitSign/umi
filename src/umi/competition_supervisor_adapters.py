@@ -376,6 +376,7 @@ class ProductionSuccessorRuntimeAdapter:
         self._stopped = False
         self._recovered: OwnedCompetitionChainObservation | None = None
         self._recovered_floor: tuple[int, str] | None = None
+        self._stopped_audit: tuple | None = None
 
     @contextmanager
     def _registry(self):
@@ -633,6 +634,7 @@ class ProductionSuccessorRuntimeAdapter:
         self._preflight[selection.directive_sha256] = current
 
     async def stop_worker(self):
+        self._stopped_audit = None
         self._recovered = None
         self._recovered_floor = None
         self._stopped = False
@@ -692,6 +694,7 @@ class ProductionSuccessorRuntimeAdapter:
 
     @log_phase("transaction_recovery")
     async def recover_stopped_transactions(self, observation):
+        self._stopped_audit = None
         self._recovered = None
         self._recovered_floor = None
         floor = self._observation_floor(observation)
@@ -803,6 +806,30 @@ class ProductionSuccessorRuntimeAdapter:
             )
         self._recovered = observation
         self._recovered_floor = self._observation_floor(observation)
+        self._stopped_audit = (registry_snapshot, attempts_snapshot, packages)
+
+    def _stopped_audit_matches(self):
+        if self._stopped_audit is None:
+            return False
+        registry, attempts, packages = self._stopped_audit
+        weight_path = selected_weight_state_root(self.installation) / "competition-weights.sqlite3"
+        return (
+            _recovery_journal_snapshot(self.path) == registry
+            and _recovery_journal_snapshot(weight_path, allow_absent_root=True) == attempts
+            and all(_recovery_package_snapshot(path) == saved for path, saved in packages.items())
+        )
+
+    async def retry_stopped_start(self):
+        """Keep a completed audit only while its stopped inputs remain unchanged.
+
+        This is an integrity check, not chain authority. The next startup still
+        collects a fresh owned proof and repeats every native preflight gate.
+        """
+        if not self._stopped or self._recovered is None or not self._stopped_audit_matches():
+            return False
+        if (await self.container.status()).phase == "running":
+            return False
+        return self._stopped_audit_matches()
 
     def _completed_replay(self, prepared):
         root = Path(self.config.worker_state_root) / "competition" / "replay"
@@ -905,6 +932,8 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("managed worker restarted after stopped recovery")
         if any(attempt.phase not in _TERMINAL for attempt in self._attempts().values()):
             raise SuccessorAdapterError("a successor attempt became unresolved before start")
+        if not self._stopped_audit_matches():
+            raise SuccessorAdapterError("stopped recovery inputs changed before start")
         # Stopped recovery established terminal durable effects. Its timestamp
         # is not today's preflight authority; use its retained high-water only,
         # and collect a new owned proof after the image work below.
@@ -974,6 +1003,7 @@ class ProductionSuccessorRuntimeAdapter:
         await self.container.remove_stopped()
         self._stopped, self._recovered = False, None
         self._recovered_floor = None
+        self._stopped_audit = None
         await self.container.launch(activation, self._staged[selection.directive_sha256].release)
 
     async def start_replay(self, selection):
