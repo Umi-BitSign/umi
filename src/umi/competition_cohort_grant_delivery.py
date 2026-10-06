@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 
 import bittensor as bt
@@ -29,6 +30,8 @@ from .validator import (
     _pinned_public_origin,
     _read_response_body,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,22 @@ class CohortEndpointGrantDelivery:
             selected, assignment, job = recovery.selection(slot)
             grant = selection_grant(selected, assignment)
             key = digest(grant)
+
+            def pending(reason):
+                logger.info(
+                    canonical_json_bytes(
+                        {
+                            "status": "endpoint_miner_grant_pending",
+                            "selection_slot": slot,
+                            "grant_sha256": key,
+                            "miner_hotkey": job.submission.submission.hotkey,
+                            "reason_code": reason,
+                            "chain_submission_authorized": False,
+                        }
+                    ).decode()
+                )
+                return CohortGrantDeliveryOutcome("pending", reason)
+
             old = journal.journal.get("miner_grant_delivery", key)
             if old is not None:
                 return CohortGrantDeliveryOutcome(
@@ -134,15 +153,15 @@ class CohortEndpointGrantDelivery:
                 TimeoutError,
                 ComponentResponseError,
             ):
-                return CohortGrantDeliveryOutcome("pending", "miner_grant_delivery_unavailable")
+                return pending("miner_grant_delivery_unavailable")
             if isinstance(raw, int):
-                return CohortGrantDeliveryOutcome("pending", f"miner_grant_http_{raw}")
+                return pending(f"miner_grant_http_{raw}")
             try:
                 receipt = SignedCohortMinerGrantReceipt.model_validate_json(raw)
                 if canonical_json_bytes(receipt) != raw:
                     raise ValueError("noncanonical grant receipt")
                 receipt = verify_grant_receipt(receipt, grant)
             except ValueError:
-                return CohortGrantDeliveryOutcome("pending", "miner_grant_receipt_invalid")
+                return pending("miner_grant_receipt_invalid")
             await run_owned_thread(journal.journal.put, "miner_grant_delivery", key, receipt)
             return CohortGrantDeliveryOutcome("retained", "miner_grant_receipt_retained", receipt)

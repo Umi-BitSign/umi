@@ -276,7 +276,7 @@ class CohortEndpointWorker:
             status, reason, details = task.result()
             results.append((stage, status, reason))
             if details:
-                retries.append((stage, reason, details))
+                retries.append((stage, slot, reason, details))
 
         async def perform(operation):
             try:
@@ -322,7 +322,14 @@ class CohortEndpointWorker:
                 await run_owned_thread(self.schedule.advance_inbox, chosen or slots[-1])
 
         if len(active) < self.concurrency:
-            rows = await run_owned_thread(self.schedule.pending, self.batch_size)
+            # Only admitted operations may move durable case cursors. A whole
+            # page advances cases that were never started and can starve peers.
+            rows = await run_owned_thread(
+                lambda: self.schedule.pending(
+                    min(self.batch_size, self.concurrency - len(active)),
+                    exclude=tuple(active),
+                )
+            )
             for row in rows:
                 slot = row[1]
                 if len(active) >= self.concurrency:
@@ -338,7 +345,7 @@ class CohortEndpointWorker:
             if not active:
                 self._prepare_turn = True
 
-        last = retries[-1] if retries else ("", "", [])
+        last = retries[-1] if retries else ("", "", "", [])
         return {
             "status": "cohort_endpoint_scheduler",
             "assignments_considered": sum(stage == "prepare" for stage, _, _ in results),
@@ -356,11 +363,12 @@ class CohortEndpointWorker:
             "in_flight_operations": len(active),
             "retry_count": len(retries),
             "last_retry_stage": last[0],
-            "last_retry_type": last[1],
-            "last_retry_details": last[2],
+            "last_retry_slot": last[1],
+            "last_retry_type": last[2],
+            "last_retry_details": last[3],
             "retry_examples": [
-                {"stage": stage, "error_type": reason, "details": details}
-                for stage, reason, details in retries[:8]
+                {"stage": stage, "slot": slot, "error_type": reason, "details": details}
+                for stage, slot, reason, details in retries[:8]
             ],
             "last_pending_reason": next(
                 (reason for _, status, reason in reversed(results) if status == "pending"), ""

@@ -1743,7 +1743,10 @@ The running scheduler keeps a bounded set of owned operations rather than
 waiting for an entire batch. A ready miner can advance its next case while
 another miner's preparation, inference or recovery is still pending. There is
 at most one in-flight operation per assignment. Durable cursors select the next
-work; one preparation operation can run beside existing cases, and a single-slot
+work. Only cases admitted to available capacity advance case cursors; assignments
+with an owned in-flight operation are excluded before selecting the next page.
+Scanning work that cannot start must not skip its cases or delay ready peers.
+One preparation operation can run beside existing cases, and a single-slot
 selection alternates preparation and cases. Repeated pending cases therefore do
 not prevent discovery of new assignments. `in_flight_operations` reports the
 retained running operations. Stop
@@ -1772,10 +1775,25 @@ content and run signature, policy, history and binding checks. Reuse closes at
 operation return and never acts as an authorization or freshness cache.
 
 Scheduler reports retain up to eight distinct `retry_examples` with the stage,
-exception type and source frames. These supplement the last retry so a later
+selection slot, exception type and source frames. `last_retry_slot` binds the last
+failure to its retained assignment. These supplement the last retry so a later
 preparation failure cannot hide an earlier case failure. They omit exception
 messages, endpoint URLs, authentication headers and response bodies. They are
 diagnostics, not execution, closure or reward evidence.
+
+The CLI also emits `endpoint_miner_grant_pending` for unsuccessful grant control
+exchanges. Its fixed reason code distinguishes an HTTP status, unavailable
+delivery or invalid receipt and binds the selection slot, grant digest and miner
+hotkey. Pending grant delivery does not authorize retirement or chain submission.
+
+Miner dispatch caches retain their exact chain and transport identity across
+approved operational-timeout upgrades. Released policy-free and per-policy
+bindings are migrated in place without discarding captured registration proofs.
+A changed chain pin, registration floor or transport identity still rejects the
+cache. Do not delete registration caches to work around an upgrade hold. Verify
+cache compatibility before stopping a live miner; after migration, any rollback
+source must accept the resulting binding too. Selecting a source is separate from
+verifying runtime health.
 
 The public `GET /v1/competition/cohorts/{cohort_sha256}/requests/readiness`
 route accepts a fresh 32-character hexadecimal `nonce`. The version 7 coordinator

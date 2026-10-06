@@ -1094,26 +1094,41 @@ async def test_failed_endpoint_origin_start_closes_both_owned_providers(
     os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))
 
 
-def test_cli_enables_numeric_retirement_diagnostics(selected, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "logger_name, diagnostic",
+    [
+        (
+            "umi.competition_cohort_endpoint_retirement",
+            {"status": "endpoint_retirement_http_pending", "http_status": 503},
+        ),
+        (
+            "umi.competition_cohort_grant_delivery",
+            {
+                "status": "endpoint_miner_grant_pending",
+                "selection_slot": "aa" * 32,
+                "grant_sha256": "bb" * 32,
+                "miner_hotkey": "validated_miner",
+                "reason_code": "miner_grant_http_422",
+                "chain_submission_authorized": False,
+            },
+        ),
+    ],
+)
+def test_cli_enables_numeric_retirement_diagnostics(
+    selected, monkeypatch, capsys, logger_name, diagnostic
+):
     import logging
 
-    logger = logging.getLogger("umi.competition_cohort_endpoint_retirement")
+    logger = logging.getLogger(logger_name)
     old_level, old_propagate, old_handlers = logger.level, logger.propagate, tuple(logger.handlers)
 
     async def run(config):
-        logger.info(
-            canonical_json_bytes(
-                {"status": "endpoint_retirement_http_pending", "http_status": 503}
-            ).decode()
-        )
+        logger.info(canonical_json_bytes(diagnostic).decode())
 
     monkeypatch.setattr(cli, "_run", run)
     cli.main(["run", "--config", str(selected.path)])
     captured = capsys.readouterr()
-    assert json.loads(captured.err) == {
-        "status": "endpoint_retirement_http_pending",
-        "http_status": 503,
-    }
+    assert json.loads(captured.err) == diagnostic
     assert (logger.level, logger.propagate, tuple(logger.handlers)) == (
         old_level,
         old_propagate,

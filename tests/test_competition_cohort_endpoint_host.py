@@ -390,10 +390,15 @@ async def test_recurring_worker_waits_for_missing_media_then_completes(installed
     try:
 
         async def wait_pending():
-            while not reports:
+            # A rolling scheduler reports admitted in-flight work before its
+            # media fetch finishes. Wait for the retained pending outcome.
+            while not any(report.get("batch_pending", 0) > 0 for report in reports):
+                if task.done():
+                    task.result()
+                    raise AssertionError("worker stopped before reporting missing media")
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_pending(), 30)
+        await asyncio.wait_for(wait_pending(), 180)
         assert reports[-1]["batch_pending"] > 0 and not n.signatures
         n.media_fail = False
 
