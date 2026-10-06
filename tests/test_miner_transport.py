@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -371,10 +372,35 @@ async def test_window_authority_rejects_before_resource_or_model_work(
         f"retryable={retryable}" in caplog.messages
     )
     assert request.challenge_id not in caplog.text
+    report = next(
+        json.loads(m.split(" report=", 1)[1])
+        for m in caplog.messages
+        if m.startswith("miner_admission_failure report=")
+    )
+    assert report["stage"] == "translate"
+    assert report["causes"][0]["reason_code"] == "request_window_binding_mismatch"
     assert authority.calls == 1
     assert fetcher.calls == translator.calls == 0
     with pytest.raises(MinerResourceError, match="assignment_not_recorded"):
         miner_runtime.resource_ledger.snapshot(binding)
+
+
+def test_admission_cause_logging_preserves_native_error_without_provider_secrets(caplog):
+    from umi.miner import _log_admission_failure
+    from umi.validator_chain import ValidatorChainError
+
+    secret = "wss://provider.test/?token=secret private clip reference"
+    try:
+        try:
+            raise OSError(secret)
+        except OSError as error:
+            raise ValidatorChainError("proof_rpc_failed") from error
+    except ValidatorChainError as error:
+        _log_admission_failure("translate", error)
+    report = json.loads(caplog.messages[-1].split(" report=", 1)[1])
+    assert [x["reason_code"] for x in report["causes"]] == ["proof_rpc_failed", "os_error"]
+    assert secret not in caplog.text
+    assert "provider.test" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1459,6 +1485,7 @@ def test_miner_loads_an_exact_canonical_policy_file(tmp_path: Path) -> None:
     policy = make_policy()
     path = tmp_path / "policy.json"
     path.write_bytes(canonical_json_bytes(policy))
+    path.chmod(0o600)
 
     assert _load_policy(path) == policy
 

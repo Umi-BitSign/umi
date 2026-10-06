@@ -69,6 +69,15 @@ starting the miner. It verifies exact policy, transport, model, finality and
 sidecar health. If any check fails, it restores the prior systemd commands and
 restarts the previous miner and sidecar. Rerunning the updater is idempotent.
 
+The current runtime shares concurrent RPC reads for the same exact block hash
+and retains them in a bounded cache. Current-head reads remain fresh; cached
+storage still requires proof verification. A retryable authority rejection does
+not establish that an RPC quota was exceeded. If it persists, the miner logs
+`miner_admission_failure report=` with bounded native cause codes for translate,
+grant or background failures. Those reports omit exception messages, request
+contents and provider URLs. Include those selected lines when reporting a hold;
+keep the existing enrollment and assignment state.
+
 Endpoint enrollment and service-work admission are durable phases, so a temporary
 coordinator or finality outage does not roll back a healthy miner upgrade. Before
 each first send, the updater stores the exact signed participation request and
