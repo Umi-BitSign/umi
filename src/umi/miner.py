@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -37,6 +38,7 @@ from .competition_cohort_miner import (
 from .competition_cohort_miner_case import parse_miner_grant
 from .competition_miner_feed import FeedEndpointAuthorizationAuthority
 from .competition_miner_finality import CompetitionMinerFinality
+from .competition_progress import _failure_details
 from .concurrency import run_owned_thread, wait_for_owned
 from .config import SAFETY_BOUNDARY, Limits
 from .crypto import seal_response, sign_response_digest, verify_response_signature
@@ -87,6 +89,23 @@ from .protocol import (
 from .video import HttpVideoFetcher, VideoFetcher, VideoFetchError, VideoFetchResult
 
 LOGGER = logging.getLogger("umi.miner")
+
+
+def _log_admission_failure(stage, error):
+    # Exception messages may contain provider credentials or request data.
+    # Diagnostics must not change admission or prevent background recovery.
+    with suppress(Exception):
+        LOGGER.warning(
+            "miner_admission_failure report=%s",
+            json.dumps(
+                {
+                    "schema": "umi-miner-admission-failure/1",
+                    "stage": stage,
+                    "causes": _failure_details(error),
+                },
+                separators=(",", ":"),
+            ),
+        )
 
 
 class BodyLimitExceeded(ValueError):
@@ -1046,6 +1065,7 @@ def create_app(
             # the host restart this process, with normal startup/store checks.
             app.state.background_failure = name
             LOGGER.error("miner_background_service_failed service=%s", name)
+            _log_admission_failure(name, None if task.cancelled() else task.exception())
             if on_background_failure is not None:
                 on_background_failure(name)
 
@@ -1259,6 +1279,7 @@ def create_app(
                             grant, validator_hotkey=validator_hotkey, wallet=runtime.wallet
                         )
                     except (OSError, asyncio.TimeoutError, TimeoutError, sqlite3.Error) as error:
+                        _log_admission_failure("grant", error)
                         raise HTTPException(
                             status_code=503, detail="cohort_grant_unavailable"
                         ) from error
@@ -1339,6 +1360,7 @@ def create_app(
                         )
                 except MinerAdmissionError as error:
                     status = 503 if error.retryable else 422
+                    _log_admission_failure("translate", error)
                     LOGGER.warning(
                         "miner_admission_rejected reason_code=%s retryable=%s",
                         error.reason_code,

@@ -636,6 +636,17 @@ unrelated requests can proceed. Cancellation drains that operation before
 releasing its admission owner; it cannot abandon validation in a background
 thread or let another operation acquire the same owner early.
 
+Local queue reads wait for classified private-mutex contention within the
+configured admission operation budget. History retention retries recollect the
+owned history and finalized registration before validating or admitting work. Retries drain the
+previous thread and yield the listener between attempts. Cancellation releases
+the admission owner after thread cleanup. Permission, I/O, record-validation and
+authority failures are not retried by this mutex wait. The final claim commit
+still checks the current published history under the intake lock; waiting does
+not authorize stale history or change accepted claims. Capacity and history
+reads reuse canonical serialization only within their synchronous operation,
+without caching validation, signatures or admission decisions.
+
 The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
 For a host transfer, fence the outgoing owner and preserve the original logical

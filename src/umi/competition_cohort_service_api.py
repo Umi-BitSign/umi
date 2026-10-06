@@ -19,6 +19,7 @@ from functools import partial
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_order_signer import (
@@ -47,6 +48,7 @@ from .competition_registration_archive import (
 )
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
+from .private_files import PrivateStateBusyError
 from .protocol import canonical_json_bytes
 
 PATH = "/v1/competition/service-work"
@@ -197,9 +199,29 @@ class ServiceWorkAdmissionAPI:
     async def _call(self, awaitable):
         return await wait_for_owned(awaitable, timeout=self.timeout)
 
+    async def _local(self, function, *args):
+        """Wait for a genuine local mutex hold without retrying validation failures.
+
+        Each attempt drains its owned thread before yielding. Only acquisition
+        contention is retried; failed I/O, corrupt records and changed authority
+        retain their original failure. Cancellation releases the HTTP owner.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        delay = 0.05
+        while True:
+            try:
+                return await run_owned_thread(function, *args)
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(delay, remaining))
+                delay = min(1.0, delay * 2)
+
     @staticmethod
     def _remember(queue, source, capture):
-        with queue.journal.locked():
+        with queue.journal.locked(), canonical_json_reuse():
             catalog, _ = queue._catalog()
             body = catalog.catalog
             # Retain closure/revocation before refusing new claims. A subsequent
@@ -214,25 +236,38 @@ class ServiceWorkAdmissionAPI:
 
     async def _current(self, queue):
         with progress_phase("service_admission_catalog"):
-            catalog, round_ = await run_owned_thread(queue._catalog)
+            catalog, round_ = await self._local(queue._catalog)
         cohort = catalog.catalog.cohort_sha256
-        with progress_phase("service_admission_history"):
-            source = await self._call(self.history(cohort))
-        with progress_phase("service_admission_capture"):
-            capture = await self._call(self.capture())
-        with progress_phase("service_admission_history_review"):
-            await run_owned_thread(self._remember, queue, source, capture)
-            await run_owned_thread(
-                partial(
-                    review_service_catalog,
-                    catalog,
-                    round_,
-                    queue.policy,
-                    source,
-                    expected_tip_sha256=history_tip(source.history),
-                    current_block=execution_boundary(capture).block,
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        while True:
+            with progress_phase("service_admission_history"):
+                source = await self._call(self.history(cohort))
+            with progress_phase("service_admission_capture"):
+                capture = await self._call(self.capture())
+            with progress_phase("service_admission_history_review"):
+                try:
+                    await run_owned_thread(self._remember, queue, source, capture)
+                except PrivateStateBusyError:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise
+                    # Recollect owned inputs after contention. Retrying only
+                    # persistence would extend the authority of an old head.
+                    await asyncio.sleep(min(1.0, remaining))
+                    continue
+                await run_owned_thread(
+                    partial(
+                        review_service_catalog,
+                        catalog,
+                        round_,
+                        queue.policy,
+                        source,
+                        expected_tip_sha256=history_tip(source.history),
+                        current_block=execution_boundary(capture).block,
+                    )
                 )
-            )
+            break
         with progress_phase("service_admission_roster"):
             supplied_roster = await self._call(self.roster(cohort, source, capture))
             roster = await run_owned_thread(self._check_roster, supplied_roster, round_)
@@ -284,7 +319,7 @@ class ServiceWorkAdmissionAPI:
         queue = self.selected(catalog)
         async with self.serial[catalog]:
             # Recovery must precede every live history, preparation and capture call.
-            admission = await run_owned_thread(queue.lookup, signed)
+            admission = await self._local(queue.lookup, signed)
             if admission is None:
                 _, source, capture, roster = await self._current(queue)
                 member = next(
@@ -322,7 +357,7 @@ class ServiceWorkAdmissionAPI:
                 )
             retained = self.archives[catalog]
             try:
-                await run_owned_thread(retained.read, admission)
+                await self._local(retained.read, admission)
             except FileNotFoundError:
                 raw, metadata = await self._call(self.archive(admission.observation))
                 await run_owned_thread(retained.attach, admission, raw, metadata)
@@ -340,7 +375,7 @@ class ServiceWorkAdmissionAPI:
 
     @staticmethod
     def _capacity(queue, archive_bytes=0):
-        with queue.journal.locked(), queue.journal.transaction() as db:
+        with queue.journal.locked(), canonical_json_reuse(), queue.journal.transaction() as db:
             catalog, _ = queue._catalog(db)
             count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
             _, used, _ = queue.journal._capacity(db)
@@ -377,7 +412,7 @@ class ServiceWorkAdmissionAPI:
         async with self.serial[catalog]:
             try:
                 result["reason_code"] = "queue_unavailable"
-                reason, remaining = await run_owned_thread(self._capacity, queue)
+                reason, remaining = await self._local(self._capacity, queue)
                 result.update(reason_code=reason, remaining_claims=remaining)
                 if reason != "accepting":
                     return result
@@ -389,7 +424,7 @@ class ServiceWorkAdmissionAPI:
                 await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
                 result["reason_code"] = "owner_inputs_unavailable"
                 await self._unchanged(queue, source)
-                reason, remaining = await run_owned_thread(
+                reason, remaining = await self._local(
                     self._capacity, queue, len(raw) + len(metadata) + 128
                 )
                 result.update(reason_code=reason, remaining_claims=remaining)
