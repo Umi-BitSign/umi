@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import re
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import partial
@@ -555,6 +556,8 @@ class FinalizedProofCollector:
         self._finality = finality
         self._verifier = verifier
         self._limits = limits or ProofCollectionLimits()
+        self._checked_snapshots = OrderedDict()
+        self._snapshot_lock = asyncio.Lock()
 
     def with_evidence_rpc(self, rpc: RawJsonRpc) -> FinalizedProofCollector:
         """Reuse the same verifier and limits for retained untrusted storage bytes.
@@ -576,37 +579,53 @@ class FinalizedProofCollector:
             raise ValidatorChainError("owned_finality_unavailable") from error
         if not isinstance(snapshot, FinalizedSnapshotRef):
             raise ValidatorChainError("owned_finalized_snapshot_invalid")
-        try:
-            header = _mapping(
-                await self._rpc.request("chain_getHeader", (snapshot.block_hash,)),
-                "finalized_header_invalid",
-            )
-            number = _block_number(header.get("number"))
-            if number != snapshot.block_number:
-                raise ValidatorChainError("finalized_header_number_mismatch")
-            canonical_hash = _hash(
-                await self._rpc.request("chain_getBlockHash", (number,)),
-                "finalized_block_hash_invalid",
-            )
-            if canonical_hash != snapshot.block_hash:
-                raise ValidatorChainError("finalized_block_hash_mismatch")
-            parent_hash = _hash(
-                header.get("parentHash"),
-                "finalized_parent_hash_invalid",
-            )
-            if parent_hash != snapshot.parent_hash:
-                raise ValidatorChainError("finalized_parent_hash_mismatch")
-            state_root = _hash(
-                header.get("stateRoot"),
-                "finalized_state_root_invalid",
-            )
-            if state_root != snapshot.state_root:
-                raise ValidatorChainError("finalized_state_root_mismatch")
-            return snapshot
-        except ValidatorChainError:
-            raise
-        except Exception as error:
-            raise ValidatorChainError("finalized_snapshot_rpc_failed") from error
+        key = (
+            snapshot.block_number,
+            snapshot.block_hash,
+            snapshot.parent_hash,
+            snapshot.state_root,
+        )
+        # Re-read owned finality for every caller. Only a previously cross-checked
+        # exact snapshot avoids duplicate header RPCs; changed heads and roots
+        # still require all original checks. Errors never populate this cache.
+        async with self._snapshot_lock:
+            if key in self._checked_snapshots:
+                self._checked_snapshots.move_to_end(key)
+                return snapshot
+            try:
+                header = _mapping(
+                    await self._rpc.request("chain_getHeader", (snapshot.block_hash,)),
+                    "finalized_header_invalid",
+                )
+                number = _block_number(header.get("number"))
+                if number != snapshot.block_number:
+                    raise ValidatorChainError("finalized_header_number_mismatch")
+                canonical_hash = _hash(
+                    await self._rpc.request("chain_getBlockHash", (number,)),
+                    "finalized_block_hash_invalid",
+                )
+                if canonical_hash != snapshot.block_hash:
+                    raise ValidatorChainError("finalized_block_hash_mismatch")
+                parent_hash = _hash(
+                    header.get("parentHash"),
+                    "finalized_parent_hash_invalid",
+                )
+                if parent_hash != snapshot.parent_hash:
+                    raise ValidatorChainError("finalized_parent_hash_mismatch")
+                state_root = _hash(
+                    header.get("stateRoot"),
+                    "finalized_state_root_invalid",
+                )
+                if state_root != snapshot.state_root:
+                    raise ValidatorChainError("finalized_state_root_mismatch")
+                self._checked_snapshots[key] = None
+                if len(self._checked_snapshots) > 256:
+                    self._checked_snapshots.popitem(last=False)
+                return snapshot
+            except ValidatorChainError:
+                raise
+            except Exception as error:
+                raise ValidatorChainError("finalized_snapshot_rpc_failed") from error
 
     async def pinned_runtime(
         self,

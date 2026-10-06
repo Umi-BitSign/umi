@@ -46,6 +46,7 @@ from .open_competition import (
     digest,
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
+from .proof_rpc_cache import BlockPinnedRpcCache
 from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
 from .substrate_proof import SubprocessStorageProofVerifier
@@ -323,6 +324,8 @@ class _RegistrationRpc:
         )
         self._closed = False
 
+        self._read_cache = BlockPinnedRpcCache(self._request_uncached)
+
     async def storage_values(self, block_hash: str, keys: Sequence[bytes]):
         if not 1 <= len(keys) <= 256 or any(
             not isinstance(key, bytes) or not 1 <= len(key) <= 512 for key in keys
@@ -360,6 +363,7 @@ class _RegistrationRpc:
 
     async def aclose(self):
         self._closed = True
+        await self._read_cache.aclose()
         await asyncio.gather(*(pool.close() for pool in self._persistent_pools.values()))
 
     @asynccontextmanager
@@ -376,6 +380,9 @@ class _RegistrationRpc:
                 await pool.close()
 
     async def request(self, method: str, params: Sequence[Any]) -> Any:
+        return await self._read_cache.request(method, params)
+
+    async def _request_uncached(self, method: str, params: Sequence[Any]) -> Any:
         if self._closed:
             raise ValueError("registration RPC is closed")
         ceiling = {
