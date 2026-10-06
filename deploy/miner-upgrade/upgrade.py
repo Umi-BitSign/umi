@@ -1414,7 +1414,12 @@ def main() -> None:
         return
     if receipt.exists():
         prior = document(receipt.read_bytes(), label="upgrade receipt")
-        if prior.get("policy_sha256") == manifest["policy"]["value_sha256"]:
+        selected_python = RUNTIME_ROOT / manifest["runtime"]["revision"] / "venv/bin/python"
+        if (
+            prior.get("policy_sha256") == manifest["policy"]["value_sha256"]
+            and prior.get("runtime_revision") == manifest["runtime"]["revision"]
+            and Path(miner_python(miner.arguments)).resolve() == selected_python.resolve()
+        ):
             observed = wait_health(
                 port,
                 manifest["policy"]["value_sha256"],

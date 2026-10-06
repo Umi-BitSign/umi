@@ -49,6 +49,11 @@ runtime revision. It installs the runtime beside the old runtime and creates a
 new private state namespace for the current transport policy. Nonce, assignment,
 finality, grant and model-sidecar state from earlier policies remain intact.
 
+Rerunning the command installs a changed runtime even within the same cohort.
+An existing receipt skips cutover only when its revision and the running miner's
+interpreter match the selected deployment. Retained enrollment, nonce, assignment
+and grant state stay in the same namespace.
+
 The updater also handles the standard Unix-socket model sidecar. It binds a new
 sidecar socket and capacity descriptor to the current transport policy before
 starting the miner. It verifies exact policy, transport, model, finality and
