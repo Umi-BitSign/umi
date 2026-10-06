@@ -347,7 +347,7 @@ async def test_warm_header_cache_does_not_waive_freshness_or_timestamp_proofs(re
     elif mutation == "timestamp":
         recovery.state.bad_timestamp = True
     else:
-        recovery.chain.clock.now += 120_001
+        recovery.chain.clock.now += source.config.maximum_head_age_ms + 1
     with pytest.raises((ValueError, RuntimeError)):
         await DispatchFinalityProvider.verified_blocks(source, (height,))
 
@@ -368,7 +368,7 @@ async def test_dispatch_recovery_never_waives_existing_guards(recovery, mutation
     elif mutation == "capacity":
         source.config = source.config.model_copy(update={"maximum_cache_bytes": 1})
     else:
-        recovery.chain.clock.now += 120_001
+        recovery.chain.clock.now += source.config.maximum_head_age_ms + 1
     with pytest.raises((ValueError, RuntimeError)):
         await DispatchFinalityProvider.verified_blocks(source, (height,))
     from contextlib import closing

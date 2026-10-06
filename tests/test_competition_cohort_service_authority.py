@@ -107,7 +107,7 @@ async def test_service_origins_enforce_accepted_work_and_live_native_proofs(auth
     elif damage == "proof":
         p.c.rpc.bad_proof = True
     else:
-        p.c.clock.now += 120001
+        p.c.clock.now += p.config.maximum_head_age_ms + 1
     with pytest.raises((ValueError, RuntimeError)):
         await owner.origin(assignment)
 

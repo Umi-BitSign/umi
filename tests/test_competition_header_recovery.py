@@ -131,7 +131,7 @@ async def test_recovery_requires_matching_ancestry_and_owned_current_context(lin
     elif mode == "unowned":
         a.reviewer._owned = False
     else:
-        a.chain.clock.now += 180_000
+        a.chain.clock.now += a.reviewer.config.maximum_head_age_ms + 1
     with pytest.raises((ValueError, FileNotFoundError)):
         await reviewed(a)
 

@@ -577,7 +577,7 @@ async def test_slow_work_refreshes_proof_without_extending_old_authority(
 
         def slow_replay(prepared):
             value = replay(prepared)
-            shift[0] = 121_000_000_000
+            shift[0] = observation.expires_monotonic_ns - observation.captured_monotonic_ns + 1
             return value
 
         monkeypatch.setattr(case.adapter, "_replay", slow_replay)
@@ -587,13 +587,13 @@ async def test_slow_work_refreshes_proof_without_extending_old_authority(
 
         async def slow_prepare(release):
             await prepare(release)
-            shift[0] = 121_000_000_000
+            shift[0] = observation.expires_monotonic_ns - observation.captured_monotonic_ns + 1
 
         monkeypatch.setattr(case.container, "prepare_image", slow_prepare)
         await case.adapter.start_replay(case.selection)
         assert case.container.current.phase == "running"
     else:
-        shift[0] = 121_000_000_000
+        shift[0] = observation.expires_monotonic_ns - observation.captured_monotonic_ns + 1
         await case.adapter.start_replay(case.selection)
         assert case.container.current.phase == "running"
     with pytest.raises(ValueError, match="owned proof"):
@@ -815,7 +815,7 @@ async def test_stopped_recovery_refreshes_after_slow_retained_history(
 
     def slow(*args, **kwargs):
         result = original(*args, **kwargs)
-        elapsed[0] += 121 * 10**9
+        elapsed[0] += initial.expires_monotonic_ns - initial.captured_monotonic_ns + 1
         return result
 
     monkeypatch.setattr(target, name, slow)
@@ -1182,7 +1182,7 @@ async def test_slow_start_verification_precedes_fresh_weight_proof(adapter_case,
 
     def slow_verify(*args, **kwargs):
         result = original_verify(*args, **kwargs)
-        shift[0] += 121_000_000_000
+        shift[0] += initial.expires_monotonic_ns - initial.captured_monotonic_ns + 1
         return result
 
     monkeypatch.setattr(case.adapter, "_verify", slow_verify)

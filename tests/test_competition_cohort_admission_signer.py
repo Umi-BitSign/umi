@@ -165,7 +165,7 @@ async def test_four_hour_outage_after_lost_signature_reuses_intent_and_original_
     assert h.calls[0][1] == h.calls[1][1] == vote.admission
     assert restarted.journal.load(slot)[:4] == original[:4]
     # A lost acknowledgement after commit returns the same signature even offline.
-    a.chain.clock.now += 180_000
+    a.chain.clock.now += a.reviewer.config.maximum_head_age_ms + 1
     assert await h.worker().recover(slot) == vote
     assert len(h.calls) == 2
 

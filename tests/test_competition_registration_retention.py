@@ -118,7 +118,7 @@ async def test_failed_save_rolls_back_pruning_and_highwater(chain, failure):
         if failure == "retention":
             raise RuntimeError("receipt ledger unavailable")
         if failure == "freshness":
-            chain.clock.now += 121_000  # Simulate expiry after proof collection.
+            chain.clock.now += provider.config.maximum_head_age_ms + 1  # Expire after collection.
         return frozenset()
 
     provider._retained_capture_blocks = retained

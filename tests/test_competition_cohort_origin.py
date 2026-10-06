@@ -311,8 +311,9 @@ async def test_slow_review_refreshes_native_head_without_replaying_authority(end
         calls.append(args[-1])
         result = real(*args)
         # Advance both the controlled clock and its native finalized fixture.
-        p.c.clock.now += 180000
-        p.c.finality.timestamp += 180000
+        elapsed_ms = p.config.maximum_head_age_ms + 1
+        p.c.clock.now += elapsed_ms
+        p.c.finality.timestamp += elapsed_ms
         p.c.rpc.values[("Timestamp", "Now", ())] = p.c.finality.timestamp
         p.c.finality.ref = replace(
             p.c.finality.ref, block_number=_HEIGHT + 15, block_hash=_hash(44)

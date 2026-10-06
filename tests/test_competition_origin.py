@@ -352,7 +352,7 @@ async def test_invalid_origin_never_returns_or_records_evidence(origin_chain, mu
     elif mutation == "metadata":
         item.rpc.metadata = b"bad"
     elif mutation == "stale":
-        item.clock.now += 120001
+        item.clock.now += item.origin_provider.config.maximum_head_age_ms + 1
     elif mutation == "expired":
         item.finality.ref = replace(item.finality.ref, block_number=_HEIGHT + 301)
     with pytest.raises((ValueError, RuntimeError)):
@@ -367,7 +367,7 @@ async def test_origin_rechecks_freshness_after_proof_collection(origin_chain, mo
 
     async def delayed(*args):
         result = await original(*args)
-        item.clock.now = _NOW + 120001
+        item.clock.now = _NOW + item.origin_provider.config.maximum_head_age_ms + 1
         return result
 
     monkeypatch.setattr(item.proofs, "storage_reads", delayed)
@@ -677,7 +677,7 @@ async def test_dns_delay_rechecks_finality_freshness(dns_chain, monkeypatch):
     item = dns_chain
 
     async def slow(*args):
-        item.clock.now += 120001
+        item.clock.now += item.origin_provider.config.maximum_head_age_ms + 1
         return ["8.8.8.8"]
 
     monkeypatch.setattr(item.origin_provider, "_resolver", slow)
