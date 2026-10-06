@@ -23,7 +23,7 @@ reward activation are separate events.
 
 ## Upgrade an existing miner
 
-Standard Linux miners managed by systemd use one updater. Choose only whether
+Linux miners managed by systemd use one updater. Choose only whether
 you intend to participate in the public-model track:
 
 ```sh
@@ -43,7 +43,14 @@ rights decision and complete artifact.
 
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
-fetches the current canonical manifest, checks its policy and profile against
+keeps the existing service account, including an existing root-run installation.
+It inspects the installed startup schema and authority before choosing a migration.
+For a runtime update under the same cohort authority, it retains the exact startup
+bytes, grant directory, nonce database, assignment database and finality database
+in place, including custom paths. Relative paths keep the service's existing
+working directory. The updater does not copy a directory-bound grant journal or
+change accounts as part of an upgrade.
+It fetches the current canonical manifest, checks its policy and profile against
 the public competition status, and selects that matching deployment's exact
 runtime revision. It selects the exact root-owned CPython patch version and
 scoring package versions required by the signed transport policy for this host.
@@ -106,13 +113,16 @@ the operator's signed rights declaration and selected bundle. Signed manifests,
 rather than cohort numbers baked into the script, enforce the profile published
 before intake. No cohort-specific replacement script is needed.
 
-The automatic path stops before mutation when it finds a custom or ambiguous
-deployment, including multiple miner services, a root-run miner, a non-systemd
-sidecar or an unrecognized entry point. Container and custom service operators
-should apply the same [current upgrade manifest](../../deploy/miner-upgrade/current.json):
-use its exact runtime and policy inputs, create fresh policy-bound protocol state,
-preserve the previous deployment for rollback, and require the health contract
-below before switching traffic.
+The automatic path stops before service changes when it finds an unsupported
+transition or ambiguous deployment, including multiple miner services, an unknown
+startup schema or authority transition, a non-systemd sidecar or an unrecognized
+entry point. A custom state directory or existing root account alone does not
+require a manual upgrade. Do not create fresh protocol state, relocate grants or
+reset an existing installation to get past a refused migration. Container and
+other unsupported service layouts need a qualified migration using the same
+[current upgrade manifest](../../deploy/miner-upgrade/current.json), with the
+existing deployment and journals preserved until the replacement passes the
+health contract below.
 
 The public TLS edge must proxy `POST /v1/translate`,
 `POST /v1/competition/cohorts/assignments`, the response-recovery route, and the

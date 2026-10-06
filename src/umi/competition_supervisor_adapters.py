@@ -23,10 +23,10 @@ from typing import Protocol
 
 from .competition_adapter_history import (
     MAX_HISTORY_NODE_BYTES,
+    RecoveryHistoryReplay,
     encode_history,
-    parse_history_node,
+    replayed_history_head,
     restore_history,
-    summarize_history_nodes,
     validate_history_reference,
     validate_reference_head,
 )
@@ -208,8 +208,11 @@ def _record(selection, files, *, history_reference=None):
     )
 
 
-def _decode_record(raw, *, history_nodes=None, history_prefixes=None, metadata_only=False):
+def _decode_record(
+    raw, *, history_nodes=None, history_prefixes=None, metadata_only=False, recovery_history=None
+):
     value = json.loads(raw)
+    restored = None
     if (
         canonical_json_bytes(value) != raw
         or not isinstance(value, dict)
@@ -241,16 +244,18 @@ def _decode_record(raw, *, history_nodes=None, history_prefixes=None, metadata_o
             )
         # Only _records uses metadata_only to validate paths and small fields
         # without allocating every run's full continuation at once.
-        page_bytes = (
-            b"{}"
-            if metadata_only
-            else restore_history(
+        if metadata_only:
+            page_bytes = b"{}"
+        elif recovery_history is not None:
+            restored = recovery_history.restore(value["current_directive_page"], head=signed)
+            page_bytes = restored.payload
+        else:
+            page_bytes = restore_history(
                 value["current_directive_page"], head=signed, nodes=history_nodes or {}
             )
-        )
     else:
         page_bytes = canonical_json_bytes(value["current_directive_page"])
-    return (
+    result = (
         SuccessorWorkerSelection(signed),
         SuccessorArtifactFiles(
             release_bundle_path=Path(value["release_bundle_path"]),
@@ -262,13 +267,15 @@ def _decode_record(raw, *, history_nodes=None, history_prefixes=None, metadata_o
             else canonical_json_bytes(value["authorization"]),
         ),
     )
+    return result if recovery_history is None else (*result, restored)
 
 
 class _RetainedRuns(Mapping):
     """One bounded registry snapshot, with histories reconstructed on access."""
 
-    def __init__(self, records, nodes, used_bytes):
-        self._records, self.nodes, self.used_bytes = records, nodes, used_bytes
+    def __init__(self, records, history, used_bytes):
+        self._records, self._history, self.used_bytes = records, history, used_bytes
+        self.nodes = history.nodes
 
     def __iter__(self):
         return iter(self._records)
@@ -278,6 +285,10 @@ class _RetainedRuns(Mapping):
 
     def __getitem__(self, identity):
         return _decode_record(self._records[identity], history_nodes=self.nodes)
+
+    def recovery_values(self):
+        for raw in self._records.values():
+            yield _decode_record(raw, recovery_history=self._history)
 
 
 @contextmanager
@@ -404,11 +415,8 @@ class ProductionSuccessorRuntimeAdapter:
                 raise SuccessorAdapterError("adapter registry record is malformed")
             if node_count and not 0 < node_maximum <= MAX_HISTORY_NODE_BYTES:
                 raise SuccessorAdapterError("adapter registry history node is malformed")
-            nodes = {
-                identity: parse_history_node(identity, body)
-                for identity, body in db.execute("SELECT id,body FROM history_nodes")
-            }
-            prefixes = summarize_history_nodes(nodes)
+            history = RecoveryHistoryReplay(dict(db.execute("SELECT id,body FROM history_nodes")))
+            nodes, prefixes = history.nodes, history.prefixes
             result = {}
             for identity, raw, checksum in db.execute("SELECT id,body,sha FROM runs"):
                 if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != checksum:
@@ -419,7 +427,7 @@ class ProductionSuccessorRuntimeAdapter:
                 if selection.directive_sha256 != identity:
                     raise SuccessorAdapterError("adapter registry directive binding changed")
                 result[identity] = raw
-            return _RetainedRuns(result, nodes, total + node_total)
+            return _RetainedRuns(result, history, total + node_total)
 
     def _retain(self, prepared):
         records = self._records()
@@ -460,7 +468,14 @@ class ProductionSuccessorRuntimeAdapter:
             )
 
     @log_phase("package_verification")
-    def _verify(self, selection, files, *, recovery_packages: RecoveryPackageReplay | None = None):
+    def _verify(
+        self,
+        selection,
+        files,
+        *,
+        recovery_packages: RecoveryPackageReplay | None = None,
+        recovery_history=None,
+    ):
         validate_authenticated_successor_installation(self.installation)
         if selection.continuation_bytes is not None and (
             selection.continuation_bytes != files.current_directive_page_bytes
@@ -475,10 +490,16 @@ class ProductionSuccessorRuntimeAdapter:
                 directive.issued_at_block, self.installation.checkpoint_finalized_block
             ),
         )
-        page = parse_canonical_successor_supervisor_directive_history(
-            files.current_directive_page_bytes
-        )
-        if page.more or page.head != signed:
+        if recovery_history is None:
+            page = parse_canonical_successor_supervisor_directive_history(
+                files.current_directive_page_bytes
+            )
+            if page.more or page.head != signed:
+                raise SuccessorAdapterError("staged history does not end at the selected directive")
+        elif (
+            replayed_history_head(recovery_history, payload=files.current_directive_page_bytes)
+            != signed
+        ):
             raise SuccessorAdapterError("staged history does not end at the selected directive")
         execution = _canonical(SuccessorWorkerExecutionConfig, files.worker_execution_bytes)
         package = (
@@ -688,9 +709,11 @@ class ProductionSuccessorRuntimeAdapter:
         targets = {}
         packages = {}
         recovery_packages = RecoveryPackageReplay()
-        for selection, files in records.values():
+        for selection, files, restored in records.recovery_values():
             snapshot = _recovery_package_snapshot(files.package_path)
-            prepared = self._verify(selection, files, recovery_packages=recovery_packages)
+            prepared = self._verify(
+                selection, files, recovery_packages=recovery_packages, recovery_history=restored
+            )
             if _recovery_package_snapshot(files.package_path) != snapshot:
                 raise SuccessorAdapterError("retained recovery package changed during verification")
             packages[files.package_path] = snapshot

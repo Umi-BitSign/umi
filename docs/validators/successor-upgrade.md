@@ -98,6 +98,20 @@ those local bytes instead of fetching the selected directive's one-hop page.
 The host still verifies every predecessor and signature against the original
 root-sealed v4 installation anchor. No later directive can replace that anchor.
 
+When the supervisor has fallen behind, it collects consecutive cursor pages
+within the native record and byte bounds before choosing a worker directive.
+Every collected record still passes the ordinary signature and continuation
+checks. An unavailable later page retains the verified prefix for the next
+attempt; the supervisor does not launch an intermediate expired directive while
+the feed reports more records.
+
+Stopped-transaction recovery reconstructs shared history nodes once per bounded
+registry snapshot. Each run must reproduce its retained history's exact byte
+length and SHA-256, selected head and cursor linkage. Its head signature, package,
+installation and current transaction-recovery authorization are still checked.
+This avoids repeatedly decoding the same growing histories without changing
+their bytes or authorizing work from a cached chain head.
+
 Network pages remain limited to 64 records and 1 MiB; the feed currently returns
 batches of 16. Local continuations use `umi-validator-supervisor-directive-history/1`
 when they exceed either network-page limit. They are bounded by 65,536 records

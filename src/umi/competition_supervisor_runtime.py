@@ -31,6 +31,7 @@ from .competition_supervisor import (
     MAX_SUCCESSOR_DOCUMENT_BYTES,
     MAX_SUCCESSOR_HISTORY_BYTES,
     SignedSuccessorSupervisorDirective,
+    SuccessorSupervisorDirectivePage,
     SuccessorSupervisorDirectiveState,
     advance_successor_supervisor_directive_history_state,
     advance_successor_supervisor_directive_state,
@@ -54,7 +55,7 @@ from .competition_worker import (
 from .encoding import account_id32
 from .file_identity import delivery_file_identity as _startup_identity
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
-from .validator_supervisor import ValidatorSupervisorConfig
+from .validator_supervisor import MAX_SUPERVISOR_DIRECTIVES_PER_PAGE, ValidatorSupervisorConfig
 
 
 class SuccessorRuntimeError(ValueError):
@@ -943,6 +944,52 @@ class SuccessorSupervisorRuntime:
         ]
         return SuccessorWorkerSelection(signed, successor_continuation_bytes(anchor, continuation))
 
+    async def _collect_directive_page(self):
+        cursor = (4, self._state.accepted_sequence, self._state.accepted_directive_sha256)
+
+        async def read(after):
+            payload = await self.fetcher.fetch_directive_page(
+                after_version=after[0], after_sequence=after[1], after_directive_sha256=after[2]
+            )
+            if not isinstance(payload, bytes):
+                raise SuccessorRuntimeError("successor feed is unavailable")
+            page = parse_canonical_successor_supervisor_directive_page(payload)
+            if (page.after_version, page.after_sequence, page.after_directive_sha256) != after:
+                raise SuccessorRuntimeError("successor feed cursor mismatch")
+            return page, len(payload)
+
+        page, received = await read(cursor)
+        items = list(page.directives)
+        # One-hop relay objects are a transport choice, not a reason to stop
+        # and repeat the complete transaction audit after every old directive.
+        # Collect at most one native page's records; all signatures and history
+        # gates are still replayed by the ordinary reconciliation below.
+        while page.more and 0 < len(items) < MAX_SUPERVISOR_DIRECTIVES_PER_PAGE:
+            after = (4, page.head.directive.sequence, page.head.directive_sha256)
+            try:
+                following, size = await read(after)
+            except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                # Retain the collected prefix through the ordinary verification path,
+                # but never turn an incomplete fetch into execution authority.
+                break
+            if (
+                len(items) + len(following.directives) > MAX_SUPERVISOR_DIRECTIVES_PER_PAGE
+                or received + size > self.limits.maximum_history_bytes
+            ):
+                break
+            items.extend(following.directives)
+            received += size
+            page = following
+        return SuccessorSupervisorDirectivePage(
+            schema="umi-validator-supervisor-directive-page/4",
+            after_version=cursor[0],
+            after_sequence=cursor[1],
+            after_directive_sha256=cursor[2],
+            directives=items,
+            more=page.more,
+            head=page.head,
+        )
+
     @log_phase("reconcile")
     async def _reconcile(self):
         self._state, history, worker = self._load_history()
@@ -954,15 +1001,8 @@ class SuccessorSupervisorRuntime:
         if not self._restart_checked:
             observation = await self._stop_and_recover(observation)
             worker = _idle()
-        payload = await self.fetcher.fetch_directive_page(
-            after_version=4,
-            after_sequence=self._state.accepted_sequence,
-            after_directive_sha256=self._state.accepted_directive_sha256,
-        )
-        if not isinstance(payload, bytes):
-            raise SuccessorRuntimeError("successor feed is unavailable")
+        page = await self._collect_directive_page()
         observation = await self._refresh_observation()
-        page = parse_canonical_successor_supervisor_directive_page(payload)
         if (page.after_version, page.after_sequence, page.after_directive_sha256) != (
             4,
             self._state.accepted_sequence,
@@ -994,7 +1034,7 @@ class SuccessorSupervisorRuntime:
         if prefix:
             candidate = prefix[-1]
             expired = observation.block > candidate.directive.valid_through_block
-            if not expired and candidate.directive.mode != "hold":
+            if not page.more and not expired and candidate.directive.mode != "hold":
                 selection = self._selection(candidate, [*history, *prefix])
                 self._current_gates(candidate, observation, starting=True)
                 await self.adapter.stage(selection)

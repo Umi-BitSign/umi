@@ -93,7 +93,7 @@ def test_model_only_cohort_requires_public_track(cohort: str) -> None:
     upgrade.validate_manifest(manifest, status, "yes")
 
 
-def test_miner_command_replaces_every_policy_bound_state_path(tmp_path: Path) -> None:
+def test_miner_command_preserves_existing_cohort_state_paths(tmp_path: Path) -> None:
     manifest = _manifest()
     current = [
         "/old/bin/python",
@@ -122,11 +122,9 @@ def test_miner_command_replaces_every_policy_bound_state_path(tmp_path: Path) ->
     ]
     result = upgrade.miner_command(current, "/new/bin/python", tmp_path, manifest)
     assert result[:3] == ["/new/bin/python", "-m", "umi.miner"]
-    assert upgrade.option(result, "--nonce-db") == str(tmp_path / "protocol/nonces.sqlite3")
-    assert upgrade.option(result, "--assignment-db") == str(
-        tmp_path / "protocol/assignments.sqlite3"
-    )
-    assert upgrade.option(result, "--finality-state") == str(tmp_path / "protocol/finality.sqlite3")
+    assert upgrade.option(result, "--nonce-db") == "/old/nonces.sqlite3"
+    assert upgrade.option(result, "--assignment-db") == "/old/assignments.sqlite3"
+    assert upgrade.option(result, "--finality-state") == "/old/finality.sqlite3"
     assert "--competition-feed" not in result
     assert "--competition-predecessor-policy" not in result
     assert "--competition-chain-config" not in result
@@ -663,12 +661,14 @@ def test_model_only_upgrade_records_intent_without_touching_endpoint(
 
 
 @pytest.mark.parametrize("public_track", ["no", "yes"])
+@pytest.mark.parametrize("layout", ["standard", "manual_cohort"])
 @pytest.mark.parametrize(
     "prior_runtime", ["old", "missing", "current", "rolled_back", "legacy", "missing_transport"]
 )
 def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     prior_runtime: str,
     public_track: str,
+    layout: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -732,6 +732,25 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     for path, value in protected.items():
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(value)
+    if layout == "manual_cohort":
+        custom = tmp_path / "custom-state"
+        custom.mkdir()
+        startup_bytes = upgrade.startup(
+            manifest, custom, "miner-hotkey", "10" * 32, "https://miner.example"
+        )
+        startup_path = custom / "startup.json"
+        startup_path.write_bytes(startup_bytes)
+        arguments.extend(("--competition-cohort-config", str(startup_path)))
+        for flag, filename in (
+            ("--nonce-db", "nonces.sqlite3"),
+            ("--assignment-db", "assignments.sqlite3"),
+            ("--finality-state", "finality.sqlite3"),
+        ):
+            path = custom / filename
+            protected[path] = b"retained custom journal"
+            path.write_bytes(protected[path])
+            arguments.extend((flag, str(path)))
+        protected[startup_path] = startup_bytes
     calls = []
     responses = {
         upgrade.DEFAULT_MANIFEST: upgrade.canonical(manifest),
@@ -779,7 +798,14 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
         command = json.loads((inputs / "miner-command.json").read_bytes())["arguments"]
         assert command[0] == str(target_python)
         assert upgrade.option(command, "--model-revision") == "10" * 32
-        assert upgrade.option(command, "--nonce-db") == str(state / "protocol/nonces.sqlite3")
+        nonce_path = (
+            custom / "nonces.sqlite3"
+            if layout == "manual_cohort"
+            else state / "protocol/nonces.sqlite3"
+        )
+        assert upgrade.option(command, "--nonce-db") == str(nonce_path)
+        if layout == "manual_cohort":
+            assert (inputs / "miner-startup.json").read_bytes() == startup_bytes
     assert all(path.read_bytes() == value for path, value in protected.items())
 
 
@@ -910,3 +936,102 @@ def test_runtime_exact_pins_are_verified_before_promotion(tmp_path, monkeypatch,
     }
     assert pip_options["timeout"] == 3600
     assert sentinel.read_bytes() == b"keep existing service runtime"
+
+
+def test_manual_cohort_upgrade_retains_exact_startup_and_custom_paths(tmp_path):
+    manifest = _manifest()
+    raw = upgrade.startup(manifest, tmp_path / "custom", "miner-hotkey", "10" * 32, "https://miner")
+    config = tmp_path / "existing.json"
+    config.write_bytes(raw)
+    args = [
+        "/old/python",
+        "-m",
+        "umi.miner",
+        "--competition-cohort-config",
+        str(config),
+        "--nonce-db",
+        "/root/custom/nonces.sqlite3",
+        "--assignment-db",
+        "/root/custom/assignments.sqlite3",
+        "--finality-state",
+        "/root/custom/finality.sqlite3",
+    ]
+    result, kind = upgrade.migration_startup(
+        args, manifest, tmp_path / "new", "miner-hotkey", "10" * 32, "https://miner"
+    )
+    assert result == raw and kind == "cohort_runtime_in_place"
+    updated = upgrade.miner_command(args, "/new/python", tmp_path / "new", manifest)
+    for flag in ("--nonce-db", "--assignment-db", "--finality-state"):
+        assert upgrade.option(updated, flag) == upgrade.option(args, flag)
+    assert config.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["policy_sha256", "cohorts", "miner_hotkey", "schema"])
+def test_manual_upgrade_rejects_unqualified_authority_changes_before_writes(tmp_path, field):
+    manifest = _manifest()
+    raw = upgrade.startup(manifest, tmp_path / "custom", "miner-hotkey", "10" * 32, "https://miner")
+    value = json.loads(raw)
+    if field == "schema":
+        value["schema"] = "unknown-startup/9"
+    else:
+        value["authority"][field] = [] if field == "cohorts" else "00" * 32
+    config = tmp_path / "existing.json"
+    old = upgrade.canonical(value)
+    config.write_bytes(old)
+    args = ["--competition-cohort-config", str(config)]
+    with pytest.raises(ValueError, match="unsupported installed cohort"):
+        upgrade.migration_startup(
+            args, manifest, tmp_path / "new", "miner-hotkey", "10" * 32, "https://miner"
+        )
+    assert config.read_bytes() == old and not (tmp_path / "new").exists()
+
+
+def test_root_run_miner_is_discovered_without_account_migration(monkeypatch):
+    monkeypatch.setattr(
+        upgrade, "run", lambda *a, **kw: SimpleNamespace(stdout="MainPID=123\nUser=root\n")
+    )
+    args = ["/old/python", "-m", "umi.miner"]
+    monkeypatch.setattr(upgrade, "cmdline", lambda pid: args)
+    monkeypatch.setattr(upgrade.os, "readlink", lambda path: "/")
+    found = upgrade.service("umi.miner.service")
+    assert found.user == "root" and found.pid == 123 and found.arguments == args
+
+
+def test_manual_relative_paths_use_running_service_working_directory(tmp_path):
+    manifest = _manifest()
+    raw = upgrade.startup(manifest, Path("state"), "miner-hotkey", "10" * 32, "https://miner")
+    (tmp_path / "startup.json").write_bytes(raw)
+    arguments = [
+        "/old/python",
+        "-m",
+        "umi.miner",
+        "--competition-cohort-config",
+        "startup.json",
+        "--model-revision",
+        "10" * 32,
+        "--serving-origin",
+        "https://miner",
+        "--wallet-name",
+        "miner",
+        "--hotkey",
+        "miner",
+        "--wallet-path",
+        "wallets",
+        "--nonce-db",
+        "state/nonces.sqlite3",
+        "--assignment-db",
+        "state/assignments.sqlite3",
+        "--finality-state",
+        "state/finality.sqlite3",
+    ]
+    identity = upgrade.miner_identity(arguments, "root", tmp_path)
+    retained, kind = upgrade.migration_startup(
+        arguments, manifest, tmp_path / "new", *identity, tmp_path
+    )
+    assert retained == raw and kind == "cohort_runtime_in_place"
+    enrollment = json.loads(
+        upgrade.endpoint_enrollment_config(arguments, manifest, *identity, False, tmp_path)
+    )
+    assert enrollment["wallet_path"] == str(tmp_path / "wallets")
+    updated = upgrade.miner_command(arguments, "/new/python", tmp_path / "new", manifest)
+    assert upgrade.option(updated, "--assignment-db") == "state/assignments.sqlite3"
