@@ -366,6 +366,9 @@ async def test_fallback_cannot_relax_native_chain_or_proof_validation(chain, wir
 
 async def test_real_tls_primary_archive_is_tried_first_and_no_new_block_selected(chain, wire):
     state, router = wire
+    clock = [0.0]
+    for transport in router.transports:
+        transport._read_cache.now = lambda: clock[0]
     state.primary_status = 0
     result = await router.request("chain_getHeader", (chain.finality.ref.block_hash,))
     assert result["stateRoot"] == chain.finality.ref.state_root
@@ -373,9 +376,14 @@ async def test_real_tls_primary_archive_is_tried_first_and_no_new_block_selected
     state.primary_rpc_error = True
     result = await router.request("chain_getHeader", (chain.finality.ref.block_hash,))
     assert result["stateRoot"] == chain.finality.ref.state_root
+    assert len(state.reads) == 1  # The identical immutable header is still cached.
+    clock[0] = 31.0
+    result = await router.request("chain_getHeader", (chain.finality.ref.block_hash,))
+    assert result["stateRoot"] == chain.finality.ref.state_root
     assert state.reads[-2][1:] == state.reads[-1][1:]
     state.fallback_rpc_error = True
     state.second_rpc_error = True
+    clock[0] = 62.0
     with pytest.raises(ValidatorChainError, match="proof_rpc_error"):
         await router.request("chain_getHeader", (chain.finality.ref.block_hash,))
     assert state.reads[-2][1:] == state.reads[-1][1:]

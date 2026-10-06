@@ -569,8 +569,19 @@ baseline or a ledger missing any anchored submission. The required
 journal disjoint from intake and finality state.
 
 If readiness returns `503` with `verified registration unavailable`, inspect
-the intake service's private `registration_refresh_failed` log. The fixed
-`reason_code` distinguishes RPC rate limiting (`proof_rpc_rate_limited`), stale
+the intake service's private `registration_refresh_failed` log.
+
+Exact-block RPC reads share a bounded per-transport memory cache: up to 64 MiB,
+512 entries and 64 concurrent distinct reads, with 30-second retention. Identical
+concurrent reads share one network operation. Latest-head reads, number-only
+block-hash queries, failed requests and unavailable-block results are not cached.
+Storage bytes remain untrusted and their proofs are verified on every use.
+Each head check still consults owned finality; a fully cross-checked exact
+snapshot can reuse its header validation, with at most 256 snapshots retained.
+Changed hashes, parents or roots require the complete original checks. No cache
+entry establishes current authority, registration eligibility or receipt timing.
+
+The fixed `reason_code` distinguishes RPC rate limiting (`proof_rpc_rate_limited`), stale
 owned finality (`owned_finality_stale`), and registration-cache capacity
 (`registration_cache_capacity`). Unknown failures use a redacted fallback.
 A running process or advancing observer does not prove that storage-proof
