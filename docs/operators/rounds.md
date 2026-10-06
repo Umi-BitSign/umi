@@ -1780,6 +1780,9 @@ while that history check waits, confirmation recollects finality once and repeat
 the authority checks. It never lowers the retained head or substitutes a cached
 head. A still-lagging provider, malformed journal or changed authority remains a
 hold; a valid closure is retained before further origin use is refused.
+The earlier assignment-authority observation applies the same bounded recovery
+by repeating its complete history and finality checks before execution starts.
+Neither retry starts inference, replaces an assignment or renews authority.
 
 Scheduler reports retain up to eight distinct `retry_examples` with the stage,
 selection slot, exception type and source frames. `last_retry_slot` binds the last

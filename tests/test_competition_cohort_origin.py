@@ -601,3 +601,99 @@ async def test_invalid_retained_highwater_does_not_trigger_origin_recollection(
             (_HEIGHT,),
             (_HEIGHT + 1,),
         ]
+
+
+@pytest.mark.parametrize("provider_advances", [True, False])
+async def test_assignment_authority_recollects_after_concurrent_head_observation(
+    endpoint, provider_advances, monkeypatch
+):
+    from umi.competition_execution import execution_boundary
+
+    p = endpoint
+    service = p.service()
+    collect = service.authority.provider.collect
+    calls = 0
+
+    async def concurrent_collect():
+        nonlocal calls
+        capture = await collect()
+        calls += 1
+        if calls == 1:
+            block = execution_boundary(capture).block
+            p.e.journal().journal.observe(block + 1)
+            if provider_advances:
+                p.c.finality.ref = replace(
+                    p.c.finality.ref, block_number=block + 1, block_hash=_hash(92)
+                )
+        return capture
+
+    monkeypatch.setattr(service.authority.provider, "collect", concurrent_collect)
+    if provider_advances:
+        capture = await service.collect(p.e.assignment)
+        assert capture.block == _HEIGHT + 1
+        assert p.e.journal().assignment(p.e.r.slot) == p.e.assignment
+    else:
+        with pytest.raises(ValueError, match="finalized head regressed"):
+            await service.collect(p.e.assignment)
+    with p.e.journal().journal.transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(_HEIGHT + 1,)]
+
+
+async def test_closure_during_assignment_authority_recollection_is_retained(endpoint, monkeypatch):
+    from umi.competition_execution import execution_boundary
+
+    p = endpoint
+    service = p.service()
+    collect = service.authority.provider.collect
+    history = service.authority.history
+    calls = 0
+    histories = 0
+    original = p.e.r.h.source
+
+    async def concurrent_collect():
+        nonlocal calls
+        capture = await collect()
+        calls += 1
+        if calls == 1:
+            block = execution_boundary(capture).block
+            p.e.journal().journal.observe(block + 1)
+            p.c.finality.ref = replace(
+                p.c.finality.ref, block_number=block + 1, block_hash=_hash(93)
+            )
+        return capture
+
+    async def closing_history(cohort):
+        nonlocal histories
+        histories += 1
+        if histories == 2:
+            p.e.r.h.source = source_for(p.e.r.h.batch, p.e.r.h.batch["history"])
+        return await history(cohort)
+
+    monkeypatch.setattr(service.authority.provider, "collect", concurrent_collect)
+    monkeypatch.setattr(service.authority, "history", closing_history)
+    with pytest.raises(ValueError, match="open request"):
+        await service.collect(p.e.assignment)
+    assert p.resolutions == []
+    p.e.r.h.source = original
+    with pytest.raises(ValueError, match="rolled back"):
+        await p.collect()
+
+
+async def test_invalid_assignment_highwater_does_not_retry_authority(endpoint, monkeypatch):
+    p = endpoint
+    service = p.service()
+    collect = service.authority.provider.collect
+    calls = 0
+
+    async def invalid_collect():
+        nonlocal calls
+        capture = await collect()
+        calls += 1
+        with p.e.journal().journal.transaction() as db:
+            db.executemany("INSERT INTO highwater VALUES (?)", [(_HEIGHT + 1,), (_HEIGHT + 2,)])
+        return capture
+
+    monkeypatch.setattr(service.authority.provider, "collect", invalid_collect)
+    with pytest.raises(ValueError, match="finalized head regressed"):
+        await service.collect(p.e.assignment)
+    assert calls == 1 and p.resolutions == []

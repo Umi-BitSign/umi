@@ -28,6 +28,7 @@ from .competition_cohort_order_signer import (
     review_order,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
@@ -57,6 +58,20 @@ class CohortExecutionAuthority:
         self.journal, self.provider, self.history = journal, provider, history
 
     async def current(
+        self, assignment: CohortExecutionAssignment
+    ) -> tuple[CohortOrderHistory, ExecutionBoundary]:
+        # Other owned operations can advance this shared journal after proof
+        # collection. Repeat the complete authority observation once, rather
+        # than using the journal's head as a substitute for owned finality.
+        for attempt in range(2):
+            try:
+                return await self._current(assignment)
+            except FinalizedHeadRegression:
+                if attempt:
+                    raise
+        raise AssertionError("execution authority exhausted without a result")
+
+    async def _current(
         self, assignment: CohortExecutionAssignment
     ) -> tuple[CohortOrderHistory, ExecutionBoundary]:
         timeout = self.journal.config.read_timeout_seconds
