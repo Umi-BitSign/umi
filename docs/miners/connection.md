@@ -50,6 +50,10 @@ bytes, grant directory, nonce database, assignment database and finality databas
 in place, including custom paths. Relative paths keep the service's existing
 working directory. The updater does not copy a directory-bound grant journal or
 change accounts as part of an upgrade.
+The selected miner runs with isolated Python imports, so an old checkout in the
+working directory or an inherited `PYTHONPATH` or `PYTHONHOME` cannot silently
+select the previous source. The working directory still resolves existing data
+and configuration paths.
 It fetches the current canonical manifest, checks its policy and profile against
 the public competition status, and selects that matching deployment's exact
 runtime revision. It selects the exact root-owned CPython patch version and
@@ -66,7 +70,9 @@ model-sidecar state from earlier policies remain intact.
 Rerunning the command installs a changed runtime even within the same cohort.
 An existing receipt skips cutover only when its revision and the running miner's
 interpreter match the selected deployment and scoring profile. An older runtime
-for the same source revision is preserved and replaced by the verified policy
+launch without isolated Python imports also requires cutover, even if its receipt
+names the selected revision. An older runtime for the same source revision is
+preserved and replaced by the verified policy
 profile instead of being reused merely because its revision matches. Retained
 enrollment, nonce, assignment and grant state stay in the same namespace.
 

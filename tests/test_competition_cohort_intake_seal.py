@@ -322,3 +322,52 @@ async def test_controller_restarts_after_lost_signature_and_publication_ack_with
         assert intake.receipt(request_for(scenario))["status"] == "pending_attestation"
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("failure", ["none", "noncanonical_record", "bad_signature", "wrong_index"])
+def test_locked_seal_replay_preserves_bytes_and_refuses_changed_originals(
+    intake, scenario, monkeypatch, failure
+):
+    import json
+
+    from umi import competition_cohort_intake_seal as seal_module
+    from umi.competition_cohort_intake_seal import build_intake_seal
+
+    intake.retain(request_for(scenario), capture_at(210))
+    cohort, tip = identity(intake, scenario)
+    original = intake.seal(cohort, capture_at(300), expected_tip_sha256=tip)
+    with intake._connection() as (db, store):
+        history = store.published_history(cohort)
+        raw_records = tuple(intake._records(db, history))
+        expected = build_intake_seal(
+            history,
+            scenario["policy"],
+            original.observation,
+            original.snapshot,
+            raw_records,
+            expected_tip_sha256=tip,
+        )
+    assert canonical_json_bytes(expected) == canonical_json_bytes(original)
+    if failure != "none":
+        with sqlite3.connect(Path(intake.config.directory) / "intake.sqlite3") as db:
+            if failure == "wrong_index":
+                db.execute("UPDATE cohort_consents SET recovery_tip=?", ("00" * 32,))
+            else:
+                value = json.loads(raw_records[0][1])
+                if failure == "bad_signature":
+                    value["request"]["signed_submission"]["signature"] = "0x" + "00" * 64
+                    changed = canonical_json_bytes(value)
+                else:
+                    changed = json.dumps(value, indent=2).encode()
+                db.execute("UPDATE cohort_consents SET body=?", (changed,))
+        with pytest.raises(ValueError):
+            intake.sealed(cohort)
+    else:
+        # Owner replay uses the already native-decoded row; the public raw-byte
+        # decoder above remains independently exercised for wire reconstruction.
+        monkeypatch.setattr(
+            seal_module,
+            "read_participation",
+            lambda raw: pytest.fail("large record decoded twice during locked replay"),
+        )
+        assert canonical_json_bytes(intake.sealed(cohort)) == canonical_json_bytes(original)

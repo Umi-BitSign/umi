@@ -244,8 +244,11 @@ def miner_command(
     updated = list(arguments)
     if python_module_miner(updated):
         updated[0] = runtime_python
+        module_index = updated.index("-m")
+        flags = [flag for flag in ("-I", "-B") if flag not in updated[1:module_index]]
+        updated[module_index:module_index] = flags
     elif Path(updated[0]).name == "umi-miner":
-        updated[0] = str(Path(runtime_python).with_name("umi-miner"))
+        updated = [runtime_python, "-I", "-B", "-m", "umi.miner", *updated[1:]]
     else:
         raise ValueError("unsupported miner entry point")
     for name in (
@@ -1598,6 +1601,8 @@ def main() -> None:
             and prior.get("policy_sha256") == manifest["policy"]["value_sha256"]
             and prior.get("runtime_revision") == manifest["runtime"]["revision"]
             and Path(miner_python(miner.arguments)).resolve() == selected_python.resolve()
+            and python_module_miner(miner.arguments)
+            and {"-I", "-B"}.issubset(miner.arguments[1 : miner.arguments.index("-m")])
         ):
             observed = wait_health(
                 port,
