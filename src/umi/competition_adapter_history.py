@@ -258,3 +258,84 @@ def restore_history(reference, *, head, nodes) -> bytes:
         raise RetainedHistoryError("retained history bytes differ from their recorded binding")
     parse_canonical_successor_supervisor_directive_history(body)
     return body
+
+
+_RECOVERY_HISTORY_ISSUER = object()
+
+
+@dataclass(frozen=True)
+class ReplayedHistory:
+    """Exact restored bytes from a single validated registry snapshot, never authority."""
+
+    payload: bytes
+    head: SignedSuccessorSupervisorDirective
+    head_bytes: bytes
+    _issuer: object
+
+
+class RecoveryHistoryReplay:
+    """Validate shared nodes once per audit; retain no state between audits.
+
+    Every node is checked by the ordinary canonical signed-directive parser.
+    Every reference still checks its cursor, complete chain, size and exact
+    restored-byte digest. Signature, consent, package and transaction checks
+    remain the adapter's responsibility on every run.
+    """
+
+    def __init__(self, stored_nodes):
+        self.nodes = {
+            identity: parse_history_node(identity, body) for identity, body in stored_nodes.items()
+        }
+        self.prefixes = summarize_history_nodes(self.nodes)
+        self._signed_bytes = {
+            identity: canonical_json_bytes(node.signed) for identity, node in self.nodes.items()
+        }
+
+    def restore(self, reference, *, head):
+        validate_reference_head(reference, head=head, nodes=self.nodes, prefixes=self.prefixes)
+        current, records = reference["tip"], []
+        for _ in range(reference["count"]):
+            node = self.nodes.get(current)
+            if node is None:
+                raise RetainedHistoryError("retained history node is missing")
+            records.append(self._signed_bytes[current])
+            current = node.previous
+        if current is not None:
+            raise RetainedHistoryError("retained history prefix length differs")
+        # Each fragment was canonicalized from the native parsed signed model;
+        # RFC 8785 orders these fixed ASCII keys exactly as below. No signed
+        # payload or schema is rewritten. The recorded full-byte binding is
+        # checked even though shared nested models need not be parsed again.
+        head_bytes = canonical_json_bytes(head)
+        body = (
+            b'{"after_directive_sha256":'
+            + canonical_json_bytes(reference["after_directive_sha256"])
+            + b',"after_sequence":'
+            + canonical_json_bytes(reference["after_sequence"])
+            + b',"after_version":'
+            + canonical_json_bytes(reference["after_version"])
+            + b',"directives":['
+            + b",".join(reversed(records))
+            + b'],"head":'
+            + head_bytes
+            + b',"more":false,"schema":'
+            + canonical_json_bytes(reference["page_schema"])
+            + b"}"
+        )
+        if (
+            len(body) != reference["page_size_bytes"]
+            or hashlib.sha256(body).hexdigest() != reference["page_sha256"]
+        ):
+            raise RetainedHistoryError("retained history bytes differ from their recorded binding")
+        return ReplayedHistory(body, head, head_bytes, _RECOVERY_HISTORY_ISSUER)
+
+
+def replayed_history_head(history, *, payload):
+    if (
+        type(history) is not ReplayedHistory
+        or history._issuer is not _RECOVERY_HISTORY_ISSUER
+        or history.payload != payload
+        or canonical_json_bytes(history.head) != history.head_bytes
+    ):
+        raise RetainedHistoryError("replayed history binding changed")
+    return history.head

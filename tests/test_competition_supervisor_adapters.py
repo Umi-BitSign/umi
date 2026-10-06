@@ -1195,3 +1195,156 @@ async def test_slow_start_verification_precedes_fresh_weight_proof(adapter_case,
     fresh = case.adapter._preflight[case.selection.directive_sha256]
     validate_owned_weight_observation(fresh)
     assert fresh.captured_monotonic_ns > initial.expires_monotonic_ns
+
+
+@pytest.mark.parametrize("count", [0, 1, 16, 68])
+def test_recovery_history_fold_matches_native_parser(adapter_case, count):
+    from umi.competition_adapter_history import (
+        RecoveryHistoryReplay,
+        encode_history,
+        replayed_history_head,
+    )
+    from umi.competition_supervisor import (
+        parse_canonical_successor_supervisor_directive_history,
+        successor_continuation_bytes,
+    )
+
+    anchor = adapter_case.selection.signed
+    records = _signed_continuation(anchor, count)
+    body = successor_continuation_bytes(anchor, records)
+    reference, nodes = encode_history(body)
+    replay = RecoveryHistoryReplay(nodes)
+    head = records[-1] if records else anchor
+    restored = replay.restore(reference, head=head)
+    assert restored.payload == body
+    assert replayed_history_head(restored, payload=body) == (
+        parse_canonical_successor_supervisor_directive_history(body).head
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("count", True),
+        ("count", 1),
+        ("after_directive_sha256", "00" * 32),
+        ("page_sha256", "00" * 32),
+        ("page_size_bytes", 1),
+        ("page_schema", []),
+        ("tip", "00" * 32),
+    ],
+)
+def test_recovery_history_fold_rejects_changed_reference(adapter_case, field, value):
+    from umi.competition_adapter_history import RecoveryHistoryReplay, encode_history
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    anchor = adapter_case.selection.signed
+    records = _signed_continuation(anchor, 2)
+    reference, nodes = encode_history(successor_continuation_bytes(anchor, records))
+    with pytest.raises(ValueError):
+        RecoveryHistoryReplay(nodes).restore({**reference, field: value}, head=records[-1])
+
+
+def test_recovery_history_fold_rejects_payload_and_head_substitution(adapter_case):
+    from umi.competition_adapter_history import (
+        RecoveryHistoryReplay,
+        encode_history,
+        replayed_history_head,
+    )
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    anchor = adapter_case.selection.signed
+    records = _signed_continuation(anchor, 2)
+    body = successor_continuation_bytes(anchor, records)
+    reference, nodes = encode_history(body)
+    replay = RecoveryHistoryReplay(nodes)
+    with pytest.raises(ValueError):
+        replay.restore(reference, head=records[0])
+    restored = replay.restore(reference, head=records[-1])
+    with pytest.raises(ValueError):
+        replayed_history_head(restored, payload=body + b" ")
+    with pytest.raises(ValueError):
+        replayed_history_head(replace(restored, head=records[0]), payload=body)
+    with pytest.raises(ValueError):
+        replayed_history_head(replace(restored, _issuer=object()), payload=body)
+    changed = dict(nodes)
+    changed[reference["tip"]] = b"{}"
+    with pytest.raises(ValueError):
+        RecoveryHistoryReplay(changed)
+
+
+async def test_recovery_fold_still_reverifies_every_retained_head(adapter_case, monkeypatch):
+    case = adapter_case
+    await case.adapter.stage(case.selection)
+    case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
+    verify = adapters.verify_signed_successor_supervisor_directive_history
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(args[0].directive_sha256)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(adapters, "verify_signed_successor_supervisor_directive_history", observed)
+    await _stopped(case)
+    assert calls == [case.selection.directive_sha256]
+    calls.clear()
+    await case.adapter.recover_stopped_transactions(
+        await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
+    )
+    assert calls == [case.selection.directive_sha256]
+
+
+@pytest.mark.parametrize("corrupt_signature", [False, True])
+async def test_shared_recovery_audits_each_run_without_expanding_nested_schemas(
+    adapter_case, monkeypatch, corrupt_signature
+):
+    from umi.competition_supervisor import successor_continuation_bytes
+
+    case = adapter_case
+    records = _signed_continuation(case.selection.signed, 4)
+    if corrupt_signature:
+        final = records[-1]
+        records[-1] = final.model_copy(
+            update={
+                "signatures": [
+                    item.model_copy(update={"signature": "0x" + "00" * 64})
+                    for item in final.signatures
+                ]
+            }
+        )
+    for count, signed in enumerate(records, 1):
+        case.adapter._retain(
+            SimpleNamespace(
+                selection=SuccessorWorkerSelection(signed),
+                files=replace(
+                    case.files,
+                    current_directive_page_bytes=successor_continuation_bytes(
+                        case.selection.signed, records[:count]
+                    ),
+                ),
+            )
+        )
+    verify = adapters.verify_signed_successor_supervisor_directive_history
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(args[0].directive_sha256)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(adapters, "verify_signed_successor_supervisor_directive_history", observed)
+    monkeypatch.setattr(
+        adapters,
+        "parse_canonical_successor_supervisor_directive_history",
+        lambda *a, **k: pytest.fail("expanded shared nested history again"),
+    )
+    await case.adapter.stop_worker()
+    observation = await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
+    if corrupt_signature:
+        with pytest.raises(ValidatorSupervisorError, match="signature_invalid"):
+            await case.adapter.recover_stopped_transactions(observation)
+        assert case.adapter._recovered is None
+    else:
+        await case.adapter.recover_stopped_transactions(observation)
+        assert case.adapter._recovered is not None
+    assert calls == [item.directive_sha256 for item in records]
+    assert not case.item.encoded

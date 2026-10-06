@@ -266,18 +266,38 @@ def miner_command(
         "--finality-state": str(protocol / "finality.sqlite3"),
         "--max-recovery-assignments": str(manifest["maximum_recovery_assignments"]),
     }
+    existing_cohort = option(arguments, "--competition-cohort-config", required=False)
     for name, value in replacements.items():
+        if existing_cohort is not None and name in {
+            "--nonce-db",
+            "--assignment-db",
+            "--finality-state",
+        }:
+            # These are required options in cohort miners. A runtime upgrade
+            # retains the exact paths and the unit's working directory.
+            option(arguments, name)
+            continue
         replace_option(updated, name, value)
     return updated
 
 
-def miner_identity(arguments: list[str], user: str) -> tuple[str, str, str]:
+def installed_path(value: str, working_directory: Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else working_directory / path
+
+
+def miner_identity(
+    arguments: list[str], user: str, working_directory: Path = Path("/")
+) -> tuple[str, str, str]:
     model = option(arguments, "--model-revision")
     origin = option(arguments, "--serving-origin")
     config_path = option(arguments, "--competition-cohort-config", required=False)
     hotkey = None
     if config_path is not None:
-        config = document(Path(config_path).read_bytes(), label="existing cohort startup")
+        config = document(
+            installed_path(config_path, working_directory).read_bytes(),
+            label="existing cohort startup",
+        )
         authority = config.get("authority") if isinstance(config, dict) else None
         hotkey = authority.get("miner_hotkey") if isinstance(authority, dict) else None
     if hotkey is None:
@@ -299,7 +319,7 @@ def miner_identity(arguments: list[str], user: str) -> tuple[str, str, str]:
             code,
             str(wallet_name),
             str(hotkey_name),
-            wallet_path or "",
+            str(installed_path(wallet_path, working_directory)) if wallet_path else "",
         )
         hotkey = result.stdout.strip()
     if not isinstance(hotkey, str) or not hotkey:
@@ -337,12 +357,49 @@ def startup(manifest: dict, state: Path, hotkey: str, model: str, origin: str) -
     )
 
 
+def migration_startup(
+    arguments: list[str],
+    manifest: dict,
+    state: Path,
+    hotkey: str,
+    model: str,
+    origin: str,
+    working_directory: Path = Path("/"),
+) -> tuple[bytes, str]:
+    """Select a supported installed-config transition without touching journals."""
+    existing_path = option(arguments, "--competition-cohort-config", required=False)
+    proposed = startup(manifest, state, hotkey, model, origin)
+    if existing_path is None:
+        return proposed, "legacy_to_cohort"
+    raw = installed_path(existing_path, working_directory).read_bytes()
+    current = document(raw, label="installed cohort startup")
+    expected = document(proposed, label="target cohort startup")
+    if current.get("schema") != expected["schema"]:
+        raise ValueError("unsupported installed cohort startup schema; miner unchanged")
+    authority = current.get("authority")
+    if not isinstance(authority, dict):
+        raise ValueError("installed cohort authority is missing; miner unchanged")
+    directory = authority.get("directory")
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("installed grant directory is missing; miner unchanged")
+    expected["authority"]["directory"] = directory
+    if current != expected:
+        # The journal binds this authority, including its policy and roster.
+        # A future cohort/policy transition needs its explicit native migration;
+        # changing a directory or copying the database cannot authorize it.
+        raise ValueError("unsupported installed cohort authority transition; miner unchanged")
+    for name in ("--nonce-db", "--assignment-db", "--finality-state"):
+        option(arguments, name)
+    return raw, "cohort_runtime_in_place"
+
+
 @dataclass(frozen=True)
 class Service:
     name: str
     pid: int
     user: str
     arguments: list[str]
+    working_directory: Path = Path("/")
 
 
 def python_module_miner(arguments: list[str]) -> bool:
@@ -383,9 +440,18 @@ def service(name: str) -> Service:
         values[key] = value
     pid = int(values.get("MainPID", "0"))
     user = values.get("User") or "root"
-    if pid <= 0 or user == "root":
-        raise ValueError(f"{name} is not one running unprivileged service")
-    return Service(name=name, pid=pid, user=user, arguments=cmdline(pid))
+    if pid <= 0:
+        raise ValueError(f"{name} is not one running service")
+    working_directory = Path(os.readlink(f"/proc/{pid}/cwd"))
+    if not working_directory.is_absolute() or not working_directory.is_dir():
+        raise ValueError("running service working directory is unavailable")
+    return Service(
+        name=name,
+        pid=pid,
+        user=user,
+        arguments=cmdline(pid),
+        working_directory=working_directory,
+    )
 
 
 def discover_miner() -> Service:
@@ -899,6 +965,7 @@ def endpoint_enrollment_config(
     model: str,
     origin: str,
     public_model_track: bool,
+    working_directory: Path = Path("/"),
 ) -> bytes:
     wallet_name = option(arguments, "--wallet-name")
     hotkey_name = option(arguments, "--hotkey")
@@ -916,7 +983,9 @@ def endpoint_enrollment_config(
             "schema": "umi-miner-cohort-enrollment/1",
             "service_authority_sha256": manifest["service_authority_sha256"],
             "wallet_name": wallet_name,
-            "wallet_path": wallet_path or None,
+            "wallet_path": (
+                str(installed_path(wallet_path, working_directory)) if wallet_path else None
+            ),
         }
     )
 
@@ -1446,12 +1515,26 @@ def main() -> None:
         raise ValueError("run the upgrade with sudo")
     miner = discover_miner()
     account = pwd.getpwnam(miner.user)
-    hotkey, model, origin = miner_identity(miner.arguments, miner.user)
+    hotkey, model, origin = miner_identity(miner.arguments, miner.user, miner.working_directory)
     state = ROOT / (manifest["policy"]["value_sha256"][:16])
     receipt = state / "upgrade-receipt.json"
     port = int(option(miner.arguments, "--port"))
     model_only = manifest["eligible_tracks"] == ["model"]
+    retained_startup, migration = (
+        (None, "model_intent_endpoint_unchanged")
+        if model_only
+        else migration_startup(
+            miner.arguments, manifest, state, hotkey, model, origin, miner.working_directory
+        )
+    )
     summary = {
+        "migration": migration,
+        "installed_runtime_python": miner_python(miner.arguments),
+        "installed_cohort_startup": option(
+            miner.arguments, "--competition-cohort-config", required=False
+        )
+        is not None,
+        "target_runtime_revision": manifest["runtime"]["revision"],
         "cohort": manifest["cohort"],
         "endpoint_service_unchanged": model_only,
         "miner_service": miner.name,
@@ -1538,6 +1621,7 @@ def main() -> None:
                     model,
                     origin,
                     args.public_model_track == "yes",
+                    miner.working_directory,
                 ),
                 policy_raw=policy_raw,
             )
@@ -1576,7 +1660,7 @@ def main() -> None:
     write_private(inputs / "upgrade-manifest.json", manifest_raw, account)
     write_private(
         inputs / "miner-startup.json",
-        startup(manifest, state, hotkey, model, origin),
+        retained_startup,
         account,
     )
     write_private(
@@ -1650,6 +1734,7 @@ def main() -> None:
             model,
             origin,
             args.public_model_track == "yes",
+            miner.working_directory,
         ),
         policy_raw=retained_policy_raw,
     )
