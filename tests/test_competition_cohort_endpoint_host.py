@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 
 from umi import competition_cohort_endpoint_host as host_module
-from umi.competition_cohort_clip_delivery import ClipDeliveryConfig
+from umi.competition_cohort_clip_delivery import ClipDeliveryConfig, CohortClipDelivery
 from umi.competition_cohort_endpoint_host import EndpointHost, EndpointHostConfig
 from umi.competition_cohort_endpoint_vote_http import endpoint_vote_routes
 from umi.competition_cohort_execution_journal import CohortExecutionJournal
@@ -409,6 +409,59 @@ async def test_recurring_worker_waits_for_missing_media_then_completes(installed
                 await asyncio.sleep(0.01)
 
         await asyncio.wait_for(wait_complete(), 180)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 60)
+    assert n.q.p.model.calls == len(n.q.p.e.job.cases)
+
+
+async def test_clip_read_failure_keeps_native_scheduler_running_then_completes(
+    installed, monkeypatch
+):
+    n = installed
+    requests = n.host.worker.attempts.requests
+    original = requests.video_source
+    publisher = CohortClipDelivery(n.host.config.clips, n.client, "a" * 64)
+    unavailable = True
+
+    async def publish(sha256, now):
+        # Reproduce the publisher's HTTP failure at the native host boundary.
+        # Clip byte verification and retained intent recovery have separate
+        # publisher tests; this exercises the recurring signed-work scheduler.
+        raise httpx.ReadError("private clip read failed")
+
+    monkeypatch.setattr(publisher, "_publish", publish)
+
+    async def video(job, case):
+        if unavailable:
+            return await publisher(case.video_sha256)
+        return await original(job, case)
+
+    requests.video_source = video
+    stop, reports = asyncio.Event(), []
+    task = asyncio.create_task(n.host.worker.run(stop, poll_seconds=0.01, report=reports.append))
+    try:
+
+        async def pending():
+            while not any(report.get("batch_pending", 0) for report in reports):
+                if task.done():
+                    task.result()
+                    raise AssertionError("clip read failure stopped the scheduler")
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(pending(), 180)
+        assert not task.done() and not n.signatures
+        assert any(report.get("last_retry_type") == "OSError" for report in reports)
+        assert "private clip read failed" not in str(reports)
+        unavailable = False
+
+        async def completed():
+            while n.host.worker.schedule.complete(n.q.slot) is None:
+                if task.done():
+                    task.result()
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(completed(), 180)
     finally:
         stop.set()
         await asyncio.wait_for(task, 60)

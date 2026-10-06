@@ -18,7 +18,9 @@ async def clips(tmp_path, monkeypatch):
     body = b"\0\0\0\x10ftyp" + b"retained-test-video" * 100
     sha = hashlib.sha256(body).hexdigest()
     (root / (sha + ".mp4")).write_bytes(body)
-    state = SimpleNamespace(now=1790630000, objects={}, uploads=[], lost=False, fault=None)
+    state = SimpleNamespace(
+        now=1790630000, objects={}, uploads=[], lost=False, fault=None, transport_error=None
+    )
     monkeypatch.setattr(delivery.time, "time", lambda: state.now)
     cfg = delivery.ClipDeliveryConfig(
         schema="umi-cohort-clip-delivery-config/1",
@@ -44,6 +46,8 @@ async def clips(tmp_path, monkeypatch):
                 raise httpx.ReadError("lost upload acknowledgement")
             return httpx.Response(201)
         assert request.method == "GET" and "authorization" not in request.headers
+        if state.transport_error is not None:
+            raise state.transport_error("private clip transport failed", request=request)
         if path not in state.objects:
             return httpx.Response(404)
         value = state.objects[path]
@@ -63,9 +67,14 @@ async def clips(tmp_path, monkeypatch):
 async def test_upload_recovers_lost_ack_and_automatically_renews(clips):
     c = clips
     c.lost = True
-    with pytest.raises(httpx.ReadError):
-        await c.open()(c.sha)
+    uploader = c.open()
+    with pytest.raises(OSError, match="transport is unavailable") as failed:
+        await uploader(c.sha)
+    assert isinstance(failed.value.__cause__, httpx.ReadError)
+    slot, intent, _ = uploader._select(c.sha, c.now)
+    assert uploader.journal.get("complete", slot) is None
     first = await c.open()(c.sha)
+    assert first == intent.video
     assert len(c.uploads) == 1
     assert c.uploads[0] in first.url
     # Deletion is repaired at the exact same capability; no new signed request.
@@ -76,6 +85,24 @@ async def test_upload_recovers_lost_ack_and_automatically_renews(clips):
     next_ = await c.open()(c.sha)
     assert next_.url != first.url and next_.sha256 == first.sha256
     assert len(c.uploads) == 3
+
+
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout])
+async def test_transport_failure_retries_original_intent_without_republishing(clips, error):
+    uploader = clips.open()
+    slot, intent, body = uploader._select(clips.sha, clips.now)
+    path = httpx.URL(intent.video.url).path
+    clips.objects[path] = body
+    clips.transport_error = error
+    with pytest.raises(OSError, match="transport is unavailable") as failed:
+        await uploader(clips.sha)
+    assert isinstance(failed.value.__cause__, error)
+    assert uploader.journal.get("complete", slot) is None
+    assert not clips.uploads
+    clips.transport_error = None
+    assert await clips.open()(clips.sha) == intent.video
+    assert uploader.journal.get("complete", slot) == {"intent": delivery.digest(intent)}
+    assert not clips.uploads
 
 
 @pytest.mark.parametrize("fault", ["digest", "oversize", "redirect"])

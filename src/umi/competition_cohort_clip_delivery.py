@@ -155,6 +155,12 @@ class CohortClipDelivery:
         # workers issue concurrently. Waiting workers retain their own budgets.
         async with self.serial:
             with video_fetch_logging():
-                return await wait_for_owned(
-                    self._publish(sha256, int(time.time())), timeout=self.config.timeout_seconds
-                )
+                try:
+                    return await wait_for_owned(
+                        self._publish(sha256, int(time.time())), timeout=self.config.timeout_seconds
+                    )
+                except httpx.RequestError as error:
+                    # A failed read does not establish that the retained object
+                    # is missing. Let the scheduler retry its original intent;
+                    # do not republish or treat transport failure as corruption.
+                    raise OSError("selected clip transport is unavailable") from error
