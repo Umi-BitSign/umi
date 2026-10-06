@@ -4,6 +4,7 @@ The retained preparation and finality sources are fixtures; every order review,
 signature, selection and delivery receipt uses the native implementation.
 """
 
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -11,6 +12,7 @@ import pytest
 
 from umi.competition_cohort_order_host import CohortOrderHost, OrderHostConfig
 from umi.competition_cohort_order_signer import order_slot
+from umi.competition_cohort_request_readiness_host import CombinedRequestReadiness
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
@@ -149,6 +151,55 @@ async def test_complete_roster_selected_and_delivered_without_manual_orders(owne
     assert await resumed.select(r.cohort) == count
     assert (await resumed.worker.poll_once())["retry_count"] == 0
     assert (len(r.h.calls), len(r.receipt_calls), o.prepared_reads) == calls
+
+
+async def test_retained_roster_returns_verified_orders_and_rejects_later_tampering(owner):
+    o, r = owner, owner.network.r
+    host = o.host()
+    count = await host.select(r.cohort)
+    selected = host.queue.journal.get("order_host_roster", r.cohort)
+    expected = tuple(host.queue.intent(slot).order for slot in selected["slots"])
+    assert host._retained_orders(r.cohort) == expected
+    assert host._retained(r.cohort) == count == len(expected)
+    slot = selected["slots"][0]
+    original = host.queue.journal.get("intent", slot)
+    damaged = json.loads(canonical_json_bytes(original))
+    damaged["order"]["round"]["cohort_sha256"] = "ff" * 32
+    with host.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='intent' AND id=?",
+            (canonical_json_bytes(damaged), slot),
+        )
+    with pytest.raises(ValueError):
+        host._retained_orders(r.cohort)
+
+
+async def test_readiness_ignores_delivery_noise_but_rejects_changed_selection(owner):
+    o, r = owner, owner.network.r
+    host = o.host()
+    await host.select(r.cohort)
+    # The selection reader uses a real signed roster and native journal. Its
+    # surrounding HTTP/finality ports are exercised by the readiness suite.
+    reader = CombinedRequestReadiness.__new__(CombinedRequestReadiness)
+    reader.orders, reader.selected, reader.selection_stamp = host, {}, None
+    source = SimpleNamespace(cohort=r.cohort, roster=SimpleNamespace(round=r.h.order.round))
+    original = reader._orders(source)
+    stamp = reader.selection_stamp
+    await host.worker.poll_once()
+    assert reader._selection_stamp(r.cohort) == stamp
+    assert reader._orders(source) == original
+    selected = host.queue.journal.get("order_host_roster", r.cohort)
+    slot = selected["slots"][0]
+    damaged = json.loads(canonical_json_bytes(host.queue.journal.get("intent", slot)))
+    damaged["order"]["round"]["cohort_sha256"] = "ff" * 32
+    with host.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='intent' AND id=?",
+            (canonical_json_bytes(damaged), slot),
+        )
+    assert reader._selection_stamp(r.cohort) != stamp
+    with pytest.raises(ValueError):
+        reader._orders(source)
 
 
 async def test_partial_selection_resumes_originals_after_long_outage(owner, monkeypatch):

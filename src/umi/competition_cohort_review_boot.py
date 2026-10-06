@@ -48,6 +48,22 @@ from .protocol import canonical_json_bytes
 logger = logging.getLogger(__name__)
 
 
+class PhaseReviewServiceFailure(RuntimeError):
+    """Stable service boundary reason that never includes private exception text."""
+
+    _REASONS = (
+        "primary_finality_observer_stopped",
+        "endpoint_finality_observer_stopped",
+        "phase_review_listener_stopped",
+    )
+
+    def __init__(self, reason_code: str):
+        if reason_code not in self._REASONS:
+            raise ValueError("phase review service reason is invalid")
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 def _token(path: str) -> str:
     # Root-owned, group-readable by the service, never embedded in public config.
     return _credential(
@@ -264,9 +280,17 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
         workers = None
         try:
             while not stop.is_set() and not serving.done():
-                app.state.finality_provider.ensure_observer_running()
+                try:
+                    app.state.finality_provider.ensure_observer_running()
+                except RuntimeError as error:
+                    raise PhaseReviewServiceFailure("primary_finality_observer_stopped") from error
                 if app.state.endpoint is not None:
-                    app.state.endpoint.recovery.origin.provider.ensure_observer_running()
+                    try:
+                        app.state.endpoint.recovery.origin.provider.ensure_observer_running()
+                    except RuntimeError as error:
+                        raise PhaseReviewServiceFailure(
+                            "endpoint_finality_observer_stopped"
+                        ) from error
                 if server.started and app.state.benchmark is not None and workers is None:
                     workers = asyncio.create_task(app.state.benchmark.run(stop))
                 await asyncio.wait((serving, *((workers,) if workers else ())), timeout=0.25)
@@ -277,7 +301,7 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
             if serving.done():
                 serving.result()
                 if not stop.is_set():
-                    raise RuntimeError("phase review listener exited before shutdown")
+                    raise PhaseReviewServiceFailure("phase_review_listener_stopped")
         finally:
             server.should_exit = True
 

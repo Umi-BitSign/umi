@@ -44,6 +44,23 @@ from .test_competition_cohort_service_review import reviewed as reviewed
 from .test_competition_cohort_service_worker import loop as loop
 
 
+async def test_legacy_service_configuration_keeps_canonical_bytes(host):
+    raw = canonical_json_bytes(host.open().config)
+    assert b'"request_window_version"' not in raw
+    assert b'"request_window_miner_hotkeys"' not in raw
+    recovered = ServiceDispatchConfig.model_validate_json(raw)
+    assert recovered.request_window_version == 1
+    assert recovered.request_window_miner_hotkeys is None
+    assert canonical_json_bytes(recovered) == raw
+
+    selected = recovered.model_copy(
+        update={"request_window_version": 2, "request_window_miner_hotkeys": ()}
+    )
+    retained = ServiceDispatchConfig.model_validate_json(canonical_json_bytes(selected))
+    assert retained.request_window_version == 2
+    assert retained.request_window_miner_hotkeys == ()
+
+
 @pytest.fixture
 async def host(networked, tmp_path, monkeypatch):
     s, c, p = networked, networked.c, networked.p
@@ -238,3 +255,35 @@ async def test_dispatch_owns_origin_provider_until_context_drains(host, monkeypa
     else:
         await run()
     assert events == ([] if fault in ("backups", "policy") else ["created", "started", "closed"])
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("miner_scope", ["all", "matched", "empty", "other"])
+async def test_service_request_windows_are_scoped_to_qualified_miners(host, version, miner_scope):
+    from umi.competition_cohort_request_window import CohortAttemptRequestWindow
+
+    h, s = host.open(), host.s
+    selected_miners = {
+        "all": None,
+        "matched": (s.c.assignment.admission.submission.submission.hotkey,),
+        "empty": (),
+        "other": (s.p.validator.hotkey.ss58_address,),
+    }[miner_scope]
+    h.config = ServiceDispatchConfig.model_validate_json(
+        canonical_json_bytes(
+            h.config.model_copy(
+                update={
+                    "request_window_version": version,
+                    "request_window_miner_hotkeys": selected_miners,
+                }
+            )
+        )
+    )
+    worker = await h.worker(host.catalog)
+    captured = await worker.inputs(s.c.assignment)
+    if version == 2 and miner_scope in {"all", "matched"}:
+        assert isinstance(captured.window, CohortAttemptRequestWindow)
+        assert captured.window != s.c.window
+    else:
+        assert captured.window == s.c.window
+    assert s.p.model.calls == 0 and s.signatures == 0

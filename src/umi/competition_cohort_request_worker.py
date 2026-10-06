@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import bittensor as bt
+
 from .competition_cohort_endpoint import RecoverableEndpointOrder, endpoint_obligation_sha256
 from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_miner_case import (
@@ -21,7 +23,7 @@ from .competition_cohort_request_signer import (
     request_slot,
     validate_request_plan,
 )
-from .competition_cohort_request_window import capture_request_window
+from .competition_cohort_request_window import capture_cohort_attempt_window, capture_request_window
 from .competition_execution import ExecutionCase
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
@@ -46,6 +48,8 @@ class CohortEndpointRequestWorker:
         request_vote,
         *,
         video_source: EndpointVideoSource | None = None,
+        fresh_windows: bool = False,
+        fresh_window_miner_hotkeys: tuple[str, ...] | None = None,
     ):
         if (
             signer.journal.policy != recovery.journal.policy
@@ -55,6 +59,14 @@ class CohortEndpointRequestWorker:
             raise ValueError("request coordinator differs from its evaluator")
         self.signer, self.recovery, self.request_vote = signer, recovery, request_vote
         self.video_source = video_source
+        if type(fresh_windows) is not bool:
+            raise TypeError("fresh_windows must be a boolean")
+        self.fresh_windows = fresh_windows
+        self.fresh_window_miner_hotkeys = (
+            None
+            if fresh_window_miner_hotkeys is None
+            else frozenset(identity(key) for key in fresh_window_miner_hotkeys)
+        )
 
     async def video(self, job: RecoverableExecutionJob, case: ExecutionCase) -> Video:
         if self.video_source is None:
@@ -68,11 +80,25 @@ class CohortEndpointRequestWorker:
             raise ValueError("endpoint video source changed the assigned clip")
         return value
 
-    async def _window(self, transport):
+    async def _window(self, transport, job, attempt_number):
         async def capture():
             blocks = self.signer.blocks_for(transport)
             height = await blocks.finalized_head_height()
-            return await capture_request_window(transport, blocks, height)
+            if self.fresh_windows and (
+                self.fresh_window_miner_hotkeys is None
+                or identity(job.submission.submission.hotkey) in self.fresh_window_miner_hotkeys
+            ):
+                window = await capture_cohort_attempt_window(
+                    transport, blocks, height, job, attempt_number
+                )
+            else:
+                window = await capture_request_window(transport, blocks, height)
+            # A valid historical issuance proof is not a live opportunity.
+            # Do not freeze a new intent which cannot be dispatched. Retained
+            # intents still recover unchanged through certified retirement.
+            if bt.timelock.current_round() >= window.schedule(transport).response_close_round:
+                raise OSError("request response window already elapsed")
+            return window
 
         return await wait_for_owned(
             capture(), timeout=self.signer.journal.config.read_timeout_seconds
@@ -90,7 +116,7 @@ class CohortEndpointRequestWorker:
             videos = [await self.video(job, case) for case in job.cases]
         if len(videos) != len(job.cases):
             raise ValueError("initial request requires each assigned video")
-        window = await self._window(transport)
+        window = await self._window(transport, job, 1)
         body = RecoverableEndpointOrder(
             schema="umi-recoverable-endpoint-order/1",
             job=job,
@@ -132,7 +158,7 @@ class CohortEndpointRequestWorker:
         case = next(c for c in job.cases if c.case_id == case_id)
         if video is None:
             video = await self.video(job, case)
-        window = await self._window(transport)
+        window = await self._window(transport, job, number)
         selected = RecoverableEndpointCaseOrder(
             schema="umi-recoverable-endpoint-case-order/1",
             job=job,

@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_evaluation import RecoverableEvaluationRound
@@ -242,7 +243,7 @@ class ServiceWorkQueue:
     def lookup(self, signed: SignedServiceWorkClaim) -> ServiceWorkAdmission | None:
         signed = verify_service_claim(signed)
         key = service_claim_key(signed.claim)
-        with self.journal.locked(), self.journal.transaction() as db:
+        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_claims WHERE claim_key=?", (key,)
             ).fetchone()
@@ -354,7 +355,7 @@ class ServiceWorkQueue:
             or not 1 <= limit <= 256
         ):
             raise ValueError("invalid service queue page")
-        with self.journal.locked(), self.journal.transaction() as db:
+        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
             rows = db.execute(
                 "SELECT ordinal FROM service_claims WHERE ordinal>? ORDER BY ordinal LIMIT ?",
                 (after_ordinal, limit),
@@ -397,7 +398,7 @@ class ServiceWorkQueue:
 
     def retained_seal(self) -> ServiceWorkSeal | None:
         """Read the owner's complete immutable fence without closing admissions."""
-        with self.journal.locked():
+        with self.journal.locked(), canonical_json_reuse():
             return self._retained_seal()
 
     def _retained_seal(self) -> ServiceWorkSeal | None:
@@ -432,7 +433,7 @@ class ServiceWorkQueue:
         """
         key = self.config.catalog_sha256
         objects = JournalEndpointObjects(self.journal)
-        with self.journal.locked():
+        with self.journal.locked(), canonical_json_reuse():
             catalog, round_ = self._catalog()
             old = self._retained_seal()
             if old is not None:

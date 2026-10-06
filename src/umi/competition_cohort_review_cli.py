@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_review_boot import run_phase_review_service
 from .competition_cohort_review_config import load_phase_review_config
+from .competition_progress import _failure_details
 from .open_competition import digest
 
 
@@ -47,6 +48,7 @@ def main(argv=None):
         for name in (
             "umi.competition_cohort_review_boot",
             "umi.competition_cohort_benchmark_host",
+            "umi.competition_cohort_endpoint_retirement",
             "umi.competition.progress",
         ):
             logger = logging.getLogger(name)
@@ -56,7 +58,19 @@ def main(argv=None):
             logger.propagate = False
         asyncio.run(_run(config))
     except Exception as error:
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__}))
+        report = {"status": "failed", "error_type": type(error).__name__}
+        reason_code = getattr(error, "reason_code", None)
+        if reason_code in {
+            "primary_finality_observer_stopped",
+            "endpoint_finality_observer_stopped",
+            "phase_review_listener_stopped",
+            "benchmark_execution_worker_stopped",
+            "benchmark_exports_worker_stopped",
+            "benchmark_endpoints_worker_stopped",
+        }:
+            report["reason_code"] = reason_code
+        report["details"] = _failure_details(error)
+        print(json.dumps(report))
         raise SystemExit(1) from None
     finally:
         for logger, level, propagate in loggers:

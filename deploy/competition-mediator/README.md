@@ -42,7 +42,12 @@ The runtime must:
 Run the deployed worker as a dedicated `umi-mediator` account. Its credential
 home, journal and output root are the only writable paths. The unit must have no
 supplementary groups and no readable validator wallets, cohort signer roots or
-settlement state. Use `ProtectSystem=strict`, `ProtectHome=true`,
+settlement state. Install the pinned CLI as a root-owned file with mode `0555`
+and the runner manifest as root-owned `0444`; writable root-owned dependencies
+and dependencies owned by another non-root account are refused. Keep their
+parent release tree root-owned and non-writable by the service account. The
+private journal, home and empty working directory remain service-owned. Use
+`ProtectSystem=strict`, `ProtectHome=true`,
 `NoNewPrivileges=true`, `PrivateTmp=true`, `PrivateDevices=true`, an empty
 capability set, `ProtectProc=invisible`, native-only system calls and namespaces,
 and explicit `ReadOnlyPaths`/`ReadWritePaths` for the immutable release and
@@ -97,17 +102,17 @@ python -I -B -m umi.competition_mediator_qualification \
   --fixture /opt/umi-mediator/tests/mediator-injection-cases.json \
   --invocation /etc/umi/mediator/invocation.json \
   --system-prompt /opt/umi-mediator/system-prompt-v1.txt \
-  --cli /home/mediator/.local/share/claude/versions/EXACT_VERSION \
+  --cli /opt/umi-mediator/releases/QUALIFIED_RELEASE/claude \
   --journal /var/lib/umi-mediator/qualification-journal \
   --working-directory /var/lib/umi-mediator/runtime/work \
-  --home /home/mediator \
+  --home /var/lib/umi-mediator/home \
   --report /var/lib/umi-mediator/qualification-report.json \
   --maximum-total-cost-microusd REVIEWED_TOTAL_CEILING
 ```
 
 `runtime/runner-release.json` must be the reviewed manifest whose exact SHA-256
-is bound in `invocation.json`. Provision it as an owned regular file with no
-group or other write bit, and verify that mode after transfer; a writable or
+is bound in `invocation.json`. Install it as a root-owned regular file with mode
+`0444`, and verify that mode after transfer; a writable or
 changed manifest fails closed as `runner_changed` before contacting the
 provider. The working directory itself is empty and mode `0500`. An exact rerun
 reads terminal results from the journal; an interrupted request remains

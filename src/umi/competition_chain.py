@@ -134,7 +134,9 @@ class CompetitionChainConfig(StrictProtocolModel):
     minimum_finalized_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
     maximum_head_age_ms: Annotated[int, Field(ge=1, le=600_000)] = 300_000
     maximum_future_skew_ms: Annotated[int, Field(ge=0, le=30_000)] = 30_000
-    collection_timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 120
+    # Keep released default bytes; operators can give slow proof providers a
+    # larger bounded observation budget without changing chain authority.
+    collection_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 120
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 1800
     finality_segment_startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None
     maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
@@ -651,6 +653,13 @@ class FinalizedRegistrationProvider:
         profiles = [
             config,
             config.model_copy(update={"finality_segment_startup_timeout_seconds": None}),
+            config.model_copy(update={"collection_timeout_seconds": 120}),
+            config.model_copy(
+                update={
+                    "collection_timeout_seconds": 120,
+                    "finality_segment_startup_timeout_seconds": None,
+                }
+            ),
         ]
         for startup_timeout_seconds in (600, 900):
             profiles.append(
@@ -765,7 +774,10 @@ class FinalizedRegistrationProvider:
             raise RuntimeError("owned_finality_provider_closed")
         if self._owned and (self._task is None or self._task.done()):
             if self._task is not None and not self._task.cancelled():
-                self._task.exception()  # Retrieve it, but never expose its text.
+                error = self._task.exception()
+                # Private diagnostics retain typed causes and source locations;
+                # callers still never expose exception text or provider inputs.
+                raise RuntimeError("owned_finality_observer_stopped") from error
             raise RuntimeError("owned_finality_observer_stopped")
 
     async def wait_ready(self) -> RegistrationCapture:

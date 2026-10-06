@@ -150,6 +150,23 @@ async def test_host_runs_workers_and_drains_cancelled_inference(native):
     assert host.execution.head(e.job, 0) is not None
 
 
+async def test_host_reports_failed_worker_without_private_exception_text(native):
+    class FailedWorker:
+        async def run(self, stop, *, poll_seconds, report):
+            raise ValueError("PRIVATE_WORKER_EXCEPTION_TEXT")
+
+    host = native.host()
+    host.workers = {"execution": FailedWorker()}
+    with pytest.raises(
+        host_module.BenchmarkWorkerFailure,
+        match=r"^benchmark_execution_worker_stopped$",
+    ) as caught:
+        await host.run(asyncio.Event())
+    assert caught.value.reason_code == "benchmark_execution_worker_stopped"
+    assert "PRIVATE_WORKER_EXCEPTION_TEXT" not in str(caught.value)
+    assert not host.tasks
+
+
 async def test_repeated_cancellation_waits_for_inference_cleanup(native):
     n, e = native, native.e
     entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()

@@ -42,7 +42,11 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
-from .competition_cohort_request_window import EndpointRequestWindow, capture_request_window
+from .competition_cohort_request_window import (
+    CohortAttemptRequestWindow,
+    EndpointRequestWindow,
+    capture_plan_request_window,
+)
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_round_journal import RecordReservation, RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -114,7 +118,10 @@ class EndpointRequestIntent(StrictProtocolModel):
     plan: EndpointRequestPlan
     source: CohortOrderHistory
     observation: ExecutionBoundary
-    windows: Annotated[tuple[EndpointRequestWindow, ...], Field(min_length=1, max_length=2048)]
+    windows: Annotated[
+        tuple[CohortAttemptRequestWindow | EndpointRequestWindow, ...],
+        Field(min_length=1, max_length=2048),
+    ]
 
 
 class EndpointRequestSignerConfig(CohortAdmissionSignerConfig):
@@ -195,7 +202,10 @@ class EndpointRequestJournal:
                 raise ValueError("request issuance precedes certified preparation")
             if request.issued_block > value.observation.block:
                 raise ValueError("request issuance was not finalized at observation")
-            windows[request.issued_block].check(request, plan.transport)
+            window = windows[request.issued_block]
+            if isinstance(window, CohortAttemptRequestWindow):
+                window.check_context(plan.body.job, plan.body.attempt_number)
+            window.check(request, plan.transport)
         return value
 
     def load(self, slot):
@@ -373,8 +383,8 @@ class EndpointRequestSigner:
                     for height in sorted({r.issued_block for r in plan.body.requests}):
                         windows.append(
                             await wait_for_owned(
-                                capture_request_window(
-                                    plan.transport, self.blocks_for(plan.transport), height
+                                capture_plan_request_window(
+                                    plan, self.blocks_for(plan.transport), height
                                 ),
                                 timeout=config.read_timeout_seconds,
                             )

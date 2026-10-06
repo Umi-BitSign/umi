@@ -43,6 +43,7 @@ from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_cohort_service_export import service_work_routes
 from .competition_reward_boot import _disjoint
 from .competition_reward_service import _stop_task
+from .competition_service_supervision import drain_server_requests
 from .concurrency import await_owned_task, run_owned_thread
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
@@ -50,6 +51,9 @@ from .private_files import Directory, ensure_private_directory, lock_private_fil
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 logger = logging.getLogger(__name__)
+
+# Inbound control calls may be cancelled on stop; owned native writes still drain.
+OWNER_REQUEST_DRAIN_SECONDS = 120
 
 
 class AdmissionOwnerConfig(StrictProtocolModel):
@@ -256,7 +260,7 @@ async def run_admission_owner(
                 port=config.listen_port,
                 access_log=False,
                 log_config=None,
-                timeout_graceful_shutdown=None,
+                timeout_graceful_shutdown=OWNER_REQUEST_DRAIN_SECONDS,
             )
         )
 
@@ -328,4 +332,7 @@ async def run_admission_owner(
                 try:
                     await await_owned_task(serving)
                 finally:
-                    await _stop_task(stopping)
+                    try:
+                        await drain_server_requests(server)
+                    finally:
+                        await _stop_task(stopping)

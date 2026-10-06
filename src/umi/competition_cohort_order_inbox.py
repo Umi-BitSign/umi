@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_queue import (
     SignedOrderDeliveryReceipt,
@@ -75,13 +77,13 @@ class CohortOrderInbox:
                 "(cohort TEXT PRIMARY KEY, history TEXT NOT NULL)"
             )
 
-    def _load(self, slot: str):
-        raw = self.journal.get("intent", slot)
+    def _load(self, slot: str, *, db: sqlite3.Connection | None = None):
+        raw = self.journal.get("intent", slot, db=db)
         if raw is None:
             return None
         intent = CohortOrderIntent.model_validate_json(canonical_json_bytes(raw))
         certificate = SignedRecoverableEvaluationOrder.model_validate_json(
-            canonical_json_bytes(self.journal.get("certificate", slot))
+            canonical_json_bytes(self.journal.get("certificate", slot, db=db))
         )
         if (
             order_slot(intent.order) != slot
@@ -98,11 +100,14 @@ class CohortOrderInbox:
 
     def assignment(self, slot: str) -> CohortExecutionAssignment:
         """Export only a durably acknowledged assignment, without signing."""
-        with self.journal.locked():
-            saved = self._load(slot)
+        # An accepting writer may hold its compound-operation mutex across
+        # network calls. Acknowledged work needs only a consistent SQLite
+        # snapshot of its immutable inputs, with fresh conflict and proof checks.
+        with canonical_json_reuse(), self.journal.transaction() as db:
+            saved = self._load(slot, db=db)
             if saved is None:
                 raise FileNotFoundError("inbox assignment is unavailable")
-            raw = self.journal.get("receipt", slot)
+            raw = self.journal.get("receipt", slot, db=db)
             if raw is None:
                 raise FileNotFoundError("inbox assignment acknowledgement is pending")
             receipt = check_delivery_receipt(

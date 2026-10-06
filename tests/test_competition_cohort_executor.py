@@ -131,6 +131,31 @@ async def test_unfinished_execution_still_requires_the_job_writer_lock(execution
     assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
 
 
+async def test_endpoint_worker_can_defer_incumbent_until_miner_terminal(execution):
+    e = execution
+    worker = e.worker(defer_endpoint_until_terminal=True)
+    first = await worker.poll_once()
+    if e.job.mode != "endpoint_incumbent":
+        assert first["jobs_deferred"] == 0 and len(e.calls) == 1
+        return
+
+    assert first["status"] == "cohort_execution_pending"
+    assert first["jobs_deferred"] == 1
+    assert first["last_deferred_reason"] == "endpoint_terminal_pending"
+    assert first["retry_count"] == 0
+    assert not e.calls
+    assert e.journal().journal.get("assignment", e.r.slot) is None
+
+    # The endpoint worker owns and validates this record. Execution only uses
+    # its presence as the scheduling fence before beginning local inference.
+    e.journal().journal.put("endpoint_terminal_selection", e.r.slot, {"terminal": True})
+    e.r.h.block += 1
+    second = await worker.poll_once()
+    assert second["jobs_deferred"] == 0
+    assert second["steps_advanced"] == 1
+    assert len(e.calls) == 1
+
+
 async def test_ten_hour_outages_keep_completed_steps_and_original_order(execution):
     e = execution
     await e.executor().advance(e.assignment)

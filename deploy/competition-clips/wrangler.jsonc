@@ -6,6 +6,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "api.umi.vision/v1/clips/*",
+      "zone_name": "umi.vision"
+    }
+  ],
   "logpush": false,
   "observability": {
     "enabled": true,

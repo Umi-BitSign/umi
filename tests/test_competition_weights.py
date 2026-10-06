@@ -333,7 +333,7 @@ async def test_full_evidence_audit_precedes_each_fresh_capture(weight_case, monk
 
     def slow_audit(db):
         result = audit(db)
-        elapsed[0] += 121 * 10**9
+        elapsed[0] += (item.provider.config.maximum_head_age_ms + 1) * 10**6
         audit_times.append(time.monotonic_ns())
         return result
 
@@ -519,7 +519,7 @@ async def test_slow_evidence_commit_cannot_use_expired_post_send_proof(weight_ca
         with original_db() as db:
             yield db
         if item.encoded and not elapsed[0]:
-            elapsed[0] = 121 * 10**9
+            elapsed[0] = (item.provider.config.maximum_head_age_ms + 1) * 10**6
 
     monkeypatch.setattr(item.worker, "_db", slow_commit)
     with pytest.raises(ValueError, match="owned proof adapter"):
@@ -1498,7 +1498,7 @@ async def test_stopped_recovery_captures_after_slow_verification(
 
     def slow(*args, **kwargs):
         result = original(*args, **kwargs)
-        elapsed[0] += 121 * 10**9
+        elapsed[0] += (item.provider.config.maximum_head_age_ms + 1) * 10**6
         verified.append(True)
         return result
 

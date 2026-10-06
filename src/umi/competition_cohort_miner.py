@@ -43,6 +43,7 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_request_admission import CohortRequestWindowAuthority
 from .competition_cohort_service_grant import (
     ServiceMinerGrant,
     review_service_request_current,
@@ -188,7 +189,8 @@ class CohortMinerAuthorizationAuthority:
                 identity(validator_hotkey) != identity(body.evaluator_hotkey)
                 or identity(sub.hotkey) != identity(self.config.miner_hotkey)
                 or sub.model_revision != self.config.model_revision
-                or sub.endpoint_url != self.config.serving_origin
+                or public_https_origin(sub.endpoint_url)
+                != public_https_origin(self.config.serving_origin)
                 or body.assignment.catalog.catalog.service_terms_sha256
                 != self.config.service_terms_sha256
                 or self.cohorts.get(body.assignment.round.cohort_sha256)
@@ -219,7 +221,8 @@ class CohortMinerAuthorizationAuthority:
             or job.mode != "endpoint_incumbent"
             or identity(sub.hotkey) != identity(self.config.miner_hotkey)
             or sub.model_revision != self.config.model_revision
-            or sub.endpoint_url != self.config.serving_origin
+            or public_https_origin(sub.endpoint_url)
+            != public_https_origin(self.config.serving_origin)
         ):
             raise ValueError("cohort grant differs from miner assignment or serving configuration")
         if isinstance(grant, CohortMinerGrant) and attempt.order.attempt_number != 1:
@@ -443,8 +446,25 @@ class CohortMinerAuthorizationAuthority:
                 with self.journal.locked():
                     grant = await run_owned_thread(self._lookup, request, validator_hotkey)
                     before, _ = await self._current(grant)
+                    if isinstance(grant, ServiceMinerGrant):
+                        window_authority = CohortRequestWindowAuthority(
+                            policy=self.transport,
+                            finalized_blocks=self.finalized_blocks,
+                            legacy_authorize=self.legacy.authorize,
+                            job=grant.body.assignment,
+                            attempt_number=grant.body.attempt_number,
+                        )
+                    else:
+                        window_authority = CohortRequestWindowAuthority(
+                            policy=self.transport,
+                            finalized_blocks=self.finalized_blocks,
+                            legacy_authorize=self.legacy.authorize,
+                            job=grant.attempt.order.job,
+                            attempt_number=grant.attempt.order.attempt_number,
+                        )
                     admission = await wait_for_owned(
-                        self.legacy.authorize(request), timeout=self.config.read_timeout_seconds
+                        window_authority.authorize(request),
+                        timeout=self.config.read_timeout_seconds,
                     )
                     after, head = await self._current(grant)
                     if before != after:

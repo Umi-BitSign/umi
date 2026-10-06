@@ -138,7 +138,7 @@ async def test_unrelated_or_malformed_slot_is_a_hold(control, value):
 async def test_invalid_owned_proof_never_becomes_current_control(control, mutation):
     item = control
     if mutation == "stale":
-        item.clock.now += 120_001
+        item.clock.now += item.provider.config.maximum_head_age_ms + 1
     elif mutation == "future":
         item.clock.now -= 31_002
     elif mutation == "genesis":
@@ -240,7 +240,7 @@ async def test_collection_cannot_extend_wall_clock_freshness(control, monkeypatc
 
     async def slow_read(*args):
         result = await original(*args)
-        control.clock.now += 120_001
+        control.clock.now += control.provider.config.maximum_head_age_ms + 1
         return result
 
     monkeypatch.setattr(control.provider, "_weight_read", slow_read)

@@ -39,7 +39,7 @@ from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
 from .config import Limits
 from .endpoint_response_recovery import verify_recovered_response
-from .endpoint_retirement import verify_retirement_receipt
+from .endpoint_retirement import retirement_absence_elapsed, verify_retirement_receipt
 from .open_competition import CompetitionPolicy, Signature, digest, identity
 from .protocol import StrictProtocolModel, canonical_json_bytes, request_digest
 
@@ -137,11 +137,12 @@ def validate_case_review(
         miner_hotkey=miner,
         evaluator_hotkey=evaluator,
     ).receipt
-    if closed.result == "no_response_retained":
-        if (
-            review.recovered is not None
-            or retired.observed_block <= request.deadline_block
-            or retired.observed_round < request.response_close_round
+    if closed.result != "response_retained":
+        if review.recovered is not None or not retirement_absence_elapsed(
+            closed,
+            request,
+            observed_block=retired.observed_block,
+            observed_round=retired.observed_round,
         ):
             raise ValueError("endpoint retry conflicts with response or expiry evidence")
         disposition = "retry_required"

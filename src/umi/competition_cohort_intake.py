@@ -22,6 +22,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
@@ -197,7 +198,10 @@ class CohortIntake:
 
     @contextmanager
     def _connection(self):
-        with self._process_lock, self._exclusive_connection() as value:
+        # Replaying a whole accepted roster repeats identical canonical inputs.
+        # Reuse serialization only while this operation owns the current state;
+        # every schema, signature and authority check still runs on each read.
+        with self._process_lock, canonical_json_reuse(), self._exclusive_connection() as value:
             yield value
 
     @contextmanager
@@ -480,17 +484,34 @@ class CohortIntake:
             )
             return self._receipt(raw, store, request)
 
-    def _records(self, db, history):
+    def _records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
         tips = {digest(history.genesis), *(digest(s.transition) for s in history.transitions)}
+        clauses = ["cohort=?"]
+        parameters = [digest(history.plan)]
+        if track is not None:
+            clauses.append("track=?")
+            parameters.append(track)
+        if hotkey is not None:
+            clauses.append("hotkey=?")
+            parameters.append(identity(hotkey))
         for consent, tip, raw in db.execute(
             "SELECT consent,recovery_tip,substr(body,1,4194305) FROM cohort_consents "
-            "WHERE cohort=? ORDER BY consent",
-            (digest(history.plan),),
+            "WHERE " + " AND ".join(clauses) + " ORDER BY consent",
+            parameters,
         ):
             retained = read_participation(raw)
             if (
                 retained.proposed_admission.recovery_tip_sha256 != tip
                 or retained.proposed_admission.cohort_sha256 != digest(history.plan)
+                or (
+                    track is not None
+                    and retained.request.signed_submission.submission.track != track
+                )
+                or (
+                    hotkey is not None
+                    and identity(retained.request.signed_submission.submission.hotkey)
+                    != identity(hotkey)
+                )
             ):
                 raise ValueError("retained consent index differs from its body")
             if tip in tips:

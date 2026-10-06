@@ -188,7 +188,13 @@ def job_policy_timeout(journal: CohortExecutionJournal) -> float:
 
 class CohortExecutionWorker:
     def __init__(
-        self, inbox: CohortOrderInbox, executor: CohortExecutor, *, batch_size=16, concurrency=4
+        self,
+        inbox: CohortOrderInbox,
+        executor: CohortExecutor,
+        *,
+        batch_size=16,
+        concurrency=4,
+        defer_endpoint_until_terminal=False,
     ):
         if (
             inbox.policy != executor.journal.policy
@@ -201,6 +207,7 @@ class CohortExecutionWorker:
             or not 1 <= batch_size <= 256
             or type(concurrency) is not int
             or not 1 <= concurrency <= 32
+            or type(defer_endpoint_until_terminal) is not bool
         ):
             raise ValueError("execution worker capacity is outside bounds")
         if (
@@ -210,6 +217,7 @@ class CohortExecutionWorker:
         ):
             raise ValueError("execution and inbox state must remain separate")
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
+        self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
         # must not make their own local reads compete for that nonblocking lock.
@@ -249,6 +257,22 @@ class CohortExecutionWorker:
                     try:
                         async with self.inbox_reads:
                             assignment = await run_owned_thread(self.inbox.assignment, slot)
+                        if self.defer_endpoint_until_terminal:
+                            job = await run_owned_thread(
+                                self.executor.journal.validate_assignment, assignment
+                            )
+                            if (
+                                job.mode == "endpoint_incumbent"
+                                and await run_owned_thread(
+                                    journal.get, "endpoint_terminal_selection", slot
+                                )
+                                is None
+                            ):
+                                # Endpoint origin capture and local incumbent execution
+                                # share the assignment authority lock. Let the miner
+                                # request become terminal before beginning a long local
+                                # inference so the two workers cannot starve each other.
+                                return slot, "deferred", "endpoint_terminal_pending"
                         result = await self.executor.advance(assignment)
                         return slot, "complete" if result is not None else "progress", ""
                     except (
@@ -268,13 +292,20 @@ class CohortExecutionWorker:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
             pending = [r for r in results if r[1] == "pending"]
+            deferred = [r for r in results if r[1] == "deferred"]
             return {
-                "status": "cohort_execution_pending" if pending else "cohort_execution_current",
+                "status": (
+                    "cohort_execution_pending"
+                    if pending or deferred
+                    else "cohort_execution_current"
+                ),
                 "jobs_complete": sum(r[1] == "complete" for r in results),
                 "steps_advanced": sum(r[1] == "progress" for r in results),
+                "jobs_deferred": len(deferred),
                 "retry_count": len(pending),
                 "last_retry_slot": pending[-1][0] if pending else "",
                 "last_retry_type": pending[-1][2] if pending else "",
+                "last_deferred_reason": deferred[-1][2] if deferred else "",
                 "chain_submission_authorized": False,
             }
 

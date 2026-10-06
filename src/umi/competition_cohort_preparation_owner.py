@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput
@@ -36,6 +38,13 @@ class CohortPreparation:
             raise ValueError("invalid prepared promotion byte bound")
         self.queue, self.promotion = queue, promotion_store
         self.maximum_bytes, self.maximum_promotion_bytes = maximum_bytes, maximum_promotion_bytes
+        # A retained round is immutable for one certified history generation.
+        # Its full replay verifies every submission and can be deliberately
+        # expensive, so serialize that replay separately from the intake lock
+        # and reuse its canonical result.  Fresh history and retained-row checks
+        # below still fence closure, revocation and local state replacement.
+        self._retained_lock = threading.Lock()
+        self._retained_cache: dict[tuple[str, str], bytes] = {}
 
     def prepare(
         self, cohort: str, capture: RegistrationCapture, *, expected_tip_sha256: str
@@ -57,9 +66,51 @@ class CohortPreparation:
         self, cohort: str, *, expected_tip_sha256: str, current_block: int
     ) -> PreparedCohortRound:
         """Replay a retained round without selecting or creating a new one."""
-        return self._prepare(
-            cohort, None, expected_tip_sha256=expected_tip_sha256, current_block=current_block
-        )
+        key = (cohort, expected_tip_sha256)
+        with self._retained_lock:
+            raw = self._retained_cache.get(key)
+            if raw is not None:
+                cached = PreparedCohortRound.model_validate_json(raw)
+                queue, intake = self.queue, self.queue.intake
+                intake._allowed(cohort)
+                with queue._connection() as (db, store):
+                    history = store.published_history(cohort)
+                    if history_tip(history) != expected_tip_sha256:
+                        raise ValueError(
+                            "intake history changed before preparation; retry current history"
+                        )
+                    view = verify_cohort_history(
+                        history,
+                        queue.policy,
+                        expected_tip_sha256=expected_tip_sha256,
+                        current_block=current_block,
+                    )
+                    if view.state.phase in {"intake", "revoked"}:
+                        raise ValueError(
+                            "round preparation requires certified intake and active authority"
+                        )
+                    row = db.execute(
+                        "SELECT digest,substr(body,1,?),observed "
+                        "FROM cohort_prepared_rounds WHERE cohort=?",
+                        (self.maximum_bytes + 1, cohort),
+                    ).fetchone()
+                    if (
+                        row is None
+                        or row[1] != raw
+                        or row[0] != digest(cached)
+                        or row[2] != cached.observation.block
+                    ):
+                        self._retained_cache.pop(key, None)
+                        raise ValueError("retained preparation changed after verified replay")
+                return cached
+            result = self._prepare(
+                cohort,
+                None,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+            self._retained_cache[key] = canonical_json_bytes(result)
+            return result
 
     def _prepare(
         self,

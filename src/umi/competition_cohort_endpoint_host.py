@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import bittensor as bt
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .competition_artifacts import preserved_bundle_available
 from .competition_chain import CompetitionChainConfig
@@ -43,7 +43,7 @@ from .competition_reward_boot import _disjoint
 from .competition_runner import verify_runtime
 from .competition_transport_finality import CompetitionTransportFinality
 from .concurrency import run_owned_thread
-from .open_competition import digest, identity
+from .open_competition import Hotkey, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -51,6 +51,10 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 
 class EndpointHostConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-endpoint-host/1"] = Field(alias="schema")
+    request_window_version: Literal[1, 2] = 1
+    request_window_miner_hotkeys: Annotated[tuple[Hotkey, ...], Field(max_length=4096)] | None = (
+        None
+    )
     requests: EndpointRequestSignerConfig
     decisions: CohortEndpointDecisionConfig
     origins: CompetitionChainConfig
@@ -58,6 +62,15 @@ class EndpointHostConfig(StrictProtocolModel):
     objects_directory: Directory
     transport_directory: Directory
     reviewers: Annotated[tuple[CohortReviewPeerConfig, ...], Field(min_length=1, max_length=64)]
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_window_config(self, handler):
+        value = handler(self)
+        if self.request_window_version == 1:
+            value.pop("request_window_version", None)
+        if self.request_window_miner_hotkeys is None:
+            value.pop("request_window_miner_hotkeys", None)
+        return value
 
     def stores(self):
         return tuple(
@@ -156,7 +169,12 @@ class EndpointHost:
             return await self.peer(who).decision_vote(review)
 
         requests = CohortEndpointRequestWorker(
-            self.signer, self.recovery, request_vote, video_source=video
+            self.signer,
+            self.recovery,
+            request_vote,
+            video_source=video,
+            fresh_windows=c.request_window_version == 2,
+            fresh_window_miner_hotkeys=c.request_window_miner_hotkeys,
         )
         decisions = CohortEndpointCaseCoordinator(
             CohortEndpointRetirement(self.recovery),

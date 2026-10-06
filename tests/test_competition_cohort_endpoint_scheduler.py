@@ -23,6 +23,7 @@ from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
 from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
 from umi.competition_cohort_endpoint_worker import CohortEndpointWorker
 from umi.competition_cohort_execution_journal import CohortExecutionJournal
+from umi.endpoint_protocol import COHORT_GRANT_PATH
 from umi.miner import create_app
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -159,6 +160,12 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     q.media_fail = True
     report = await q.worker().poll_once()
     assert report["retry_count"] > 0 and "bearer-secret" not in repr(report)
+    assert report["last_retry_details"][0]["reason_code"] == "os_error"
+    assert report["last_retry_details"][0]["source_frames"]
+    assert all(
+        frame["module"].startswith("umi.")
+        for frame in report["last_retry_details"][0]["source_frames"]
+    )
     assert q.p.model.calls == 0 and not q.s.calls
     assert q.worker().schedule.load(q.slot) is not None
     assert q.worker().schedule.complete(q.slot) is None
@@ -166,6 +173,24 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     terminal, _ = await finish(q)
     assert terminal.job_sha256 == digest(q.p.e.job)
     assert q.policy_calls == 1
+
+
+async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled):
+    q, p = scheduled, scheduled.p
+    original = p.delivery_recovery.transport
+
+    class RejectGrant(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == COHORT_GRANT_PATH:
+                return httpx.Response(422)
+            return await original.handle_async_request(request)
+
+    p.delivery_recovery.transport = RejectGrant()
+    report = await q.worker().poll_once()
+    assert report["last_pending_reason"] == "miner_grant_http_422"
+    assert report["retry_count"] == 0
+    assert p.model.calls == 0
+    assert q.worker().schedule.complete(q.slot) is None
 
 
 @pytest.mark.parametrize(
@@ -430,3 +455,30 @@ async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
 
     with pytest.raises(FileNotFoundError):
         tuple(endpoint_archive_cases(archive, missing_parent, p.c.policy))
+
+
+async def test_selected_case_advances_before_slow_assignment_preparation(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = worker._prepare
+
+    async def slow_prepare(slot):
+        entered.set()
+        await release.wait()
+        return await original(slot)
+
+    monkeypatch.setattr(worker, "_prepare", slow_prepare)
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        # The real signed response and terminal reference must exist while the
+        # next preparation is still waiting. Merely starting a task is not enough.
+        assert p.model.calls == 1
+        assert any(worker.schedule.reference(q.slot, c.case_id) for c in p.e.job.cases)
+    finally:
+        release.set()
+        report = await task
+    assert report["cases_completed"] == 1
+    assert not report["request_closure_authorized"]

@@ -855,3 +855,38 @@ async def test_shutdown_interrupts_a_stalled_once_cycle(setup, monkeypatch):
     result = await asyncio.wait_for(task, 2)
     assert result["status"] == "stopped" and closed.is_set()
     assert first.executions.status(execution_key(setup.job))["status"] == "failed"
+
+
+@pytest.mark.parametrize("budget", [240, 600, 601])
+def test_config_accepts_extended_owned_finality_budget(setup, budget):
+    raw = setup.drivers[0].config.model_dump(mode="json", by_alias=True)
+    raw["chain"]["collection_timeout_seconds"] = budget
+    if budget > 600:
+        with pytest.raises(ValueError):
+            worker.EvaluatorConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = worker.EvaluatorConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.chain.collection_timeout_seconds == budget
+
+
+@pytest.mark.parametrize("budget", [600, 601])
+def test_work_signing_accepts_extended_owned_finality_budget(setup, tmp_path, budget):
+    config = setup.drivers[0].config
+    raw = config.model_dump(mode="json", by_alias=True)
+    raw.update(
+        round_coordinator_origin="https://round.example",
+        legacy_policy_sha256="cd" * 32,
+        dispatch_directory=str(tmp_path / "budget-dispatch"),
+        work_signing_chain={
+            **raw["chain"],
+            "state_directory": str(tmp_path / "budget-work-chain"),
+            "collection_timeout_seconds": budget,
+        },
+        work_minimum_issue_ms=60000,
+    )
+    if budget > 600:
+        with pytest.raises(ValueError):
+            worker.EvaluatorConfig.model_validate_json(canonical_json_bytes(raw))
+    else:
+        checked = worker.EvaluatorConfig.model_validate_json(canonical_json_bytes(raw))
+        assert checked.work_signing_chain.collection_timeout_seconds == budget

@@ -12,6 +12,7 @@ import httpx
 from .auth import REQUEST_BODY_SHA256_HEADER
 from .competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery, recovery_slot
 from .competition_cohort_endpoint_selection import selection_grant
+from .competition_cohort_execution_journal import control_exchange_timeout_seconds
 from .competition_cohort_miner import (
     MAX_COHORT_GRANT_BYTES,
     SignedCohortMinerGrantReceipt,
@@ -78,7 +79,7 @@ class CohortEndpointGrantDelivery:
             body = canonical_json_bytes(grant)
             if len(body) > MAX_COHORT_GRANT_BYTES:
                 raise ValueError("cohort grant exceeds transport bound")
-            timeout = journal.config.read_timeout_seconds
+            timeout = control_exchange_timeout_seconds(journal.config)
 
             async def exchange():
                 origin, host, sni = await _pinned_public_origin(
@@ -119,7 +120,7 @@ class CohortEndpointGrantDelivery:
                                 "resource_limit", "grant response header bound"
                             )
                         if response.status_code != 200:
-                            return None
+                            return response.status_code
                         return await _read_response_body(response, 64 * 1024, prefix=bytearray())
                     finally:
                         await response.aclose()
@@ -134,8 +135,8 @@ class CohortEndpointGrantDelivery:
                 ComponentResponseError,
             ):
                 return CohortGrantDeliveryOutcome("pending", "miner_grant_delivery_unavailable")
-            if raw is None:
-                return CohortGrantDeliveryOutcome("pending", "miner_grant_not_acknowledged")
+            if isinstance(raw, int):
+                return CohortGrantDeliveryOutcome("pending", f"miner_grant_http_{raw}")
             try:
                 receipt = SignedCohortMinerGrantReceipt.model_validate_json(raw)
                 if canonical_json_bytes(receipt) != raw:

@@ -22,6 +22,7 @@ from pydantic import Field
 from .auth import REQUEST_BODY_SHA256_HEADER
 from .competition_cohort_grant_delivery import verify_grant_receipt
 from .competition_cohort_miner import SignedCohortMinerGrantReceipt
+from .competition_cohort_request_admission import CohortRequestWindowAuthority
 from .competition_cohort_service_grant import service_grant_slot
 from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_work import ServiceWorkAssignment
@@ -35,8 +36,12 @@ from .endpoint_response_recovery import (
     retrieve_endpoint_response,
     verify_recovered_response,
 )
-from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
-from .miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthority
+from .endpoint_retirement import (
+    SignedEndpointRetirementReceipt,
+    retirement_absence_elapsed,
+    verify_retirement_receipt,
+)
+from .miner_admission import MinerAdmissionError
 from .open_competition import digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import (
@@ -225,8 +230,11 @@ class ServiceWorkTransport:
                 # Grant acknowledgement may be slow. Acquire fresh origin and
                 # authority after it, then check the transport window again.
                 capture = await self._capture(grant)
-                authority = ProofBackedMinerWindowAuthority(
-                    policy=self.requests.transport, finalized_blocks=self.blocks
+                authority = CohortRequestWindowAuthority(
+                    policy=self.requests.transport,
+                    finalized_blocks=self.blocks,
+                    job=grant.body.assignment,
+                    attempt_number=grant.body.attempt_number,
                 )
                 try:
                     await wait_for_owned(
@@ -293,9 +301,11 @@ class ServiceWorkTransport:
             if canonical_json_bytes(retired) != raw:
                 raise ValueError("service retirement acknowledgement is noncanonical")
             retired = self._retirement(grant, retired)
-            if retired.receipt.result == "no_response_retained" and (
-                capture.block <= grant.body.request.deadline_block
-                or bt.timelock.current_round() < grant.body.request.response_close_round
+            if retired.receipt.result != "response_retained" and not retirement_absence_elapsed(
+                retired.receipt,
+                grant.body.request,
+                observed_block=capture.block,
+                observed_round=bt.timelock.current_round(),
             ):
                 return ServiceTransportOutcome("request_window_open", response)
             # Retirement may race completion. Recover before recording that fence.

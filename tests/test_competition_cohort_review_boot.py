@@ -402,9 +402,39 @@ def test_cli_reports_phase_failure_without_private_exception_text(selected, monk
     with pytest.raises(SystemExit):
         cli.main(["run", "--config", str(selected.path)])
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"status": "failed", "error_type": "ValueError"}
+    report = json.loads(captured.out)
+    assert report["status"] == "failed" and report["error_type"] == "ValueError"
+    assert report["details"][0]["reason_code"] == "validation_failed"
     assert '"event":"failed"' in captured.err
     assert "PRIVATE_EXCEPTION_TEXT" not in captured.out + captured.err
+
+
+def test_cli_reports_allowlisted_service_reason_without_private_cause(
+    selected, monkeypatch, capsys
+):
+    async def failed(config):
+        try:
+            raise ValueError("PRIVATE_CAUSE_TEXT")
+        except ValueError as error:
+            raise boot.PhaseReviewServiceFailure("primary_finality_observer_stopped") from error
+
+    monkeypatch.setattr(cli, "_run", failed)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(selected.path)])
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    details = report.pop("details")
+    assert report == {
+        "status": "failed",
+        "error_type": "PhaseReviewServiceFailure",
+        "reason_code": "primary_finality_observer_stopped",
+    }
+    assert [d["reason_code"] for d in details] == [
+        "primary_finality_observer_stopped",
+        "validation_failed",
+    ]
+    assert details[0]["source_frames"][-1]["module"] == "umi.competition_cohort_review_cli"
+    assert "PRIVATE_CAUSE_TEXT" not in captured.out + captured.err
 
 
 @pytest.mark.parametrize(
@@ -673,7 +703,10 @@ async def test_host_drains_listener_before_provider_and_lease(
     task = asyncio.create_task(boot.run_phase_review_service(selected.config, stop))
     await asyncio.wait_for(entered.wait(), 3)
     if failure == "listener":
-        with pytest.raises(RuntimeError, match="listener"):
+        with pytest.raises(
+            boot.PhaseReviewServiceFailure,
+            match="phase_review_listener_stopped",
+        ):
             await task
         assert events[-1] == "closed"
         return
@@ -695,8 +728,15 @@ async def test_host_drains_listener_before_provider_and_lease(
         lock_private_file(Path(selected.config.signing.directory) / "service.lock")
     finish.set()
     if failure in ("cancel", "observer"):
-        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
-            await task
+        if failure == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(
+                boot.PhaseReviewServiceFailure,
+                match="primary_finality_observer_stopped",
+            ):
+                await task
     else:
         await task
     assert events[-2:] == ["drained", "closed"]
@@ -1007,6 +1047,7 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
     async with boot.phase_review_app(c) as app:
         assert app.state.endpoint is None
         assert isinstance(app.state.benchmark.sandbox, DirectCohortCpuSandbox)
+        assert app.state.benchmark.worker.defer_endpoint_until_terminal is False
         assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 
@@ -1020,6 +1061,7 @@ async def test_endpoint_boot_owns_origin_provider_and_native_workers(
         assert app.state.endpoint is not None
         assert app.state.benchmark.workers["endpoints"] is app.state.endpoint.worker
         assert app.state.endpoint.recovery.journal is app.state.benchmark.execution
+        assert app.state.benchmark.worker.defer_endpoint_until_terminal is True
         assert providers.events.count("started") == 2
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
             for kind in ("request", "decision"):
@@ -1050,3 +1092,30 @@ async def test_failed_endpoint_origin_start_closes_both_owned_providers(
             pytest.fail("failed provider started")
     assert providers.events.count("closed") == 2
     os.close(lock_private_file(Path(c.signing.directory) / "service.lock"))
+
+
+def test_cli_enables_numeric_retirement_diagnostics(selected, monkeypatch, capsys):
+    import logging
+
+    logger = logging.getLogger("umi.competition_cohort_endpoint_retirement")
+    old_level, old_propagate, old_handlers = logger.level, logger.propagate, tuple(logger.handlers)
+
+    async def run(config):
+        logger.info(
+            canonical_json_bytes(
+                {"status": "endpoint_retirement_http_pending", "http_status": 503}
+            ).decode()
+        )
+
+    monkeypatch.setattr(cli, "_run", run)
+    cli.main(["run", "--config", str(selected.path)])
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {
+        "status": "endpoint_retirement_http_pending",
+        "http_status": 503,
+    }
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == (
+        old_level,
+        old_propagate,
+        old_handlers,
+    )

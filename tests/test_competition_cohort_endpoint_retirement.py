@@ -4,7 +4,10 @@ RPC, owned finality, DNS and inference use fixtures. Replacement certification
 and host fencing are not simulated by these tests.
 """
 
+import asyncio
 import hashlib
+import json
+import time
 from dataclasses import replace
 
 import bittensor as bt
@@ -120,6 +123,30 @@ async def test_unexpired_request_stays_pending(retiring):
     assert p.model.calls == p.fetcher.calls == 0
 
 
+@pytest.mark.parametrize("status", [403, 404, 409, 503])
+async def test_retirement_logs_http_status_without_private_transport_data(retiring, caplog, status):
+    p = retiring
+    caplog.set_level("INFO", logger="umi.competition_cohort_endpoint_retirement")
+    p.delivery_recovery.transport = httpx.MockTransport(
+        lambda request: httpx.Response(status, text="PRIVATE endpoint rejection body")
+    )
+    result = await p.retire()
+    assert result.reason == "retirement_not_acknowledged" and result.value is None
+    reports = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition_cohort_endpoint_retirement"
+    ]
+    assert len(reports) == 1
+    assert reports[0]["http_status"] == status
+    assert reports[0]["status"] == "endpoint_retirement_http_pending"
+    assert reports[0]["chain_submission_authorized"] is False
+    assert "PRIVATE" not in caplog.text
+    assert "example.com" not in caplog.text
+    assert p.retirement.retained(p.retire_slot, p.case_id) is None
+    assert p.model.calls == p.fetcher.calls == 0
+
+
 async def test_lost_http_ack_recovers_same_signed_retirement(retiring, monkeypatch):
     p = retiring
     expire_both(p, monkeypatch)
@@ -142,6 +169,26 @@ async def test_lost_http_ack_recovers_same_signed_retirement(retiring, monkeypat
     monkeypatch.setattr(miner_module, "sign_object", forbidden)
     assert (await p.retire()).status == "retained"
     assert p.model.calls == 0
+
+
+async def test_hanging_retirement_control_exchange_is_bounded_and_retryable(retiring, monkeypatch):
+    p = retiring
+    expire_both(p, monkeypatch)
+    journal = p.delivery_recovery.journal
+    journal.config = journal.config.model_copy(update={"read_timeout_seconds": 1})
+    inner = p.delivery_recovery.transport
+
+    class Hang(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.Event().wait()
+
+    p.delivery_recovery.transport = Hang()
+    started = time.monotonic()
+    result = await p.retire()
+    assert time.monotonic() - started < 2
+    assert (result.status, result.reason) == ("pending", "retirement_transport_unavailable")
+    p.delivery_recovery.transport = inner
+    assert (await p.retire()).status == "retained"
 
 
 @pytest.mark.parametrize("after_commit", [False, True])

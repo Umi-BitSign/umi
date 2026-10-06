@@ -16,6 +16,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from email.utils import parsedate_to_datetime
 
 from .concurrency import await_owned_task, wait_for_owned
+from .protocol import canonical_json_bytes
 from .validator_chain import _RPC_RESPONSE_LIMITS, ValidatorChainError
 
 _RETRYABLE = {"proof_rpc_rate_limited", "proof_rpc_failed", "proof_rpc_error"}
@@ -25,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class FailoverProofRpc:
     def __init__(self, transports: tuple, *, timeout_seconds: float):
-        if len(transports) != 3 or not 0 < timeout_seconds <= 120:
+        if len(transports) != 3 or not 0 < timeout_seconds <= 600:
             raise ValueError("proof RPC failover requires bounded explicit transports")
         self.transports = transports
         self.bulk_storage_reads = all(rpc.bulk_storage_reads for rpc in transports)
@@ -100,7 +101,13 @@ class FailoverProofRpc:
                         self._cooldown_until[index] = self._now() + retry_after
                         self._cooldown_reasons[index] = "proof_rpc_rate_limited"
                         _LOGGER.warning(
-                            "competition_proof_rpc_throttled",
+                            canonical_json_bytes(
+                                {
+                                    "status": "competition_proof_rpc_throttled",
+                                    "provider_index": index,
+                                    "retry_after_seconds": retry_after,
+                                }
+                            ).decode(),
                             extra={"provider_index": index, "retry_after_seconds": retry_after},
                         )
                     elif error.reason_code == "proof_rpc_failed":

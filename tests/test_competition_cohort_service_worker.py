@@ -452,3 +452,55 @@ async def test_missing_original_selection_cannot_be_replaced_by_fresh_work(loop)
     report = await s.worker().poll_once()
     assert report["work_pending"] == 1
     assert s.inputs == 1 and not s.paths and s.p.model.calls == 0
+
+
+async def test_fresh_service_window_completes_native_work_and_restarts(loop, monkeypatch):
+    import time
+    from dataclasses import replace
+
+    import bittensor as bt
+
+    from umi.competition_cohort_request_window import capture_cohort_attempt_window
+    from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, ceil_div
+
+    from .test_drand import ROUND
+
+    s, p, c = loop, loop.p, loop.c
+    clock = p.transport_policy.clock
+    budget_seconds = (
+        ceil_div(
+            clock.issue_allowance_seconds + clock.response_window_seconds,
+            clock.target_block_interval_seconds,
+        )
+        * clock.target_block_interval_seconds
+    )
+    issued = c.window.issuance.height
+    # Use the actual retained Quicknet pulse for native response decryption.
+    # The finality port is a fixture; this does not claim live chain qualification.
+    issuance = replace(
+        p.finality.blocks[issued],
+        timestamp_ms=(
+            QUICKNET_GENESIS_MS
+            + (ROUND - 1) * QUICKNET_PERIOD_MS
+            - (budget_seconds + clock.reveal_margin_seconds) * 1000
+        ),
+    )
+    p.finality.blocks[issued] = issuance
+    c.window = await capture_cohort_attempt_window(
+        p.transport_policy, p.finality, issued, c.assignment, 1
+    )
+    schedule = c.window.schedule(p.transport_policy)
+    assert schedule.reveal_round == ROUND
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: schedule.selection_round)
+    monkeypatch.setattr(time, "time", lambda: issuance.timestamp_ms / 1000)
+    worker, value, reports = await finish(s)
+    read_service_terminal(value, worker.terminals.objects, p.c.policy, p.transport_policy)
+    assert p.model.calls == p.fetcher.calls == 1
+    assert s.votes == 2
+    assert any(r["work_complete"] for r in reports)
+    exact = canonical_json_bytes(value)
+    restart_miner(c)
+    s.offline = True
+    _, retained, _ = await finish(s)
+    assert canonical_json_bytes(retained) == exact
+    assert p.model.calls == 1

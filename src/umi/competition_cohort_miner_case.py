@@ -174,7 +174,7 @@ def validate_case_order_body(body, policy, transport):
         or prior.attempt_number + 1 != body.attempt_number
         or prior.disposition != "retry_required"
         or prior.response_sha256 is not None
-        or retirement.receipt.result != "no_response_retained"
+        or retirement.receipt.result not in {"no_response_retained", "expired_response_opportunity"}
         or retirement.receipt.response_sha256 is not None
         or retirement.receipt.grant_sha256 != body.parent_grant_sha256
         or retirement.receipt.request_digest != prior.request_sha256

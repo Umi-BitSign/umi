@@ -171,7 +171,7 @@ async def test_owned_finality_is_required_even_with_complete_archive(archive, fa
     if failure == "missing_header":
         del a.blocks[a.old.height]
     elif failure == "stale_head":
-        a.chain.clock.now += 180_000
+        a.chain.clock.now += a.reviewer.config.maximum_head_age_ms + 1
     elif failure == "stopped":
         a.reviewer._owned = True
         a.reviewer._task = SimpleNamespace(done=lambda: True)
@@ -269,7 +269,7 @@ async def test_long_review_rechecks_freshness_and_monotonic_head(archive):
     check = a.chain.verifier.verify_many
 
     def slow(**kwargs):
-        a.chain.clock.now += 180_000
+        a.chain.clock.now += a.reviewer.config.maximum_head_age_ms + 1
         return check(**kwargs)
 
     a.chain.verifier.verify_many = slow

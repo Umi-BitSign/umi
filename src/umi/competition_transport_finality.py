@@ -67,4 +67,14 @@ class CompetitionTransportFinality:
         self.provider._check_finality_context(block)
         if block.height != height:
             raise ValueError("transport observer returned another block")
-        return replace(block, scoring_policy_hash=self.policy_hash)
+        # The owned registration observer may advance to a newer compatible
+        # Subtensor runtime while a cohort continues under its frozen transport
+        # policy.  The compatibility check above binds that newer observation to
+        # the same chain family.  Expose the unchanged finalized proof under the
+        # transport's exact policy pins so request construction and miners do not
+        # have to weaken their exact policy checks for arbitrary block sources.
+        return replace(
+            block,
+            scoring_policy_hash=self.policy_hash,
+            chain_observation=self.transport.implementation_pins.live_chain,
+        )

@@ -18,6 +18,7 @@ from .competition_mediator import (
     MediatorOutput,
     MediatorReceipt,
     MediatorRequest,
+    _trusted_dependency_owner,
 )
 from .competition_mediator_journal import MediatorJournal
 from .private_files import private_path, publish_private_model, read_private_model
@@ -108,11 +109,11 @@ def _fixture_bytes(path: Path) -> bytes:
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_uid != os.getuid()
+            or not _trusted_dependency_owner(info)
             or info.st_mode & 0o022
             or not 1 <= info.st_size <= 1024 * 1024
         ):
-            raise ValueError("qualification fixture must be an owned bounded regular file")
+            raise ValueError("qualification fixture must be an owned or sealed root-owned file")
         chunks = []
         remaining = info.st_size + 1
         while remaining:

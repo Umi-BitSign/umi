@@ -140,7 +140,15 @@ configuration. Complete these checks in order:
    each signed plan, alternating coordinator/evaluator outages, restart replay,
    five-hour rests, 24-hour validator opportunities and previous-row continuity.
 4. **Capacity:** Run the intended host and container runtime with production-size
-   evidence and generous test watchdogs. Test watchdogs may detect harness stalls;
+   evidence and generous test watchdogs. Verify the pinned CPU image and an actual
+   bounded invocation as the evaluator service account under its exact systemd
+   mount, namespace, privilege and cgroup settings. A successful shell invocation
+   does not qualify a sandboxed service. Keep evaluator container storage separate
+   from validator storage and wallets. Bound model concurrency across every
+   evaluator on the host by their combined per-case memory limits, leaving
+   headroom for chain observers and owner services. Include rootless case scopes
+   when checking aggregate consumption; they may be outside the reviewer unit's
+   cgroup. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
@@ -174,3 +182,11 @@ transaction are intermediate evidence. None alone proves a live reward row.
 Retain predecessor signed artifacts and evidence for replay. Remove obsolete
 migration instructions after no installed service or recovery consumer depends
 on them; Git history is the record of superseded launch plans.
+
+Owned-finality collection budgets accept 1 through 600 seconds, with a
+120-second default. Intake shares one background collection per refresh, using
+at least 240 seconds or the configured budget when larger; callers wait through
+that same collection. These operation budgets do not relax verified head age,
+cohort authority or signed issue deadlines. Retain existing journal bindings and
+use a qualified migration before changing a bound installed configuration;
+never reset evidence to change a timeout.

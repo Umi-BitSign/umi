@@ -108,7 +108,9 @@ def signing(decisions, tmp_path):
         return await signer(name).attest(plan)
 
     s.signer = signer
-    s.worker = lambda: CohortEndpointRequestWorker(signer(), p.delivery_recovery, peer)
+    s.worker = lambda **options: CohortEndpointRequestWorker(
+        signer(), p.delivery_recovery, peer, **options
+    )
     return s
 
 
@@ -147,6 +149,29 @@ async def test_request_quorum_retains_proofs_and_recovers_offline(signing):
     assert await s.signer(s.other).recover(slot) == bv
     assert await s.signer().certify(slot) == cert
     assert len(s.calls) == 2
+
+
+async def test_elapsed_historical_window_does_not_freeze_new_intent(signing, monkeypatch):
+    import bittensor as bt
+
+    s = signing
+    worker = s.worker()
+    close = s.plan.body.requests[0].response_close_round
+    videos = tuple(request.video for request in s.plan.body.requests)
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: close)
+    with pytest.raises(OSError, match="response window already elapsed"):
+        await worker.initial(s.plan.assignment, s.plan.transport, videos)
+    assert not s.calls
+    with worker.signer.journal.journal.transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+
+    # The same assignment remains usable once a live window is available.
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: close - 1)
+    plan = await worker.initial(s.plan.assignment, s.plan.transport, videos)
+    assert plan.body.job == s.plan.body.job
+    assert all(request.response_close_round == close for request in plan.body.requests)
+    assert worker.signer.journal.load(request_slot(plan.body)).plan == plan
+    assert len(s.calls) == 1
 
 
 async def test_partial_signature_finishes_after_transport_expiry(signing, monkeypatch):
@@ -473,3 +498,125 @@ async def test_request_capacity_can_grow_without_new_selection(signing):
     s.overrides = {"maximum_bytes": 128 * 1024**2}
     await s.signer().attest(s.plan)
     assert s.signer().journal.load(request_slot(s.plan.body)).plan == s.plan
+
+
+@pytest.mark.parametrize("close_during_admission", [False, True])
+@pytest.mark.parametrize("miner_scope", ["all", "matched", "empty", "other"])
+async def test_fresh_replacement_works_inside_legacy_blackout(
+    signing, monkeypatch, close_during_admission, miner_scope
+):
+    import bittensor as bt
+
+    from umi.competition_cohort_request_window import capture_request_window
+    from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, quicknet_round_at_ms
+
+    s, p = signing, signing.p
+    review = await s.d.evidence(index=1)
+    certificate = (
+        await coordinator(s.d).advance(p.retire_slot, review.retirement.case_id)
+    ).certificate
+    parent_bytes = canonical_json_bytes(p.grant)
+    template = next_grant(s.d, p.grant, review, certificate, monkeypatch)
+    legacy = template.attempt.order.requests[0]
+    issuance = p.finality.blocks[legacy.issued_block]
+    # Proof collection or an outage crossed the old fixed issuance opportunity.
+    issuance = replace(
+        issuance,
+        timestamp_ms=(QUICKNET_GENESIS_MS + (legacy.response_close_round + 1) * QUICKNET_PERIOD_MS),
+    )
+    p.finality.blocks[issuance.height] = issuance
+    monkeypatch.setattr(
+        bt.timelock, "current_round", lambda: quicknet_round_at_ms(issuance.timestamp_ms)
+    )
+    with pytest.raises(ValueError, match="outside its verified window"):
+        await capture_request_window(p.transport_policy, p.finality, issuance.height)
+
+    selected_miners = {
+        "all": None,
+        "matched": (p.e.job.submission.submission.hotkey,),
+        "empty": (),
+        "other": (wallet(s.own).hotkey.ss58_address,),
+    }[miner_scope]
+    worker = s.worker(fresh_windows=True, fresh_window_miner_hotkeys=selected_miners)
+    if miner_scope in {"empty", "other"}:
+        with pytest.raises(ValueError, match="outside its verified window"):
+            await worker.replacement(
+                p.grant, certificate, review.retirement.retirement, p.transport_policy, legacy.video
+            )
+        assert worker.signer.journal.load(request_slot(template.attempt.order)) is None
+        assert canonical_json_bytes(p.grant) == parent_bytes
+        assert p.model.calls == p.fetcher.calls == 0
+        return
+    plan = await worker.replacement(
+        p.grant,
+        certificate,
+        review.retirement.retirement,
+        p.transport_policy,
+        legacy.video,
+    )
+    # Removing the canary selection cannot reinterpret a retained request.
+    worker.fresh_window_miner_hotkeys = frozenset()
+    assert (
+        await worker.replacement(
+            p.grant, certificate, review.retirement.retirement, p.transport_policy, legacy.video
+        )
+        == plan
+    )
+    signed_request = plan.body.requests[0]
+    assert signed_request.response_close_round > bt.timelock.current_round()
+    assert canonical_json_bytes(p.grant) == parent_bytes
+    # Both clock representations use exactly the same issuance and nominal budget.
+    round_ms = QUICKNET_GENESIS_MS + (signed_request.response_close_round - 1) * QUICKNET_PERIOD_MS
+    block_ms = (signed_request.deadline_block - signed_request.issued_block) * (
+        p.transport_policy.clock.target_block_interval_seconds * 1000
+    )
+    assert 0 <= round_ms - issuance.timestamp_ms - block_ms < QUICKNET_PERIOD_MS
+    saved = worker.signer.journal.load(request_slot(plan.body))
+    assert saved.windows[0].schema_ == "umi-cohort-attempt-window/2"
+    # Restart the reviewer and replay the retained proof, before actual delivery.
+    assert await s.signer().recover(request_slot(plan.body)) == worker.signer.journal.vote(
+        request_slot(plan.body), worker.signer.journal.config.signer
+    )
+    outcome = await worker.advance(plan)
+    assert outcome.status == "certified"
+    selected = outcome.selection
+    if close_during_admission:
+        from umi.competition_cohort_request_admission import CohortRequestWindowAuthority
+
+        from .test_competition_cohort_order_signer import source_for
+
+        delivered = await CohortEndpointGrantDelivery(p.delivery_recovery).deliver(
+            selection_slot(selected)
+        )
+        assert delivered.status == "retained", delivered
+        original = CohortRequestWindowAuthority.authorize
+        prior = p.e.r.h.source
+
+        async def close_after_check(authority, candidate):
+            admitted = await original(authority, candidate)
+            p.e.r.h.source = source_for(p.e.r.h.batch, p.e.r.h.batch["history"])
+            return admitted
+
+        monkeypatch.setattr(CohortRequestWindowAuthority, "authorize", close_after_check)
+        response = await request(p, TRANSLATE_PATH, signed_request)
+        assert response.status_code == 422, response.text
+        monkeypatch.setattr(CohortRequestWindowAuthority, "authorize", original)
+        p.miner = p.rebuild()
+        p.e.r.h.source = prior
+        response = await request(p, TRANSLATE_PATH, signed_request)
+        assert response.status_code == 422, response.text
+        assert p.model.calls == p.fetcher.calls == 0
+        assert canonical_json_bytes(p.grant) == parent_bytes
+        return
+    dispatch = CohortEndpointDispatcher(p.delivery_recovery, p.finality)
+    result = await dispatch.dispatch(selection_slot(selected), plan.body.case_id)
+    assert result["status"] == "recovered", result
+    assert p.model.calls == 1
+    assert p.delivery_recovery.retained(selection_slot(selected), plan.body.case_id) is not None
+    transmissions = len(p.transmissions)
+    result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        selection_slot(selected), plan.body.case_id
+    )
+    assert result["status"] == "recovered"
+    assert p.model.calls == 1 and len(p.transmissions) == transmissions
+    assert canonical_json_bytes(p.grant) == parent_bytes

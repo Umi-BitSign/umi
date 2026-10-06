@@ -112,8 +112,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
             raise ValueError("service-work admission requires its own configured cohort intake")
         if self.chain.policy_sha256 != self.policy_sha256:
             raise ValueError("intake and chain configuration bind different policies")
-        if self.chain.collection_timeout_seconds > 120:
-            raise ValueError("intake proof collection must finish within 120 seconds")
+        if self.chain.collection_timeout_seconds > 600:
+            raise ValueError("intake proof collection must finish within 600 seconds")
         if self.admission_capacity.maximum_records > 65_536:
             raise ValueError("intake admission capacity exceeds checkpoint capacity")
         state = Path(self.state_directory)
@@ -293,7 +293,9 @@ def create_intake_app(
         if provider_factory is None
         else provider_factory(config.chain, policy)
     )
-    background_collection_timeout = 240 if provider_factory is None else None
+    background_collection_timeout = (
+        max(240, config.chain.collection_timeout_seconds) if provider_factory is None else None
+    )
     finality_cache = VerifiedRegistrationCache(
         provider,
         policy,
@@ -348,7 +350,9 @@ def create_intake_app(
         return (await finality_cache.collect_fresh()).snapshot
 
     async def cached_snapshot() -> RegistrationSnapshot:
-        return (await finality_cache.cached()).snapshot
+        # Report the selected deployment even while the owned proof collector
+        # warms up. Missing fresh evidence keeps admission explicitly unverified.
+        return (await finality_cache.cached(wait_for_inflight=False)).snapshot
 
     registration_wait_seconds = (
         config.chain.collection_timeout_seconds

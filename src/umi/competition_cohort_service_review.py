@@ -21,7 +21,11 @@ from .competition_cohort_endpoint_decision_contracts import (
 )
 from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
 from .competition_cohort_recovery import verify_recovery_quorum
-from .competition_cohort_request_window import capture_request_window
+from .competition_cohort_request_window import (
+    CohortAttemptRequestWindow,
+    capture_cohort_attempt_window,
+    capture_request_window,
+)
 from .competition_cohort_service_export import ServiceWorkReader, SignedServiceWorkResponse
 from .competition_cohort_service_grant import (
     MAX_SERVICE_GRANT_BYTES,
@@ -43,7 +47,11 @@ from .competition_registration_archive import (
 )
 from .competition_round_journal import RecordReservation, RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
-from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
+from .endpoint_retirement import (
+    SignedEndpointRetirementReceipt,
+    retirement_absence_elapsed,
+    verify_retirement_receipt,
+)
 from .open_competition import (
     CompetitionPolicy,
     Hotkey,
@@ -119,7 +127,11 @@ def certify_service_retry(
         miner_hotkey=miner,
         evaluator_hotkey=body.evaluator_hotkey,
     )
-    if review.retirement.receipt.result != "no_response_retained" or not 1 <= len(votes) <= 64:
+    if (
+        review.retirement.receipt.result
+        not in {"no_response_retained", "expired_response_opportunity"}
+        or not 1 <= len(votes) <= 64
+    ):
         raise ValueError("service retry requires a no-response fence and bounded votes")
     signatures = tuple(
         sorted(
@@ -218,7 +230,10 @@ class ServiceWorkReviewer:
                 miner_hotkey=body.assignment.admission.claim.claim.hotkey,
                 evaluator_hotkey=body.evaluator_hotkey,
             )
-            if review.retirement.receipt.result != "no_response_retained":
+            if review.retirement.receipt.result not in {
+                "no_response_retained",
+                "expired_response_opportunity",
+            }:
                 raise ValueError("service retry needs a signed no-response fence")
             kind, value = "service_retry", service_retry_decision(review)
         else:
@@ -254,10 +269,11 @@ class ServiceWorkReviewer:
 
     def _check_current(self, review, body, source, block, observed_round):
         review_service_request_current(body, self.policy, source, block)
-        if isinstance(review, ServiceRetryReview) and (
-            block <= body.request.deadline_block
-            or type(observed_round) is not int
-            or observed_round < body.request.response_close_round
+        if isinstance(review, ServiceRetryReview) and not retirement_absence_elapsed(
+            review.retirement.receipt,
+            body.request,
+            observed_block=block,
+            observed_round=observed_round,
         ):
             raise ValueError("service retry precedes request expiry")
 
@@ -320,11 +336,22 @@ class ServiceWorkReviewer:
                         raise ValueError(
                             "service registration proof changed its original admission"
                         )
-                    window = await self._call(
-                        capture_request_window(
-                            self.transport, self.blocks, body.request.issued_block
+                    if isinstance(body.window, CohortAttemptRequestWindow):
+                        window = await self._call(
+                            capture_cohort_attempt_window(
+                                self.transport,
+                                self.blocks,
+                                body.request.issued_block,
+                                body.assignment,
+                                body.attempt_number,
+                            )
                         )
-                    )
+                    else:
+                        window = await self._call(
+                            capture_request_window(
+                                self.transport, self.blocks, body.request.issued_block
+                            )
+                        )
                     if window != body.window:
                         raise ValueError("service request window differs from independent finality")
                     intent = ServiceReviewIntent(

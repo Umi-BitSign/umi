@@ -65,9 +65,12 @@ async def test_recovered_snapshot_does_not_relax_verification(skipped, mode):
     elif mode == "timestamp":
         skipped.state.bad_timestamp = True
     elif mode == "stale":
-        skipped.chain.clock.now += 121_000
+        skipped.chain.clock.now += source.config.maximum_head_age_ms + 1
     elif mode == "old_target":
-        skipped.chain.clock.now += 85_000  # Fresh anchor, stale target.
+        # The target is 36 seconds older than its anchor. Expire only it.
+        skipped.chain.clock.now = (
+            skipped.anchor.timestamp_ms + source.config.maximum_head_age_ms - 35_999
+        )
     elif mode == "unowned":
         source._owned = False
     else:

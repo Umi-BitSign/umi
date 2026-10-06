@@ -221,7 +221,7 @@ async def test_peer_rejects_stale_corrupt_or_redirected_reply(ready, fault):
             assert not await peer.ready(n.probe, n.observation, 10)
 
 
-async def test_public_clock_tracks_coordinator_and_evaluator_recovery(ready):
+async def test_public_clock_tracks_coordinator_and_evaluator_recovery(ready, monkeypatch):
     n, h = ready, ready.host
     key, cohort = n.probe.catalog_sha256s[0], n.probe.cohort_sha256
     b = h.benchmark
@@ -259,7 +259,7 @@ async def test_public_clock_tracks_coordinator_and_evaluator_recovery(ready):
     # Selection is fixture supplied; the evaluator checks a real acknowledged
     # native assignment, transport and retained media/model inputs over HTTP.
     orders = SimpleNamespace(
-        _retained=lambda _: 1,
+        _retained_orders=lambda _: (n.order,),
         queue=SimpleNamespace(
             journal=SimpleNamespace(
                 get=lambda *_: {"slots": ["slot"]},
@@ -278,6 +278,9 @@ async def test_public_clock_tracks_coordinator_and_evaluator_recovery(ready):
         ("peer-" + own * 8,),
         lambda: True,
     )
+    # Selection is a fixture here; native selection invalidation is qualified
+    # with the real owner journal in the order-host tests.
+    monkeypatch.setattr(combined, "_selection_stamp", lambda _: "fixture-selection")
     service.request_readiness = combined
     app = FastAPI()
     app.include_router(request_readiness_routes(service))

@@ -3,6 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+
+from .concurrency import await_owned_task
+
+
+async def drain_server_requests(server):
+    """Retain ownership until cancelled HTTP requests finish durable cleanup.
+
+    Uvicorn cancels overdue requests but can return before their cancellation
+    handlers finish. Call this after serving stops, before releasing host locks.
+    Do not cancel requests again: their existing cancellation handlers own the
+    remaining writes, and another cancellation could interrupt that cleanup.
+    """
+
+    async def drain():
+        tasks = tuple(server.server_state.tasks)
+        for task in tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await await_owned_task(task)
+
+    await await_owned_task(asyncio.create_task(drain()))
 
 
 async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0):
@@ -27,7 +48,10 @@ async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (),
         finally:
             if not serving.done():
                 serving.cancel()
-            await asyncio.gather(serving, return_exceptions=True)
+            try:
+                await asyncio.gather(serving, return_exceptions=True)
+            finally:
+                await drain_server_requests(server)
 
 
 def serve_with_finality_supervision(app, *, liveness_tasks=lambda: (), **options):

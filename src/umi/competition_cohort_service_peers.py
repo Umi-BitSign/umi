@@ -78,7 +78,10 @@ class ServiceWorkPeerReviews:
             miner_hotkey=body.assignment.admission.claim.claim.hotkey,
             evaluator_hotkey=body.evaluator_hotkey,
         )
-        if review.retirement.receipt.result != "no_response_retained":
+        if review.retirement.receipt.result not in {
+            "no_response_retained",
+            "expired_response_opportunity",
+        }:
             raise ValueError("service retry requires the original no-response fence")
         with self.journal.locked():
             self.journal.put("service_retry_peer_intent", slot, {"review": digest(review)})

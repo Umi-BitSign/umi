@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -22,12 +23,17 @@ from .competition_cohort_endpoint_recovery import (
     recovery_slot,
 )
 from .competition_cohort_endpoint_selection import case_record_key, selection_grant
+from .competition_cohort_execution_journal import control_exchange_timeout_seconds
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .config import Limits
 from .endpoint_protocol import COHORT_RETIRE_PATH
 from .endpoint_response_recovery import retrieve_endpoint_response
-from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
+from .endpoint_retirement import (
+    SignedEndpointRetirementReceipt,
+    retirement_absence_elapsed,
+    verify_retirement_receipt,
+)
 from .open_competition import digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import (
@@ -36,6 +42,8 @@ from .validator import (
     _pinned_public_origin,
     _read_response_body,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CohortRetiredEndpointCase(StrictProtocolModel):
@@ -75,9 +83,11 @@ class CohortEndpointRetirement:
             miner_hotkey=job.submission.submission.hotkey,
             evaluator_hotkey=job.evaluator_hotkey,
         )
-        if receipt.receipt.result == "no_response_retained" and (
-            value.observed_block <= request.deadline_block
-            or value.observed_round < request.response_close_round
+        if receipt.receipt.result != "response_retained" and not retirement_absence_elapsed(
+            receipt.receipt,
+            request,
+            observed_block=value.observed_block,
+            observed_round=value.observed_round,
         ):
             raise ValueError("absence receipt precedes request expiry")
         return value
@@ -129,7 +139,7 @@ class CohortEndpointRetirement:
             limits = Limits.from_policy(selected.transport_policy)
             if len(body) > limits.maximum_request_body_bytes:
                 raise ValueError("retirement request exceeds transport bound")
-            timeout = journal.config.read_timeout_seconds
+            timeout = control_exchange_timeout_seconds(journal.config)
 
             async def exchange():
                 origin, host, sni = await _pinned_public_origin(
@@ -170,6 +180,19 @@ class CohortEndpointRetirement:
                                 "resource_limit", "retirement header bound"
                             )
                         if response.status_code != 200:
+                            # Numeric transport diagnostics carry no authority.
+                            # Never expose the endpoint, headers or response body.
+                            logger.info(
+                                canonical_json_bytes(
+                                    {
+                                        "status": "endpoint_retirement_http_pending",
+                                        "selection_sha256": digest(selected),
+                                        "case_record_sha256": key,
+                                        "http_status": response.status_code,
+                                        "chain_submission_authorized": False,
+                                    }
+                                ).decode()
+                            )
                             return None
                         return await _read_response_body(response, 16 * 1024, prefix=bytearray())
                     finally:

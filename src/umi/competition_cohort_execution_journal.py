@@ -35,6 +35,13 @@ from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
+CONTROL_EXCHANGE_TIMEOUT_SECONDS = 120
+
+
+def control_exchange_timeout_seconds(config: CohortExecutionConfig) -> int:
+    """Bound retry-safe miner control calls without shortening inference."""
+    return min(config.read_timeout_seconds, CONTROL_EXCHANGE_TIMEOUT_SECONDS)
+
 
 class CohortExecutionConfig(CohortOrderSignerConfig):
     schema_: Literal["umi-cohort-execution-config/1"] = Field(alias="schema")

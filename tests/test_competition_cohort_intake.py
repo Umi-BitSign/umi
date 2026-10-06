@@ -71,17 +71,16 @@ def intake(tmp_path, scenario):
     return service
 
 
-def request_for(scenario, *, sequence=1, block=200):
-    signed = submission(scenario["policy"], sequence=sequence)
+def request_for(scenario, *, sequence=1, block=200, name="Alice"):
+    signed = submission(scenario["policy"], sequence=sequence, name=name)
     body = scenario["consent"].consent.model_copy(
         update={
             "signed_at_block": block,
             "submission_sha256": digest(signed.submission),
+            "hotkey": signed.submission.hotkey,
         }
     )
-    consent = scenario["consent"].__class__(
-        consent=body, signature=sign_object(body, wallet("Alice"))
-    )
+    consent = scenario["consent"].__class__(consent=body, signature=sign_object(body, wallet(name)))
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
 
 
@@ -260,8 +259,28 @@ def test_service_exposes_live_history_and_retries_without_new_finality(
             content=canonical_json_bytes(request_for(scenario, sequence=2)),
             headers={"content-type": "application/json"},
         )
-        assert new.status_code == 503
+        # The bounded verified capture still applies, including its admission
+        # interval fence; a failed refresh does not erase valid evidence.
+        assert new.status_code == 409
+        assert new.json()["detail"] == "cohort intake or submission is not eligible"
         assert "PRIVATE" not in new.text
+        other = client.post(
+            url,
+            content=canonical_json_bytes(request_for(scenario, name="Bob")),
+            headers={"content-type": "application/json"},
+        )
+        assert other.status_code == 200, other.text
+        assert other.json()["status"] == "pending_attestation"
+        cache = app.state.registration_snapshot_cache
+        expired = cache._monotonic() + cache._maximum_age + 1
+        cache._monotonic = lambda: expired
+        unavailable = client.post(
+            url,
+            content=canonical_json_bytes(request_for(scenario, sequence=2)),
+            headers={"content-type": "application/json"},
+        )
+        assert unavailable.status_code == 503
+        assert "PRIVATE" not in unavailable.text
     assert provider.closed
 
 

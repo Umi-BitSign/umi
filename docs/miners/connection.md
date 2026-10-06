@@ -9,6 +9,12 @@ cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
 phase and admission state before signing or diagnosing a submission. Send a new
 submission only when `admission_accepting_new` is true.
 
+The [request-window recovery contract](../competition/transport-cadence.md)
+explains retained attempts and the new linked-deadline extension. That extension
+requires compatible selected coordinator and miner releases. Publishing its
+source alone does not enable new request windows. Do not delete grant, request,
+response or retirement state to upgrade or recover delayed work.
+
 The previous certified allocation remains effective until the active cohort
 produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance
@@ -37,10 +43,16 @@ rights decision and complete artifact.
 
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
-fetches the current canonical manifest, checks it against the public competition
-status, installs the pinned runtime beside the old runtime, and creates a new
-private state namespace for the current transport policy. Nonce, assignment,
+fetches the current canonical manifest, checks its policy and profile against
+the public competition status, and selects that matching deployment's exact
+runtime revision. It installs the runtime beside the old runtime and creates a
+new private state namespace for the current transport policy. Nonce, assignment,
 finality, grant and model-sidecar state from earlier policies remain intact.
+
+Rerunning the command installs a changed runtime even within the same cohort.
+An existing receipt skips cutover only when its revision and the running miner's
+interpreter match the selected deployment. Retained enrollment, nonce, assignment
+and grant state stay in the same namespace.
 
 The updater also handles the standard Unix-socket model sidecar. It binds a new
 sidecar socket and capacity descriptor to the current transport policy before

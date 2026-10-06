@@ -22,11 +22,12 @@ from .competition_cohort_endpoint_selection import (
     selection_slot,
 )
 from .competition_cohort_grant_delivery import CohortEndpointGrantDelivery, verify_grant_receipt
+from .competition_cohort_request_admission import CohortRequestWindowAuthority
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread, wait_for_owned
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse, verify_recovered_response
-from .miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthority
+from .miner_admission import MinerAdmissionError
 from .open_competition import digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import PreparedRequestAttempt, prepare_request_attempt, send_prepared_request
@@ -166,8 +167,11 @@ class CohortEndpointDispatcher:
             request = selected_request(selected, case_id)
             timeout = journal.config.read_timeout_seconds
             # Each side independently checks the live transport window.
-            authority = ProofBackedMinerWindowAuthority(
-                policy=selected.transport_policy, finalized_blocks=self.finalized_blocks
+            authority = CohortRequestWindowAuthority(
+                policy=selected.transport_policy,
+                finalized_blocks=self.finalized_blocks,
+                job=job,
+                attempt_number=selection_grant(selected, assignment).attempt.order.attempt_number,
             )
             try:
                 await wait_for_owned(authority.authorize(request), timeout=timeout)

@@ -139,6 +139,25 @@ async def test_native_queue_to_each_native_inbox_and_quiet_restart(relay):
     assert len(r.h.calls) == 2 and len(r.receipt_calls) == 2 and len(r.delivery_calls) == 2
 
 
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_acknowledged_assignment_reads_while_acceptance_mutex_is_held(relay, conflict):
+    r = relay
+    assert (await r.worker().poll_once())["deliveries_acknowledged"] == 2
+    box = r.inbox(r.h.order.evaluators[0])
+    expected = box.assignment(r.slot)
+    # The same mutex is held during another admission's network/signing work.
+    # Reading a committed receipt must not contend for that compound lock.
+    with box.journal.locked():
+        if conflict:
+            with pytest.raises(ValueError, match="conflict"):
+                box.journal.put("certificate", r.slot, {"tampered": True})
+            with pytest.raises(ValueError, match="conflict held"):
+                box.assignment(r.slot)
+        else:
+            assert box.assignment(r.slot) == expected
+    assert box.assignments() == (r.slot,)
+
+
 async def test_partial_quorum_survives_repeated_ten_hour_outages_without_new_selection(relay):
     r = relay
     r.blocked_reviewers.add(identity(wallet("Dave").hotkey.ss58_address))

@@ -579,6 +579,43 @@ async def test_private_http_releases_capacity_after_cancelled_export(remote):
         assert response.response.evidence.progress == h.result.progress
 
 
+async def test_private_http_queues_behind_long_export(remote):
+    h = remote
+    original = h.exporter.respond
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(request)
+
+    h.exporter.respond = delayed
+    app = FastAPI()
+    app.include_router(intake_review_routes(h.exporter, token="test-credential-" * 3))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        fetch = IntakeReviewHTTPClient(
+            client, "https://owner.example", token="test-credential-" * 3
+        )
+        request = IntakeReviewRequest(
+            schema="umi-intake-review-request/1", challenge="ab" * 32, progress=h.result.progress
+        )
+        first = asyncio.create_task(fetch(request))
+        await entered.wait()
+        second = asyncio.create_task(fetch(request))
+        await asyncio.sleep(1.1)
+        assert not second.done()
+        release.set()
+        one, two = await asyncio.gather(first, second)
+        first_response = SignedIntakeReviewResponse.model_validate_json(one)
+        second_response = SignedIntakeReviewResponse.model_validate_json(two)
+        assert first_response.response.evidence.progress == h.result.progress
+        assert second_response.response.evidence.progress == h.result.progress
+
+
 def test_export_includes_superseded_consent_in_original_inventory(phase, scenario):
     phase.intake.retain(request_for(scenario, sequence=2, block=240), capture_at(240))
     result = healthy(phase, scenario)

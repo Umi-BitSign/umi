@@ -713,3 +713,20 @@ async def test_rate_limit_cooldown_is_shared_with_background_refresh(policy, mon
         assert provider.calls == 1
     finally:
         await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_nonwaiting_status_does_not_cancel_shared_cold_collection(policy):
+    provider = ControlledProvider(ValueError("private proof diagnostic"))
+    cache = cache_for(provider, policy)
+    await cache.start()
+    try:
+        await asyncio.wait_for(provider.started.wait(), timeout=5)
+        inflight = cache._inflight
+        with pytest.raises(VerifiedCaptureUnavailable):
+            await asyncio.wait_for(cache.cached(wait_for_inflight=False), timeout=5)
+        assert cache._inflight is inflight and not inflight.done()
+        assert not provider.release.is_set()
+    finally:
+        provider.release.set()
+        await cache.aclose()

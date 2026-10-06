@@ -660,3 +660,107 @@ def test_model_only_upgrade_records_intent_without_touching_endpoint(
     assert report["endpoint_service_unchanged"] is True
     assert intent["public_model_track"] is True
     assert launcher_installs == [SCRIPT]
+
+
+@pytest.mark.parametrize("public_track", ["no", "yes"])
+@pytest.mark.parametrize("prior_runtime", ["old", "missing", "current", "rolled_back"])
+def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
+    prior_runtime: str,
+    public_track: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _manifest()
+    target_python = tmp_path / "runtimes" / manifest["runtime"]["revision"] / "venv/bin/python"
+    actual_python = target_python if prior_runtime == "current" else tmp_path / "old/bin/python"
+    arguments = [
+        str(actual_python),
+        "-m",
+        "umi.miner",
+        "--port",
+        "8091",
+        "--model-revision",
+        "10" * 32,
+        "--serving-origin",
+        "https://miner.example",
+        "--wallet-name",
+        "miner",
+        "--hotkey",
+        "miner",
+    ]
+    miner = upgrade.Service("umi-miner.service", 10, "miner", arguments)
+    account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="miner")
+    root = tmp_path / "state"
+    state = root / manifest["policy"]["value_sha256"][:16]
+    inputs = state / "inputs"
+    inputs.mkdir(parents=True)
+    policy_raw = (ROOT / "docs/competition/C5_POLICY.json").read_bytes()
+    transport_raw = (ROOT / "docs/competition/C5_TRANSPORT_POLICY.json").read_bytes()
+    (inputs / "competition-policy.json").write_bytes(policy_raw)
+    prior = {
+        "policy_sha256": manifest["policy"]["value_sha256"],
+        "runtime_revision": "00" * 20
+        if prior_runtime == "old"
+        else manifest["runtime"]["revision"],
+        "status": "miner_upgrade_verified",
+    }
+    if prior_runtime == "missing":
+        prior.pop("runtime_revision")
+    (state / "upgrade-receipt.json").write_bytes(upgrade.canonical(prior))
+    protected = {
+        state / "protocol/nonces.sqlite3": b"retained nonce state",
+        state / "enrollment/signed-request.json": b"exact retained request",
+    }
+    for path, value in protected.items():
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(value)
+    calls = []
+    responses = {
+        upgrade.DEFAULT_MANIFEST: upgrade.canonical(manifest),
+        upgrade.DEFAULT_STATUS: upgrade.canonical(_status(manifest)),
+        manifest["policy"]["url"]: policy_raw,
+        manifest["transport"]["url"]: transport_raw,
+    }
+    monkeypatch.setattr(upgrade, "fetch", lambda url, *_args, **_kwargs: responses[url])
+    monkeypatch.setattr(upgrade, "ROOT", root)
+    monkeypatch.setattr(upgrade, "RUNTIME_ROOT", tmp_path / "runtimes")
+    monkeypatch.setattr(upgrade, "discover_miner", lambda: miner)
+    monkeypatch.setattr(
+        upgrade,
+        "miner_identity",
+        lambda *_args: ("miner-hotkey", "10" * 32, "https://miner.example"),
+    )
+    monkeypatch.setattr(upgrade.pwd, "getpwnam", lambda *_args: account)
+    monkeypatch.setattr(upgrade.sys, "platform", "linux")
+    monkeypatch.setattr(upgrade.shutil, "which", lambda *_args: "/bin/systemctl")
+    monkeypatch.setattr(upgrade.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(upgrade, "secure_root", lambda p: p.mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(upgrade, "install_launcher", lambda *_args: None)
+    monkeypatch.setattr(upgrade, "wait_health", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        upgrade, "install_runtime", lambda *_args: calls.append("runtime") or target_python
+    )
+    monkeypatch.setattr(upgrade, "prepare_sidecar", lambda command, *_args: (None, command, None))
+    monkeypatch.setattr(
+        upgrade, "activate_services", lambda **kwargs: calls.append(kwargs) or {"ok": True}
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "install_endpoint_enrollment",
+        lambda **kwargs: {"status": "retained_request_reused"},
+    )
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--public-model-track", public_track])
+    upgrade.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == (
+        "already_upgraded" if prior_runtime == "current" else "miner_upgrade_verified"
+    )
+    assert len(calls) == (0 if prior_runtime == "current" else 2)
+    if calls:
+        command = json.loads((inputs / "miner-command.json").read_bytes())["arguments"]
+        assert command[0] == str(target_python)
+        assert upgrade.option(command, "--model-revision") == "10" * 32
+        assert upgrade.option(command, "--nonce-db") == str(state / "protocol/nonces.sqlite3")
+    assert all(path.read_bytes() == value for path, value in protected.items())

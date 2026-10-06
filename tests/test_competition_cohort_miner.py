@@ -256,6 +256,16 @@ async def test_native_late_grant_inference_restart_and_original_response_recover
     assert (await grant(p)).content == ack.content
 
 
+async def test_grant_accepts_equivalent_serving_origin_spelling(granted):
+    p = granted
+    p.miner = p.rebuild(
+        directory=p.miner_cfg.directory + "-equivalent-origin",
+        serving_origin=p.miner_cfg.serving_origin.rstrip("/") + "/",
+    )
+    ack = await grant(p)
+    assert ack.status_code == 200, ack.text
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -705,6 +715,28 @@ async def test_lost_grant_http_ack_recovers_without_reselection(delivery):
         assert (
             db.execute("SELECT COUNT(*) FROM records WHERE kind='miner_grant'").fetchone()[0] == 1
         )
+
+
+async def test_hanging_grant_control_exchange_is_bounded_and_retryable(delivery):
+    from umi.competition_cohort_execution_journal import control_exchange_timeout_seconds
+
+    p = delivery
+    journal = p.delivery_recovery.journal
+    assert control_exchange_timeout_seconds(journal.config) == 120
+    journal.config = journal.config.model_copy(update={"read_timeout_seconds": 1})
+    inner = p.delivery_recovery.transport
+
+    class Hang(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.Event().wait()
+
+    p.delivery_recovery.transport = Hang()
+    started = time.monotonic()
+    result = await p.deliver()
+    assert time.monotonic() - started < 2
+    assert (result.status, result.reason) == ("pending", "miner_grant_delivery_unavailable")
+    p.delivery_recovery.transport = inner
+    assert (await p.deliver()).status == "retained"
 
 
 @pytest.mark.parametrize(

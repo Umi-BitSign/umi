@@ -37,6 +37,16 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 logger = logging.getLogger(__name__)
 
 
+class BenchmarkWorkerFailure(RuntimeError):
+    """Report which owned worker stopped without exposing private exception text."""
+
+    def __init__(self, worker: str):
+        if worker not in {"execution", "exports", "endpoints"}:
+            raise ValueError("benchmark worker name is invalid")
+        self.reason_code = f"benchmark_{worker}_worker_stopped"
+        super().__init__(self.reason_code)
+
+
 class BenchmarkHostConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-benchmark-host/1"] = Field(alias="schema")
     directory: Directory
@@ -143,6 +153,7 @@ class BenchmarkHost:
             CohortExecutor(self.execution, provider, self.history, self.sandbox),
             batch_size=c.batch_size,
             concurrency=c.concurrency,
+            defer_endpoint_until_terminal=getattr(config, "endpoint", None) is not None,
         )
         self.journal = RoundJournal(
             Path(c.directory),
@@ -192,10 +203,15 @@ class BenchmarkHost:
             done, _ = await asyncio.wait(
                 (*self.tasks.values(), stopping), return_when=asyncio.FIRST_COMPLETED
             )
-            for task in done - {stopping}:
-                task.result()
-            if not stop.is_set():
-                raise RuntimeError("benchmark worker exited before shutdown")
+            for name, task in self.tasks.items():
+                if task not in done:
+                    continue
+                try:
+                    task.result()
+                except Exception as error:
+                    raise BenchmarkWorkerFailure(name) from error
+                if not stop.is_set():
+                    raise BenchmarkWorkerFailure(name)
         finally:
 
             async def drain():

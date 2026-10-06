@@ -69,6 +69,12 @@ class CohortEndpointAttemptWorker:
             self.recovery, self.requests.signer.blocks_for(selected.transport_policy)
         )
         sent = await dispatcher.dispatch(slot, case_id)
+        if sent["status"] == "pending" and sent["reason"].startswith("miner_grant_"):
+            return {
+                "status": "pending",
+                "reason": sent["reason"],
+                "selection_slot": slot,
+            }
         result = await self.decisions.advance(slot, case_id)
         if result.certificate is None:
             return {

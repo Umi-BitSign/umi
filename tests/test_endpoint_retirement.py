@@ -17,6 +17,7 @@ from umi.miner_resources import (
     SQLiteMinerResourceLedger,
 )
 from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_miner import (
     base_policy as base_policy,
@@ -167,7 +168,7 @@ async def test_unstarted_expired_request_is_fenced_across_restart(granted, monke
         new.close()
 
 
-@pytest.mark.parametrize("expired", ["neither", "block", "round"])
+@pytest.mark.parametrize("expired", ["neither", "block"])
 async def test_unexpired_opportunity_cannot_be_retired(granted, monkeypatch, expired):
     p = granted
     assert (await grant(p)).status_code == 200
@@ -217,6 +218,29 @@ async def test_pending_retirement_drains_active_work_and_keeps_its_response(gran
     final = verify(p, await retire(p))
     assert final.receipt.response_sha256 == hashlib.sha256(result.content).hexdigest()
     assert p.model.calls == 1
+
+
+async def test_expired_response_opportunity_fences_before_block_deadline(granted, monkeypatch):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    original_request = canonical_json_bytes(p.requests[0])
+    assert p.finality.head <= p.requests[0].deadline_block
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: p.requests[0].response_close_round)
+    result = await retire(p)
+    receipt = verify(p, result)
+    assert receipt.receipt.schema_ == "umi-endpoint-retirement/2"
+    assert receipt.receipt.result == "expired_response_opportunity"
+    assert receipt.receipt.response_sha256 is None
+    assert canonical_json_bytes(p.requests[0]) == original_request
+    assert p.model.calls == 0
+    # Restart with the same ledger: exact receipt recovery, no new inference.
+    ledger = reopen(p)
+    try:
+        assert (await retire(p)).content == result.content
+        assert (await translate(p)).status_code == 409
+        assert p.model.calls == 0
+    finally:
+        ledger.close()
 
 
 @pytest.mark.parametrize("fault", ["intent", "sign", "receipt", "after_commit"])
@@ -407,3 +431,47 @@ async def test_unavailable_grant_storage_is_retryable(granted, monkeypatch):
     assert (await grant(p)).status_code == 200
     expire(p, monkeypatch)
     verify(p, await retire(p))
+
+
+@pytest.mark.parametrize("fault", ["intent", "sign", "receipt", "after_commit"])
+async def test_expired_opportunity_intent_resumes_offline_without_rule_change(
+    granted, monkeypatch, fault
+):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: p.requests[0].response_close_round)
+    assert p.finality.head <= p.requests[0].deadline_block
+    ledger = p.miner.resource_ledger
+    original = getattr(
+        ledger, "prepare_retirement" if fault == "intent" else "commit_retirement_receipt"
+    )
+
+    def interrupted(*args, **kwargs):
+        if fault == "after_commit":
+            original(*args, **kwargs)
+        raise OSError("interrupted expiry fence")
+
+    target, name = (
+        (module, "sign_object")
+        if fault == "sign"
+        else (ledger, "prepare_retirement" if fault == "intent" else "commit_retirement_receipt")
+    )
+    with monkeypatch.context() as m:
+        m.setattr(target, name, interrupted)
+        assert (await retire(p)).status_code == 503
+    row = ledger._connection.execute("SELECT receipt_intent FROM request_retirements").fetchone()
+    assert row is not None and b"umi-endpoint-retirement/2" in row[0]
+    frozen = bytes(row[0])
+    restored = reopen(p)
+    try:
+
+        async def unavailable():
+            raise OSError("chain unavailable after persisted fence")
+
+        monkeypatch.setattr(p.finality, "finalized_head_height", unavailable)
+        receipt = verify(p, await retire(p))
+        assert canonical_json_bytes(receipt.receipt) == frozen
+        assert receipt.receipt.result == "expired_response_opportunity"
+        assert p.model.calls == 0
+    finally:
+        restored.close()
