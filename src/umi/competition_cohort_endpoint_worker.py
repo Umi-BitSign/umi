@@ -160,6 +160,14 @@ class CohortEndpointWorker:
                 failed("case_scan", "", error)
             results = await self._gather(case(row) for row in rows)
         last = retries[-1] if retries else ("", "", "", [])
+        # A later discovery failure must not hide the failure advancing already
+        # selected cases. Keep bounded, distinct traces without exception text,
+        # endpoint URLs, authentication headers or response bodies.
+        retry_examples = []
+        for stage, _, error_type, details in retries:
+            example = {"stage": stage, "error_type": error_type, "details": details}
+            if example not in retry_examples and len(retry_examples) < 8:
+                retry_examples.append(example)
         reasons = [reason for status, reason in (*prepared, *results) if status == "pending"]
         return {
             "status": "cohort_endpoint_scheduler",
@@ -174,6 +182,7 @@ class CohortEndpointWorker:
             "last_retry_slot": last[1],
             "last_retry_type": last[2],
             "last_retry_details": last[3],
+            "retry_examples": retry_examples,
             "last_pending_reason": reasons[-1] if reasons else "",
             "request_closure_authorized": False,
             "chain_submission_authorized": False,

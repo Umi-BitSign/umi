@@ -175,6 +175,30 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     assert q.policy_calls == 1
 
 
+async def test_case_failure_is_retained_in_report_after_prepare_failure(scheduled, monkeypatch):
+    worker = scheduled.worker()
+    assert (await worker._prepare(scheduled.slot))[0] == "prepared"
+
+    async def missing_case(slot, case_id):
+        raise FileNotFoundError("https://private.example/missing/bearer-secret")
+
+    async def invalid_prepare(slot):
+        raise ValueError("https://private.example/prepare/bearer-secret")
+
+    monkeypatch.setattr(worker.attempts, "advance", missing_case)
+    monkeypatch.setattr(worker, "_prepare", invalid_prepare)
+    report = await worker.poll_once()
+    assert report["last_retry_stage"] == "prepare"
+    assert {(r["stage"], r["error_type"]) for r in report["retry_examples"]} == {
+        ("case", "FileNotFoundError"),
+        ("prepare", "ValueError"),
+    }
+    assert "bearer-secret" not in repr(report) and "private.example" not in repr(report)
+    assert all(r["details"][0]["source_frames"] for r in report["retry_examples"])
+    assert worker.schedule.complete(scheduled.slot) is None
+    assert scheduled.p.model.calls == 0
+
+
 async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled):
     q, p = scheduled, scheduled.p
     original = p.delivery_recovery.transport

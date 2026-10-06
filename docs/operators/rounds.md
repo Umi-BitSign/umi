@@ -1732,6 +1732,13 @@ The cohort's manifest selects its terms and transport hash. Peer requests cannot
 select a different transport. Each signed request and replacement uses its own
 selected transport's finalized block adapter.
 
+The endpoint host's optional `concurrency` selects between 1 and 32 parallel
+remote deliveries independently of the benchmark's local inference limit. If
+omitted, it retains the benchmark concurrency and the original canonical
+configuration bytes. Select a bounded delivery limit after qualifying the
+shared proof providers and HTTP connections; raising it does not authorize more
+local model processes, change accepted assignments or refresh signed requests.
+
 The endpoint worker starts alongside CPU execution and completion exports. It
 delivers requests, retrieves retained responses, obtains independent retirement
 votes and resumes certified replacements. Missing inputs or unavailable peers
@@ -1741,6 +1748,12 @@ routes require the reviewer credential and validate native evidence before
 signing. Response signatures are checked against the exact submitted body.
 Both finality observers and all workers drain before releasing the host key and
 exclusive lease.
+
+Scheduler reports retain up to eight distinct `retry_examples` with the stage,
+exception type and source frames. These supplement the last retry so a later
+preparation failure cannot hide an earlier case failure. They omit exception
+messages, endpoint URLs, authentication headers and response bodies. They are
+diagnostics, not execution, closure or reward evidence.
 
 The public `GET /v1/competition/cohorts/{cohort_sha256}/requests/readiness`
 route accepts a fresh 32-character hexadecimal `nonce`. The version 7 coordinator
