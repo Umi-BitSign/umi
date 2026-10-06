@@ -495,6 +495,7 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
         if config.recoverable_service is not None:
             for name in (
                 "umi.competition_cohort_lifecycle",
+                "umi.competition.progress",
                 *(
                     "umi.competition_cohort_" + suffix
                     for suffix in (

@@ -961,3 +961,44 @@ async def test_owned_roster_validation_drains_before_releasing_readiness_owner(
         await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled()
     assert not s.api.serial[s.c.cfg.catalog_sha256].locked()
+
+
+async def test_service_admission_failure_is_diagnosable_without_exposing_provider_data(
+    api_case, monkeypatch
+):
+    from umi import competition_progress as progress
+
+    s = api_case
+    reports = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_kwargs: reports.append(body))
+    s.offline.add("capture")
+    response = await post(s)
+    assert response.status_code == 503
+    assert reports[-1]["operation"] == "service_claim"
+    assert reports[-1]["stage"] == "admit"
+    assert "private provider" not in str(reports)
+    assert "private provider" not in response.text
+    readiness = await ready(s)
+    assert readiness.json()["ready"] is False
+    assert reports[-1]["operation"] == "service_readiness"
+    assert reports[-1]["stage"] == "owner_inputs_unavailable"
+    assert s.c.queue.entries() == ()
+
+
+async def test_service_readiness_reports_native_stage_timings(api_case, monkeypatch):
+    from umi import competition_progress as progress
+
+    reports = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_kwargs: reports.append(body))
+    response = await ready(api_case)
+    assert response.json()["ready"] is True
+    phases = [r for r in reports if r.get("phase", "").startswith("service_admission_")]
+    assert [(r["phase"], r["event"]) for r in phases] == [
+        ("service_admission_" + stage, event)
+        for stage in ("catalog", "history", "capture", "history_review", "roster")
+        for event in ("started", "completed")
+    ]
+    assert all(r["elapsed_ms"] >= 0 for r in phases if r["event"] == "completed")
+    assert all(
+        set(r) <= {"phase", "phase_id", "parent_phase_id", "event", "elapsed_ms"} for r in phases
+    )

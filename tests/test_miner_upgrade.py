@@ -663,7 +663,9 @@ def test_model_only_upgrade_records_intent_without_touching_endpoint(
 
 
 @pytest.mark.parametrize("public_track", ["no", "yes"])
-@pytest.mark.parametrize("prior_runtime", ["old", "missing", "current", "rolled_back"])
+@pytest.mark.parametrize(
+    "prior_runtime", ["old", "missing", "current", "rolled_back", "legacy", "missing_transport"]
+)
 def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     prior_runtime: str,
     public_track: str,
@@ -672,8 +674,21 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     manifest = _manifest()
-    target_python = tmp_path / "runtimes" / manifest["runtime"]["revision"] / "venv/bin/python"
-    actual_python = target_python if prior_runtime == "current" else tmp_path / "old/bin/python"
+    transport_path = ROOT / "docs/competition/C5_TRANSPORT_POLICY.json"
+    pins = upgrade.scoring_runtime_pins(transport_path)
+    target_python = (
+        tmp_path
+        / "runtimes"
+        / (manifest["runtime"]["revision"] + "-" + upgrade.sha256(upgrade.canonical(pins))[:16])
+        / "venv/bin/python"
+    )
+    actual_python = (
+        target_python
+        if prior_runtime in {"current", "missing_transport"}
+        else tmp_path / "old/bin/python"
+    )
+    if prior_runtime == "legacy":
+        actual_python = tmp_path / "runtimes" / manifest["runtime"]["revision"] / "venv/bin/python"
     arguments = [
         str(actual_python),
         "-m",
@@ -698,6 +713,8 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     policy_raw = (ROOT / "docs/competition/C5_POLICY.json").read_bytes()
     transport_raw = (ROOT / "docs/competition/C5_TRANSPORT_POLICY.json").read_bytes()
     (inputs / "competition-policy.json").write_bytes(policy_raw)
+    if prior_runtime != "missing_transport":
+        (inputs / "transport-policy.json").write_bytes(transport_raw)
     prior = {
         "policy_sha256": manifest["policy"]["value_sha256"],
         "runtime_revision": "00" * 20
@@ -764,3 +781,132 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
         assert upgrade.option(command, "--model-revision") == "10" * 32
         assert upgrade.option(command, "--nonce-db") == str(state / "protocol/nonces.sqlite3")
     assert all(path.read_bytes() == value for path, value in protected.items())
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [("x86_64", "x86_64-unknown-linux-gnu"), ("aarch64", "aarch64-unknown-linux-gnu")],
+)
+def test_upgrader_selects_host_specific_signed_runtime_pins(
+    target, expected, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(upgrade.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(upgrade.platform, "machine", lambda: target)
+    monkeypatch.setattr(upgrade.platform, "libc_ver", lambda: ("glibc", "2.42"))
+    raw = json.loads((ROOT / "docs/competition/C5_TRANSPORT_POLICY.json").read_bytes())
+    pins = dict(raw["implementation_pins"]["scoring_by_target"]["x86_64-unknown-linux-gnu"])
+    pins["python_version"] = "3.13.8"
+    raw["implementation_pins"]["scoring_by_target"][expected] = pins
+    path = tmp_path / "policy.json"
+    path.write_bytes(upgrade.canonical(raw))
+    assert upgrade.scoring_runtime_pins(path) == pins
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("implementation_pins", []),
+        ("scoring_by_target", []),
+        ("python_version", "3.12"),
+        ("regex_distribution_version", "2026.9.3;unsafe"),
+    ],
+)
+def test_upgrader_rejects_invalid_runtime_pin_profiles(field, value, tmp_path):
+    raw = json.loads((ROOT / "docs/competition/C5_TRANSPORT_POLICY.json").read_bytes())
+    if field == "implementation_pins":
+        raw[field] = value
+    elif field == "scoring_by_target":
+        raw["implementation_pins"][field] = value
+    else:
+        raw["implementation_pins"]["scoring_by_target"]["x86_64-unknown-linux-gnu"][field] = value
+    path = tmp_path / "policy.json"
+    path.write_bytes(upgrade.canonical(raw))
+    with pytest.raises(ValueError):
+        upgrade.scoring_runtime_pins(path)
+
+
+def test_python_selection_skips_wrong_patch_and_uses_exact_policy(tmp_path, monkeypatch):
+    old = tmp_path / "old-python"
+    correct = tmp_path / "python3.12.14"
+    for path in (old, correct):
+        path.write_text("placeholder")
+        path.chmod(0o755)
+    monkeypatch.setattr(
+        upgrade.shutil, "which", lambda name: str(correct) if name == "python3.12.14" else None
+    )
+    original_stat = Path.stat
+
+    def root_owned(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_gid=0)
+
+    monkeypatch.setattr(Path, "stat", root_owned)
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        assert "platform.python_version()" in args[-1]
+        assert "3.12.14" in args[-1]
+        return SimpleNamespace(returncode=0 if args[0] == str(correct) else 1)
+
+    monkeypatch.setattr(upgrade, "run", run)
+    assert upgrade.policy_python(
+        str(old), {"python_implementation": "CPython", "python_version": "3.12.14"}
+    ) == str(correct)
+    assert [call[0] for call in calls] == [str(old), str(correct)]
+
+
+@pytest.mark.parametrize("fail_verification", [False, True])
+def test_runtime_exact_pins_are_verified_before_promotion(tmp_path, monkeypatch, fail_verification):
+    policy = ROOT / "docs/competition/C5_TRANSPORT_POLICY.json"
+    manifest = _manifest()
+    runtime_root = tmp_path / "runtimes"
+    runtime_root.mkdir()
+    legacy = runtime_root / manifest["runtime"]["revision"]
+    legacy.mkdir()
+    sentinel = legacy / "retained-live-runtime"
+    sentinel.write_bytes(b"keep existing service runtime")
+    monkeypatch.setattr(upgrade, "RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(upgrade, "secure_root", lambda path: None)
+    monkeypatch.setattr(upgrade, "seal_tree", lambda path: None)
+    monkeypatch.setattr(upgrade, "policy_python", lambda *_args: "/root-owned/python3.12.14")
+    target = upgrade.runtime_directory(manifest["runtime"], policy)
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        if "venv" in args:
+            python = Path(args[-1]) / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"test interpreter")
+        if "validate_scoring_runtime" in " ".join(args):
+            assert args[:4] == ("runuser", "--user", "miner", "--")
+            if not target.exists():
+                assert target.with_name(target.name + ".pending").exists()
+            if fail_verification:
+                raise ValueError("scoring runtime does not match policy pin")
+        return SimpleNamespace(stdout="verified import", returncode=0)
+
+    monkeypatch.setattr(upgrade, "run", run)
+    account = SimpleNamespace(pw_name="miner")
+    if fail_verification:
+        with pytest.raises(ValueError, match="does not match"):
+            upgrade.install_runtime("/old/python", manifest["runtime"], account, policy)
+        assert not target.exists()
+    else:
+        assert (
+            upgrade.install_runtime("/old/python", manifest["runtime"], account, policy)
+            == target / "venv/bin/python"
+        )
+        assert target.exists()
+    pip_args, pip_options = next(
+        (args, opts) for args, opts in calls if "install" in args and "uv" in args
+    )
+    assert set(pip_args[-4:]) == {
+        "regex==2026.9.3",
+        "rfc8785==0.1.4",
+        "pydantic==2.13.5",
+        "pydantic-core==2.46.5",
+    }
+    assert pip_options["timeout"] == 3600
+    assert sentinel.read_bytes() == b"keep existing service runtime"

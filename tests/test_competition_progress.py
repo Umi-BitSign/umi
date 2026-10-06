@@ -216,3 +216,19 @@ def test_native_reason_and_chained_cause_survive_generic_phase_error(progress_ev
         "no_verified_finalized_head",
     ]
     assert failure["causes"][0]["error_type"] == "umi.validator_chain.ValidatorChainError"
+
+
+def test_admission_diagnostics_never_log_request_or_exception_text(progress_events):
+    secret = "https://private.example/video?token=secret private reference"
+    try:
+        raise PermissionError(secret)
+    except PermissionError as error:
+        progress.report_admission_failure("model_delivery", "reserve", error)
+    event = progress_events[-1]
+    assert event["operation"] == "model_delivery" and event["stage"] == "reserve"
+    assert event["causes"][0]["reason_code"] == "permission_denied"
+    assert secret not in json.dumps(progress_events)
+    progress.report_admission_failure(secret, secret, ValueError(secret))
+    assert progress_events[-1]["operation"] == "unknown"
+    assert progress_events[-1]["stage"] == "unknown"
+    assert secret not in json.dumps(progress_events)

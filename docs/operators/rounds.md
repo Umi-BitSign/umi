@@ -621,6 +621,14 @@ history and signature checks. Admission stores its original proof archive
 atomically with the accepted claim, so cache pruning cannot discard its recovery
 inputs. Invalid retained records stop pruning rather than releasing their pins.
 
+When model delivery or paid service admission is held, the intake journal emits
+an `admission_held` event with the fixed operation and stage plus bounded native
+exception types, reason codes and source frames. Model delivery identifies
+reservation, capture, retry and status stages; service readiness identifies the
+queue, owner-input or archive boundary. These diagnostics contain no request
+body, reference text, credential, signed transaction or exception message. They
+do not change the HTTP result, accept work or authorize chain submissions.
+
 Service admission and readiness revalidate the complete owned roster in an
 owned thread, preserving the original round, participant and admission checks.
 This keeps roster serialization and validation off the HTTP event loop so
@@ -1880,3 +1888,8 @@ and verifies the returned policy, consent, contribution and signature quorum.
 `admission_certified` certifies participation only. It does not establish current
 registration, assignment delivery, a score or reward activation; downstream
 execution must still use the authoritative cohort history and fresh evidence.
+
+Service admission also emits bounded start/completion phases for catalog, history,
+registration capture, history review and retained roster replay. These timings
+identify an operation still running after an edge gateway timeout without
+logging request arguments or changing admission decisions.

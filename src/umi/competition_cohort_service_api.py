@@ -39,6 +39,7 @@ from .competition_cohort_service_work import (
     verify_service_claim,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_progress import progress_phase, report_admission_failure
 from .competition_registration_archive import (
     MAX_ARCHIVE_BYTES,
     MAX_METADATA_BYTES,
@@ -212,24 +213,29 @@ class ServiceWorkAdmissionAPI:
             )
 
     async def _current(self, queue):
-        catalog, round_ = await run_owned_thread(queue._catalog)
+        with progress_phase("service_admission_catalog"):
+            catalog, round_ = await run_owned_thread(queue._catalog)
         cohort = catalog.catalog.cohort_sha256
-        source = await self._call(self.history(cohort))
-        capture = await self._call(self.capture())
-        await run_owned_thread(self._remember, queue, source, capture)
-        await run_owned_thread(
-            partial(
-                review_service_catalog,
-                catalog,
-                round_,
-                queue.policy,
-                source,
-                expected_tip_sha256=history_tip(source.history),
-                current_block=execution_boundary(capture).block,
+        with progress_phase("service_admission_history"):
+            source = await self._call(self.history(cohort))
+        with progress_phase("service_admission_capture"):
+            capture = await self._call(self.capture())
+        with progress_phase("service_admission_history_review"):
+            await run_owned_thread(self._remember, queue, source, capture)
+            await run_owned_thread(
+                partial(
+                    review_service_catalog,
+                    catalog,
+                    round_,
+                    queue.policy,
+                    source,
+                    expected_tip_sha256=history_tip(source.history),
+                    current_block=execution_boundary(capture).block,
+                )
             )
-        )
-        supplied_roster = await self._call(self.roster(cohort, source, capture))
-        roster = await run_owned_thread(self._check_roster, supplied_roster, round_)
+        with progress_phase("service_admission_roster"):
+            supplied_roster = await self._call(self.roster(cohort, source, capture))
+            roster = await run_owned_thread(self._check_roster, supplied_roster, round_)
         return catalog, source, capture, roster
 
     @staticmethod
@@ -398,8 +404,8 @@ class ServiceWorkAdmissionAPI:
             except FileNotFoundError:
                 if result["reason_code"] == "queue_unavailable":
                     result["reason_code"] = "catalog_pending"
-            except _UNAVAILABLE:
-                pass
+            except _UNAVAILABLE as error:
+                report_admission_failure("service_readiness", result["reason_code"], error)
         return result
 
 
@@ -477,6 +483,7 @@ def service_admission_routes(api: ServiceWorkAdmissionAPI) -> APIRouter:
         try:
             return await api.admit(catalog, signed)
         except _UNAVAILABLE as error:
+            report_admission_failure("service_claim", "admit", error)
             raise HTTPException(503, "service admission unavailable; retry unchanged") from error
 
     return router

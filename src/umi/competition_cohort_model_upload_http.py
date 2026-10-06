@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from .competition_cohort_model_upload import CHUNK_BYTES, CohortModelUploads, ModelUploadChunk
 from .competition_cohort_participation import CohortParticipationRequest
+from .competition_progress import report_admission_failure
 from .concurrency import run_owned_thread
 from .open_competition import Signature
 
@@ -43,22 +44,30 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
                 body.extend(part)
             return bytes(body)
 
+        stage = "body"
         try:
             signed = CohortParticipationRequest.model_validate_json(
                 await asyncio.wait_for(read(), timeout=10)
             )
             if signed.consent.consent.cohort_sha256 != cohort:
                 raise ValueError("wrong cohort")
+            stage = "retry"
             key = await run_owned_thread(owner.retry, signed)
             if key is None:
+                stage = "capture"
                 current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
+                stage = "reserve"
                 key = await run_owned_thread(owner.reserve, signed, current)
+            stage = "status"
             return await run_owned_thread(owner.status, key)
         except asyncio.TimeoutError as error:
+            report_admission_failure("model_delivery", stage, error)
             raise HTTPException(503, "model delivery unavailable; retry unchanged") from error
         except ValueError as error:
+            report_admission_failure("model_delivery", stage, error)
             raise HTTPException(422, "invalid model delivery request") from error
         except (OSError, RuntimeError, sqlite3.Error) as error:
+            report_admission_failure("model_delivery", stage, error)
             raise HTTPException(503, "model delivery pending; retry unchanged") from error
 
     @router.get("/v1/competition/model-uploads/{key}")
@@ -126,6 +135,7 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
         except ValueError as error:
             raise HTTPException(422, "file differs from model manifest") from error
         except (OSError, sqlite3.Error) as error:
+            report_admission_failure("model_delivery", "chunk", error)
             raise HTTPException(503, "model delivery pending; retry unchanged") from error
         finally:
             slots.release()
