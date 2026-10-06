@@ -621,6 +621,13 @@ history and signature checks. Admission stores its original proof archive
 atomically with the accepted claim, so cache pruning cannot discard its recovery
 inputs. Invalid retained records stop pruning rather than releasing their pins.
 
+Service admission and readiness revalidate the complete owned roster in an
+owned thread, preserving the original round, participant and admission checks.
+This keeps roster serialization and validation off the HTTP event loop so
+unrelated requests can proceed. Cancellation drains that operation before
+releasing its admission owner; it cannot abandon validation in a background
+thread or let another operation acquire the same owner early.
+
 The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
 For a host transfer, fence the outgoing owner and preserve the original logical

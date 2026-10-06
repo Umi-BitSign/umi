@@ -228,15 +228,22 @@ class ServiceWorkAdmissionAPI:
                 current_block=execution_boundary(capture).block,
             )
         )
-        roster = RecoverableRosterEvidence.model_validate_json(
-            canonical_json_bytes(await self._call(self.roster(cohort, source, capture)))
-        )
+        supplied_roster = await self._call(self.roster(cohort, source, capture))
+        roster = await run_owned_thread(self._check_roster, supplied_roster, round_)
+        return catalog, source, capture, roster
+
+    @staticmethod
+    def _check_roster(value, round_):
+        # Large retained rosters must not block the listener while they are
+        # serialized and revalidated. Keep the complete original checks in the
+        # owned operation, including cancellation drain before releasing serial.
+        roster = RecoverableRosterEvidence.model_validate_json(canonical_json_bytes(value))
         if roster.round != round_ or tuple(
             (digest(p.record.request.signed_submission.submission), digest(p.admission.admission))
             for p in roster.participants
         ) != tuple((p.submission_sha256, p.admission_sha256) for p in round_.participants):
             raise ValueError("owned roster differs from the original prepared round")
-        return catalog, source, capture, roster
+        return roster
 
     async def _unchanged(self, queue, source):
         latest = await self._call(self.history(digest(source.history.plan)))

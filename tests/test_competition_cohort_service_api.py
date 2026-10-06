@@ -894,3 +894,70 @@ async def test_archive_acquired_before_cutoff_survives_delayed_admission(
     duplicate = await post(s)
     assert duplicate.json() == result.json() and not s.calls
     assert s.api.archives[s.c.cfg.catalog_sha256].read(accepted) == original_archive
+
+
+@pytest.mark.parametrize("path", ["current", "readiness"])
+async def test_owned_roster_validation_runs_off_listener_thread(api_case, monkeypatch, path):
+    """Native roster serialization/validation cannot occupy the HTTP event loop."""
+    import threading
+
+    from umi.competition_cohort_roster import RecoverableRosterEvidence
+
+    s = api_case
+    loop_thread = threading.get_ident()
+    original = RecoverableRosterEvidence.model_validate_json
+    calls = []
+
+    async def retained_roster(cohort, source, capture):
+        return s.roster
+
+    def validate(cls, *args, **kwargs):
+        ident = threading.get_ident()
+        calls.append(ident)
+        assert ident != loop_thread, "native roster validation blocked the listener"
+        return original(*args, **kwargs)
+
+    s.api.roster = retained_roster
+    monkeypatch.setattr(RecoverableRosterEvidence, "model_validate_json", classmethod(validate))
+    if path == "current":
+        _, _, _, roster = await s.api._current(s.c.queue)
+        assert roster == s.roster
+    else:
+        report = await s.api.readiness(s.c.cfg.catalog_sha256, "ab" * 16)
+        assert report["ready"] is True
+    assert calls
+
+
+async def test_owned_roster_validation_drains_before_releasing_readiness_owner(
+    api_case, monkeypatch
+):
+    import threading
+
+    s = api_case
+    entered, release = threading.Event(), threading.Event()
+    original = s.api._check_roster
+    loop_thread = threading.get_ident()
+
+    async def retained_roster(cohort, source, capture):
+        return s.roster
+
+    def held(value, round_):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(60), "fixture release was never delivered"
+        return original(value, round_)
+
+    s.api.roster = retained_roster
+    monkeypatch.setattr(s.api, "_check_roster", held)
+    task = asyncio.create_task(s.api.readiness(s.c.cfg.catalog_sha256, "ab" * 16))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 60), timeout=65)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert s.api.serial[s.c.cfg.catalog_sha256].locked()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert not s.api.serial[s.c.cfg.catalog_sha256].locked()
