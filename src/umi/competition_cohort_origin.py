@@ -17,6 +17,7 @@ from .competition_origin import (
     FinalizedEndpointProvider,
     public_https_origin,
 )
+from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest
 from .protocol import canonical_json_bytes
@@ -125,13 +126,7 @@ class CohortEndpointOrigin:
                 await authority.current(assignment)
                 raise OSError("cohort authority changed during origin collection")
 
-        await unchanged()
-        boundary = execution_boundary(
-            await wait_for_owned(authority.provider.collect(), timeout=timeout)
-        )
-        await unchanged()
-
-        def retained():
+        def retained(boundary: ExecutionBoundary):
             journal = authority.journal.journal
             journal.observe(boundary.block)
             with journal.transaction() as db:
@@ -141,5 +136,20 @@ class CohortEndpointOrigin:
                 if row != (digest(source),):
                     raise ValueError("retained endpoint authority changed during collection")
 
-        await run_owned_thread(retained)
-        return boundary
+        # Another owned operation may advance the shared journal while the
+        # post-collection history check waits. Recollect once, retaining all
+        # authority and finality checks; a genuinely lagging provider still holds.
+        for attempt in range(2):
+            await unchanged()
+            boundary = execution_boundary(
+                await wait_for_owned(authority.provider.collect(), timeout=timeout)
+            )
+            await unchanged()
+            try:
+                await run_owned_thread(retained, boundary)
+            except FinalizedHeadRegression:
+                if attempt:
+                    raise
+            else:
+                return boundary
+        raise AssertionError("origin confirmation exhausted without a result")

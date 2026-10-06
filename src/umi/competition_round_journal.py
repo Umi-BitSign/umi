@@ -46,6 +46,10 @@ class RecordReservation:
     value_sha256: str | None = None
 
 
+class FinalizedHeadRegression(ValueError):
+    """A valid observation is older than this journal's retained high water."""
+
+
 class RoundJournal:
     """Bounded immutable records and durable conflict holds, shared by both roles."""
 
@@ -863,12 +867,10 @@ class RoundJournal:
     def observe(self, block: int) -> None:
         with self.transaction() as db:
             old = db.execute("SELECT block FROM highwater LIMIT 2").fetchall()
-            if (
-                type(block) is not int
-                or not 0 <= block <= 2**53 - 1
-                or (old and (len(old) != 1 or old[0][0] > block))
-            ):
+            if type(block) is not int or not 0 <= block <= 2**53 - 1 or (old and len(old) != 1):
                 raise ValueError("round finalized head regressed")
+            if old and old[0][0] > block:
+                raise FinalizedHeadRegression("round finalized head regressed")
             db.execute("DELETE FROM highwater")
             db.execute("INSERT INTO highwater VALUES (?)", (block,))
             if db.execute("PRAGMA user_version").fetchone()[0] == 2:

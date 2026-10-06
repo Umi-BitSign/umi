@@ -1774,6 +1774,13 @@ serialization within one bounded operation. They still parse current stored
 content and run signature, policy, history and binding checks. Reuse closes at
 operation return and never acts as an authorization or freshness cache.
 
+Origin confirmation checks authenticated cohort history before and after its
+owned finalized observation. If another operation advances the shared journal
+while that history check waits, confirmation recollects finality once and repeats
+the authority checks. It never lowers the retained head or substitutes a cached
+head. A still-lagging provider, malformed journal or changed authority remains a
+hold; a valid closure is retained before further origin use is refused.
+
 Scheduler reports retain up to eight distinct `retry_examples` with the stage,
 selection slot, exception type and source frames. `last_retry_slot` binds the last
 failure to its retained assignment. These supplement the last retry so a later
