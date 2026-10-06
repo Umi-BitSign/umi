@@ -66,7 +66,8 @@ Supply every admitted predecessor, newest first. For the evaluator, replace
 from the review ledger and available for exclusive provider ownership.
 
 The command rejects an early or late application before rolling the ledger to
-the successor policy. It hashes both preserved bundles, collects another fresh
+the successor policy. It checks both preserved bundles using their retained
+verification records (hashing only a previously unverified local archive), collects another fresh
 owned head before the append, and refuses active rounds, disputed history,
 changed assets, a changed parent, and insufficient signatures. The record,
 receipt, content identity and writer fences commit together. Older running

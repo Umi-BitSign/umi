@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import shutil
 import stat
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -128,7 +129,7 @@ def preserve_bundle(
     """Copy and verify all model files, then atomically publish a content directory.
 
     A destination interrupted before rename is never a promotable archive.
-    Retries verify the existing archive instead of overwriting it.
+    Retries reuse the preserved verification receipt instead of overwriting it.
     """
     validate_bundle_policy(bundle, policy)
     if not archive.is_absolute() or archive.is_symlink():
@@ -156,7 +157,7 @@ def _preserve_locked(bundle, source, archive, policy):
             raise ValueError("unsafe interrupted artifact directory")
         shutil.rmtree(stage)
     if final.exists() or final.is_symlink():
-        verify_preserved_bundle(bundle, archive, policy)
+        _verify_preserved_locked(bundle, archive, policy)
         return final
     stage.mkdir(mode=0o700)
     try:
@@ -177,7 +178,7 @@ def _preserve_locked(bundle, source, archive, policy):
             manifest.flush()
             os.fsync(manifest.fileno())
         (stage / "manifest.json").chmod(0o400)
-        verify_bundle_directory(bundle, model_root, policy)
+        # Every output byte was verified while copying; do not reread weights.
         # fsync directory entries as well as file contents before publishing.
         for directory, _, _ in os.walk(stage, topdown=False):
             with _directory(Path(directory)) as directory_fd:
@@ -187,9 +188,10 @@ def _preserve_locked(bundle, source, archive, policy):
         except OSError:
             if not final.exists():
                 raise
-            verify_preserved_bundle(bundle, archive, policy)
+            _verify_preserved_locked(bundle, archive, policy)
         with _directory(archive) as archive_fd:
             os.fsync(archive_fd)
+        _remember_preserved_verification(bundle, archive)
     finally:
         if stage.exists():
             # This is only the exact directory allocated above, never a caller
@@ -203,8 +205,126 @@ def verify_preserved_bundle(
     archive: Path,
     policy: CompetitionPolicy,
 ) -> str:
+    validate_bundle_policy(bundle, policy)
+    # Readers of already verified content do not contend with one another.
+    expected = _preserved_verification_record(bundle, archive)
+    if _has_preserved_verification(bundle, archive, expected):
+        return digest(bundle)
+    lease = lock_private_file(archive / (".preserve-" + digest(bundle) + ".lock"))
+    try:
+        return _verify_preserved_locked(bundle, archive, policy)
+    finally:
+        os.close(lease)
+
+
+def _file_identity(info):
+    # Nanosecond timestamps and inode numbers can exceed canonical JSON's
+    # interoperable integer range; preserve their exact decimal representation.
+    return [
+        str(value)
+        for value in (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_mode,
+            info.st_uid,
+            info.st_gid,
+            info.st_nlink,
+        )
+    ]
+
+
+def _preserved_verification_record(bundle, archive):
+    """Inspect identity/metadata only; never reread verified weight content."""
     _preserved_manifest(bundle, archive)
-    return verify_bundle_directory(bundle, archive / digest(bundle) / "model", policy)
+    key = digest(bundle)
+    with _directory(archive / key) as parent:
+        root = os.fstat(parent)
+        manifest = os.stat("manifest.json", dir_fd=parent, follow_symlinks=False)
+        with _directory(archive / key / "model") as model:
+            _check_tree(model, bundle)
+            records = []
+            for record in bundle.files:
+                with _artifact(model, record) as (_, info):
+                    records.append([record.path, _file_identity(info)])
+            return canonical_json_bytes(
+                {
+                    "schema": "umi-preserved-content-verification/1",
+                    "model_sha256": key,
+                    "parent_identity": _file_identity(root),
+                    "manifest_identity": _file_identity(manifest),
+                    "model_directory_identity": _file_identity(os.fstat(model)),
+                    "files": records,
+                }
+            )
+
+
+def _remember_preserved_verification(bundle, archive, expected=None):
+    """Called only after verified copy or full first-materialization verification."""
+    expected = expected if expected is not None else _preserved_verification_record(bundle, archive)
+    if len(expected) > 4 * 1024**2:
+        raise ValueError("preserved verification exceeds its byte bound")
+    with _directory(archive) as root:
+        name = ".verification-" + secrets.token_hex(16) + ".tmp"
+        descriptor = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(expected)
+                output.flush()
+                os.fchmod(output.fileno(), 0o400)
+                os.fsync(output.fileno())
+            os.rename(
+                name, ".verified-" + digest(bundle) + ".json", src_dir_fd=root, dst_dir_fd=root
+            )
+            os.fsync(root)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=root)
+
+
+def _verify_preserved_locked(bundle, archive, policy):
+    expected = _preserved_verification_record(bundle, archive)
+    if _has_preserved_verification(bundle, archive, expected):
+        return digest(bundle)
+    # Older archives receive one durable receipt; a failed verification is never remembered.
+    verify_bundle_directory(bundle, archive / digest(bundle) / "model", policy)
+    if _preserved_verification_record(bundle, archive) != expected:
+        raise ValueError("preserved artifact changed during verification of its immutable manifest")
+    _remember_preserved_verification(bundle, archive, expected)
+    return digest(bundle)
+
+
+def _has_preserved_verification(bundle, archive, expected):
+    with _directory(archive) as root:
+        root_info = os.fstat(root)
+        if root_info.st_mode & 0o022:
+            raise ValueError("archive must not be writable by other users")
+        try:
+            descriptor = os.open(
+                ".verified-" + digest(bundle) + ".json",
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=root,
+            )
+        except FileNotFoundError:
+            return False
+        with os.fdopen(descriptor, "rb") as receipt:
+            info = os.fstat(receipt.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != root_info.st_uid
+                or stat.S_IMODE(info.st_mode) != 0o400
+                or info.st_size != len(expected)
+                or receipt.read(len(expected) + 1) != expected
+            ):
+                raise ValueError(
+                    "preserved artifact changed after verification of its immutable manifest"
+                )
+        return True
 
 
 def _preserved_manifest(bundle: ModelBundle, archive: Path) -> None:
@@ -227,7 +347,7 @@ def _preserved_manifest(bundle: ModelBundle, archive: Path) -> None:
 def preserved_bundle_available(bundle: ModelBundle, archive: Path, policy: CompetitionPolicy):
     """Check readable, bounded inputs without hashing model weights in a health probe.
 
-    Execution still calls verify_preserved_bundle before loading any model.
+    Execution checks the retained immutable verification receipt before loading any model.
     Availability is not an integrity receipt or permission to execute.
     """
     validate_bundle_policy(bundle, policy)
