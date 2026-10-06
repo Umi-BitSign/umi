@@ -11,6 +11,7 @@ import bittensor as bt
 import httpx
 import pytest
 
+from umi import canonical_reuse
 from umi.auth import HotkeyAuth, RequestAuthenticator
 from umi.competition_cohort_endpoint import (
     RecoverableEndpointOrder,
@@ -216,6 +217,34 @@ async def send_original(p, index=0):
             content=canonical_json_bytes(p.requests[index]),
             auth=HotkeyAuth(p.validator, p.miner.hotkey_ss58),
         )
+
+
+async def test_selection_reuse_releases_bytes_and_rechecks_assignment(recovery_case, monkeypatch):
+    p = recovery_case
+    recovery = p.consumer()
+    original = recovery.journal.validate_assignment
+    caches = []
+    reject = False
+
+    def validate(assignment):
+        cache = canonical_reuse._ACTIVE.get()
+        assert cache is not None and not cache.closed
+        caches.append(cache)
+        if reject:
+            raise ValueError("assignment verification changed")
+        return original(assignment)
+
+    monkeypatch.setattr(recovery.journal, "validate_assignment", validate)
+    assert recovery.selection(p.slot)[0] == p.selection
+    first = caches[-1]
+    assert first.closed and not first.entries and canonical_reuse._ACTIVE.get() is None
+
+    reject = True
+    with pytest.raises(ValueError, match="assignment verification changed"):
+        recovery.selection(p.slot)
+    second = caches[-1]
+    assert second is not first
+    assert second.closed and not second.entries and canonical_reuse._ACTIVE.get() is None
 
 
 @pytest.mark.parametrize("failure", [False, True])

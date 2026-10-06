@@ -12,6 +12,7 @@ from typing import Any
 import bittensor as bt
 import httpx
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_endpoint import (
     SignedRecoverableEndpointOrder,
     validate_recoverable_endpoint_transport,
@@ -97,6 +98,7 @@ class CohortEndpointResponseRecovery:
             raise ValueError("response recovery attempt differs from acknowledged assignment")
         return selected, assignment, job
 
+    @canonical_json_reuse()
     def _validate(self, selected: EndpointSelection, assignment=None):
         result = self._validate_one(selected, assignment)
         current, assignment, _ = result
@@ -124,6 +126,7 @@ class CohortEndpointResponseRecovery:
             current, assignment = parent, parent_assignment
         return result
 
+    @canonical_json_reuse()
     def selection(self, slot: str):
         raw = self.journal.journal.get("endpoint_recovery_selection", slot)
         if raw is None:
