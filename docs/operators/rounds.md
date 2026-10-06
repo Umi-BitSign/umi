@@ -1739,6 +1739,18 @@ configuration bytes. Select a bounded delivery limit after qualifying the
 shared proof providers and HTTP connections; raising it does not authorize more
 local model processes, change accepted assignments or refresh signed requests.
 
+The running scheduler keeps a bounded set of owned operations rather than
+waiting for an entire batch. A ready miner can advance its next case while
+another miner's preparation, inference or recovery is still pending. There is
+at most one in-flight operation per assignment. Durable cursors select the next
+work; one preparation operation can run beside existing cases, and a single-slot
+selection alternates preparation and cases. Repeated pending cases therefore do
+not prevent discovery of new assignments. `in_flight_operations` reports the
+retained running operations. Stop
+drains those operations before releasing the scheduler owner; restart replays
+the same signed requests and completed responses. A single `poll_once` remains
+a bounded batch observation for callers that explicitly request one.
+
 The endpoint worker starts alongside CPU execution and completion exports. It
 delivers requests, retrieves retained responses, obtains independent retirement
 votes and resumes certified replacements. Missing inputs or unavailable peers

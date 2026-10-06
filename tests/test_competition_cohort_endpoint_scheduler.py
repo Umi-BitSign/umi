@@ -530,3 +530,120 @@ async def test_selected_case_advances_before_slow_assignment_preparation(schedul
         report = await task
     assert report["cases_completed"] == 1
     assert not report["request_closure_authorized"]
+
+
+async def test_running_scheduler_completes_peer_while_other_preparation_waits(
+    scheduled, monkeypatch
+):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker(concurrency=2)
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    entered, release, complete, stop = (asyncio.Event() for _ in range(4))
+    original = worker._prepare
+
+    async def held_prepare(slot):
+        if slot == other:
+            entered.set()
+            await release.wait()
+        return await original(slot)
+
+    def observe(report):
+        if worker.schedule.journal.get("endpoint_replay_archive", q.slot) is not None:
+            complete.set()
+
+    monkeypatch.setattr(worker, "_prepare", held_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01, report=observe))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        await asyncio.wait_for(complete.wait(), timeout=180)
+        assert not release.is_set()
+        assert not task.done()
+        terminal = worker.schedule.complete(q.slot)
+        assert terminal is not None and len(terminal.cases) == len(q.p.e.job.cases)
+        assert q.p.model.calls == len(q.p.e.job.cases)
+        assert worker.schedule.complete(other) is None
+        archive = EndpointReplayArchive.model_validate_json(
+            canonical_json_bytes(worker.schedule.journal.get("endpoint_replay_archive", q.slot))
+        )
+        objects = JournalEndpointObjects(worker.schedule.journal)
+        assert len(tuple(endpoint_archive_cases(archive, objects, q.p.c.policy))) == len(
+            q.p.e.job.cases
+        )
+    finally:
+        stop.set()
+        release.set()
+        await asyncio.wait_for(task, timeout=120)
+
+
+async def test_running_scheduler_keeps_owner_until_cancelled_operation_drains(
+    scheduled, monkeypatch
+):
+    q = scheduled
+    worker = q.worker()
+    entered, cleaning, release, stop = (asyncio.Event() for _ in range(4))
+
+    async def held_prepare(slot):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    monkeypatch.setattr(worker, "_prepare", held_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        stop.set()
+        await asyncio.wait_for(cleaning.wait(), timeout=120)
+        with pytest.raises(BlockingIOError):
+            await q.worker().poll_once()
+        assert not task.done()
+        assert q.p.model.calls == 0
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(task, timeout=120)
+    terminal, _ = await finish(q)
+    assert terminal is not None
+    assert q.p.model.calls == len(q.p.e.job.cases)
+
+
+async def test_running_scheduler_discovers_work_beside_rejected_grants(scheduled, monkeypatch):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker(concurrency=1)
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    original_transport = q.p.delivery_recovery.transport
+
+    class RejectGrant(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == COHORT_GRANT_PATH:
+                return httpx.Response(422)
+            return await original_transport.handle_async_request(request)
+
+    q.p.delivery_recovery.transport = RejectGrant()
+    discovered, rejected, stop = (asyncio.Event() for _ in range(3))
+    original_prepare = worker._prepare
+
+    async def observe_prepare(slot):
+        if slot == other:
+            discovered.set()
+        return await original_prepare(slot)
+
+    def observe(report):
+        assert report.get("in_flight_operations", 0) <= 1
+        if report.get("last_pending_reason") == "miner_grant_http_422":
+            rejected.set()
+
+    monkeypatch.setattr(worker, "_prepare", observe_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01, report=observe))
+    try:
+        await asyncio.wait_for(rejected.wait(), timeout=180)
+        await asyncio.wait_for(discovered.wait(), timeout=180)
+        assert worker.schedule.complete(q.slot) is None
+        assert q.p.model.calls == 0
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=120)

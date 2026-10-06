@@ -59,6 +59,8 @@ class CohortEndpointWorker:
         self.inbox, self.attempts, self.transport_policy = inbox, attempts, transport_policy
         self.schedule = CohortEndpointSchedule(attempts, maximum_cases=maximum_cases)
         self.batch_size = batch_size
+        self.concurrency = concurrency
+        self._prepare_turn = True
         self.capacity, self.serial = asyncio.Semaphore(concurrency), asyncio.Lock()
 
     async def _prepare(self, slot):
@@ -94,6 +96,27 @@ class CohortEndpointWorker:
             with self.schedule.owner.locked(digest(["umi-cohort-endpoint-scheduler/1"])):
                 return await self._poll()
 
+    async def _inbox_slots(self, *, advance=True):
+        schedule = self.schedule
+        after = await run_owned_thread(schedule.cursor, "inbox")
+        slots = await run_owned_thread(
+            lambda: self.inbox.assignments(after=after, limit=self.batch_size)
+        )
+        if not slots and after:
+            slots = await run_owned_thread(lambda: self.inbox.assignments(limit=self.batch_size))
+        if slots and advance:
+            await run_owned_thread(schedule.advance_inbox, slots[-1])
+        return slots
+
+    async def _case(self, row):
+        _, slot, case_id = row
+        result = await self.attempts.advance(slot, case_id)
+        if result["status"] == "completed":
+            await run_owned_thread(self.schedule.retain_case, slot, case_id)
+            if await run_owned_thread(self.schedule.complete, slot) is not None:
+                await run_owned_thread(export_endpoint_archive, self.schedule, slot)
+        return result["status"], result["reason"]
+
     async def _poll(self):
         schedule = self.schedule
         retries = []
@@ -103,18 +126,7 @@ class CohortEndpointWorker:
 
         slots = ()
         try:
-            after = await run_owned_thread(schedule.cursor, "inbox")
-            slots = await run_owned_thread(
-                lambda: self.inbox.assignments(after=after, limit=self.batch_size)
-            )
-            if not slots and after:
-                slots = await run_owned_thread(
-                    lambda: self.inbox.assignments(limit=self.batch_size)
-                )
-            if slots:
-                # Move the cursor before external reads. Accepted assignments
-                # remain in the inbox and are revisited after wrap or restart.
-                await run_owned_thread(schedule.advance_inbox, slots[-1])
+            slots = await self._inbox_slots()
         except _RETRY as error:
             failed("inbox_scan", "", error)
 
@@ -133,15 +145,10 @@ class CohortEndpointWorker:
             failed("case_scan", "", error)
 
         async def case(row):
-            obligation, slot, case_id = row
+            obligation, _, _ = row
             async with self.capacity:
                 try:
-                    result = await self.attempts.advance(slot, case_id)
-                    if result["status"] == "completed":
-                        await run_owned_thread(schedule.retain_case, slot, case_id)
-                        if await run_owned_thread(schedule.complete, slot) is not None:
-                            await run_owned_thread(export_endpoint_archive, schedule, slot)
-                    return result["status"], result["reason"]
+                    return await self._case(row)
                 except _RETRY as error:
                     failed("case", obligation, error)
                     return "pending", type(error).__name__
@@ -211,31 +218,153 @@ class CohortEndpointWorker:
     ) -> None:
         if isinstance(poll_seconds, bool) or not 0 < poll_seconds <= 60:
             raise ValueError("endpoint scheduler poll interval is outside bounds")
-        while not stop.is_set():
-            task, stopping = asyncio.create_task(self.poll_once()), asyncio.create_task(stop.wait())
-            try:
-                done, _ = await asyncio.wait((task, stopping), return_when=asyncio.FIRST_COMPLETED)
-                if stopping in done:
-                    return
+        active = {}
+        async with self.serial:
+            # Keep the scheduler owner until every in-flight operation has
+            # completed cancellation and durable cleanup. Individual peers do
+            # not hold a batch barrier over the next case of a ready miner.
+            with self.schedule.owner.locked(digest(["umi-cohort-endpoint-scheduler/1"])):
                 try:
-                    result = task.result()
-                except _RETRY as error:
-                    result = {
-                        "status": "cohort_endpoint_scheduler_retry",
-                        "error_type": type(error).__name__,
-                        "retry_details": _failure_details(error),
-                        "request_closure_authorized": False,
-                        "chain_submission_authorized": False,
-                    }
-                if report is not None:
-                    report(result)
-            finally:
+                    while not stop.is_set():
+                        task = asyncio.create_task(self._rolling_poll(active))
+                        stopping = asyncio.create_task(stop.wait())
+                        try:
+                            done, _ = await asyncio.wait(
+                                (task, stopping), return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if stopping in done:
+                                return
+                            try:
+                                result = task.result()
+                            except _RETRY as error:
+                                result = {
+                                    "status": "cohort_endpoint_scheduler_retry",
+                                    "error_type": type(error).__name__,
+                                    "retry_details": _failure_details(error),
+                                    "request_closure_authorized": False,
+                                    "chain_submission_authorized": False,
+                                }
+                            if report is not None:
+                                report(result)
+                        finally:
 
-                async def drain(task=task, stopping=stopping):
-                    task.cancel()
-                    stopping.cancel()
-                    await asyncio.gather(task, stopping, return_exceptions=True)
+                            async def drain_tick(task=task, stopping=stopping):
+                                task.cancel()
+                                stopping.cancel()
+                                await asyncio.gather(task, stopping, return_exceptions=True)
 
-                await await_owned_task(asyncio.create_task(drain()))
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                            await await_owned_task(asyncio.create_task(drain_tick()))
+                        with suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                finally:
+
+                    async def drain_operations():
+                        for _, task in active.values():
+                            task.cancel()
+                        await asyncio.gather(
+                            *(task for _, task in active.values()), return_exceptions=True
+                        )
+
+                    await await_owned_task(asyncio.create_task(drain_operations()))
+
+    async def _rolling_poll(self, active):
+        results, retries = [], []
+        for slot, (stage, task) in tuple(active.items()):
+            if not task.done():
+                continue
+            del active[slot]
+            status, reason, details = task.result()
+            results.append((stage, status, reason))
+            if details:
+                retries.append((stage, reason, details))
+
+        async def perform(operation):
+            try:
+                status, reason = await operation()
+                return status, reason, []
+            except _RETRY as error:
+                return "pending", type(error).__name__, _failure_details(error)
+
+        def start(stage, slot, operation):
+            active[slot] = (stage, asyncio.create_task(perform(operation)))
+
+        # Reserve one discovery slot when capacity permits. With a single slot,
+        # alternate preparation and cases; repeated pending cases cannot starve
+        # assignments whose request selection has not yet been built.
+        if (
+            len(active) < self.concurrency
+            and not any(stage == "prepare" for stage, _ in active.values())
+            and (self.concurrency > 1 or self._prepare_turn)
+        ):
+            slots = await self._inbox_slots(advance=False)
+            chosen = None
+            for slot in slots:
+                if slot in active:
+                    continue
+                selected = await run_owned_thread(
+                    self.schedule.journal.get, "endpoint_recovery_selection", slot
+                )
+                terminal = await run_owned_thread(
+                    self.schedule.journal.get, "endpoint_terminal_selection", slot
+                )
+                archive = await run_owned_thread(
+                    self.schedule.journal.get, "endpoint_replay_archive", slot
+                )
+                if selected is not None and (terminal is None or archive is not None):
+                    continue
+                chosen = slot
+                start("prepare", slot, lambda slot=slot: self._prepare(slot))
+                self._prepare_turn = False
+                break
+            if chosen is not None or slots:
+                # Do not skip a whole inbox page when only one operation was
+                # admitted. A crash keeps the inbox and exact requests intact.
+                await run_owned_thread(self.schedule.advance_inbox, chosen or slots[-1])
+
+        if len(active) < self.concurrency:
+            rows = await run_owned_thread(self.schedule.pending, self.batch_size)
+            for row in rows:
+                slot = row[1]
+                if len(active) >= self.concurrency:
+                    break
+                if slot in active:
+                    continue
+                selected = await run_owned_thread(
+                    self.schedule.journal.get, "endpoint_recovery_selection", slot
+                )
+                if selected is not None:
+                    start("case", slot, lambda row=row: self._case(row))
+                    self._prepare_turn = True
+            if not active:
+                self._prepare_turn = True
+
+        last = retries[-1] if retries else ("", "", [])
+        return {
+            "status": "cohort_endpoint_scheduler",
+            "assignments_considered": sum(stage == "prepare" for stage, _, _ in results),
+            "assignments_prepared": sum(
+                stage == "prepare" and status == "prepared" for stage, status, _ in results
+            ),
+            "assignments_complete": sum(
+                stage == "prepare" and status == "completed" for stage, status, _ in results
+            ),
+            "cases_considered": sum(stage == "case" for stage, _, _ in results),
+            "cases_completed": sum(
+                stage == "case" and status == "completed" for stage, status, _ in results
+            ),
+            "batch_pending": sum(status == "pending" for _, status, _ in results),
+            "in_flight_operations": len(active),
+            "retry_count": len(retries),
+            "last_retry_stage": last[0],
+            "last_retry_type": last[1],
+            "last_retry_details": last[2],
+            "retry_examples": [
+                {"stage": stage, "error_type": reason, "details": details}
+                for stage, reason, details in retries[:8]
+            ],
+            "last_pending_reason": next(
+                (reason for _, status, reason in reversed(results) if status == "pending"), ""
+            ),
+            "request_closure_authorized": False,
+            "chain_submission_authorized": False,
+        }
