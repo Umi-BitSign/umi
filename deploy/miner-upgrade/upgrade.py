@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import platform
 import pwd
 import re
 import shutil
@@ -31,6 +32,7 @@ SYSTEMD_ROOT = Path("/etc/systemd/system")
 ENROLLMENT_SERVICE = "umi-miner-cohort-enrollment.service"
 ENROLLMENT_TIMER = "umi-miner-cohort-enrollment.timer"
 SERVICE_CLAIM_TIMEOUT_SECONDS = 3600
+UV_BOOTSTRAP_VERSION = "0.12.9"
 HEX32 = re.compile(r"^[0-9a-f]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.:@-]+\.service$")
@@ -608,8 +610,52 @@ def seal_tree(root: Path) -> None:
     os.chown(root, 0, 0)
 
 
-def python312(current_python: str) -> str:
-    candidates = (current_python, shutil.which("python3.12"), "/usr/bin/python3.12")
+def scoring_runtime_pins(transport_path: Path) -> dict:
+    policy = document(transport_path.read_bytes(), label="transport policy")
+    implementation = policy.get("implementation_pins", {})
+    if not isinstance(implementation, dict):
+        raise ValueError("the transport policy implementation pins are invalid")
+    pins = implementation.get("scoring")
+    variants = implementation.get("scoring_by_target")
+    if variants is not None:
+        if not isinstance(variants, dict):
+            raise ValueError("the transport policy scoring targets are invalid")
+        architecture = {"aarch64": "aarch64", "arm64": "aarch64", "x86_64": "x86_64"}.get(
+            platform.machine().lower()
+        )
+        if (
+            platform.system() != "Linux"
+            or platform.libc_ver()[0] != "glibc"
+            or architecture is None
+        ):
+            raise ValueError("the scoring runtime target is not supported")
+        pins = variants.get(architecture + "-unknown-linux-gnu")
+    if not isinstance(pins, dict) or pins.get("python_implementation") != "CPython":
+        raise ValueError("the active transport policy has no scoring runtime pins for this host")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(pins.get("python_version", ""))):
+        raise ValueError("the active scoring policy requires an unsupported Python version")
+    for package in ("regex", "rfc8785", "pydantic", "pydantic_core"):
+        version = pins.get(package + "_distribution_version")
+        if not isinstance(version, str) or not re.fullmatch(
+            r"[0-9][A-Za-z0-9.!+_-]{0,63}", version
+        ):
+            raise ValueError("the active scoring policy has an invalid package version")
+    return pins
+
+
+def runtime_directory(runtime: dict, transport_path: Path) -> Path:
+    pins = scoring_runtime_pins(transport_path)
+    return RUNTIME_ROOT / (runtime["revision"] + "-" + sha256(canonical(pins))[:16])
+
+
+def policy_python(current_python: str, pins: dict) -> str:
+    version = pins["python_version"]
+    candidates = (
+        current_python,
+        shutil.which("python" + version),
+        shutil.which("python" + version.rsplit(".", 1)[0]),
+        "/usr/bin/python" + version.rsplit(".", 1)[0],
+    )
     tried = set()
     for candidate in candidates:
         if not candidate or candidate in tried or not Path(candidate).is_absolute():
@@ -623,44 +669,80 @@ def python312(current_python: str) -> str:
             continue
         result = run(
             str(path),
+            "-I",
+            "-B",
             "-c",
-            "import sys;raise SystemExit(sys.version_info[:2] != (3, 12))",
+            "import platform;raise SystemExit((platform.python_implementation(),"
+            "platform.python_version()) != " + repr((pins["python_implementation"], version)) + ")",
             check=False,
         )
         if result.returncode == 0:
             return str(path)
-    raise ValueError("a root-owned CPython 3.12 is required for the cohort runtime")
+    raise ValueError(
+        "a root-owned CPython " + version + " is required by the active scoring policy"
+    )
 
 
-def install_runtime(current_python: str, runtime: dict, account: pwd.struct_passwd) -> Path:
+def install_runtime(
+    current_python: str, runtime: dict, account: pwd.struct_passwd, transport_path: Path
+) -> Path:
     secure_root(RUNTIME_ROOT)
-    target = RUNTIME_ROOT / runtime["revision"]
+    pins = scoring_runtime_pins(transport_path)
+    target = runtime_directory(runtime, transport_path)
     python = target / "venv" / "bin" / "python"
     prefix = ["runuser", "--user", account.pw_name, "--"]
+    verification = (
+        "import importlib.metadata as m,json,sys;"
+        "d=m.distribution('umi-subnet');"
+        "p=next(d.locate_file(x) for x in d.files if str(x).endswith('direct_url.json'));"
+        "v=json.loads(p.read_text())['vcs_info'];"
+        f"assert v['commit_id']=='{runtime['revision']}';"
+        "from umi.policy import ScoringPolicy,validate_scoring_runtime;"
+        "from pathlib import Path;"
+        "validate_scoring_runtime(ScoringPolicy.model_validate_json(Path(sys.argv[1]).read_bytes()));"
+        "import umi;print(umi.__file__)"
+    )
     if not target.exists():
-        base_python = python312(current_python)
+        base_python = policy_python(current_python, pins)
         staging = target.with_name(target.name + ".pending")
         if staging.exists():
             info = staging.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != 0
+            ):
                 raise ValueError("incomplete runtime staging path differs")
             shutil.rmtree(staging)
         staging.mkdir(mode=0o755)
         staging_python = staging / "venv" / "bin" / "python"
-        run(
-            base_python,
-            "-m",
-            "venv",
-            "--copies",
-            str(staging / "venv"),
-        )
-        run(
+        run(base_python, "-I", "-B", "-m", "venv", "--copies", str(staging / "venv"))
+        requirements = [
+            name + "==" + pins[key + "_distribution_version"]
+            for name, key in (
+                ("regex", "regex"),
+                ("rfc8785", "rfc8785"),
+                ("pydantic", "pydantic"),
+                ("pydantic-core", "pydantic_core"),
+            )
+        ]
+        environment = [
             "env",
             "GIT_CONFIG_GLOBAL=/dev/null",
             "GIT_CONFIG_NOSYSTEM=1",
             "PIP_CONFIG_FILE=/dev/null",
             "PIP_NO_CACHE_DIR=1",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "UV_PYTHON_DOWNLOADS=never",
+        ]
+        # The installed-distribution hashes include INSTALLER metadata. Use the
+        # same installer as the approved profile, not rewritten metadata from pip.
+        run(
+            *environment,
             str(staging_python),
+            "-I",
+            "-B",
             "-m",
             "pip",
             "install",
@@ -668,10 +750,30 @@ def install_runtime(current_python: str, runtime: dict, account: pwd.struct_pass
             "--no-input",
             "--index-url",
             "https://pypi.org/simple",
-            f"git+{runtime['repository']}@{runtime['revision']}",
-            timeout=1800,
+            "uv==" + UV_BOOTSTRAP_VERSION,
+            timeout=3600,
         )
-        run(str(staging_python), "-m", "pip", "check")
+        run(
+            *environment,
+            str(staging_python),
+            "-I",
+            "-B",
+            "-m",
+            "uv",
+            "--no-config",
+            "--no-cache",
+            "pip",
+            "install",
+            "--python",
+            str(staging_python),
+            "--default-index",
+            "https://pypi.org/simple",
+            f"git+{runtime['repository']}@{runtime['revision']}",
+            *requirements,
+            timeout=3600,
+        )
+        run(str(staging_python), "-I", "-B", "-m", "pip", "check")
+        run(*prefix, str(staging_python), "-I", "-B", "-c", verification, str(transport_path))
         seal_tree(staging)
         os.replace(staging, target)
     else:
@@ -685,21 +787,7 @@ def install_runtime(current_python: str, runtime: dict, account: pwd.struct_pass
             raise ValueError("existing runtime directory differs")
     if not python.exists():
         raise ValueError("runtime interpreter is missing")
-    verification = (
-        "import importlib.metadata as m,json,sys;"
-        "d=m.distribution('umi-subnet');"
-        "p=next(d.locate_file(x) for x in d.files if str(x).endswith('direct_url.json'));"
-        "v=json.loads(p.read_text())['vcs_info'];"
-        f"assert v['commit_id']=='{runtime['revision']}';"
-        "assert sys.version_info[:2]==(3,12);"
-        "import umi;print(umi.__file__)"
-    )
-    check = run(
-        *prefix,
-        str(python),
-        "-c",
-        verification,
-    )
+    check = run(*prefix, str(python), "-I", "-B", "-c", verification, str(transport_path))
     if not check.stdout.strip():
         raise ValueError("installed runtime did not import")
     return python
@@ -1414,9 +1502,17 @@ def main() -> None:
         return
     if receipt.exists():
         prior = document(receipt.read_bytes(), label="upgrade receipt")
-        selected_python = RUNTIME_ROOT / manifest["runtime"]["revision"] / "venv/bin/python"
+        retained_transport = state / "inputs/transport-policy.json"
+        selected_python = None
+        if retained_transport.exists():
+            if sha256(retained_transport.read_bytes()) != manifest["transport"]["sha256"]:
+                raise ValueError("retained transport policy digest differs")
+            selected_python = (
+                runtime_directory(manifest["runtime"], retained_transport) / "venv/bin/python"
+            )
         if (
-            prior.get("policy_sha256") == manifest["policy"]["value_sha256"]
+            selected_python is not None
+            and prior.get("policy_sha256") == manifest["policy"]["value_sha256"]
             and prior.get("runtime_revision") == manifest["runtime"]["revision"]
             and Path(miner_python(miner.arguments)).resolve() == selected_python.resolve()
         ):
@@ -1495,7 +1591,12 @@ def main() -> None:
         ),
         account,
     )
-    runtime_python = install_runtime(miner_python(miner.arguments), manifest["runtime"], account)
+    runtime_python = install_runtime(
+        miner_python(miner.arguments),
+        manifest["runtime"],
+        account,
+        inputs / "transport-policy.json",
+    )
     updated = miner_command(miner.arguments, str(runtime_python), state, manifest)
     sidecar, updated, new_socket = prepare_sidecar(
         updated, state, account, manifest["transport"]["value_sha256"]

@@ -52,7 +52,7 @@ from .competition_cohort_recovery import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
-from .competition_execution import ExecutionBoundary
+from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
@@ -605,7 +605,11 @@ class ServiceAdmissionHost:
                     if state.phase != "requests":
                         pending += 1
                         continue
-                    current_block = await self.provider.current_finalized_block()
+                    current_block = (
+                        execution_boundary(await self.capture()).block
+                        if self.provider is None
+                        else await self.provider.current_finalized_block()
+                    )
                     await run_owned_thread(self._install, key, catalog, source, current_block)
                 ready += 1
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -627,13 +631,7 @@ class ServiceAdmissionHost:
     def retained_registration_blocks(self) -> frozenset[int]:
         blocks = set()
         for queue in self.queues.values():
-            after = 0
-            while True:
-                page = queue.entries(after_ordinal=after, limit=256)
-                if not page:
-                    break
-                blocks.update(a.observation.block for a in page)
-                after = page[-1].ordinal
+            blocks.update(queue.retained_registration_blocks())
         return frozenset(blocks)
 
     async def run(self, stop: asyncio.Event) -> None:

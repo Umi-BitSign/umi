@@ -45,6 +45,11 @@ _PHASES = frozenset(
         "cohort_progress_vote",
         "cohort_decision_vote",
         "cohort_service_vote",
+        "service_admission_catalog",
+        "service_admission_history",
+        "service_admission_capture",
+        "service_admission_history_review",
+        "service_admission_roster",
     }
 )
 _REASONS = {
@@ -143,6 +148,34 @@ def _emit(body, *, failed=False):
                 separators=(",", ":"),
             ),
         )
+
+
+def report_admission_failure(operation, stage, error):
+    """Report native failure boundaries without request data or exception messages."""
+    if operation not in {"model_delivery", "service_claim", "service_readiness"}:
+        operation = "unknown"
+    if stage not in {
+        "body",
+        "retry",
+        "capture",
+        "reserve",
+        "status",
+        "chunk",
+        "admit",
+        "queue_unavailable",
+        "owner_inputs_unavailable",
+        "archive_unavailable",
+    }:
+        stage = "unknown"
+    _emit(
+        {
+            "event": "admission_held",
+            "operation": operation,
+            "stage": stage,
+            "causes": _failure_details(error),
+        },
+        failed=True,
+    )
 
 
 def report_container_command_failure(command, returncode, stderr):

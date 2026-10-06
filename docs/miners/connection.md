@@ -45,14 +45,23 @@ The updater discovers the one running `umi.miner` systemd service and retains it
 hotkey, model revision, serving origin, wallet, model backend and public port. It
 fetches the current canonical manifest, checks its policy and profile against
 the public competition status, and selects that matching deployment's exact
-runtime revision. It installs the runtime beside the old runtime and creates a
-new private state namespace for the current transport policy. Nonce, assignment,
-finality, grant and model-sidecar state from earlier policies remain intact.
+runtime revision. It selects the exact root-owned CPython patch version and
+scoring package versions required by the signed transport policy for this host.
+It checks the installed source, Python, package contents and scoring profile as
+the miner service user before switching services. A missing compatible Python or
+failed runtime check stops the upgrade while the existing miner remains selected.
+
+The runtime installs beside the old runtime, with its directory bound to both
+the source revision and scoring profile. The private state namespace remains
+bound to the current transport policy. Nonce, assignment, finality, grant and
+model-sidecar state from earlier policies remain intact.
 
 Rerunning the command installs a changed runtime even within the same cohort.
 An existing receipt skips cutover only when its revision and the running miner's
-interpreter match the selected deployment. Retained enrollment, nonce, assignment
-and grant state stay in the same namespace.
+interpreter match the selected deployment and scoring profile. An older runtime
+for the same source revision is preserved and replaced by the verified policy
+profile instead of being reused merely because its revision matches. Retained
+enrollment, nonce, assignment and grant state stay in the same namespace.
 
 The updater also handles the standard Unix-socket model sidecar. It binds a new
 sidecar socket and capacity descriptor to the current transport policy before

@@ -51,9 +51,11 @@ async def test_legacy_endpoint_configuration_keeps_canonical_bytes(installed):
     raw = canonical_json_bytes(config)
     assert b'"request_window_version"' not in raw
     assert b'"request_window_miner_hotkeys"' not in raw
+    assert b'"concurrency"' not in raw
     recovered = EndpointHostConfig.model_validate_json(raw)
     assert recovered.request_window_version == 1
     assert recovered.request_window_miner_hotkeys is None
+    assert recovered.concurrency is None
     assert canonical_json_bytes(recovered) == raw
 
     selected = recovered.model_copy(
@@ -62,6 +64,14 @@ async def test_legacy_endpoint_configuration_keeps_canonical_bytes(installed):
     retained = EndpointHostConfig.model_validate_json(canonical_json_bytes(selected))
     assert retained.request_window_version == 2
     assert retained.request_window_miner_hotkeys == ()
+
+
+@pytest.mark.parametrize("concurrency", [0, 33, True, 1.5, "4"])
+async def test_endpoint_concurrency_rejects_invalid_capacity(installed, concurrency):
+    config = installed.host.config.model_dump(mode="json", by_alias=True)
+    config["concurrency"] = concurrency
+    with pytest.raises(ValueError):
+        EndpointHostConfig.model_validate(config)
 
 
 @pytest.fixture
@@ -155,7 +165,7 @@ async def installed(scheduled, tmp_path, monkeypatch):
     monkeypatch.setattr(host_module, "CompetitionTransportFinality", blocks)
     async with httpx.AsyncClient(transport=Routes()) as client:
 
-        def host(name):
+        def host(name, *, model_concurrency=4, endpoint_concurrency=None):
             root = tmp_path / ("installed-" + name)
             requests, decisions = s.signer(name).journal.config, s.d.worker(name).journal.config
             reviewers = tuple(
@@ -169,6 +179,7 @@ async def installed(scheduled, tmp_path, monkeypatch):
             )
             config = EndpointHostConfig(
                 schema="umi-cohort-endpoint-host/1",
+                concurrency=endpoint_concurrency,
                 requests=requests,
                 decisions=decisions,
                 origins=p.config,
@@ -206,7 +217,7 @@ async def installed(scheduled, tmp_path, monkeypatch):
                 history=p.e.box.history,
                 execution=CohortExecutionJournal(cfg, p.c.policy),
                 inbox=box,
-                config=SimpleNamespace(batch_size=16, concurrency=4),
+                config=SimpleNamespace(batch_size=16, concurrency=model_concurrency),
             )
 
             async def sign(body):
@@ -264,6 +275,61 @@ async def test_native_host_delivers_votes_and_finishes_without_repeating_work(in
     assert report["assignments_complete"] == 1
     assert n.host.worker.schedule.complete(n.q.slot) == terminal
     assert counts == (len(n.signatures), len(n.calls), p.model.calls, n.media_calls)
+
+
+async def test_remote_miner_wait_does_not_serialize_one_slot_model_host(installed, monkeypatch):
+    from .test_competition_cohort_endpoint_scheduler import add_second_assignment
+
+    n = installed
+    other = await add_second_assignment(n.q)
+    host = n.make(n.q.s.own, model_concurrency=1, endpoint_concurrency=2)
+    assert host.benchmark.config.concurrency == 1
+    worker = host.worker
+    assert (await worker._prepare(n.q.slot))[0] == "prepared"
+    worker.schedule.register(n.q.p.e.box.assignment(other), n.q.p.transport_policy)
+    entered, release, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    advance, prepare = worker.attempts.advance, worker._prepare
+    pending, retain = worker.schedule.pending, worker.schedule.retain_case
+    loop = asyncio.get_running_loop()
+
+    async def waiting(slot, case_id):
+        if slot == other:
+            entered.set()
+            await release.wait()
+            return {"status": "pending", "reason": "retirement_transport_unavailable"}
+        return await advance(slot, case_id)
+
+    async def prepare_selected(slot):
+        if slot == other:
+            return "pending", "retirement_transport_unavailable"
+        return await prepare(slot)
+
+    def waiting_first(limit):
+        return tuple(sorted(pending(limit), key=lambda row: row[1] != other))
+
+    def retained(slot, case_id):
+        value = retain(slot, case_id)
+        if slot == n.q.slot:
+            loop.call_soon_threadsafe(completed.set)
+        return value
+
+    monkeypatch.setattr(worker.attempts, "advance", waiting)
+    monkeypatch.setattr(worker, "_prepare", prepare_selected)
+    monkeypatch.setattr(worker.schedule, "pending", waiting_first)
+    monkeypatch.setattr(worker.schedule, "retain_case", retained)
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        await asyncio.wait_for(completed.wait(), 120)
+        assert not task.done()
+        assert n.q.p.model.calls == 1
+        assert any(worker.schedule.reference(n.q.slot, c.case_id) for c in n.q.p.e.job.cases)
+        assert worker.schedule.complete(other) is None
+    finally:
+        release.set()
+        report = await asyncio.wait_for(task, 120)
+    assert report["cases_completed"] == 1
+    assert not report["request_closure_authorized"]
 
 
 @pytest.mark.parametrize("kind", ["request", "decision"])
@@ -324,10 +390,15 @@ async def test_recurring_worker_waits_for_missing_media_then_completes(installed
     try:
 
         async def wait_pending():
-            while not reports:
+            # A rolling scheduler reports admitted in-flight work before its
+            # media fetch finishes. Wait for the retained pending outcome.
+            while not any(report.get("batch_pending", 0) > 0 for report in reports):
+                if task.done():
+                    task.result()
+                    raise AssertionError("worker stopped before reporting missing media")
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_pending(), 30)
+        await asyncio.wait_for(wait_pending(), 180)
         assert reports[-1]["batch_pending"] > 0 and not n.signatures
         n.media_fail = False
 

@@ -672,6 +672,18 @@ class FinalizedRegistrationProvider:
                     }
                 )
             )
+        # The deployed Studio miner also used the released 120-second
+        # collection budget with the original freshness/startup allowances.
+        profiles.append(
+            config.model_copy(
+                update={
+                    "maximum_head_age_ms": 120_000,
+                    "collection_timeout_seconds": 120,
+                    "startup_timeout_seconds": 900,
+                    "finality_segment_startup_timeout_seconds": None,
+                }
+            )
+        )
         return tuple(profiles)
 
     def _acceptable_cache_bindings(self) -> frozenset[str]:

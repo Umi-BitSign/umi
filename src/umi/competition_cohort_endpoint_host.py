@@ -55,6 +55,7 @@ class EndpointHostConfig(StrictProtocolModel):
     request_window_miner_hotkeys: Annotated[tuple[Hotkey, ...], Field(max_length=4096)] | None = (
         None
     )
+    concurrency: Annotated[int, Field(strict=True, ge=1, le=32)] | None = None
     requests: EndpointRequestSignerConfig
     decisions: CohortEndpointDecisionConfig
     origins: CompetitionChainConfig
@@ -70,6 +71,8 @@ class EndpointHostConfig(StrictProtocolModel):
             value.pop("request_window_version", None)
         if self.request_window_miner_hotkeys is None:
             value.pop("request_window_miner_hotkeys", None)
+        if self.concurrency is None:
+            value.pop("concurrency", None)
         return value
 
     def stores(self):
@@ -186,7 +189,9 @@ class EndpointHost:
             CohortEndpointAttemptWorker(requests, decisions),
             self.transport,
             batch_size=benchmark.config.batch_size,
-            concurrency=benchmark.config.concurrency,
+            concurrency=(
+                c.concurrency if c.concurrency is not None else benchmark.config.concurrency
+            ),
         )
 
     def peer(self, who):

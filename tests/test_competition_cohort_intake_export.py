@@ -635,3 +635,203 @@ def test_export_includes_superseded_consent_in_original_inventory(phase, scenari
     )
     with pytest.raises(ValueError, match="sealed original inventory"):
         replay_intake_export(selected_only, phase.intake.policy, maximum_sample_gap_blocks=10)
+
+
+@pytest.mark.parametrize("port", ["reader", "exporter"])
+async def test_authenticated_history_validation_does_not_block_event_loop(
+    remote, monkeypatch, port
+):
+    import threading
+
+    from umi import competition_cohort_history_http as module
+
+    h = remote
+    loop_thread = threading.get_ident()
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+    cohort = digest(h.history.plan)
+    checked = []
+    original = module.canonical_json_bytes
+    if port == "reader":
+
+        async def fetch(request):
+            # The response is prepared before inspecting reader validation.
+            monkeypatch.setattr(module, "canonical_json_bytes", original)
+            raw = await exporter.respond(request)
+            monkeypatch.setattr(module, "canonical_json_bytes", check)
+            return raw
+
+        async def invoke():
+            return await CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)(cohort)
+    else:
+
+        async def invoke():
+            request = module.CohortHistoryRequest(
+                schema="umi-cohort-history-request/1", cohort_sha256=cohort, challenge="cc" * 32
+            )
+            return await exporter.respond(request)
+
+    def check(value):
+        if isinstance(value, module.SignedCohortHistoryResponse) or (
+            port == "exporter" and isinstance(value, module.CohortHistoryResponse)
+        ):
+            checked.append(threading.get_ident())
+            assert checked[-1] != loop_thread, "native history validation blocked the event loop"
+        return original(value)
+
+    monkeypatch.setattr(module, "canonical_json_bytes", check)
+    assert await invoke()
+    assert checked
+
+
+async def test_cancelled_history_reader_drains_native_verification(remote, monkeypatch):
+    import threading
+
+    from umi import competition_cohort_history_http as module
+
+    h = remote
+    loop_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+    original = module.canonical_json_bytes
+
+    def paused(value):
+        if isinstance(value, module.SignedCohortHistoryResponse):
+            assert threading.get_ident() != loop_thread
+            entered.set()
+            assert release.wait(60)
+        return original(value)
+
+    async def fetch(request):
+        raw = await exporter.respond(request)
+        monkeypatch.setattr(module, "canonical_json_bytes", paused)
+        return raw
+
+    reader = CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)
+    task = asyncio.create_task(reader(digest(h.history.plan)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+
+
+def test_authenticated_history_read_advances_ahead_of_queued_background_intake(remote, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from .test_thread_gate import queued
+
+    h = remote
+    cohort = digest(h.history.plan)
+    gate, order = h.intake._process_lock, []
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, None)
+    current = threading.local()
+    connection = h.intake._exclusive_connection
+
+    @contextmanager
+    def observed_connection():
+        with connection() as value:
+            order.append(getattr(current, "role", "caller"))
+            yield value
+
+    monkeypatch.setattr(h.intake, "_exclusive_connection", observed_connection)
+
+    def background():
+        current.role = "background"
+        with h.intake._connection() as (_, store):
+            return store.published_history(cohort)
+
+    def history():
+        current.role = "history"
+        return exporter.read(cohort)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with gate.hold():
+            normal = pool.submit(background)
+            queued(gate, normal=1, preferred=0)
+            preferred = pool.submit(history)
+            queued(gate, normal=1, preferred=1)
+        original, source = normal.result(timeout=60), preferred.result(timeout=60)
+    assert order == ["history", "background"]
+    assert source.history == original == h.intake.history(cohort)
+    assert source.inputs().keys() == {
+        t.transition.evidence_sha256
+        for t in source.history.transitions
+        if t.transition.operation != "revoke"
+    }
+
+
+async def test_bounded_private_history_four_replies_keep_fresh_signed_challenges(remote):
+    """Concurrent history callers reach the priority gate without unbounded export."""
+    h = remote
+    owner = wallet("Charlie").hotkey.ss58_address
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie").hotkey)
+
+    exporter = CohortHistoryExporter(h.intake, owner, sign)
+    original = exporter.respond
+    entered, release = asyncio.Queue(), asyncio.Event()
+    active, peak = 0, 0
+
+    async def blocked(request):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await entered.put(request.challenge)
+        try:
+            await release.wait()
+            return await original(request)
+        finally:
+            active -= 1
+
+    exporter.respond = blocked
+    app = FastAPI()
+    app.include_router(cohort_history_routes(exporter, token="test-credential-" * 3))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        wire = CohortHistoryHTTPClient(
+            client, "https://owner.example", token="test-credential-" * 3
+        )
+        reader = CohortHistoryReader(owner, wire)
+        tasks = [asyncio.create_task(reader(digest(h.history.plan))) for _ in range(5)]
+        try:
+            challenges = await asyncio.wait_for(
+                asyncio.gather(*(entered.get() for _ in range(4))), timeout=30
+            )
+            assert len(set(challenges)) == 4 and active == peak == 4
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert entered.empty() and not any(task.done() for task in tasks)
+        finally:
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=120)
+        assert all(source.history == h.history for source in results)
+        assert all(source.inputs().keys() == results[0].inputs().keys() for source in results)
+        assert peak == 4 and active == 0
+
+
+@pytest.mark.parametrize("concurrency", [-1, 0, 9, True, 1.0, "4"])
+def test_private_review_capacity_rejects_invalid_configuration(remote, concurrency):
+    from umi.competition_cohort_review_http import phase_review_routes
+
+    with pytest.raises(ValueError, match="concurrency"):
+        phase_review_routes(
+            remote.exporter,
+            token="test-credential-" * 3,
+            path=PATH,
+            request_model=IntakeReviewRequest,
+            concurrency=concurrency,
+        )

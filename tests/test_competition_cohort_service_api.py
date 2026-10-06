@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -48,9 +49,9 @@ from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_cohort_order_signer import source_for
 from .test_competition_cohort_recovery import signatures
+from .test_competition_cohort_service_queue import admit, inputs
 from .test_competition_cohort_service_queue import base_policy as base_policy
 from .test_competition_cohort_service_queue import harness as harness
-from .test_competition_cohort_service_queue import inputs
 from .test_competition_cohort_service_queue import legacy_scenario as legacy_scenario
 from .test_competition_cohort_service_queue import policy as policy
 from .test_competition_cohort_service_queue import queue_case as queue_case
@@ -59,6 +60,7 @@ from .test_competition_cohort_service_queue import recovery as recovery
 from .test_competition_cohort_service_queue import runtime as runtime
 from .test_competition_cohort_service_queue import scenario as scenario
 from .test_competition_historical_registration import change_block
+from .test_competition_registration_retention import retained_rows
 from .test_open_competition import wallet
 
 
@@ -829,3 +831,174 @@ async def test_precommitted_catalog_uses_queue_round_for_discovery_and_admission
     restart(s)
     s.offline = {"capture", "history", "roster", "archive"}
     assert (await post(s)).json() == accepted.json() and not s.calls
+
+
+@pytest.mark.parametrize("damage", ["index", "canonical", "hold"])
+async def test_bad_service_retention_rolls_back_registration_pruning(api_case, chain, damage):
+    s = api_case
+    original = admit(s.c)
+    before = retained_rows(s.provider)
+    s.provider._retained_capture_blocks = s.c.queue.retained_registration_blocks
+    with s.c.queue.journal.transaction() as db:
+        if damage == "index":
+            db.execute("UPDATE service_claims SET admission=?", ("ff" * 32,))
+        elif damage == "canonical":
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='service_admission'",
+                (canonical_json_bytes(original) + b"\n",),
+            )
+        else:
+            db.execute("INSERT INTO holds VALUES (?)", (original.work_sha256,))
+    change_block(
+        chain, s.observed.snapshot.block + s.provider.policy.maximum_snapshot_age_blocks + 1
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        await s.provider.collect()
+    assert retained_rows(s.provider) == before
+    with sqlite3.connect(s.provider._path) as db:
+        assert db.execute("SELECT block FROM observed_head").fetchone()[0] == before[-1][0]
+
+
+async def test_archive_acquired_before_cutoff_survives_delayed_admission(
+    api_case, chain, monkeypatch
+):
+    s = api_case
+    captured = asyncio.Event()
+    resume = asyncio.Event()
+    unchanged = s.api._unchanged
+    original_block = s.observed.snapshot.block
+    original_archive = await s.provider.retained_archive(execution_boundary(s.observed))
+    s.provider._retained_capture_blocks = s.c.queue.retained_registration_blocks
+
+    async def delayed(queue, source):
+        captured.set()
+        await resume.wait()
+        await unchanged(queue, source)
+
+    monkeypatch.setattr(s.api, "_unchanged", delayed)
+    request = asyncio.create_task(post(s))
+    try:
+        await asyncio.wait_for(captured.wait(), timeout=120)
+        change_block(chain, original_block + s.provider.policy.maximum_snapshot_age_blocks + 1)
+        await s.provider.collect()
+        assert original_block not in {row[0] for row in retained_rows(s.provider)}
+    finally:
+        resume.set()
+    result = await request
+    assert result.status_code == 200, result.text
+    accepted = s.c.queue.lookup(inputs(s.c)[0])
+    assert accepted.observation.block == original_block
+    assert s.api.archives[s.c.cfg.catalog_sha256].read(accepted) == original_archive
+    restart(s)
+    s.offline = {"capture", "history", "roster", "archive"}
+    duplicate = await post(s)
+    assert duplicate.json() == result.json() and not s.calls
+    assert s.api.archives[s.c.cfg.catalog_sha256].read(accepted) == original_archive
+
+
+@pytest.mark.parametrize("path", ["current", "readiness"])
+async def test_owned_roster_validation_runs_off_listener_thread(api_case, monkeypatch, path):
+    """Native roster serialization/validation cannot occupy the HTTP event loop."""
+    import threading
+
+    from umi.competition_cohort_roster import RecoverableRosterEvidence
+
+    s = api_case
+    loop_thread = threading.get_ident()
+    original = RecoverableRosterEvidence.model_validate_json
+    calls = []
+
+    async def retained_roster(cohort, source, capture):
+        return s.roster
+
+    def validate(cls, *args, **kwargs):
+        ident = threading.get_ident()
+        calls.append(ident)
+        assert ident != loop_thread, "native roster validation blocked the listener"
+        return original(*args, **kwargs)
+
+    s.api.roster = retained_roster
+    monkeypatch.setattr(RecoverableRosterEvidence, "model_validate_json", classmethod(validate))
+    if path == "current":
+        _, _, _, roster = await s.api._current(s.c.queue)
+        assert roster == s.roster
+    else:
+        report = await s.api.readiness(s.c.cfg.catalog_sha256, "ab" * 16)
+        assert report["ready"] is True
+    assert calls
+
+
+async def test_owned_roster_validation_drains_before_releasing_readiness_owner(
+    api_case, monkeypatch
+):
+    import threading
+
+    s = api_case
+    entered, release = threading.Event(), threading.Event()
+    original = s.api._check_roster
+    loop_thread = threading.get_ident()
+
+    async def retained_roster(cohort, source, capture):
+        return s.roster
+
+    def held(value, round_):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(60), "fixture release was never delivered"
+        return original(value, round_)
+
+    s.api.roster = retained_roster
+    monkeypatch.setattr(s.api, "_check_roster", held)
+    task = asyncio.create_task(s.api.readiness(s.c.cfg.catalog_sha256, "ab" * 16))
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 60), timeout=65)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert s.api.serial[s.c.cfg.catalog_sha256].locked()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert not s.api.serial[s.c.cfg.catalog_sha256].locked()
+
+
+async def test_service_admission_failure_is_diagnosable_without_exposing_provider_data(
+    api_case, monkeypatch
+):
+    from umi import competition_progress as progress
+
+    s = api_case
+    reports = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_kwargs: reports.append(body))
+    s.offline.add("capture")
+    response = await post(s)
+    assert response.status_code == 503
+    assert reports[-1]["operation"] == "service_claim"
+    assert reports[-1]["stage"] == "admit"
+    assert "private provider" not in str(reports)
+    assert "private provider" not in response.text
+    readiness = await ready(s)
+    assert readiness.json()["ready"] is False
+    assert reports[-1]["operation"] == "service_readiness"
+    assert reports[-1]["stage"] == "owner_inputs_unavailable"
+    assert s.c.queue.entries() == ()
+
+
+async def test_service_readiness_reports_native_stage_timings(api_case, monkeypatch):
+    from umi import competition_progress as progress
+
+    reports = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_kwargs: reports.append(body))
+    response = await ready(api_case)
+    assert response.json()["ready"] is True
+    phases = [r for r in reports if r.get("phase", "").startswith("service_admission_")]
+    assert [(r["phase"], r["event"]) for r in phases] == [
+        ("service_admission_" + stage, event)
+        for stage in ("catalog", "history", "capture", "history_review", "roster")
+        for event in ("started", "completed")
+    ]
+    assert all(r["elapsed_ms"] >= 0 for r in phases if r["event"] == "completed")
+    assert all(
+        set(r) <= {"phase", "phase_id", "parent_phase_id", "event", "elapsed_ms"} for r in phases
+    )

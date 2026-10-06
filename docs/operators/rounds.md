@@ -612,6 +612,30 @@ acknowledging it. Repeating an accepted claim returns that same admission,
 including after restart or request closure. Changing its inputs is rejected.
 There is no per-hotkey quota and no timer that removes accepted claims.
 
+Registration-cache pruning reads a local projection of the retained admissions
+to pin their original proof blocks. It checks the canonical records, complete
+FIFO index and original registration bindings without replaying service
+authorization while holding the registration database. This projection cannot
+authorize work: lookup, assignment, export and sealing still perform the full
+history and signature checks. Admission stores its original proof archive
+atomically with the accepted claim, so cache pruning cannot discard its recovery
+inputs. Invalid retained records stop pruning rather than releasing their pins.
+
+When model delivery or paid service admission is held, the intake journal emits
+an `admission_held` event with the fixed operation and stage plus bounded native
+exception types, reason codes and source frames. Model delivery identifies
+reservation, capture, retry and status stages; service readiness identifies the
+queue, owner-input or archive boundary. These diagnostics contain no request
+body, reference text, credential, signed transaction or exception message. They
+do not change the HTTP result, accept work or authorize chain submissions.
+
+Service admission and readiness revalidate the complete owned roster in an
+owned thread, preserving the original round, participant and admission checks.
+This keeps roster serialization and validation off the HTTP event loop so
+unrelated requests can proceed. Cancellation drains that operation before
+releasing its admission owner; it cannot abandon validation in a background
+thread or let another operation acquire the same owner early.
+
 The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
 For a host transfer, fence the outgoing owner and preserve the original logical
@@ -1723,6 +1747,28 @@ The cohort's manifest selects its terms and transport hash. Peer requests cannot
 select a different transport. Each signed request and replacement uses its own
 selected transport's finalized block adapter.
 
+The endpoint host's optional `concurrency` selects between 1 and 32 parallel
+remote deliveries independently of the benchmark's local inference limit. If
+omitted, it retains the benchmark concurrency and the original canonical
+configuration bytes. Select a bounded delivery limit after qualifying the
+shared proof providers and HTTP connections; raising it does not authorize more
+local model processes, change accepted assignments or refresh signed requests.
+
+The running scheduler keeps a bounded set of owned operations rather than
+waiting for an entire batch. A ready miner can advance its next case while
+another miner's preparation, inference or recovery is still pending. There is
+at most one in-flight operation per assignment. Durable cursors select the next
+work. Only cases admitted to available capacity advance case cursors; assignments
+with an owned in-flight operation are excluded before selecting the next page.
+Scanning work that cannot start must not skip its cases or delay ready peers.
+One preparation operation can run beside existing cases, and a single-slot
+selection alternates preparation and cases. Repeated pending cases therefore do
+not prevent discovery of new assignments. `in_flight_operations` reports the
+retained running operations. Stop
+drains those operations before releasing the scheduler owner; restart replays
+the same signed requests and completed responses. A single `poll_once` remains
+a bounded batch observation for callers that explicitly request one.
+
 The endpoint worker starts alongside CPU execution and completion exports. It
 delivers requests, retrieves retained responses, obtains independent retirement
 votes and resumes certified replacements. Missing inputs or unavailable peers
@@ -1732,6 +1778,66 @@ routes require the reviewer credential and validate native evidence before
 signing. Response signatures are checked against the exact submitted body.
 Both finality observers and all workers drain before releasing the host key and
 exclusive lease.
+
+Case batches prioritize assignments with a durable signed request selection over
+registered assignments still waiting for preparation. The independent inbox
+cursor continues preparing those registrations; priority does not authorize a
+request, erase an obligation or change either cursor's durable rotation.
+
+Retained execution and request-journal operations reuse only successful canonical
+serialization within one bounded operation. They still parse current stored
+content and run signature, policy, history and binding checks. Reuse closes at
+operation return and never acts as an authorization or freshness cache.
+
+Owner-history response construction and native reader verification run in owned
+threads so schema replay does not block their HTTP event loops. Cancellation
+drains that work before returning. Every response retains its fresh challenge,
+owner signature, cohort binding and complete native input checks. No signature,
+authority, finality or schema-validation result is cached.
+
+Authenticated owner-history reads receive bounded preference at the intake
+thread gate. They can pass queued background operations, but at most eight
+preferred reads run before queued normal work gets a turn. Each queue keeps FIFO
+order; recursive entry retains the current owner. The original filesystem lock,
+database ownership and binding checks still run under exclusive admission. The
+gate stores waiting tickets only, never payloads or authority results.
+
+Private owner-history HTTP delivery admits up to four concurrent replies so
+fresh requests can queue together at that gate. Other phase exports retain their
+single-reply default. The shared route builder accepts only integer capacities
+from one through eight; every reply still performs its own challenge, signature
+and native history checks, and cancellation drains its owned work.
+
+Origin confirmation checks authenticated cohort history before and after its
+owned finalized observation. If another operation advances the shared journal
+while that history check waits, confirmation recollects finality once and repeats
+the authority checks. It never lowers the retained head or substitutes a cached
+head. A still-lagging provider, malformed journal or changed authority remains a
+hold; a valid closure is retained before further origin use is refused.
+The earlier assignment-authority observation applies the same bounded recovery
+by repeating its complete history and finality checks before execution starts.
+Neither retry starts inference, replaces an assignment or renews authority.
+
+Scheduler reports retain up to eight distinct `retry_examples` with the stage,
+selection slot, exception type and source frames. `last_retry_slot` binds the last
+failure to its retained assignment. These supplement the last retry so a later
+preparation failure cannot hide an earlier case failure. They omit exception
+messages, endpoint URLs, authentication headers and response bodies. They are
+diagnostics, not execution, closure or reward evidence.
+
+The CLI also emits `endpoint_miner_grant_pending` for unsuccessful grant control
+exchanges. Its fixed reason code distinguishes an HTTP status, unavailable
+delivery or invalid receipt and binds the selection slot, grant digest and miner
+hotkey. Pending grant delivery does not authorize retirement or chain submission.
+
+Miner dispatch caches retain their exact chain and transport identity across
+approved operational-timeout upgrades. Released policy-free and per-policy
+bindings are migrated in place without discarding captured registration proofs.
+A changed chain pin, registration floor or transport identity still rejects the
+cache. Do not delete registration caches to work around an upgrade hold. Verify
+cache compatibility before stopping a live miner; after migration, any rollback
+source must accept the resulting binding too. Selecting a source is separate from
+verifying runtime health.
 
 The public `GET /v1/competition/cohorts/{cohort_sha256}/requests/readiness`
 route accepts a fresh 32-character hexadecimal `nonce`. The version 7 coordinator
@@ -1782,3 +1888,8 @@ and verifies the returned policy, consent, contribution and signature quorum.
 `admission_certified` certifies participation only. It does not establish current
 registration, assignment delivery, a score or reward activation; downstream
 execution must still use the authoritative cohort history and fresh evidence.
+
+Service admission also emits bounded start/completion phases for catalog, history,
+registration capture, history review and retained roster replay. These timings
+identify an operation still running after an edge gateway timeout without
+logging request arguments or changing admission decisions.

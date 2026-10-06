@@ -497,3 +497,43 @@ async def test_cancelled_http_body_keeps_previously_committed_chunk(delivery):
             await task
     assert h.owner.status(key)["file_offsets"][0] == 1
     upload_all(h, h.owner, key)
+
+
+@pytest.mark.asyncio
+async def test_delivery_http_reports_native_failure_stage_and_preserves_reservation(
+    delivery, monkeypatch
+):
+    from umi import competition_progress as progress
+
+    h = delivery
+    reports = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_kwargs: reports.append(body))
+    original = h.owner.status
+    secret = "private model data https://private.example/?token=hidden"
+
+    def unavailable(_key):
+        raise OSError(secret)
+
+    monkeypatch.setattr(h.owner, "status", unavailable)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=h.app), base_url="https://intake.example"
+    ) as client:
+        response = await client.post(
+            f"/v1/competition/cohorts/{h.cohort}/model-uploads",
+            content=canonical_json_bytes(h.request),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 503
+        assert reports[-1]["stage"] == "status"
+        assert reports[-1]["operation"] == "model_delivery"
+        assert secret not in str(reports) and secret not in response.text
+        key = h.owner.retry(h.request)
+        assert key is not None
+        monkeypatch.setattr(h.owner, "status", original)
+        retry = await client.post(
+            f"/v1/competition/cohorts/{h.cohort}/model-uploads",
+            content=canonical_json_bytes(h.request),
+            headers={"Content-Type": "application/json"},
+        )
+        assert retry.status_code == 200
+        assert h.owner.retry(h.request) == key

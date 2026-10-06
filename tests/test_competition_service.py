@@ -1190,8 +1190,9 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
     }
 
 
-def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monkeypatch):
-    target = logging.getLogger("umi.competition_cohort_lifecycle")
+@pytest.mark.parametrize("name", ["umi.competition_cohort_lifecycle", "umi.competition.progress"])
+def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monkeypatch, name):
+    target = logging.getLogger(name)
     before = (tuple(target.handlers), target.level, target.propagate)
     observed = []
     runtime = SimpleNamespace(

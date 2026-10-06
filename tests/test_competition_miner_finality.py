@@ -218,3 +218,91 @@ async def test_missing_observer_header_uses_verified_ancestry_and_timestamp(reco
     recovery.state.bad_proof = True
     with pytest.raises((ValueError, RuntimeError)):
         await value.verified_block_at(height)
+
+
+@pytest.mark.parametrize("collection_timeout", [15, 120])
+@pytest.mark.parametrize("policy_free", [False, True])
+def test_dispatch_reopens_exact_released_cache_without_losing_evidence(
+    chain, collection_timeout, policy_free
+):
+    import sqlite3
+    from pathlib import Path
+
+    from umi.competition_dispatch import DispatchFinalityProvider
+    from umi.open_competition import digest
+
+    from .test_competition_dispatch import dispatch_legacy_policy
+
+    transport = dispatch_legacy_policy()
+    transport = transport.model_copy(
+        update={
+            "implementation_pins": transport.implementation_pins.model_copy(
+                update={
+                    "live_chain": chain.config.chain_pin,
+                    "finality_verifier": chain.config.finality_pin,
+                }
+            )
+        }
+    )
+    old = chain.config.model_copy(
+        update={
+            "maximum_head_age_ms": 120_000,
+            "collection_timeout_seconds": collection_timeout,
+            "startup_timeout_seconds": 900,
+            "finality_segment_startup_timeout_seconds": None,
+        }
+    )
+    probe = object.__new__(DispatchFinalityProvider)
+    probe.config, probe.policy, probe.legacy_policy = old, chain.policy, transport
+    legacy_chain = (
+        probe._legacy_policy_free_config_binding_hash(old) if policy_free else digest(old)
+    )
+    legacy = digest({"chain": legacy_chain, "transport_policy": probe._finality_policy_hash()})
+    path = Path(chain.config.state_directory) / "registrations.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE binding SET digest=?", (legacy,))
+        before = {
+            table: db.execute("SELECT * FROM " + table).fetchall()
+            for table in ("captures", "artifacts", "observed_head")
+        }
+    current = chain.config.model_copy(
+        update={
+            "maximum_head_age_ms": 300_000,
+            "collection_timeout_seconds": 120,
+            "startup_timeout_seconds": 1800,
+            "finality_segment_startup_timeout_seconds": 900,
+        }
+    )
+    provider = DispatchFinalityProvider(
+        current,
+        chain.policy,
+        transport,
+        finality=chain.finality,
+        proofs=chain.proofs,
+    )
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT digest FROM binding").fetchone() == (
+            provider._cache_binding_hash(),
+        )
+        assert {
+            table: db.execute("SELECT * FROM " + table).fetchall() for table in before
+        } == before
+    # No evidence is accepted under a changed chain or transport identity.
+    changed = current.model_copy(
+        update={
+            "minimum_finalized_block": current.minimum_finalized_block + 1,
+        }
+    )
+    with pytest.raises(ValueError, match="another chain configuration"):
+        DispatchFinalityProvider(
+            changed, chain.policy, transport, finality=chain.finality, proofs=chain.proofs
+        )
+    other_transport = transport.model_copy(
+        update={
+            "activation_block": transport.activation_block + 1,
+        }
+    )
+    with pytest.raises(ValueError, match="another chain configuration"):
+        DispatchFinalityProvider(
+            current, chain.policy, other_transport, finality=chain.finality, proofs=chain.proofs
+        )

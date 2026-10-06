@@ -191,13 +191,28 @@ class DispatchFinalityProvider(FinalizedEndpointProvider):
                 )
             )
         for config in configs:
-            for policy_sha256 in admitted_policy_sha256s(self.policy):
-                legacy = config.model_copy(update={"policy_sha256": policy_sha256})
+            # Dispatch caches also carried the released policy-free chain
+            # binding before operational timeouts were removed from it. Keep
+            # the transport identity and every chain/proof pin unchanged.
+            for profile in self._legacy_operational_profiles(config):
                 accepted.add(
                     digest(
-                        {"chain": digest(legacy), "transport_policy": self._finality_policy_hash()}
+                        {
+                            "chain": self._legacy_policy_free_config_binding_hash(profile),
+                            "transport_policy": self._finality_policy_hash(),
+                        }
                     )
                 )
+                for policy_sha256 in admitted_policy_sha256s(self.policy):
+                    legacy = profile.model_copy(update={"policy_sha256": policy_sha256})
+                    accepted.add(
+                        digest(
+                            {
+                                "chain": digest(legacy),
+                                "transport_policy": self._finality_policy_hash(),
+                            }
+                        )
+                    )
         return frozenset(accepted)
 
     async def _recover_historical_block(self, height, head):

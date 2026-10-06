@@ -136,30 +136,54 @@ class CohortEndpointSchedule:
                 (position,),
             )
 
-    def pending(self, limit: int) -> tuple[tuple[str, str, str], ...]:
+    def pending(
+        self, limit: int, *, exclude: tuple[str, ...] = ()
+    ) -> tuple[tuple[str, str, str], ...]:
         if type(limit) is not int or not 1 <= limit <= 256:
             raise ValueError("endpoint schedule batch is outside bounds")
+        if (
+            type(exclude) is not tuple
+            or len(exclude) > 32
+            or any(
+                type(slot) is not str
+                or len(slot) != 64
+                or any(c not in "0123456789abcdef" for c in slot)
+                for slot in exclude
+            )
+        ):
+            raise ValueError("endpoint schedule exclusions are outside bounds")
+        if len(set(exclude)) != len(exclude):
+            raise ValueError("endpoint schedule exclusions must be unique")
+        exclusions = (
+            " AND q.slot NOT IN (" + ",".join("?" for _ in exclude) + ")" if exclude else ""
+        )
         with self.journal.transaction() as db:
             row = db.execute(
                 "SELECT position FROM endpoint_schedule_cursor WHERE name='cases'"
             ).fetchone()
             cursor = "" if row is None else row[0]
+            # Prioritize durable selected requests over registered assignments
+            # still awaiting preparation. The inbox cursor independently revisits
+            # those assignments; they cannot displace dispatch/recovery work.
             # Rotate assignments and each assignment's cases independently.
             # A global obligation cursor can repeatedly wrap past all but the
             # first case of an assignment when another has larger hashes.
             rows = db.execute(
                 "WITH pending AS (SELECT q.obligation,q.slot,q.case_id,"
                 "CASE WHEN q.slot>? THEN 0 ELSE 1 END AS band,"
+                "CASE WHEN EXISTS (SELECT 1 FROM records s "
+                "WHERE s.kind='endpoint_recovery_selection' AND s.id=q.slot) "
+                "THEN 0 ELSE 1 END AS ready_band,"
                 "ROW_NUMBER() OVER (PARTITION BY q.slot ORDER BY "
                 "CASE WHEN q.obligation>COALESCE(c.position,'') THEN 0 ELSE 1 END,"
                 "q.obligation) AS rank "
                 "FROM endpoint_schedule_queue q LEFT JOIN endpoint_schedule_case_cursor c "
                 "ON c.slot=q.slot WHERE NOT EXISTS "
                 "(SELECT 1 FROM records r WHERE r.kind='endpoint_terminal_case' "
-                "AND r.id=q.obligation)) "
+                "AND r.id=q.obligation)" + exclusions + ") "
                 "SELECT obligation,slot,case_id FROM pending WHERE rank=1 "
-                "ORDER BY band,slot LIMIT ?",
-                (cursor, limit),
+                "ORDER BY ready_band,band,slot LIMIT ?",
+                (cursor, *exclude, limit),
             ).fetchall()
             if rows:
                 db.execute(

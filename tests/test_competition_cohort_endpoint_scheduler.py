@@ -6,6 +6,7 @@ retirement certificates are exercised. No installed service or reward is claimed
 
 import asyncio
 import json
+import logging
 from itertools import pairwise
 from types import SimpleNamespace
 
@@ -175,7 +176,31 @@ async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
     assert q.policy_calls == 1
 
 
-async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled):
+async def test_case_failure_is_retained_in_report_after_prepare_failure(scheduled, monkeypatch):
+    worker = scheduled.worker()
+    assert (await worker._prepare(scheduled.slot))[0] == "prepared"
+
+    async def missing_case(slot, case_id):
+        raise FileNotFoundError("https://private.example/missing/bearer-secret")
+
+    async def invalid_prepare(slot):
+        raise ValueError("https://private.example/prepare/bearer-secret")
+
+    monkeypatch.setattr(worker.attempts, "advance", missing_case)
+    monkeypatch.setattr(worker, "_prepare", invalid_prepare)
+    report = await worker.poll_once()
+    assert report["last_retry_stage"] == "prepare"
+    assert {(r["stage"], r["error_type"]) for r in report["retry_examples"]} == {
+        ("case", "FileNotFoundError"),
+        ("prepare", "ValueError"),
+    }
+    assert "bearer-secret" not in repr(report) and "private.example" not in repr(report)
+    assert all(r["details"][0]["source_frames"] for r in report["retry_examples"])
+    assert worker.schedule.complete(scheduled.slot) is None
+    assert scheduled.p.model.calls == 0
+
+
+async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled, caplog):
     q, p = scheduled, scheduled.p
     original = p.delivery_recovery.transport
 
@@ -186,11 +211,32 @@ async def test_rejected_miner_grant_stays_pending_without_retirement(scheduled):
             return await original.handle_async_request(request)
 
     p.delivery_recovery.transport = RejectGrant()
-    report = await q.worker().poll_once()
+    with caplog.at_level(logging.INFO, logger="umi.competition_cohort_grant_delivery"):
+        report = await q.worker().poll_once()
     assert report["last_pending_reason"] == "miner_grant_http_422"
     assert report["retry_count"] == 0
     assert p.model.calls == 0
     assert q.worker().schedule.complete(q.slot) is None
+    logs = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "umi.competition_cohort_grant_delivery"
+    ]
+    assert logs and all(log["reason_code"] == "miner_grant_http_422" for log in logs)
+    assert all(log["selection_slot"] == q.slot for log in logs)
+    assert all(log["miner_hotkey"] == p.e.job.submission.submission.hotkey for log in logs)
+    assert all(
+        set(log)
+        == {
+            "status",
+            "selection_slot",
+            "grant_sha256",
+            "miner_hotkey",
+            "reason_code",
+            "chain_submission_authorized",
+        }
+        for log in logs
+    )
 
 
 @pytest.mark.parametrize(
@@ -282,6 +328,30 @@ async def test_unavailable_miner_does_not_starve_peer_after_restart(scheduled):
     rows = q.worker().schedule.pending(2)
     assert rows and {row[1] for row in rows} == {other}
     assert len(rows) == 1
+
+
+async def test_selected_request_precedes_unprepared_assignment_after_cursor_wrap(scheduled):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    worker.schedule.register(q.p.e.box.assignment(other), q.p.transport_policy)
+    # The ordinary cursor would select the unrelated assignment first. Its
+    # registration alone is not a runnable, signed request selection.
+    with worker.schedule.journal.transaction() as db:
+        db.execute(
+            "INSERT INTO endpoint_schedule_cursor VALUES ('cases',?) "
+            "ON CONFLICT(name) DO UPDATE SET position=excluded.position",
+            (q.slot,),
+        )
+    rows = worker.schedule.pending(1)
+    assert len(rows) == 1 and rows[0][1] == q.slot
+    assert worker.schedule.load(other) is not None
+    assert worker.schedule.journal.get("endpoint_recovery_selection", other) is None
+    assert q.p.model.calls == 0
+    terminal, _ = await finish(q, maximum_polls=16, batch_size=1, concurrency=1)
+    assert terminal is not None
+    assert worker.schedule.complete(other) is None
 
 
 async def test_queue_selects_one_case_per_assignment_and_rotates_durably(scheduled):
@@ -482,3 +552,178 @@ async def test_selected_case_advances_before_slow_assignment_preparation(schedul
         report = await task
     assert report["cases_completed"] == 1
     assert not report["request_closure_authorized"]
+
+
+async def test_running_scheduler_completes_peer_while_other_preparation_waits(
+    scheduled, monkeypatch
+):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker(concurrency=2)
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    entered, release, complete, stop = (asyncio.Event() for _ in range(4))
+    original = worker._prepare
+
+    async def held_prepare(slot):
+        if slot == other:
+            entered.set()
+            await release.wait()
+        return await original(slot)
+
+    def observe(report):
+        if worker.schedule.journal.get("endpoint_replay_archive", q.slot) is not None:
+            complete.set()
+
+    monkeypatch.setattr(worker, "_prepare", held_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01, report=observe))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        await asyncio.wait_for(complete.wait(), timeout=180)
+        assert not release.is_set()
+        assert not task.done()
+        terminal = worker.schedule.complete(q.slot)
+        assert terminal is not None and len(terminal.cases) == len(q.p.e.job.cases)
+        assert q.p.model.calls == len(q.p.e.job.cases)
+        assert worker.schedule.complete(other) is None
+        archive = EndpointReplayArchive.model_validate_json(
+            canonical_json_bytes(worker.schedule.journal.get("endpoint_replay_archive", q.slot))
+        )
+        objects = JournalEndpointObjects(worker.schedule.journal)
+        assert len(tuple(endpoint_archive_cases(archive, objects, q.p.c.policy))) == len(
+            q.p.e.job.cases
+        )
+    finally:
+        stop.set()
+        release.set()
+        await asyncio.wait_for(task, timeout=120)
+
+
+async def test_running_scheduler_keeps_owner_until_cancelled_operation_drains(
+    scheduled, monkeypatch
+):
+    q = scheduled
+    worker = q.worker()
+    entered, cleaning, release, stop = (asyncio.Event() for _ in range(4))
+
+    async def held_prepare(slot):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    monkeypatch.setattr(worker, "_prepare", held_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=120)
+        stop.set()
+        await asyncio.wait_for(cleaning.wait(), timeout=120)
+        with pytest.raises(BlockingIOError):
+            await q.worker().poll_once()
+        assert not task.done()
+        assert q.p.model.calls == 0
+    finally:
+        release.set()
+        stop.set()
+        await asyncio.wait_for(task, timeout=120)
+    terminal, _ = await finish(q)
+    assert terminal is not None
+    assert q.p.model.calls == len(q.p.e.job.cases)
+
+
+async def test_running_scheduler_discovers_work_beside_rejected_grants(scheduled, monkeypatch):
+    q = scheduled
+    other = await add_second_assignment(q)
+    worker = q.worker(concurrency=1)
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    original_transport = q.p.delivery_recovery.transport
+
+    class RejectGrant(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == COHORT_GRANT_PATH:
+                return httpx.Response(422)
+            return await original_transport.handle_async_request(request)
+
+    q.p.delivery_recovery.transport = RejectGrant()
+    discovered, rejected, stop = (asyncio.Event() for _ in range(3))
+    original_prepare = worker._prepare
+
+    async def observe_prepare(slot):
+        if slot == other:
+            discovered.set()
+        return await original_prepare(slot)
+
+    def observe(report):
+        assert report.get("in_flight_operations", 0) <= 1
+        if report.get("last_pending_reason") == "miner_grant_http_422":
+            rejected.set()
+
+    monkeypatch.setattr(worker, "_prepare", observe_prepare)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01, report=observe))
+    try:
+        await asyncio.wait_for(rejected.wait(), timeout=180)
+        await asyncio.wait_for(discovered.wait(), timeout=180)
+        assert worker.schedule.complete(q.slot) is None
+        assert q.p.model.calls == 0
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=120)
+
+
+async def test_busy_assignment_does_not_advance_its_unstarted_case_cursor(scheduled):
+    q = scheduled
+    other = await add_second_assignment(q)
+    schedule = q.worker().schedule
+    for slot in q.p.e.box.assignments():
+        schedule.register(q.p.e.box.assignment(slot), q.p.transport_policy)
+    before = schedule.pending(2)
+    # While one assignment owns an in-flight operation, only the ready peer's
+    # cases may rotate. Reconstruct the journal on every pass as after restart.
+    ready = [q.worker().schedule.pending(1, exclude=(q.slot,))[0] for _ in range(3)]
+    assert all(row[1] == other for row in ready)
+    assert len({row[0] for row in ready}) == 3
+    resumed = q.worker().schedule.pending(1, exclude=(other,))[0]
+    initial = next(row for row in before if row[1] == q.slot)
+    assert resumed[1] == q.slot and resumed[0] != initial[0]
+    # Exactly the next original case is chosen; excluded polls cannot skip it.
+    with schedule.journal.transaction() as db:
+        ordered = [
+            row[0]
+            for row in db.execute(
+                "SELECT obligation FROM endpoint_schedule_queue WHERE slot=? ORDER BY obligation",
+                (q.slot,),
+            )
+        ]
+    assert resumed[0] == ordered[(ordered.index(initial[0]) + 1) % len(ordered)]
+
+
+async def test_running_scheduler_retry_binds_selection_without_private_text(scheduled, monkeypatch):
+    q = scheduled
+    worker = q.worker(concurrency=1)
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    observed, stop = asyncio.Event(), asyncio.Event()
+    reports = []
+
+    async def failed_case(row):
+        raise ValueError("PRIVATE_DISPATCH_EXCEPTION")
+
+    def report(value):
+        reports.append(value)
+        if value.get("last_retry_slot") == q.slot:
+            observed.set()
+
+    monkeypatch.setattr(worker, "_case", failed_case)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01, report=report))
+    try:
+        await asyncio.wait_for(observed.wait(), 180)
+        value = next(r for r in reports if r.get("last_retry_slot") == q.slot)
+        assert value["last_retry_stage"] == "case"
+        assert value["last_retry_type"] == "ValueError"
+        assert value["retry_examples"][0]["slot"] == q.slot
+        assert "PRIVATE_DISPATCH_EXCEPTION" not in canonical_json_bytes(value).decode()
+        assert worker.schedule.complete(q.slot) is None
+        assert q.p.model.calls == 0
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 120)
