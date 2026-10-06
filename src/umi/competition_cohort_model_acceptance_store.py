@@ -155,8 +155,11 @@ class CohortModelAcceptances:
             self.intake.policy,
         )
 
-    def _record(self, db, history, submission):
-        for _, raw in self.intake._records(db, history):
+    def _record(self, db, history, submission, *, hotkey=None):
+        # Certificates and reserved intents already bind the recipient. Use the
+        # existing ledger index to avoid replaying unrelated miners under its
+        # shared lock; the original selected record is still fully verified.
+        for _, raw in self.intake._records(db, history, track="model", hotkey=hotkey):
             record = read_participation(raw)
             if digest(record.request.signed_submission.submission) == submission:
                 replay_participation(record, history, self.intake.policy)
@@ -198,7 +201,9 @@ class CohortModelAcceptances:
         with self.intake._connection() as (db, store):
             publication = read_publication(db, cohort, submission)
             history = store.published_history(cohort)
-            record = self._record(db, history, submission)
+            record = self._record(
+                db, history, submission, hotkey=publication.certificate.acceptance.recipient_hotkey
+            )
             verify_model_acceptance(
                 publication.certificate,
                 record,
@@ -218,7 +223,12 @@ class CohortModelAcceptances:
             intent = ModelAcceptanceIntent.model_validate_json(raw)
             if canonical_json_bytes(intent) != raw:
                 raise ValueError("model proposal changed canonical bytes")
-            record = self._record(db, store.published_history(cohort), submission)
+            record = self._record(
+                db,
+                store.published_history(cohort),
+                submission,
+                hotkey=intent.acceptance.recipient_hotkey,
+            )
             row = db.execute(
                 "SELECT body FROM cohort_admission_certificates WHERE consent=?",
                 (record.proposed_admission.consent_sha256,),
@@ -353,7 +363,16 @@ class CohortModelAcceptances:
         observation = execution_boundary(capture)
         with self.intake._connection() as (db, store):
             current = store.published_history(cohort)
-            if current != history or self._record(db, current, submission) != record:
+            if (
+                current != history
+                or self._record(
+                    db,
+                    current,
+                    submission,
+                    hotkey=record.request.signed_submission.submission.hotkey,
+                )
+                != record
+            ):
                 raise OSError("model intake changed during artifact verification; retry")
             # Another identical request may have committed while files were read.
             prior = _read(db, "cohort_model_acceptance_intents", cohort, submission)
@@ -439,7 +458,7 @@ class CohortModelAcceptances:
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):
             history = store.published_history(cohort)
-            record = self._record(db, history, submission)
+            record = self._record(db, history, submission, hotkey=a.recipient_hotkey)
             prior = _read(db, "cohort_model_acceptances", cohort, submission)
         if prior is not None:
             if prior != canonical_json_bytes(publication):

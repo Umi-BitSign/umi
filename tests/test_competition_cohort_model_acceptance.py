@@ -5,6 +5,8 @@ from threading import Barrier
 
 import pytest
 
+from umi import competition_cohort_intake as intake_module
+from umi import competition_cohort_model_acceptance_store as acceptance_module
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_cohort_admission_journal import CohortAdmissionVote
 from umi.competition_cohort_admission_queue import CohortAdmissionQueue
@@ -33,7 +35,7 @@ from umi.competition_cohort_model_acceptance_store import (
     PendingModelArtifacts,
 )
 from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, identity, sign_object
 from umi.private_files import publish_private_model, read_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
 
@@ -98,6 +100,43 @@ def certify(owner, cohort, sub, inputs, *, block=220, names=("Charlie", "Dave"))
         ),
         inputs=inputs,
     )
+
+
+def test_model_export_replays_only_its_original_participant(prepared, tmp_path, monkeypatch):
+    owner, cohort, _, inputs = prepared
+    with owner.intake._connection() as (db, _):
+        raw = db.execute(
+            "SELECT body FROM cohort_consents WHERE cohort=? ORDER BY consent DESC LIMIT 1",
+            (cohort,),
+        ).fetchone()[0]
+    target = acceptance_module.read_participation(raw).request.signed_submission.submission
+    expected = owner.publish(certify(owner, cohort, target, inputs), capture_at(220))
+    read = acceptance_module.read_participation
+    seen = []
+
+    def observe_record(raw):
+        record = read(raw)
+        seen.append(identity(record.request.signed_submission.submission.hotkey))
+        return record
+
+    monkeypatch.setattr(intake_module, "read_participation", observe_record)
+    monkeypatch.setattr(acceptance_module, "read_participation", observe_record)
+    assert owner.export(cohort, digest(target), tmp_path / "export") == expected
+    assert seen and set(seen) == {identity(target.hotkey)}
+
+
+@pytest.mark.parametrize("index", ["hotkey", "track", "recovery_tip"])
+def test_model_export_rejects_target_index_tampering(prepared, tmp_path, index):
+    owner, cohort, subs, inputs = prepared
+    target = subs[0]
+    owner.publish(certify(owner, cohort, target, inputs), capture_at(220))
+    with owner.intake._connection() as (db, _):
+        db.execute(
+            f"UPDATE cohort_consents SET {index}=? WHERE cohort=? AND hotkey=? AND track='model'",
+            ("endpoint" if index == "track" else "0" * 64, cohort, identity(target.hotkey)),
+        )
+    with pytest.raises(ValueError):
+        owner.export(cohort, digest(target), tmp_path / "export")
 
 
 def observe(phase, cohort, block):
