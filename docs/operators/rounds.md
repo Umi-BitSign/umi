@@ -1794,6 +1794,12 @@ order; recursive entry retains the current owner. The original filesystem lock,
 database ownership and binding checks still run under exclusive admission. The
 gate stores waiting tickets only, never payloads or authority results.
 
+Private owner-history HTTP delivery admits up to four concurrent replies so
+fresh requests can queue together at that gate. Other phase exports retain their
+single-reply default. The shared route builder accepts only integer capacities
+from one through eight; every reply still performs its own challenge, signature
+and native history checks, and cancellation drains its owned work.
+
 Origin confirmation checks authenticated cohort history before and after its
 owned finalized observation. If another operation advances the shared journal
 while that history check waits, confirmation recollects finality once and repeats

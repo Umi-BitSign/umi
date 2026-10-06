@@ -772,3 +772,66 @@ def test_authenticated_history_read_advances_ahead_of_queued_background_intake(r
         for t in source.history.transitions
         if t.transition.operation != "revoke"
     }
+
+
+async def test_bounded_private_history_four_replies_keep_fresh_signed_challenges(remote):
+    """Concurrent history callers reach the priority gate without unbounded export."""
+    h = remote
+    owner = wallet("Charlie").hotkey.ss58_address
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie").hotkey)
+
+    exporter = CohortHistoryExporter(h.intake, owner, sign)
+    original = exporter.respond
+    entered, release = asyncio.Queue(), asyncio.Event()
+    active, peak = 0, 0
+
+    async def blocked(request):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await entered.put(request.challenge)
+        try:
+            await release.wait()
+            return await original(request)
+        finally:
+            active -= 1
+
+    exporter.respond = blocked
+    app = FastAPI()
+    app.include_router(cohort_history_routes(exporter, token="test-credential-" * 3))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        wire = CohortHistoryHTTPClient(
+            client, "https://owner.example", token="test-credential-" * 3
+        )
+        reader = CohortHistoryReader(owner, wire)
+        tasks = [asyncio.create_task(reader(digest(h.history.plan))) for _ in range(5)]
+        try:
+            challenges = await asyncio.wait_for(
+                asyncio.gather(*(entered.get() for _ in range(4))), timeout=30
+            )
+            assert len(set(challenges)) == 4 and active == peak == 4
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert entered.empty() and not any(task.done() for task in tasks)
+        finally:
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=120)
+        assert all(source.history == h.history for source in results)
+        assert all(source.inputs().keys() == results[0].inputs().keys() for source in results)
+        assert peak == 4 and active == 0
+
+
+@pytest.mark.parametrize("concurrency", [-1, 0, 9, True, 1.0, "4"])
+def test_private_review_capacity_rejects_invalid_configuration(remote, concurrency):
+    from umi.competition_cohort_review_http import phase_review_routes
+
+    with pytest.raises(ValueError, match="concurrency"):
+        phase_review_routes(
+            remote.exporter,
+            token="test-credential-" * 3,
+            path=PATH,
+            request_model=IntakeReviewRequest,
+            concurrency=concurrency,
+        )

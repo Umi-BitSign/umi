@@ -75,10 +75,13 @@ def phase_review_routes(
     path: str,
     request_model: type[RequestT],
     maximum_request_bytes: int = MAX_REQUEST_BYTES,
+    concurrency: int = 1,
 ) -> APIRouter:
     _request_limit(maximum_request_bytes)
+    if type(concurrency) is not int or not 1 <= concurrency <= 8:
+        raise ValueError("phase review concurrency must be between 1 and 8")
     expected = "Bearer " + _credential(token)
-    router, capacity = APIRouter(), asyncio.Semaphore(1)
+    router, capacity = APIRouter(), asyncio.Semaphore(concurrency)
 
     @router.post(path)
     async def review(request: Request):
