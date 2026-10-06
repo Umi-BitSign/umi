@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_intake import CohortIntake
 from .competition_cohort_order_signer import CohortOrderHistory
@@ -69,14 +70,23 @@ class CohortHistoryExporter:
 
     async def respond(self, request: CohortHistoryRequest) -> bytes:
         request = CohortHistoryRequest.model_validate_json(canonical_json_bytes(request))
+        response = await run_owned_thread(self._response, request)
+        signature = await wait_for_owned(self.sign(response), timeout=self.timeout_seconds)
+        return await run_owned_thread(self._signed_response, response, signature)
+
+    @canonical_json_reuse()
+    def _response(self, request: CohortHistoryRequest) -> CohortHistoryResponse:
         response = CohortHistoryResponse(
             schema="umi-cohort-history-response/1",
             challenge=request.challenge,
-            source=await run_owned_thread(self.read, request.cohort_sha256),
+            source=self.read(request.cohort_sha256),
         )
         if len(canonical_json_bytes(response)) > self.maximum_bytes - 2048:
             raise ValueError("history response exceeds delivery capacity")
-        signature = await wait_for_owned(self.sign(response), timeout=self.timeout_seconds)
+        return response
+
+    @canonical_json_reuse()
+    def _signed_response(self, response: CohortHistoryResponse, signature: Signature) -> bytes:
         if identity(signature.hotkey) != self.owner:
             raise ValueError("history response signed by another owner")
         verify_signature(response, signature)
@@ -107,6 +117,12 @@ class CohortHistoryReader:
             challenge=secrets.token_hex(32),
         )
         raw = await wait_for_owned(self.fetch(request), timeout=self.timeout)
+        return await run_owned_thread(self._verify, raw, request)
+
+    @canonical_json_reuse()
+    def _verify(self, raw: bytes, request: CohortHistoryRequest) -> CohortOrderHistory:
+        # Authenticate each fresh challenge and replay all native inputs. The
+        # bounded serialization cache holds bytes only within this operation.
         if type(raw) is not bytes or len(raw) > MAX_EXPORT_BYTES:
             raise ValueError("owner history exceeds delivery capacity")
         signed = SignedCohortHistoryResponse.model_validate_json(raw)
@@ -114,7 +130,7 @@ class CohortHistoryReader:
             canonical_json_bytes(signed) != raw
             or signed.response.challenge != request.challenge
             or identity(signed.signature.hotkey) != self.owner
-            or digest(signed.response.source.history.plan) != cohort
+            or digest(signed.response.source.history.plan) != request.cohort_sha256
         ):
             raise ValueError("owner history changed its challenge, cohort or signer")
         verify_signature(signed.response, signed.signature)

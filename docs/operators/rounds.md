@@ -1781,6 +1781,12 @@ serialization within one bounded operation. They still parse current stored
 content and run signature, policy, history and binding checks. Reuse closes at
 operation return and never acts as an authorization or freshness cache.
 
+Owner-history response construction and native reader verification run in owned
+threads so schema replay does not block their HTTP event loops. Cancellation
+drains that work before returning. Every response retains its fresh challenge,
+owner signature, cohort binding and complete native input checks. No signature,
+authority, finality or schema-validation result is cached.
+
 Origin confirmation checks authenticated cohort history before and after its
 owned finalized observation. If another operation advances the shared journal
 while that history check waits, confirmation recollects finality once and repeats

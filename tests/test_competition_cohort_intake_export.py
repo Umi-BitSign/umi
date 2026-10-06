@@ -635,3 +635,93 @@ def test_export_includes_superseded_consent_in_original_inventory(phase, scenari
     )
     with pytest.raises(ValueError, match="sealed original inventory"):
         replay_intake_export(selected_only, phase.intake.policy, maximum_sample_gap_blocks=10)
+
+
+@pytest.mark.parametrize("port", ["reader", "exporter"])
+async def test_authenticated_history_validation_does_not_block_event_loop(
+    remote, monkeypatch, port
+):
+    import threading
+
+    from umi import competition_cohort_history_http as module
+
+    h = remote
+    loop_thread = threading.get_ident()
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+    cohort = digest(h.history.plan)
+    checked = []
+    original = module.canonical_json_bytes
+    if port == "reader":
+
+        async def fetch(request):
+            # The response is prepared before inspecting reader validation.
+            monkeypatch.setattr(module, "canonical_json_bytes", original)
+            raw = await exporter.respond(request)
+            monkeypatch.setattr(module, "canonical_json_bytes", check)
+            return raw
+
+        async def invoke():
+            return await CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)(cohort)
+    else:
+
+        async def invoke():
+            request = module.CohortHistoryRequest(
+                schema="umi-cohort-history-request/1", cohort_sha256=cohort, challenge="cc" * 32
+            )
+            return await exporter.respond(request)
+
+    def check(value):
+        if isinstance(value, module.SignedCohortHistoryResponse) or (
+            port == "exporter" and isinstance(value, module.CohortHistoryResponse)
+        ):
+            checked.append(threading.get_ident())
+            assert checked[-1] != loop_thread, "native history validation blocked the event loop"
+        return original(value)
+
+    monkeypatch.setattr(module, "canonical_json_bytes", check)
+    assert await invoke()
+    assert checked
+
+
+async def test_cancelled_history_reader_drains_native_verification(remote, monkeypatch):
+    import threading
+
+    from umi import competition_cohort_history_http as module
+
+    h = remote
+    loop_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+
+    async def sign(body):
+        return sign_object(body, wallet("Charlie"))
+
+    exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, sign)
+    original = module.canonical_json_bytes
+
+    def paused(value):
+        if isinstance(value, module.SignedCohortHistoryResponse):
+            assert threading.get_ident() != loop_thread
+            entered.set()
+            assert release.wait(60)
+        return original(value)
+
+    async def fetch(request):
+        raw = await exporter.respond(request)
+        monkeypatch.setattr(module, "canonical_json_bytes", paused)
+        return raw
+
+    reader = CohortHistoryReader(wallet("Charlie").hotkey.ss58_address, fetch)
+    task = asyncio.create_task(reader(digest(h.history.plan)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
