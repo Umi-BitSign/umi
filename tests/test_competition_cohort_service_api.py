@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -48,9 +49,9 @@ from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_cohort_order_signer import source_for
 from .test_competition_cohort_recovery import signatures
+from .test_competition_cohort_service_queue import admit, inputs
 from .test_competition_cohort_service_queue import base_policy as base_policy
 from .test_competition_cohort_service_queue import harness as harness
-from .test_competition_cohort_service_queue import inputs
 from .test_competition_cohort_service_queue import legacy_scenario as legacy_scenario
 from .test_competition_cohort_service_queue import policy as policy
 from .test_competition_cohort_service_queue import queue_case as queue_case
@@ -59,6 +60,7 @@ from .test_competition_cohort_service_queue import recovery as recovery
 from .test_competition_cohort_service_queue import runtime as runtime
 from .test_competition_cohort_service_queue import scenario as scenario
 from .test_competition_historical_registration import change_block
+from .test_competition_registration_retention import retained_rows
 from .test_open_competition import wallet
 
 
@@ -829,3 +831,66 @@ async def test_precommitted_catalog_uses_queue_round_for_discovery_and_admission
     restart(s)
     s.offline = {"capture", "history", "roster", "archive"}
     assert (await post(s)).json() == accepted.json() and not s.calls
+
+
+@pytest.mark.parametrize("damage", ["index", "canonical", "hold"])
+async def test_bad_service_retention_rolls_back_registration_pruning(api_case, chain, damage):
+    s = api_case
+    original = admit(s.c)
+    before = retained_rows(s.provider)
+    s.provider._retained_capture_blocks = s.c.queue.retained_registration_blocks
+    with s.c.queue.journal.transaction() as db:
+        if damage == "index":
+            db.execute("UPDATE service_claims SET admission=?", ("ff" * 32,))
+        elif damage == "canonical":
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='service_admission'",
+                (canonical_json_bytes(original) + b"\n",),
+            )
+        else:
+            db.execute("INSERT INTO holds VALUES (?)", (original.work_sha256,))
+    change_block(
+        chain, s.observed.snapshot.block + s.provider.policy.maximum_snapshot_age_blocks + 1
+    )
+    with pytest.raises((ValueError, RuntimeError)):
+        await s.provider.collect()
+    assert retained_rows(s.provider) == before
+    with sqlite3.connect(s.provider._path) as db:
+        assert db.execute("SELECT block FROM observed_head").fetchone()[0] == before[-1][0]
+
+
+async def test_archive_acquired_before_cutoff_survives_delayed_admission(
+    api_case, chain, monkeypatch
+):
+    s = api_case
+    captured = asyncio.Event()
+    resume = asyncio.Event()
+    unchanged = s.api._unchanged
+    original_block = s.observed.snapshot.block
+    original_archive = await s.provider.retained_archive(execution_boundary(s.observed))
+    s.provider._retained_capture_blocks = s.c.queue.retained_registration_blocks
+
+    async def delayed(queue, source):
+        captured.set()
+        await resume.wait()
+        await unchanged(queue, source)
+
+    monkeypatch.setattr(s.api, "_unchanged", delayed)
+    request = asyncio.create_task(post(s))
+    try:
+        await asyncio.wait_for(captured.wait(), timeout=120)
+        change_block(chain, original_block + s.provider.policy.maximum_snapshot_age_blocks + 1)
+        await s.provider.collect()
+        assert original_block not in {row[0] for row in retained_rows(s.provider)}
+    finally:
+        resume.set()
+    result = await request
+    assert result.status_code == 200, result.text
+    accepted = s.c.queue.lookup(inputs(s.c)[0])
+    assert accepted.observation.block == original_block
+    assert s.api.archives[s.c.cfg.catalog_sha256].read(accepted) == original_archive
+    restart(s)
+    s.offline = {"capture", "history", "roster", "archive"}
+    duplicate = await post(s)
+    assert duplicate.json() == result.json() and not s.calls
+    assert s.api.archives[s.c.cfg.catalog_sha256].read(accepted) == original_archive

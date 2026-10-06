@@ -5,6 +5,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -299,6 +300,105 @@ def test_global_work_order_has_no_per_identity_quota(queue_case):
     c.queue = other
     relabeled = [admit(c, name, i) for i, name in enumerate(("Bob", "Alice", "Alice"), 1)]
     assert [v.work_sha256 for v in relabeled] == [v.work_sha256 for v in values]
+
+
+def test_retention_keeps_original_blocks_after_restart_without_review(queue_case, monkeypatch):
+    c = queue_case
+    first = admit(c)
+    c.queue.admit(
+        *inputs(c, "Bob", 2),
+        c.h.source,
+        capture(401),
+        expected_tip_sha256=history_tip(c.h.source.history),
+    )
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    catalog = Mock(wraps=c.queue._catalog)
+    monkeypatch.setattr(c.queue, "_catalog", catalog)
+    review = Mock(side_effect=AssertionError("authorization review remains separate"))
+    monkeypatch.setattr(c.queue, "_read", review)
+    assert c.queue.retained_registration_blocks() == frozenset({400, 401})
+    assert catalog.call_count == 1
+    review.assert_not_called()
+    assert c.queue.journal.get("service_admission", first.work_sha256) == first.model_dump(
+        mode="json", by_alias=True
+    )
+    with pytest.raises(AssertionError, match="authorization review remains separate"):
+        c.queue.entries()
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_empty_retention_does_not_require_catalog(queue_case, monkeypatch, installed):
+    c = queue_case
+    queue = (
+        c.queue
+        if installed
+        else ServiceWorkQueue(
+            c.cfg.model_copy(update={"directory": c.cfg.directory + "-uninstalled"}), c.queue.policy
+        )
+    )
+    catalog = Mock(side_effect=AssertionError("empty queue has no dependency"))
+    monkeypatch.setattr(queue, "_catalog", catalog)
+    assert queue.retained_registration_blocks() == frozenset()
+    catalog.assert_not_called()
+
+
+@pytest.mark.parametrize("damage", ["claim_key", "admission", "orphan_index", "orphan_body", "gap"])
+def test_retention_rejects_changed_indexes_and_missing_admissions(queue_case, damage):
+    c = queue_case
+    admit(c)
+    admit(c, "Bob", 2)
+    with c.queue.journal.transaction() as db:
+        if damage in {"claim_key", "admission"}:
+            db.execute(f"UPDATE service_claims SET {damage}=? WHERE ordinal=1", ("ff" * 32,))
+        elif damage == "orphan_index":
+            db.execute("DELETE FROM service_claims WHERE ordinal=2")
+        elif damage == "orphan_body":
+            db.execute("DELETE FROM records WHERE kind='service_admission'")
+        else:
+            db.execute("UPDATE service_claims SET ordinal=3 WHERE ordinal=2")
+    with pytest.raises((ValueError, FileNotFoundError)):
+        c.queue.retained_registration_blocks()
+
+
+@pytest.mark.parametrize("damage", ["predecessor", "observation_block", "observation_snapshot"])
+def test_retention_checks_original_bindings_even_when_index_digest_matches(queue_case, damage):
+    c = queue_case
+    value = admit(c)
+    if damage == "predecessor":
+        changed = value.model_copy(update={"predecessor_sha256": "ff" * 32})
+    else:
+        field = "block" if damage == "observation_block" else "snapshot_sha256"
+        replacement = 401 if field == "block" else "ff" * 32
+        changed = value.model_copy(
+            update={"observation": value.observation.model_copy(update={field: replacement})}
+        )
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_admission'",
+            (canonical_json_bytes(changed),),
+        )
+        db.execute("UPDATE service_claims SET admission=?", (digest(changed),))
+    with pytest.raises(ValueError, match="original registration bindings"):
+        c.queue.retained_registration_blocks()
+
+
+def test_retention_projection_does_not_authorize_changed_signature(queue_case):
+    c = queue_case
+    value = admit(c)
+    signed = value.claim.model_copy(
+        update={"signature": sign_object(value.claim.claim, wallet("Bob"))}
+    )
+    changed = value.model_copy(update={"claim": signed})
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_admission'",
+            (canonical_json_bytes(changed),),
+        )
+        db.execute("UPDATE service_claims SET admission=?", (digest(changed),))
+    # Retention pins local original proof inputs; only full queue reads authorize work.
+    assert c.queue.retained_registration_blocks() == frozenset({value.observation.block})
+    with pytest.raises(ValueError):
+        c.queue.entries()
 
 
 @pytest.mark.parametrize("queue_case", [256], indirect=True)

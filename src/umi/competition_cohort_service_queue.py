@@ -207,13 +207,15 @@ class ServiceWorkQueue:
                 )
             )
 
-    def _raw_admission(self, ordinal, db):
+    def _raw_admission(self, ordinal, db, *, catalog=None):
         row = db.execute(
             "SELECT claim_key,admission FROM service_claims WHERE ordinal=?", (ordinal,)
         ).fetchone()
         if row is None:
             raise FileNotFoundError("accepted service claim index is incomplete")
-        work = service_work_key(self._catalog(db)[0].catalog, ordinal)
+        if catalog is None:
+            catalog = self._catalog(db)[0].catalog
+        work = service_work_key(catalog, ordinal)
         raw = self.journal.get("service_admission", work, db=db)
         if raw is None:
             raise FileNotFoundError("accepted service admission is missing")
@@ -361,6 +363,48 @@ class ServiceWorkQueue:
                 (after_ordinal, limit),
             ).fetchall()
             return tuple(self._read(row[0], db) for row in rows)
+
+    def retained_registration_blocks(self) -> frozenset[int]:
+        """Pin original proof inputs, without reviewing or authorizing service work.
+
+        Registration persistence calls this while owning its database. Keep
+        this projection local to the queue; full history and signature review
+        remains required by lookup, assignment, entries and sealing.
+        """
+        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
+            rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+            bodies = db.execute(
+                "SELECT count(*) FROM records WHERE kind='service_admission'"
+            ).fetchone()[0]
+            if len(rows) != bodies or len(rows) > 8192:
+                raise ValueError("service retention index does not cover original admissions")
+            if not rows:
+                return frozenset()
+            catalog = self._catalog(db)[0].catalog
+            blocks = set()
+            previous = None
+            for ordinal, (stored_ordinal,) in enumerate(rows, 1):
+                if stored_ordinal != ordinal:
+                    raise ValueError("service retention ordinal prefix is incomplete")
+                value = self._raw_admission(ordinal, db, catalog=catalog)
+                if (
+                    value.catalog_sha256 != self.config.catalog_sha256
+                    or value.claim.claim.catalog_sha256 != self.config.catalog_sha256
+                    or value.predecessor_sha256 != (None if previous is None else digest(previous))
+                    or value.observation.snapshot_sha256 != digest(value.registration)
+                    or value.observation.block != value.registration.block
+                    or value.observation.block_hash != value.registration.block_hash
+                    or value.registration.network != self.policy.network
+                    or value.registration.netuid != self.policy.netuid
+                    or (
+                        previous is not None
+                        and value.observation.block < previous.observation.block
+                    )
+                ):
+                    raise ValueError("service retention changed original registration bindings")
+                blocks.add(value.observation.block)
+                previous = value
+            return frozenset(blocks)
 
     def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:
         """Export the exact accepted record; never invent a benchmark assignment."""

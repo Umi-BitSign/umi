@@ -612,6 +612,15 @@ acknowledging it. Repeating an accepted claim returns that same admission,
 including after restart or request closure. Changing its inputs is rejected.
 There is no per-hotkey quota and no timer that removes accepted claims.
 
+Registration-cache pruning reads a local projection of the retained admissions
+to pin their original proof blocks. It checks the canonical records, complete
+FIFO index and original registration bindings without replaying service
+authorization while holding the registration database. This projection cannot
+authorize work: lookup, assignment, export and sealing still perform the full
+history and signature checks. Admission stores its original proof archive
+atomically with the accepted claim, so cache pruning cannot discard its recovery
+inputs. Invalid retained records stop pruning rather than releasing their pins.
+
 The queue reuses the round journal and monotonic history checks. A full queue
 rejects new claims; increasing configured capacity preserves existing work.
 For a host transfer, fence the outgoing owner and preserve the original logical

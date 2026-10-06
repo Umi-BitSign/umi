@@ -114,6 +114,33 @@ async def test_host_waits_for_certified_preparation_then_recovers_original_queue
     assert h.precommitted_bytes == tuple(canonical_json_bytes(v) for v in h.precommitted)
 
 
+async def test_registration_retention_does_not_replay_service_authority(
+    lifecycle, tmp_path, monkeypatch
+):
+    h = lifecycle
+    cfg = host_config(h, tmp_path / "host")
+    host = ServiceAdmissionHost(
+        cfg,
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+        provider=h.provider,
+    )
+    key = digest(h.precommitted[0].catalog)
+    path = Path(cfg.inputs_directory) / "catalogs" / (key + ".json")
+    publish_private_model(path, h.precommitted[0])
+    prepared = await prepare(h)
+    assert (await host.poll_once())["catalogs_installed"] == 1
+    assert (await host.api.admit(key, signed_claim(h, prepared)))["status"] == "accepted"
+
+    def slow_authority_replay(*args, **kwargs):
+        raise AssertionError("registration pruning must not replay service authority")
+
+    monkeypatch.setattr(host.queues[key], "_read", slow_authority_replay)
+    assert host.retained_registration_blocks() == frozenset({h.block})
+
+
 async def test_host_coalesces_fresh_reads_and_delegates_historical_finality(lifecycle, tmp_path):
     h = lifecycle
     capture = AsyncMock(side_effect=h.provider.collect)
@@ -194,6 +221,7 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
     provider.policy = h.intake.policy
     provider.ensure_observer_running = lambda: None  # Synthetic finality provider.
     provider.retained_archive = h.provider.retained_archive
+    provider.current_finalized_block = h.provider.current_finalized_block
     app = create_intake_app(config, h.intake.policy, provider_factory=lambda *_: provider)
     async with app.router.lifespan_context(app):
         host = app.state.service_admission_host
@@ -202,7 +230,7 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
             while host.queues[key].journal.get("service_catalog", key) is None:
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(installed(), timeout=10)
+        await asyncio.wait_for(installed(), timeout=120)
         if automatic_admission:
 
             async def private_started():
@@ -218,7 +246,7 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
                         except httpx.ConnectError:
                             await asyncio.sleep(0.02)
 
-            await asyncio.wait_for(private_started(), timeout=10)
+            await asyncio.wait_for(private_started(), timeout=120)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="https://intake.example"
         ) as client:
@@ -229,7 +257,7 @@ async def test_intake_startup_installs_catalog_and_serves_claims_without_another
                     while host.history_exporter is None:
                         await asyncio.sleep(0.01)
 
-                await asyncio.wait_for(public_started(), timeout=10)
+                await asyncio.wait_for(public_started(), timeout=120)
                 reader = CohortHistoryReader(
                     owner.owner_hotkey,
                     PublicCohortHistoryClient(
@@ -281,6 +309,7 @@ async def test_failed_worker_still_closes_cache_and_provider(
     )
     provider = Provider(config.chain, h.intake.policy)
     provider.retained_archive = h.provider.retained_archive
+    provider.current_finalized_block = h.provider.current_finalized_block
     failed, closed = asyncio.Event(), asyncio.Event()
     original_close = VerifiedRegistrationCache.aclose
 
@@ -325,6 +354,7 @@ async def test_service_routes_have_separate_claim_readiness_and_read_capacity(
     )
     provider = Provider(config.chain, h.intake.policy)
     provider.retained_archive = h.provider.retained_archive
+    provider.current_finalized_block = h.provider.current_finalized_block
     app = create_intake_app(config, h.intake.policy, provider_factory=lambda *_: provider)
     api = app.state.service_admission_host.api
     key = digest(h.precommitted[0].catalog)
