@@ -1691,6 +1691,14 @@ caller-supplied assignments still require full native validation. Current
 execution and reward authority remain independently verified.
 
 
+Historical participation replay reuses a successful native admission result only
+for the exact retained consent, historical registration observation, policy and
+signed history bytes. The bounded process-local cache returns private copies;
+changed inputs, restart or fork require native verification again. Failed replay
+is never cached. Pending intake sealing still checks its current registration
+snapshot and current history independently; historical reuse grants no current
+execution or reward authority.
+
 The intake owner also retains bounded private verified seals while it is running.
 Each lookup reads the exact seal, original consent rows and indexes, and selected
 model-acceptance bytes under the existing intake lock. Changed or missing inputs,

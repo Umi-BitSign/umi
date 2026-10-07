@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_participation import (
     CohortParticipantAdmission,
@@ -38,11 +40,22 @@ def read_participation(raw: bytes) -> RetainedCohortParticipation:
     return retained
 
 
+_historical_participation_reuse = AssignmentVerificationReuse(8 * 1024**2, 4096)
+
+
+@canonical_json_reuse()
 def replay_participation(
     retained: RetainedCohortParticipation,
     history: CohortRecoveryHistory,
     policy: CompetitionPolicy,
 ) -> CohortParticipantAdmission:
+    # This is historical replay over exact supplied inputs, never current
+    # registration, availability, finality or authority. Read changed bytes
+    # normally; only successful native results enter bounded private reuse.
+    key = (digest(retained), digest(history), digest(policy))
+    cached = _historical_participation_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
     proposed = retained.proposed_admission
     tips = [digest(history.genesis), *(digest(s.transition) for s in history.transitions)]
     if proposed.recovery_tip_sha256 not in tips:
@@ -71,4 +84,5 @@ def replay_participation(
         or retained.observation.block_hash != retained.snapshot.block_hash
     ):
         raise ValueError("retained cohort consent registration evidence differs")
+    _historical_participation_reuse.remember(key, key, proposed)
     return proposed
