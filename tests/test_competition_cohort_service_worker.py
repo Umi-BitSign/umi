@@ -318,19 +318,19 @@ async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryab
     assert calls == 2
 
 
-async def test_service_outer_retry_preserves_safe_diagnostics():
-    worker = object.__new__(ServiceWorkWorker)
+async def test_service_outer_retry_preserves_safe_diagnostics(loop):
+    worker = loop.worker()
     stop = asyncio.Event()
     reports = []
 
-    async def failing():
+    async def failing(_active):
         raise OSError("private journal path")
 
     def report(value):
         reports.append(value)
         stop.set()
 
-    worker.poll_once = failing
+    worker._rolling_poll = failing
     await worker.run(stop, poll_seconds=0.01, report=report)
     assert len(reports) == 1
     assert reports[0]["status"] == "cohort_service_worker_retry"

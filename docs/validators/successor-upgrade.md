@@ -1705,6 +1705,15 @@ chain authority is still collected independently. Paid service owner exports
 likewise wait for genuine local journal contention within their operation budget
 rather than treating a busy assignment read as unavailable evidence.
 
+Paid service scheduling admits the next accepted job when a configured slot
+becomes free, without waiting for every miner in the previous page. Only one
+job per miner runs at a time; the total operational concurrency is unchanged.
+The existing private cursor advances only through considered admissions and
+survives restart. The worker retains its process lease until all outstanding
+sends, signatures and journal writes finish cooperative cancellation. Reports
+include in-flight operations; neither those counts nor selected grants establish
+completed service work or reward credit.
+
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same
 verified block; their evidence digests need not be identical. The original

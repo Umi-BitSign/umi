@@ -87,7 +87,8 @@ class ServiceWorkWorker:
         self.reviewer_keys = {identity(k): k for k in reviewers}
         if len(self.reviewers) != len(reviewers) or not self.reviewers.keys() <= known.keys():
             raise ValueError("service reviewer identities differ from policy")
-        self.batch_size, self.capacity = batch_size, asyncio.Semaphore(concurrency)
+        self.batch_size, self.concurrency = batch_size, concurrency
+        self.capacity = asyncio.Semaphore(concurrency)
         self.serial, self.vote_writes = asyncio.Lock(), asyncio.Lock()
         with self.journal.transaction() as db:
             db.execute(
@@ -207,7 +208,7 @@ class ServiceWorkWorker:
         await self._local(self.terminals.retain, terminal, signature)
         return "completed", "terminal_retained"
 
-    def _batch(self):
+    def _batch(self, *, advance=True):
         with self.journal.transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_worker_cursor WHERE singleton=1"
@@ -216,14 +217,17 @@ class ServiceWorkWorker:
         rows = self.queue.entries(after_ordinal=after, limit=self.batch_size)
         if not rows and after:
             rows = self.queue.entries(limit=self.batch_size)
-        if rows:
-            with self.journal.transaction() as db:
-                db.execute(
-                    "INSERT INTO service_worker_cursor VALUES (1,?) "
-                    "ON CONFLICT(singleton) DO UPDATE SET ordinal=excluded.ordinal",
-                    (rows[-1].ordinal,),
-                )
+        if rows and advance:
+            self._advance_cursor(rows[-1].ordinal)
         return rows
+
+    def _advance_cursor(self, ordinal):
+        with self.journal.transaction() as db:
+            db.execute(
+                "INSERT INTO service_worker_cursor VALUES (1,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET ordinal=excluded.ordinal",
+                (ordinal,),
+            )
 
     async def poll_once(self):
         async with self.serial:
@@ -277,6 +281,7 @@ class ServiceWorkWorker:
 
     @staticmethod
     async def _stop_tasks(tasks):
+        tasks = tuple(tasks)
         for task in tasks:
             task.cancel()
 
@@ -287,26 +292,96 @@ class ServiceWorkWorker:
         # a signing operation, response write or native transport still runs.
         await await_owned_task(asyncio.create_task(drained()))
 
+    async def _rolling_poll(self, active):
+        results, retries = [], []
+        for work, (_, task) in tuple(active.items()):
+            if not task.done():
+                continue
+            del active[work]
+            status, reason, details = task.result()
+            results.append((status, reason))
+            if details:
+                retries.append(details)
+
+        async def perform(admission):
+            try:
+                status, reason = await self._advance(admission)
+                return status, reason, []
+            except _RETRY as error:
+                return "pending", type(error).__name__, _failure_details(error)
+
+        if len(active) < self.concurrency:
+            rows = await self._local(partial(self._batch, advance=False))
+            miners = {miner for miner, _ in active.values()}
+            last = None
+            for admission in rows:
+                if len(active) >= self.concurrency:
+                    break
+                last = admission.ordinal
+                miner = identity(admission.claim.claim.hotkey)
+                work = admission.work_sha256
+                if work in active or miner in miners:
+                    continue
+                active[work] = (miner, asyncio.create_task(perform(admission)))
+                miners.add(miner)
+            if last is not None:
+                # Never move past work that capacity prevented from admission.
+                # Skipped active miners remain accepted and return on rotation.
+                await self._local(self._advance_cursor, last)
+
+        pending = [reason for status, reason in results if status == "pending"]
+        examples = []
+        for details in retries:
+            if details not in examples and len(examples) < 8:
+                examples.append(details)
+        return {
+            "status": "cohort_service_worker",
+            "work_considered": len(results),
+            "work_complete": sum(status == "completed" for status, _ in results),
+            "work_pending": len(pending),
+            "in_flight_operations": len(active),
+            "last_pending_reason": pending[-1] if pending else "",
+            "retry_count": len(retries),
+            "last_retry_details": retries[-1] if retries else [],
+            "retry_examples": examples,
+            "request_closure_authorized": False,
+            "chain_submission_authorized": False,
+        }
+
     async def run(self, stop: asyncio.Event, *, poll_seconds: float = 5, report=None):
         if isinstance(poll_seconds, bool) or not 0 < poll_seconds <= 60:
             raise ValueError("service worker poll interval is outside bounds")
-        while not stop.is_set():
-            task, stopping = asyncio.create_task(self.poll_once()), asyncio.create_task(stop.wait())
+        active = {}
+        async with self.serial:
+            lease = lock_private_file(self.journal.root / "service-worker.lock")
             try:
-                done, _ = await asyncio.wait((task, stopping), return_when=asyncio.FIRST_COMPLETED)
-                if stopping in done:
-                    return
-                try:
-                    result = task.result()
-                except _RETRY as error:
-                    result = {
-                        "status": "cohort_service_worker_retry",
-                        "error_type": type(error).__name__,
-                        "last_retry_details": _failure_details(error),
-                    }
-                if report is not None:
-                    report(result)
+                while not stop.is_set():
+                    task = asyncio.create_task(self._rolling_poll(active))
+                    stopping = asyncio.create_task(stop.wait())
+                    try:
+                        done, _ = await asyncio.wait(
+                            (task, stopping), return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if stopping in done:
+                            return
+                        try:
+                            result = task.result()
+                        except _RETRY as error:
+                            result = {
+                                "status": "cohort_service_worker_retry",
+                                "error_type": type(error).__name__,
+                                "last_retry_details": _failure_details(error),
+                            }
+                        if report is not None:
+                            report(result)
+                    finally:
+                        await self._stop_tasks((task, stopping))
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
             finally:
-                await self._stop_tasks((task, stopping))
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                try:
+                    # Own the process lease until every send, signature and
+                    # journal write has cooperatively completed cancellation.
+                    await self._stop_tasks(task for _, task in active.values())
+                finally:
+                    os.close(lease)
