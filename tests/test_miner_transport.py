@@ -1606,3 +1606,180 @@ def test_runtime_fails_before_serving_when_hotkey_cannot_sign(monkeypatch) -> No
     monkeypatch.setattr("umi.miner.sign_response_digest", fail_signing)
     with pytest.raises(RuntimeError, match="signing preflight failed"):
         runtime()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,payload,expected",
+    [
+        (429, {"detail": "response_window_closed"}, "response_window_closed"),
+        (429, {"detail": "validator_ingress_busy"}, "validator_ingress_busy"),
+        (503, {"detail": "cohort_authority_unavailable"}, "cohort_authority_unavailable"),
+        (429, {"detail": "private-token=https://user:secret@example.test"}, "unknown_rejection"),
+        (503, {"detail": {"private": "secret"}}, "unknown_rejection"),
+    ],
+)
+async def test_http_rejection_reports_only_fixed_reason_without_changing_outcome(
+    caplog, status, payload, expected
+):
+    wallet = dev_wallet("//Alice")
+    selected = runtime(allowed_wallet=wallet)
+    prepared = prepare_request_attempt(
+        challenge_request(), wallet=wallet, miner_hotkey=selected.hotkey_ss58
+    )
+    outcome = await send_prepared_request(
+        prepared,
+        miner_url="https://miner.example",
+        limits=Limits(),
+        timeout_seconds=30,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                status, stream=httpx.ByteStream(canonical_json_bytes(payload))
+            )
+        ),
+    )
+    assert outcome.failure_code == "http_error"
+    assert outcome.envelope_bytes is None
+    assert outcome.received_body_prefix == b""
+    assert any(f"reported_reason={expected} " in message for message in caplog.messages)
+    assert "secret" not in caplog.text
+    assert "private-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_http_rejection_oversized_body_does_not_leak_or_change_failure(caplog):
+    wallet = dev_wallet("//Alice")
+    selected = runtime(allowed_wallet=wallet)
+    prepared = prepare_request_attempt(
+        challenge_request(), wallet=wallet, miner_hotkey=selected.hotkey_ss58
+    )
+    outcome = await send_prepared_request(
+        prepared,
+        miner_url="https://miner.example",
+        limits=Limits(),
+        timeout_seconds=30,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(429, content=b"private-secret" * 1000)
+        ),
+    )
+    assert outcome.failure_code == "http_error"
+    assert outcome.received_body_prefix == b""
+    assert "reported_reason=diagnostic_unavailable" in caplog.text
+    assert "private-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_http_rejection_stream_failure_retains_http_error_and_closes(caplog):
+    class BrokenBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            raise httpx.ReadError("private-secret")
+            yield b""
+
+        async def aclose(self):
+            self.closed = True
+
+    body = BrokenBody()
+    wallet = dev_wallet("//Alice")
+    selected = runtime(allowed_wallet=wallet)
+    prepared = prepare_request_attempt(
+        challenge_request(), wallet=wallet, miner_hotkey=selected.hotkey_ss58
+    )
+    outcome = await send_prepared_request(
+        prepared,
+        miner_url="https://miner.example",
+        limits=Limits(),
+        timeout_seconds=30,
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, stream=body)),
+    )
+    assert outcome.failure_code == "http_error"
+    assert body.closed
+    assert "reported_reason=diagnostic_unavailable" in caplog.text
+    assert "private-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_native_miner_transmission_limit_is_identified_without_second_inference(caplog):
+    wallet = dev_wallet("//Alice")
+    translator = CountingTranslator()
+    selected = runtime(allowed_wallet=wallet, translator=translator)
+    request = challenge_request()
+    transport = httpx.ASGITransport(app=create_app(selected))
+    outcomes = []
+    try:
+        for _ in range(3):
+            prepared = prepare_request_attempt(
+                request, wallet=wallet, miner_hotkey=selected.hotkey_ss58
+            )
+            outcomes.append(
+                await send_prepared_request(
+                    prepared,
+                    miner_url="https://miner.example",
+                    limits=selected.limits,
+                    timeout_seconds=30,
+                    transport=transport,
+                )
+            )
+        assert outcomes[0].failure_code is None
+        assert outcomes[1].envelope_bytes == outcomes[0].envelope_bytes
+        assert outcomes[2].failure_code == "http_error"
+        assert translator.calls == 1
+        assert "reported_reason=request_transmission_limit" in caplog.text
+    finally:
+        selected.resource_ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_http_rejection_stalled_body_keeps_known_http_failure_and_closes(caplog):
+    class StalledBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield b"private-secret"
+
+        async def aclose(self):
+            self.closed = True
+
+    body = StalledBody()
+    wallet = dev_wallet("//Alice")
+    selected = runtime(allowed_wallet=wallet)
+    prepared = prepare_request_attempt(
+        challenge_request(), wallet=wallet, miner_hotkey=selected.hotkey_ss58
+    )
+    outcome = await send_prepared_request(
+        prepared,
+        miner_url="https://miner.example",
+        limits=Limits(),
+        timeout_seconds=0.4,
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, stream=body)),
+    )
+    assert outcome.failure_code == "http_error"
+    assert body.closed
+    assert "reported_reason=diagnostic_unavailable" in caplog.text
+    assert "private-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_http_rejection_deep_json_keeps_http_failure_without_recursion_error(caplog):
+    wallet = dev_wallet("//Alice")
+    selected = runtime(allowed_wallet=wallet)
+    prepared = prepare_request_attempt(
+        challenge_request(), wallet=wallet, miner_hotkey=selected.hotkey_ss58
+    )
+    raw = b"[" * 1500 + b"0" + b"]" * 1500
+    outcome = await send_prepared_request(
+        prepared,
+        miner_url="https://miner.example",
+        limits=Limits(),
+        timeout_seconds=30,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(503, stream=httpx.ByteStream(raw))
+        ),
+    )
+    assert outcome.failure_code == "http_error"
+    assert any(
+        f"reported_reason={fallback}" in caplog.text
+        for fallback in ("diagnostic_unavailable", "unknown_rejection")
+    )

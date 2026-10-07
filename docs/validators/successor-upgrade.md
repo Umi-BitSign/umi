@@ -1610,6 +1610,21 @@ retained container, including a stopped one, prevents this automatic refresh.
 The supervisor must first reconcile and remove its own prior worker. Keep each
 validator on its dedicated service account.
 
+### Miner HTTP rejection diagnostics
+
+A failed translate logs its HTTP status and a separate `miner_http_rejection`
+record with the original request digest. `reported_reason` accepts only fixed
+protocol codes from a bounded 4-KiB error body; unknown, unreadable or oversized
+bodies use a fixed fallback label. An optional diagnostic read gets at most 30
+seconds and half the remaining exchange budget. Raw error bodies and arbitrary
+exception messages are never logged or included as miner responses.
+
+Treat the reason as the serving endpoint's report, not authenticated execution
+or retirement evidence. `response_window_closed`, `request_transmission_limit`
+and `validator_ingress_busy` require different recovery actions. The original
+HTTP failure, signed request, dispatch receipt and retirement fences stay intact;
+a diagnostic cannot authorize a resend, replacement or reward credit.
+
 ### Finality observer process diagnostics
 
 The owned finality sidecar reports a nonzero process exit as

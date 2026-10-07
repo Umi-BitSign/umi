@@ -59,6 +59,29 @@ LOGGER = logging.getLogger("umi.validator")
 
 OriginResolver = Callable[[str, int], Awaitable[Sequence[str]]]
 
+# Only fixed public protocol codes may enter the diagnostic log. Error bodies
+# can contain reflected URLs, credentials or arbitrary miner-controlled text.
+_HTTP_REJECTION_REASONS = frozenset(
+    {
+        "miner_preauth_busy",
+        "validator_ingress_busy",
+        "miner_ingress_busy",
+        "cohort_authority_unavailable",
+        "cohort_grant_unavailable",
+        "window_authority_invalid",
+        "miner_background_service_failed",
+        "response_window_closed",
+        "request_transmission_limit",
+        "response_body_attempt_limit",
+        "assignment_count_limit",
+        "total_assignment_count_limit",
+        "active_window_limit",
+        "assignment_wire_limit",
+        "response_recovery_capacity",
+        "request_retired",
+    }
+)
+
 
 class ComponentResponseError(ValueError):
     def __init__(
@@ -313,6 +336,45 @@ async def _read_response_body(
     return bytes(prefix)
 
 
+async def _http_rejection_reason(
+    response: httpx.Response,
+    *,
+    limits: Limits,
+    remaining_seconds: float,
+    resource_ledger: ResourceLedger | None,
+    assignment_id: str,
+) -> str:
+    """Read a small optional diagnostic; it never authorizes retries or work."""
+    if remaining_seconds <= 0:
+        return "diagnostic_unavailable"
+    try:
+        raw = await asyncio.wait_for(
+            _read_response_body(
+                response,
+                min(4096, limits.maximum_response_body_bytes),
+                prefix=bytearray(),
+                resource_ledger=resource_ledger,
+                assignment_id=assignment_id,
+            ),
+            # Leave time for the parent exchange to retain the known HTTP error.
+            timeout=min(30, remaining_seconds / 2),
+        )
+        payload = json.loads(raw)
+    except (
+        asyncio.TimeoutError,
+        httpx.HTTPError,
+        httpx.StreamError,
+        ComponentResponseError,
+        ValueError,
+        RecursionError,
+    ):
+        return "diagnostic_unavailable"
+    reason = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(reason, str) and reason in _HTTP_REJECTION_REASONS:
+        return reason
+    return "unknown_rejection"
+
+
 def validate_response_envelope(
     raw_body: bytes,
     signature: str,
@@ -482,6 +544,7 @@ async def send_prepared_request(
     signature: str | None = None
     response_started = False
     body_prefix = bytearray()
+    exchange_deadline = time.monotonic() + min(timeout_seconds, remaining_response_seconds)
 
     async def exchange() -> None:
         nonlocal auth_headers, raw_body, received_at, signature, response_started
@@ -576,6 +639,19 @@ async def send_prepared_request(
                     )
                 if response.status_code != 200:
                     LOGGER.warning("miner_http_error status=%d", response.status_code)
+                    reason = await _http_rejection_reason(
+                        response,
+                        limits=limits,
+                        remaining_seconds=exchange_deadline - time.monotonic(),
+                        resource_ledger=resource_ledger,
+                        assignment_id=assignment_id,
+                    )
+                    LOGGER.warning(
+                        "miner_http_rejection status=%d reported_reason=%s request_sha256=%s",
+                        response.status_code,
+                        reason,
+                        request_digest(request),
+                    )
                     raise ComponentResponseError(
                         "http_error", f"miner returned HTTP {response.status_code}"
                     )
