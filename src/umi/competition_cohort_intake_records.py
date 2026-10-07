@@ -6,6 +6,7 @@ an independently verified finality proof or an admission certificate.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Literal
 
 from pydantic import Field
@@ -31,12 +32,22 @@ class RetainedCohortParticipation(StrictProtocolModel):
     observation: ExecutionBoundary
 
 
+_participation_decode_reuse = AssignmentVerificationReuse(64 * 1024**2, 1024)
+
+
 def read_participation(raw: bytes) -> RetainedCohortParticipation:
     if type(raw) is not bytes or not 0 < len(raw) <= 4 * 1024 * 1024:
         raise ValueError("retained cohort participation exceeds its byte bound")
+    # Only canonical decoding is reusable here. Callers still read the ledger
+    # and check its current indexes, authority and registration separately.
+    key = hashlib.sha256(raw).digest()
+    cached = _participation_decode_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
     retained = RetainedCohortParticipation.model_validate_json(raw)
     if canonical_json_bytes(retained) != raw:
         raise ValueError("retained cohort consent is not canonical")
+    _participation_decode_reuse.remember(key, key, retained)
     return retained
 
 

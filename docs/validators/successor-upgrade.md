@@ -1695,6 +1695,12 @@ retained parent chain. Current execution and reward authority remain independent
 verified.
 
 
+Canonical participation decoding additionally retains private decoded results for
+exact unchanged canonical row bytes, within 64 MiB and 1,024 entries. The reader
+still loads current ledger rows and checks their current indexes. Changed bytes,
+failed or noncanonical decoding and inherited process entries never reuse a
+result. This cache grants no registration, finality, admission or reward authority.
+
 Historical participation replay reuses a successful native admission result only
 for the exact retained consent, historical registration observation, policy and
 signed history bytes. The bounded process-local cache returns private copies;

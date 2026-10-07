@@ -578,3 +578,76 @@ def test_verified_seal_reuse_cannot_ignore_new_original_consent(intake, scenario
         db.execute("INSERT INTO cohort_consents VALUES (?,?,?,?,?,?,?,?)", changed)
     with pytest.raises(ValueError):
         intake.sealed(cohort, tip)
+
+
+@pytest.fixture
+def participation_decode_observation(intake, scenario, monkeypatch):
+    import umi.competition_cohort_intake_records as module
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    intake.retain(request_for(scenario), capture_at(210))
+    cohort = digest(scenario["intake_history"].plan)
+    _, raw = intake.export_records(cohort, maximum_bytes=1024**2, maximum_records=1)[0]
+    monkeypatch.setattr(module, "_participation_decode_reuse", AssignmentVerificationReuse())
+    original = module.RetainedCohortParticipation.model_validate_json
+    calls = []
+
+    def counted(cls, body):
+        calls.append(body)
+        return original(body)
+
+    monkeypatch.setattr(
+        module.RetainedCohortParticipation, "model_validate_json", classmethod(counted)
+    )
+    return module, raw, calls
+
+
+def test_participation_decode_reuse_keeps_private_results(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    expected = module.read_participation(raw)
+    caller = module.read_participation(raw)
+    object.__setattr__(caller.observation, "block", 999)
+    assert module.read_participation(raw) == expected
+    assert calls == [raw]
+
+
+def test_participation_decode_reuse_reads_changed_bytes(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    retained = module.read_participation(raw)
+    altered = retained.model_copy(
+        update={"observation": retained.observation.model_copy(update={"block": 211})}
+    )
+    changed = canonical_json_bytes(altered)
+    assert changed != raw
+    assert module.read_participation(changed) == altered
+    assert calls == [raw, changed]
+
+
+def test_participation_decode_reuse_does_not_remember_failure(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    module.read_participation(raw)
+    noncanonical = raw + b" "
+    for _ in range(2):
+        with pytest.raises(ValueError, match="not canonical"):
+            module.read_participation(noncanonical)
+    assert calls == [raw, noncanonical, noncanonical]
+    assert module.read_participation(raw)
+    assert len(calls) == 3
+
+
+def test_participation_decode_reuse_refuses_inherited_process_results(
+    participation_decode_observation,
+):
+    module, raw, calls = participation_decode_observation
+    expected = module.read_participation(raw)
+    module._participation_decode_reuse._pid = -1
+    assert module.read_participation(raw) == expected
+    assert calls == [raw, raw]
+
+
+@pytest.mark.parametrize("bad", [b"", b"x" * (4 * 1024**2 + 1), bytearray(b"{}")])
+def test_participation_decode_reuse_preserves_input_bound(participation_decode_observation, bad):
+    module, _, calls = participation_decode_observation
+    with pytest.raises(ValueError, match="byte bound"):
+        module.read_participation(bad)
+    assert not calls
