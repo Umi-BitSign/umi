@@ -5,6 +5,7 @@ installed coordinator, external reviewer host or chain effect is represented.
 """
 
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -255,7 +256,62 @@ async def test_service_wrong_origin_does_not_send(loop):
     s.origin = substituted
     report = await s.worker().poll_once()
     assert report["work_pending"] == 1 and report["last_pending_reason"] == "ValueError"
+    assert report["retry_count"] == 1
+    assert report["last_retry_details"][0]["reason_code"] == "validation_failed"
+    assert report["last_retry_details"][0]["source_frames"]
     assert not s.paths and s.p.model.calls == 0
+
+
+async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryable(tmp_path):
+    worker = object.__new__(ServiceWorkWorker)
+    worker.serial, worker.capacity = asyncio.Lock(), asyncio.Semaphore(1)
+    worker.journal = SimpleNamespace(root=tmp_path)
+    admission = SimpleNamespace(claim=SimpleNamespace(claim=SimpleNamespace(
+        hotkey="5HTFEEFA13x4hom2Nz5EFo7RSQ6PSAyCH1BgM8CbZhhdrSDb"
+    )))
+    worker._batch = lambda: [admission]
+    calls = 0
+
+    async def failing(_):
+        nonlocal calls
+        calls += 1
+        try:
+            raise OSError("https://private.example/?token=private-capability")
+        except OSError as error:
+            raise ValueError("private response bytes") from error
+
+    worker._advance = failing
+    for _ in range(2):
+        report = await worker.poll_once()
+        assert report["work_pending"] == 1 and report["work_complete"] == 0
+        assert report["retry_count"] == 1
+        assert [e["reason_code"] for e in report["last_retry_details"]] == [
+            "validation_failed", "os_error"
+        ]
+        assert report["retry_examples"] == [report["last_retry_details"]]
+        assert "private" not in json.dumps(report)
+        assert not report["chain_submission_authorized"]
+    assert calls == 2
+
+
+async def test_service_outer_retry_preserves_safe_diagnostics():
+    worker = object.__new__(ServiceWorkWorker)
+    stop = asyncio.Event()
+    reports = []
+
+    async def failing():
+        raise OSError("private journal path")
+
+    def report(value):
+        reports.append(value)
+        stop.set()
+
+    worker.poll_once = failing
+    await worker.run(stop, poll_seconds=0.01, report=report)
+    assert len(reports) == 1
+    assert reports[0]["status"] == "cohort_service_worker_retry"
+    assert reports[0]["last_retry_details"][0]["reason_code"] == "os_error"
+    assert "private" not in json.dumps(reports)
 
 
 async def test_service_shutdown_drains_active_port_and_releases_process_lease(loop):

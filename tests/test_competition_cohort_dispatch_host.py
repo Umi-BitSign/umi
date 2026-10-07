@@ -1,6 +1,7 @@
 """Configured native service dispatch; synthetic chain, HTTPS and inference boundaries."""
 
 import asyncio
+import json
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
@@ -42,6 +43,32 @@ from .test_competition_cohort_service_authority import shared_control_group as s
 from .test_competition_cohort_service_review import networked as networked
 from .test_competition_cohort_service_review import reviewed as reviewed
 from .test_competition_cohort_service_worker import loop as loop
+
+
+async def test_dispatch_logs_worker_failure_boundary(caplog):
+    report = {"status": "cohort_service_worker", "work_pending": 1,
+              "last_retry_details": [{"error_type": "builtins.ValueError",
+                                      "reason_code": "validation_failed",
+                                      "source_frames": []}]}
+
+    class Worker:
+        async def run(self, stop, *, poll_seconds, report):
+            report(value)
+
+    value = report
+    host = object.__new__(ServiceDispatchHost)
+    host.config = SimpleNamespace(poll_seconds=5)
+    host.last_reports = {}
+
+    async def worker(_):
+        return Worker()
+
+    host.worker = worker
+    with caplog.at_level("INFO", logger="umi.competition_cohort_dispatch_host"):
+        await host._run_queue("ab" * 32, asyncio.Event())
+    record = next(r for r in caplog.records if r.name == "umi.competition_cohort_dispatch_host")
+    logged = json.loads(record.getMessage().split(" report=", 1)[1])
+    assert logged == report == host.last_reports["ab" * 32]
 
 
 async def test_legacy_service_configuration_keeps_canonical_bytes(host):

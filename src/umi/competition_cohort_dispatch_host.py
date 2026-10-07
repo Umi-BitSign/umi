@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -215,10 +216,9 @@ class ServiceDispatchHost:
             def report(value):
                 self.last_reports[key] = value
                 logger.info(
-                    "cohort_service_dispatch catalog=%s status=%s pending=%s",
+                    "cohort_service_dispatch catalog=%s report=%s",
                     key,
-                    value["status"],
-                    value.get("work_pending"),
+                    json.dumps(value, sort_keys=True, separators=(",", ":")),
                 )
 
             await worker.run(stop, poll_seconds=self.config.poll_seconds, report=report)

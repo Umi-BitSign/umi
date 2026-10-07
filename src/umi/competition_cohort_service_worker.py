@@ -29,6 +29,7 @@ from .competition_cohort_service_terminal import ServiceTerminal, ServiceWorkTer
 from .competition_cohort_service_transport import ServiceWorkTransport
 from .competition_cohort_service_work import ServiceWorkAssignment
 from .competition_execution import execution_boundary
+from .competition_progress import _failure_details
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .endpoint_retirement import SignedEndpointRetirementReceipt
 from .open_competition import Signature, digest, identity
@@ -218,22 +219,31 @@ class ServiceWorkWorker:
             try:
                 rows = await run_owned_thread(self._batch)
                 miners = {identity(r.claim.claim.hotkey): asyncio.Lock() for r in rows}
+                retries = []
 
                 async def run(admission):
                     async with miners[identity(admission.claim.claim.hotkey)], self.capacity:
                         try:
                             return await self._advance(admission)
                         except _RETRY as error:
+                            retries.append(_failure_details(error))
                             return "pending", type(error).__name__
 
                 results = await self._gather(run(row) for row in rows)
                 pending = [reason for status, reason in results if status == "pending"]
+                examples = []
+                for details in retries:
+                    if details not in examples and len(examples) < 8:
+                        examples.append(details)
                 return {
                     "status": "cohort_service_worker",
                     "work_considered": len(rows),
                     "work_complete": sum(status == "completed" for status, _ in results),
                     "work_pending": len(pending),
                     "last_pending_reason": pending[-1] if pending else "",
+                    "retry_count": len(retries),
+                    "last_retry_details": retries[-1] if retries else [],
+                    "retry_examples": examples,
                     "request_closure_authorized": False,
                     "chain_submission_authorized": False,
                 }
@@ -280,6 +290,7 @@ class ServiceWorkWorker:
                     result = {
                         "status": "cohort_service_worker_retry",
                         "error_type": type(error).__name__,
+                        "last_retry_details": _failure_details(error),
                     }
                 if report is not None:
                     report(result)
