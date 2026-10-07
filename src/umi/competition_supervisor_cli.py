@@ -441,7 +441,12 @@ async def run_supervisor(
     from .competition_reward_boot import select_standing_boot
 
     standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
-    with hold_successor_startup_lease(anchor) as startup_lease:
+    with (
+        package_verification_session(
+            directory=Path(config.state_root) / "successor-package-verification"
+        ),
+        hold_successor_startup_lease(anchor) as startup_lease,
+    ):
         await _stop_startup_worker(config, startup_lease)
         repair_successor_source_permissions(anchor=anchor, limits=_materialization_limits())
         anchor.recheck()
@@ -497,8 +502,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     configure_progress_logging()
     try:
         options = {} if args.standing_config is None else {"standing_config": args.standing_config}
-        with package_verification_session():
-            asyncio.run(run_supervisor(args.config, **options))
+        asyncio.run(run_supervisor(args.config, **options))
     except KeyboardInterrupt:
         return 130
     except Exception:

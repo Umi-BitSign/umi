@@ -21,12 +21,15 @@ Retain the original host and controls while worker or recovery consumers use the
 Keep the maintenance approval while this executable is selected; remove it after
 a later installed transition no longer depends on the original receipt.
 
-The supervisor verifies each sealed package once within its process and binds
-reuse to the exact directory and file identities, policy, release and capacity
-bounds. Unchanged packages are not reread or rehashed on each load. A replaced or
-changed file cannot borrow that result. Restart currently rebuilds the parsed
-package cache. Reward authority and current chain state remain separate checks
-for each execution.
+The supervisor verifies each sealed package once and retains a small private
+verification receipt under its state root. The worker retains its receipt under
+the existing replay state root. Reuse binds the exact directory and file
+identities, policy, release and capacity bounds. Within a process, unchanged
+packages use the parsed object. After restart, the worker reconstructs the object
+from its sealed files without repeating payload hashes or publication replay.
+Receipts do not duplicate package evidence. A replaced or changed file cannot
+borrow a previous result. Reward authority and current chain state remain
+separate checks for every execution.
 
 While the chain weight interval is pending, an already stopped supervisor may
 reuse its completed transaction audit only within the same process and while the

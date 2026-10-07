@@ -445,7 +445,10 @@ def load_competition_package(
     cached = reuse.lookup(key)
     if cached is not None:
         return cached
-    verified = _load_competition_package(package_path, **arguments)
+    manifest_sha256 = reuse.verified_manifest(key)
+    verified = _load_competition_package(
+        package_path, **arguments, _verified_manifest_sha256=manifest_sha256
+    )
     # Verification can be slow. Retain it only while the exact sealed files
     # remain the same objects; later reads need no content hashing.
     if _package_reuse_key(package_path, **arguments) != (key, input_bytes):
@@ -508,6 +511,7 @@ def _load_competition_package(
     expected_policy_sha256: str,
     observed_release: CompetitionReleaseIdentity,
     limits: CompetitionPackageLimits,
+    _verified_manifest_sha256: str | None = None,
 ) -> VerifiedCompetitionPackage:
 
     _require_hex32(expected_package_sha256, "expected package digest")
@@ -537,7 +541,13 @@ def _load_competition_package(
         declared = {item.name: item for item in manifest.files}
         _preflight_declared_sizes(root_fd, declared, limits, len(manifest_body))
         policy = _read_package_model(
-            root_fd, declared, limits, "policy.json", CompetitionPolicy, "policy"
+            root_fd,
+            declared,
+            limits,
+            "policy.json",
+            CompetitionPolicy,
+            "policy",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         cutoff_certificate = _read_package_model(
             root_fd,
@@ -546,6 +556,7 @@ def _load_competition_package(
             "cutoff-certificate.json",
             SignedCutoffPublication,
             "cutoff certificate",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         settlement_certificate = _read_package_model(
             root_fd,
@@ -554,6 +565,7 @@ def _load_competition_package(
             "settlement-certificate.json",
             SignedSettlementPublication,
             "settlement certificate",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         retained_settlement = _read_package_model(
             root_fd,
@@ -562,6 +574,7 @@ def _load_competition_package(
             "settlement.json",
             CompetitionSettlement,
             "retained settlement",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         roster = _read_package_model(
             root_fd,
@@ -570,6 +583,7 @@ def _load_competition_package(
             "roster.json",
             CompetitionPackageRoster,
             "roster",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         evidence = _read_package_model(
             root_fd,
@@ -578,6 +592,7 @@ def _load_competition_package(
             "evidence.json",
             CompetitionPackageEvidence,
             "evidence",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         replay_limits = _read_package_model(
             root_fd,
@@ -586,6 +601,7 @@ def _load_competition_package(
             "replay-limits.json",
             PublicationReplayLimits,
             "publication replay limits",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         release_identity = _read_package_model(
             root_fd,
@@ -594,6 +610,7 @@ def _load_competition_package(
             "release-identity.json",
             CompetitionReleaseIdentity,
             "release identity",
+            previously_verified=_verified_manifest_sha256 is not None,
         )
         _check_exact_tree(root_fd)
         if root_before != _directory_identity(root_fd):
@@ -601,48 +618,53 @@ def _load_competition_package(
     if release_identity != observed_release:
         raise ValueError("package release identity differs from the observed release")
 
-    cutoff, settlement = _verify_publications(
-        policy,
-        roster,
-        cutoff_certificate,
-        settlement_certificate,
-        evidence,
-        retained_settlement,
-        replay_limits,
-    )
-    _verify_repair_release(evidence, release_identity)
-    expected = {
-        "policy_sha256": digest(policy),
-        "round_sha256": cutoff.round_sha256,
-        "round_sequence": cutoff.round.sequence,
-        "runtime_sha256": cutoff.runtime_sha256,
-        "cutoff_publication_sha256": cutoff_publication_digest(cutoff),
-        "cutoff_certificate_sha256": signed_cutoff_publication_digest(cutoff_certificate),
-        "settlement_publication_sha256": settlement_publication_digest(settlement),
-        "settlement_certificate_sha256": signed_settlement_publication_digest(
-            settlement_certificate
-        ),
-        "settlement_sha256": competition_settlement_digest(retained_settlement),
-        "authenticated_roster_sha256": authenticated_roster_digest(
-            roster.submissions,
-            maximum_bytes=replay_limits.maximum_roster_bytes,
-        ),
-        "independent_evidence_set_sha256": independent_evidence_set_digest(
-            _evidence_pairs(evidence),
-            maximum_bytes=replay_limits.maximum_evidence_bytes,
-        ),
-        "projection_sha256": digest(retained_settlement.projection),
-        "promotion_head_sha256": digest(retained_settlement.promotion_head),
-        "replay_limits_sha256": competition_replay_limits_digest(replay_limits),
-        "release_identity_sha256": competition_release_identity_digest(release_identity),
-    }
-    if any(getattr(manifest, key) != value for key, value in expected.items()):
-        raise ValueError("package manifest semantic binding mismatch")
+    if _verified_manifest_sha256 is None:
+        cutoff, settlement = _verify_publications(
+            policy,
+            roster,
+            cutoff_certificate,
+            settlement_certificate,
+            evidence,
+            retained_settlement,
+            replay_limits,
+        )
+        _verify_repair_release(evidence, release_identity)
+        expected = {
+            "policy_sha256": digest(policy),
+            "round_sha256": cutoff.round_sha256,
+            "round_sequence": cutoff.round.sequence,
+            "runtime_sha256": cutoff.runtime_sha256,
+            "cutoff_publication_sha256": cutoff_publication_digest(cutoff),
+            "cutoff_certificate_sha256": signed_cutoff_publication_digest(cutoff_certificate),
+            "settlement_publication_sha256": settlement_publication_digest(settlement),
+            "settlement_certificate_sha256": signed_settlement_publication_digest(
+                settlement_certificate
+            ),
+            "settlement_sha256": competition_settlement_digest(retained_settlement),
+            "authenticated_roster_sha256": authenticated_roster_digest(
+                roster.submissions,
+                maximum_bytes=replay_limits.maximum_roster_bytes,
+            ),
+            "independent_evidence_set_sha256": independent_evidence_set_digest(
+                _evidence_pairs(evidence),
+                maximum_bytes=replay_limits.maximum_evidence_bytes,
+            ),
+            "projection_sha256": digest(retained_settlement.projection),
+            "promotion_head_sha256": digest(retained_settlement.promotion_head),
+            "replay_limits_sha256": competition_replay_limits_digest(replay_limits),
+            "release_identity_sha256": competition_release_identity_digest(release_identity),
+        }
+        if any(getattr(manifest, key) != value for key, value in expected.items()):
+            raise ValueError("package manifest semantic binding mismatch")
 
     return VerifiedCompetitionPackage(
         schema="umi-verified-competition-replay-package/1",
         package_sha256=expected_package_sha256,
-        manifest_sha256=hashlib.sha256(manifest_body).hexdigest(),
+        manifest_sha256=(
+            hashlib.sha256(manifest_body).hexdigest()
+            if _verified_manifest_sha256 is None
+            else _verified_manifest_sha256
+        ),
         manifest=manifest,
         policy=policy,
         cutoff_certificate=cutoff_certificate,
@@ -769,6 +791,8 @@ def _read_package_model(
     name: str,
     model_type: type[_ModelT],
     label: str,
+    *,
+    previously_verified: bool = False,
 ) -> _ModelT:
     record = declared[name]
     body = _read_sealed_file(
@@ -776,8 +800,10 @@ def _read_package_model(
         name,
         maximum_bytes=_limit_for(name, limits),
         expected_size=record.size_bytes,
-        expected_sha256=record.sha256,
+        expected_sha256=None if previously_verified else record.sha256,
     )
+    if previously_verified:
+        return model_type.model_validate_json(body, strict=True)
     return _parse_canonical(model_type, body, label)
 
 

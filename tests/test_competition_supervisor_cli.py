@@ -21,10 +21,10 @@ from .test_competition_host_artifacts import staged as _staged_host_fixture
 
 
 @pytest.fixture
-def host(monkeypatch):
+def host(monkeypatch, tmp_path):
     events = []
     stop = asyncio.Event()
-    config = SimpleNamespace(poll_seconds=30)
+    config = SimpleNamespace(poll_seconds=30, state_root=str(tmp_path / "state"))
     # The CLI does not substitute these fixture controls in production. Real
     # activation/tree validation has separate owner/mount/signature coverage.
     inputs = SimpleNamespace(config=config)
