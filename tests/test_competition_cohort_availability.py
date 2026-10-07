@@ -6,7 +6,9 @@ import sqlite3
 import pytest
 
 from umi.competition_cohort_availability import (
+    CohortAvailabilityObservation,
     CohortServiceAvailability,
+    CohortServiceEpoch,
     pending_availability_progress,
 )
 from umi.competition_cohort_coordinator import AttestedCohortPhaseProgress
@@ -29,6 +31,103 @@ def observe(observer, harness, block, serving=True):
         serving=serving,
         genesis_signatures=harness.genesis_signatures,
     )
+
+
+def test_reopened_connections_reuse_verified_prefix_and_validate_foreign_append(
+    harness, monkeypatch
+):
+    epoch = CohortServiceEpoch()
+
+    def reopened(block, serving=True, lifetime=epoch):
+        with sqlite3.connect(harness.path) as db:
+            observer = CohortServiceAvailability(
+                CohortRecoveryStore(db), harness.policy, epoch=lifetime
+            )
+            return observe(observer, harness, block, serving)
+
+    first = reopened(200)
+    second = reopened(205)
+    original = CohortAvailabilityObservation.model_validate_json
+    parsed = []
+
+    def tracked(raw, **kwargs):
+        value = original(raw, **kwargs)
+        parsed.append(value.sequence)
+        return value
+
+    monkeypatch.setattr(CohortAvailabilityObservation, "model_validate_json", tracked)
+    assert reopened(205) == second
+    assert parsed == []
+    foreign = reopened(210, False, CohortServiceEpoch())
+    assert parsed == [first.sequence, second.sequence]
+    parsed.clear()
+    after = reopened(215)
+    assert parsed == [foreign.sequence]
+    assert after.predecessor_sha256 == digest(foreign)
+    assert after.unavailable_blocks == 10
+
+
+@pytest.mark.parametrize(
+    "corruption", ["counter", "predecessor", "delete_first", "noncanonical", "text"]
+)
+def test_reopened_verified_prefix_rejects_changed_older_bytes(harness, corruption):
+    epoch = CohortServiceEpoch()
+    observer = CohortServiceAvailability(harness.store, harness.policy, epoch=epoch)
+    first = observe(observer, harness, 200)
+    observe(observer, harness, 205)
+    if corruption == "delete_first":
+        harness.db.execute("DELETE FROM cohort_service_observations WHERE sequence=1")
+    else:
+        value = first.model_dump(mode="json", by_alias=True)
+        if corruption == "counter":
+            value["unavailable_blocks"] = 99
+        if corruption == "predecessor":
+            value["predecessor_sha256"] = "ab" * 32
+        raw = (
+            json.dumps(value).encode()
+            if corruption == "noncanonical"
+            else canonical_json_bytes(value)
+        )
+        if corruption == "text":
+            raw = raw.decode()
+        harness.db.execute("UPDATE cohort_service_observations SET body=? WHERE sequence=1", (raw,))
+    harness.db.commit()
+    with sqlite3.connect(harness.path) as db:
+        reopened = CohortServiceAvailability(CohortRecoveryStore(db), harness.policy, epoch=epoch)
+        with pytest.raises(ValueError, match=r"incomplete|inconsistent"):
+            observe(reopened, harness, 206)
+
+
+def test_verified_prefix_does_not_cross_database_identity(harness, monkeypatch, tmp_path):
+    epoch = CohortServiceEpoch()
+    observer = CohortServiceAvailability(harness.store, harness.policy, epoch=epoch)
+    observe(observer, harness, 200)
+    observe(observer, harness, 205)
+    other = tmp_path / "other.sqlite3"
+    with sqlite3.connect(other) as copied:
+        harness.db.backup(copied)
+    original = CohortAvailabilityObservation.model_validate_json
+    parsed = []
+
+    def tracked(raw, **kwargs):
+        value = original(raw, **kwargs)
+        parsed.append(value.sequence)
+        return value
+
+    monkeypatch.setattr(CohortAvailabilityObservation, "model_validate_json", tracked)
+    with sqlite3.connect(other) as copied:
+        peer = CohortServiceAvailability(CohortRecoveryStore(copied), harness.policy, epoch=epoch)
+        assert observe(peer, harness, 210).unavailable_blocks == 0
+    assert parsed == [1, 2]
+
+
+def test_verified_prefix_refuses_inherited_process_epoch(harness, monkeypatch):
+    epoch = CohortServiceEpoch()
+    observer = CohortServiceAvailability(harness.store, harness.policy, epoch=epoch)
+    observe(observer, harness, 200)
+    monkeypatch.setattr("umi.competition_cohort_availability.os.getpid", lambda: epoch._pid + 1)
+    with pytest.raises(ValueError, match="inherited"):
+        observe(observer, harness, 205)
 
 
 def extend(harness, block, amount):

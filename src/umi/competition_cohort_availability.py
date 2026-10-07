@@ -13,14 +13,17 @@ lock. Changing capacity may unblock collection without expiring any evidence.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_coordinator import CohortPhaseProgress
 from .competition_cohort_history import verify_cohort_history
@@ -104,6 +107,9 @@ class CohortServiceEpoch:
 
     def __init__(self):
         self._pid, self._identity = os.getpid(), uuid.uuid4().hex
+        self._observation_prefixes = AssignmentVerificationReuse(
+            maximum_bytes=1024**2, maximum_entries=64
+        )
 
     def identity(self) -> str:
         if self._pid != os.getpid():
@@ -148,6 +154,7 @@ class CohortServiceAvailability:
         self._cache: dict[
             tuple[str, str], tuple[tuple[int, int], CohortAvailabilityObservation]
         ] = {}
+        self._prefixes = {}
 
     def _version(self) -> tuple[int, int]:
         return self.db.execute("PRAGMA data_version").fetchone()[0], self.db.total_changes
@@ -167,22 +174,68 @@ class CohortServiceAvailability:
         except BaseException:
             self.db.rollback()
             self._cache = {}
+            self._prefixes = {}
             raise
 
     def _unavailable(self, prior, current) -> int:
         return unavailable_service_blocks(prior, current, self.gap)
+
+    def _prefix_key(self, cohort, phase):
+        self._epoch.identity()
+        filename = next(
+            row[2] for row in self.db.execute("PRAGMA database_list") if row[1] == "main"
+        )
+        if not filename:
+            return None
+        info = Path(filename).stat()
+        return (filename, info.st_dev, info.st_ino, digest(self.policy), self.gap, cohort, phase)
+
+    @staticmethod
+    def _hash_row(prefix, sequence, raw):
+        if type(sequence) is not int or not isinstance(raw, bytes):
+            raise ValueError("retained service observations are incomplete or inconsistent")
+        prefix.update(sequence.to_bytes(8, "big", signed=True))
+        prefix.update(len(raw).to_bytes(8, "big"))
+        prefix.update(raw)
+
+    def _remember_prefix(self, cohort, phase, prefix, prior):
+        self._prefixes[(cohort, phase)] = prefix.copy()
+        key = self._prefix_key(cohort, phase)
+        if key is not None and prior is not None:
+            self._epoch._observation_prefixes.remember(key, key, (prefix.hexdigest(), prior))
 
     def _last(self, cohort: str, phase: str) -> CohortAvailabilityObservation | None:
         version = self._version()
         cached = self._cache.get((cohort, phase))
         if cached is not None and cached[0] == version:
             return cached[1]
-        prior = None
-        for sequence, raw in self.db.execute(
-            "SELECT sequence,substr(body,1,16385) FROM cohort_service_observations "
-            "WHERE cohort=? AND phase=? ORDER BY sequence",
-            (cohort, phase),
-        ):
+
+        def rows():
+            return self.db.execute(
+                "SELECT sequence,substr(body,1,16385) FROM cohort_service_observations "
+                "WHERE cohort=? AND phase=? ORDER BY sequence",
+                (cohort, phase),
+            )
+
+        prior, prefix, cursor = None, hashlib.sha256(), rows()
+        key = self._prefix_key(cohort, phase)
+        saved = None if key is None else self._epoch._observation_prefixes.lookup(key, key)
+        if saved is not None:
+            expected, verified = saved
+            # Reopened host connections must not replay every old receipt.
+            # Match every byte of the verified prefix before reusing its result;
+            # changed/deleted rows fall back to the original native replay.
+            for sequence, raw in cursor:
+                self._hash_row(prefix, sequence, raw)
+                if sequence >= verified.sequence:
+                    if sequence == verified.sequence and prefix.hexdigest() == expected:
+                        prior = verified
+                    break
+            if prior is None:
+                cursor.close()
+                prefix, cursor = hashlib.sha256(), rows()
+        for sequence, raw in cursor:
+            self._hash_row(prefix, sequence, raw)
             receipt = CohortAvailabilityObservation.model_validate_json(raw)
             if (
                 len(raw) > 16384
@@ -196,6 +249,7 @@ class CohortServiceAvailability:
             ):
                 raise ValueError("retained service observations are incomplete or inconsistent")
             prior = receipt
+        self._remember_prefix(cohort, phase, prefix, prior)
         if prior is not None:
             self._cache[(cohort, phase)] = (version, prior)
         return prior
@@ -263,4 +317,7 @@ class CohortServiceAvailability:
             )
             version = self._version()
         self._cache[(cohort, receipt.phase)] = (version, receipt)
+        prefix = self._prefixes[(cohort, receipt.phase)].copy()
+        self._hash_row(prefix, receipt.sequence, raw)
+        self._remember_prefix(cohort, receipt.phase, prefix, receipt)
         return receipt

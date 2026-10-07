@@ -1707,6 +1707,15 @@ cached. Every queue read still checks its retained indexes, and a new claim must
 respect the current retained history. Reuse does not authorize execution,
 publication, service credit or a chain transaction.
 
+Availability sampling retains the verified observation prefix across the host's
+short-lived database connections in the same process epoch. Each read hashes the
+ordered sequence and exact retained row bytes before reusing that prefix; appended
+observations receive native validation, and changed or missing prefix bytes require
+full replay. The private cache is limited to 64 results within 1 MiB and binds the
+database path/inode, policy, cohort, phase and sampling gap. A new process epoch
+starts cold. Current readiness, history, finalized capture and outage accounting
+remain independently checked; the prefix does not certify phase completion.
+
 The intake owner also retains bounded private verified seals while it is running.
 Each lookup reads the exact seal, original consent rows and indexes, and selected
 model-acceptance bytes under the existing intake lock. Changed or missing inputs,
@@ -1730,8 +1739,10 @@ job per miner runs at a time; the total operational concurrency is unchanged.
 The existing private cursor advances only through considered admissions and
 survives restart. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
-include in-flight operations; neither those counts nor selected grants establish
-completed service work or reward credit.
+include in-flight operation counts, aggregate native stages and the age of the
+oldest stage. Stage state is removed after completion, failure or cooperative
+cancellation and includes no miner identity or request content. Neither those
+counts nor selected grants establish completed service work or reward credit.
 
 Request-vote collection proceeds when verified retained signatures satisfy the
 configured independent-group quorum, without requiring a redundant reviewer's

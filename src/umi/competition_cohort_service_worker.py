@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -90,6 +91,7 @@ class ServiceWorkWorker:
         self.batch_size, self.concurrency = batch_size, concurrency
         self.capacity = asyncio.Semaphore(concurrency)
         self.serial, self.vote_writes = asyncio.Lock(), asyncio.Lock()
+        self._operation_stages = {}
         with self.journal.transaction() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS service_worker_cursor "
@@ -186,35 +188,52 @@ class ServiceWorkWorker:
                 # Never retry persistence with the same authority/head after a wait.
                 await asyncio.sleep(min(1.0, remaining))
 
+    def _stage(self, work, name):
+        if work in self._operation_stages:
+            self._operation_stages[work] = (name, asyncio.get_running_loop().time())
+
     async def _advance(self, admission):
+        work = admission.work_sha256
+        self._stage(work, "assignment_read")
         assignment = await self._local(self.queue.assignment, admission.claim)
+        self._stage(work, "terminal_read")
         if await self._local(self.terminals.read, assignment) is not None:
             return "completed", "original_terminal_retained"
+        self._stage(work, "request_lineage")
         body = await self._local(self.requests.latest, admission.claim, self.transport.evaluator)
         if body is None:
+            self._stage(work, "request_preparation")
             body = await self._prepare(assignment)
         slot = service_grant_slot(body)
         # A prepared terminal survives a signing outage and needs no new media,
         # chain observation, grant delivery, retirement or model execution.
+        self._stage(work, "terminal_intent_read")
         intent = await self._local(
             self.journal.get, "service_terminal_intent", admission.work_sha256
         )
         if intent is not None:
+            self._stage(work, "terminal_preparation")
             terminal = await self._local(self.terminals.prepare, slot)
         else:
+            self._stage(work, "request_certificate")
             grant = await self._certificate(body)
+            self._stage(work, "miner_transport")
             result = await self.transport.advance(slot)
             if result.retirement is None:
                 return "pending", result.reason
             if result.response is None:
+                self._stage(work, "replacement_review")
                 certificate = await self._call(self.retry(grant, result.retirement))
                 # Native selection verifies quorum, exact parent, signed fence,
                 # original accepted work and the new live request window.
+                self._stage(work, "replacement_preparation")
                 await self._prepare(
                     assignment, parent=grant, decision=certificate, retirement=result.retirement
                 )
                 return "pending", "replacement_selected"
+            self._stage(work, "terminal_observation")
             source, capture = await self._call(self.observation(assignment))
+            self._stage(work, "terminal_preparation")
             terminal = await run_owned_thread(
                 self.terminals.prepare,
                 slot,
@@ -223,7 +242,9 @@ class ServiceWorkWorker:
                 source,
                 execution_boundary(capture),
             )
+        self._stage(work, "terminal_signing")
         signature = await self._call(self.sign(terminal))
+        self._stage(work, "terminal_retention")
         await self._local(self.terminals.retain, terminal, signature)
         return "completed", "terminal_retained"
 
@@ -323,11 +344,15 @@ class ServiceWorkWorker:
                 retries.append(details)
 
         async def perform(admission):
+            work = admission.work_sha256
+            self._operation_stages[work] = ("starting", asyncio.get_running_loop().time())
             try:
                 status, reason = await self._advance(admission)
                 return status, reason, []
             except _RETRY as error:
                 return "pending", type(error).__name__, _failure_details(error)
+            finally:
+                self._operation_stages.pop(work, None)
 
         if len(active) < self.concurrency:
             rows = await self._local(partial(self._batch, advance=False))
@@ -353,12 +378,19 @@ class ServiceWorkWorker:
         for details in retries:
             if details not in examples and len(examples) < 8:
                 examples.append(details)
+        stages = [self._operation_stages[work] for work in active if work in self._operation_stages]
+        oldest = min(stages, key=lambda value: value[1]) if stages else None
         return {
             "status": "cohort_service_worker",
             "work_considered": len(results),
             "work_complete": sum(status == "completed" for status, _ in results),
             "work_pending": len(pending),
             "in_flight_operations": len(active),
+            "in_flight_stage_counts": dict(sorted(Counter(stage for stage, _ in stages).items())),
+            "oldest_in_flight_stage": "" if oldest is None else oldest[0],
+            "oldest_in_flight_stage_seconds": (
+                0 if oldest is None else int(asyncio.get_running_loop().time() - oldest[1])
+            ),
             "last_pending_reason": pending[-1] if pending else "",
             "retry_count": len(retries),
             "last_retry_details": retries[-1] if retries else [],

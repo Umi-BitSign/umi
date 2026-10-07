@@ -179,6 +179,52 @@ async def finish(s):
     raise AssertionError(reports)
 
 
+@pytest.mark.parametrize("stage", ["request_preparation", "request_certificate", "miner_transport"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_rolling_reports_native_wait_stage_without_private_work(
+    loop, monkeypatch, stage, cancel
+):
+    worker = loop.worker(concurrency=1)
+    entered, release = asyncio.Event(), asyncio.Event()
+    owner, name = {
+        "request_preparation": (worker, "_prepare"),
+        "request_certificate": (worker, "_certificate"),
+        "miner_transport": (worker.transport, "advance"),
+    }[stage]
+    original = getattr(owner, name)
+
+    async def held(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, held)
+    active = {}
+    await worker._rolling_poll(active)
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        report = await worker._rolling_poll(active)
+        assert report["in_flight_operations"] == 1
+        assert report["in_flight_stage_counts"] == {stage: 1}
+        assert report["oldest_in_flight_stage"] == stage
+        assert report["oldest_in_flight_stage_seconds"] >= 0
+        assert not report["request_closure_authorized"]
+        assert not report["chain_submission_authorized"]
+        encoded = json.dumps(report)
+        assert loop.p.miner.hotkey_ss58 not in encoded
+        assert loop.c.assignment.admission.work_sha256 not in encoded
+        if cancel:
+            await worker._stop_tasks(task for _, task in active.values())
+        else:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*(task for _, task in active.values())), 120)
+        assert not worker._operation_stages
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    assert not worker._operation_stages
+
+
 async def test_native_service_work_completes_and_restarts_offline(loop):
     s = loop
     worker, value, reports = await finish(s)
