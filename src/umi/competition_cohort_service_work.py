@@ -11,6 +11,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_coordinator import replay_cohort_decisions
 from .competition_cohort_evaluation import (
     RecoverableEvaluationRound,
@@ -229,6 +231,10 @@ def review_service_catalog(
     return body
 
 
+_historical_service_admission_reuse = AssignmentVerificationReuse()
+
+
+@canonical_json_reuse()
 def review_service_admission(
     value: ServiceWorkAdmission,
     signed: SignedServiceWorkCatalog,
@@ -243,6 +249,19 @@ def review_service_admission(
     Original registration captures and the owner journal must be independently
     authenticated. An unsigned admission's ordinal is not a publication proof.
     """
+    # Reuse only a successful historical proof for exact inputs. Current phase,
+    # registration, finality, publication and execution checks remain outside.
+    key = (
+        digest(value),
+        digest(signed),
+        digest(round_),
+        digest(source),
+        digest(policy),
+        None if previous is None else digest(previous),
+    )
+    cached = _historical_service_admission_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
     value = ServiceWorkAdmission.model_validate_json(canonical_json_bytes(value))
     catalog = review_service_catalog(
         signed,
@@ -289,4 +308,5 @@ def review_service_admission(
         raise ValueError("service admission changed its claim, work, order or registration binding")
     if who in {identity(s.hotkey) for s in signed.signatures}:
         raise ValueError("service recipient cannot authorize its own work catalog")
+    _historical_service_admission_reuse.remember(key, key, value)
     return value

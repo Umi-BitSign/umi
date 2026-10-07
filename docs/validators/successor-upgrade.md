@@ -1699,6 +1699,14 @@ is never cached. Pending intake sealing still checks its current registration
 snapshot and current history independently; historical reuse grants no current
 execution or reward authority.
 
+Paid-service queue replay likewise reuses successful historical admission checks
+for exact admission, signed catalog, prepared round, order history, policy and
+predecessor bytes. The cache holds at most 256 private results within 64 MiB;
+changed inputs, restart or fork require native review. Failed review is never
+cached. Every queue read still checks its retained indexes, and a new claim must
+respect the current retained history. Reuse does not authorize execution,
+publication, service credit or a chain transaction.
+
 The intake owner also retains bounded private verified seals while it is running.
 Each lookup reads the exact seal, original consent rows and indexes, and selected
 model-acceptance bytes under the existing intake lock. Changed or missing inputs,
