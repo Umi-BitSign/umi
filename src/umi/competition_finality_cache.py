@@ -239,21 +239,29 @@ class VerifiedRegistrationCache:
         """Return one newly collected capture, sharing an existing collection."""
         return self._remember(await self._collect_raw(wait_seconds=self._public_wait))
 
-    async def collect_for_cohort_recovery(self) -> RegistrationCapture:
+    async def collect_for_cohort_recovery(self, *, minimum_block: int = 0) -> RegistrationCapture:
         """Collect owned fresh evidence outside the legacy policy interval.
 
         The caller must separately verify the admitted recovery authority,
         current cohort history and explicit miner consent. This method does not
         admit legacy submissions or relax head freshness and proof validation.
         """
+        if type(minimum_block) is not int or not 0 <= minimum_block <= 2**53 - 1:
+            raise ValueError("minimum registration block is invalid")
         try:
-            return self._current()
+            capture = self._current()
+            if capture.snapshot.block >= minimum_block:
+                return capture
         except VerifiedCaptureUnavailable:
             pass
+        # An age-valid capture can still precede a newly collected origin proof.
+        # Refresh through the same single-flight owner, never one RPC per waiter.
         raw = await self._collect_raw()
         self._require_open()
         capture = self._validate(raw, require_current_policy=False)
         self._check_head_age(capture)
+        if capture.snapshot.block < minimum_block:
+            raise VerifiedCaptureUnavailable("owned registration head precedes required block")
         return capture
 
     async def _collect_raw(self, *, wait_seconds: float | None = None) -> RegistrationCapture:

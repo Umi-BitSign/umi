@@ -1709,6 +1709,13 @@ objects are private copies. Failures, evictions and inherited fork results requi
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
 
+Paid-service origin confirmation requires the surrounding registration capture
+to reach the collected origin proof's owned block. An age-valid shared capture
+may be below that block; the owner requests a minimum-height refresh through the
+same single-flight collector. A genuinely lagging owned head stays pending.
+Current history, registration proof, freshness and same-block fact comparisons
+remain enforced. This refresh grants no new cohort or reward authority.
+
 Historical participation replay reuses a successful native admission result only
 for the exact retained consent, historical registration observation, policy and
 signed history bytes. The bounded process-local cache returns private copies;

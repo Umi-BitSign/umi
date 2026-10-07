@@ -320,6 +320,9 @@ def create_intake_app(
             finality_cache.collect_for_cohort_recovery,
             provider.retained_archive,
             provider=provider,
+            capture_at_least=lambda block: finality_cache.collect_for_cohort_recovery(
+                minimum_block=block
+            ),
         )
 
     @asynccontextmanager

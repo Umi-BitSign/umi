@@ -150,3 +150,36 @@ async def test_contention_recollects_authority_before_persisting(authority, monk
     with pytest.raises(ValueError):
         await owner.observe(c.assignment)
     assert len(attempts) == 2 and len(histories) == 2
+
+
+async def test_service_origin_confirms_newer_proof_despite_age_valid_cached_capture(
+    authority, monkeypatch
+):
+    c, owner = authority
+    native = owner.provider
+    old = await native.collect()
+    minima = []
+
+    class CachedRegistration:
+        async def collect(self):
+            return old
+
+        async def collect_at_least(self, block):
+            minima.append(block)
+            return await native.collect()
+
+    owner.provider = CachedRegistration()
+    original = owner.origins._collect_origin_locked
+
+    async def advanced(*args, **kwargs):
+        c.p.c.finality.ref = replace(
+            c.p.c.finality.ref,
+            block_number=old.snapshot.block + 1,
+            block_hash="0x" + f"{old.snapshot.block + 1:064x}",
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner.origins, "_collect_origin_locked", advanced)
+    result = await owner.origin(c.assignment)
+    assert result.block == old.snapshot.block + 1
+    assert minima == [result.block]

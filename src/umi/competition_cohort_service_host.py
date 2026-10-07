@@ -72,14 +72,27 @@ logger = logging.getLogger(__name__)
 class _SharedFreshFinality:
     """Delegate historical reads while coalescing every fresh capture."""
 
-    def __init__(self, provider, capture, policy):
+    def __init__(self, provider, capture, policy, capture_at_least=None):
         if provider is None or not callable(capture):
             raise ValueError("shared service finality is unavailable")
         self._provider, self._capture = provider, capture
         self.policy = policy
+        self._capture_at_least = capture_at_least
 
     async def collect(self):
         return await self._capture()
+
+    async def collect_at_least(self, block):
+        # Production uses the shared cache's minimum-height collection. Custom
+        # providers without that callback retain their fresh native collection.
+        capture = await (
+            self._provider.collect()
+            if self._capture_at_least is None
+            else self._capture_at_least(block)
+        )
+        if execution_boundary(capture).block < block:
+            raise OSError("owned registration head precedes required origin")
+        return capture
 
     def __getattr__(self, name):
         return getattr(self._provider, name)
@@ -376,6 +389,7 @@ class ServiceAdmissionHost:
         archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]],
         *,
         provider=None,
+        capture_at_least: Callable[[int], Awaitable[RegistrationCapture]] | None = None,
     ):
         self.config = ServiceAdmissionHostConfig.model_validate_json(canonical_json_bytes(config))
         c, policy = self.config, intake.policy
@@ -389,7 +403,9 @@ class ServiceAdmissionHost:
         self.history_exporter = None
         self.provider = provider
         self.finality = (
-            None if provider is None else _SharedFreshFinality(provider, capture, policy)
+            None
+            if provider is None
+            else _SharedFreshFinality(provider, capture, policy, capture_at_least)
         )
         if c.admission_owner is not None:
             c.admission_owner.check_policy(policy)
