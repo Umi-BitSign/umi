@@ -904,6 +904,22 @@ async def test_weight_start_needs_separate_authority_and_fixed_mode(adapter_case
     assert not case.item.encoded  # The host adapter has no signing or broadcast code.
 
 
+@pytest.mark.parametrize("mode", ["competition_replay", "competition_weights"])
+async def test_first_stage_after_stopped_audit_preserves_registry_inputs(adapter_case, mode):
+    case = adapter_case
+    case.select(mode)
+    await _stopped(case)
+    assert case.adapter._stopped_audit_matches()
+    await case.adapter.stage(case.selection)
+    assert case.adapter._stopped_audit_matches()
+    if mode == "competition_weights":
+        await case.adapter.start_weights(case.selection)
+    else:
+        await case.adapter.start_replay(case.selection)
+    assert case.container.events[-1] == "launch"
+    assert not case.item.encoded
+
+
 async def test_rate_wait_reuses_unchanged_audit_but_requires_fresh_proof(adapter_case):
     from umi.competition_weight_timing import WeightRateLimitWait
 

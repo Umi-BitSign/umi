@@ -38,6 +38,14 @@ Container absence is checked again, and startup still collects a fresh owned
 proof and repeats all preflight gates. Changed inputs, uncertain state or process
 restart require full recovery. Waiting never authorizes a transaction.
 
+First startup prepares its private replay directory before capturing stopped
+recovery inputs. Initial staging therefore cannot invalidate its own registry
+audit by creating that directory. Changed journals or audited packages still
+require full recovery before another start.
+Cached delivery leaves an already sealed package's mode unchanged, preserving
+the metadata bound by its audit. Its declared objects and signed package binding
+are still checked; changed content cannot inherit an earlier result.
+
 Service claim commits wait through local mutex contention without changing the
 retained signed request. Each retry recollects owned history, capture and proof
 inputs; it does not reuse a stale head. Validation or I/O failures still hold the

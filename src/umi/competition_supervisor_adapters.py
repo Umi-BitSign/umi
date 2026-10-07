@@ -371,6 +371,10 @@ class ProductionSuccessorRuntimeAdapter:
                 db.execute("INSERT INTO binding VALUES (1,?)", (self._binding,))
             elif old != [(1, self._binding)]:
                 raise SuccessorAdapterError("adapter registry belongs to another installation")
+        # First staging follows stopped recovery. Prepare this owned child
+        # before recovery snapshots the registry parent, so our own first replay
+        # does not invalidate its directory identity. Later changes still hold.
+        _prepare_private_directory(self.root / "preflight-replay", "successor preflight replay")
         self._staged: dict[str, _Prepared] = {}
         self._preflight: dict[str, OwnedCompetitionChainObservation] = {}
         self._stopped = False

@@ -389,15 +389,19 @@ def case(material_case, monkeypatch):  # noqa: F811
 
 
 async def test_fetch_replays_exact_package_without_activation_and_reuses_after_restart(case):
+    from umi.competition_weights import _recovery_package_snapshot
+
     result = await case.fetcher.fetch(case.selection)
     assert result.release_bundle_path.read_bytes() == _BUNDLE
     assert result.package_path.stat().st_mode & 0o777 == 0o500
     assert result.authorization_bytes is None
     assert not (case.item.state / "successor-v4" / "activation-source").exists()
     assert not hasattr(result, "chain_submission_authorized")
+    snapshot = _recovery_package_snapshot(result.package_path)
     requests = list(case.responses.requests)
     restarted = delivery.HTTPSSuccessorArtifactDelivery(**case.args)
     assert await restarted.fetch(case.selection) == result
+    assert _recovery_package_snapshot(result.package_path) == snapshot
     assert case.responses.requests == requests
 
 
