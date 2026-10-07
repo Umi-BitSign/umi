@@ -1686,9 +1686,13 @@ registration bridge.
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
 Endpoint response recovery reads the assignment and its already verified job
-as one pair, including when validating retained replacement ancestry. New
-caller-supplied assignments still require full native validation. Current
-execution and reward authority remain independently verified.
+as one pair, including when validating retained replacement ancestry. Successful
+selection proofs are reused only for the exact selection and assignment bytes,
+policy, cohort configuration, private journal identity and current process. The
+bounded cache returns private copies; changes, failed proofs, restart or fork
+require native verification again. Each replacement still reads and verifies its
+retained parent chain. Current execution and reward authority remain independently
+verified.
 
 
 Historical participation replay reuses a successful native admission result only

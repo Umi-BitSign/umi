@@ -13,6 +13,7 @@ import bittensor as bt
 import httpx
 
 from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_cohort_endpoint import (
     SignedRecoverableEndpointOrder,
     validate_recoverable_endpoint_transport,
@@ -68,6 +69,7 @@ class CohortEndpointResponseRecovery:
     ):
         self.origin, self.wallet, self.transport = origin, wallet, transport
         self.journal = origin.authority.journal
+        self._selection_reuse = AssignmentVerificationReuse()
         if identity(bt.resolve_signer(wallet, role="hotkey").ss58_address) != identity(
             self.journal.config.signer
         ):
@@ -83,11 +85,28 @@ class CohortEndpointResponseRecovery:
             )
 
     def _validate_one(self, selected: EndpointSelection, assignment=None):
-        selected = parse_endpoint_selection(canonical_json_bytes(selected))
-        if assignment is None:
+        raw = canonical_json_bytes(selected)
+        supplied = assignment is not None
+        if not supplied:
+            # This retained read still checks its conflict/index bindings and
+            # exact journal bytes before reusing its own static proof.
             assignment, job = self.journal.assignment_and_job(selected.assignment_slot)
-        else:
-            # New, caller-supplied assignments have no retained proof receipt.
+        assignment_raw = canonical_json_bytes(assignment)
+        key = assignment_reuse_key(
+            self.journal.journal,
+            selected.assignment_slot,
+            (raw, assignment_raw),
+            self.journal.config,
+            self.journal.policy,
+            self.journal.cohorts,
+        )
+        cache_slot = selection_slot(selected)
+        cached = self._selection_reuse.lookup(cache_slot, key)
+        if cached is not None:
+            return cached
+        selected = parse_endpoint_selection(raw)
+        if supplied:
+            # A new caller assignment has no receipt until native validation.
             job = self.journal.validate_assignment(assignment)
         validate = (
             validate_case_attempt
@@ -98,7 +117,9 @@ class CohortEndpointResponseRecovery:
         selection_grant(selected, assignment)
         if job != signed.order.job:
             raise ValueError("response recovery attempt differs from acknowledged assignment")
-        return selected, assignment, job
+        result = selected, assignment, job
+        self._selection_reuse.remember(cache_slot, key, result)
+        return result
 
     @canonical_json_reuse()
     def _validate(self, selected: EndpointSelection, assignment=None):
