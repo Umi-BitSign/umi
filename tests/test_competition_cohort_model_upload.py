@@ -582,3 +582,82 @@ async def test_delivery_http_reports_native_failure_stage_and_preserves_reservat
         )
         assert retry.status_code == 200
         assert h.owner.retry(h.request) == key
+
+
+@pytest.fixture
+def retained_decode(delivery, monkeypatch):
+    h = delivery
+    key = h.owner.reserve(h.request, capture_at(210))
+    original = type(h.request).model_validate_json
+    calls = []
+
+    def counted(cls, raw):
+        calls.append(raw)
+        return original(raw)
+
+    monkeypatch.setattr(type(h.request), "model_validate_json", classmethod(counted))
+    return h, key, calls
+
+
+def test_retained_upload_decode_reuse_keeps_private_results(retained_decode):
+    h, key, calls = retained_decode
+    expected = h.owner.retained(key)
+    caller = h.owner.retained(key)
+    object.__setattr__(caller.signed_submission.submission, "model_revision", "f" * 64)
+    assert h.owner.retained(key) == expected
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["hold", "delete", "replace", "noncanonical"])
+def test_retained_upload_decode_reads_current_journal_fence(retained_decode, change):
+    h, key, calls = retained_decode
+    h.owner.retained(key)
+    with h.owner.journal.transaction() as db:
+        if change == "hold":
+            db.execute("INSERT INTO holds VALUES (?)", (key,))
+        elif change == "delete":
+            db.execute("DELETE FROM records WHERE kind='upload' AND id=?", (key,))
+        elif change == "replace":
+            changed = h.request.model_copy(
+                update={
+                    "signed_submission": h.request.signed_submission.model_copy(
+                        update={
+                            "submission": h.request.signed_submission.submission.model_copy(
+                                update={
+                                    "model_revision": "f" * 64,
+                                }
+                            ),
+                        }
+                    ),
+                }
+            )
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='upload' AND id=?",
+                (canonical_json_bytes(changed), key),
+            )
+        else:
+            raw = db.execute(
+                "SELECT body FROM records WHERE kind='upload' AND id=?", (key,)
+            ).fetchone()[0]
+            db.execute("UPDATE records SET body=? WHERE kind='upload' AND id=?", (raw + b" ", key))
+    for _ in range(2):
+        with pytest.raises((ValueError, FileNotFoundError)):
+            h.owner.retained(key)
+    # Replacement schema failures/identity failures never enter reuse.
+    assert len(calls) == (3 if change == "replace" else 1)
+
+
+def test_retained_upload_decode_refuses_inherited_process_results(retained_decode):
+    h, key, calls = retained_decode
+    expected = h.owner.retained(key)
+    h.owner._retained_reuse._pid = -1
+    assert h.owner.retained(key) == expected
+    assert len(calls) == 2
+
+
+def test_retained_upload_decode_eviction_preserves_native_result(retained_decode):
+    h, key, calls = retained_decode
+    h.owner._retained_reuse.maximum_bytes = 1
+    assert h.owner.retained(key) == h.request
+    assert h.owner.retained(key) == h.request
+    assert len(calls) == 2

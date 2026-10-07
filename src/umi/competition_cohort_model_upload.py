@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_artifacts import (
     _artifact,
     _copy_verified,
@@ -26,6 +27,7 @@ from .competition_artifacts import (
     preserve_bundle,
     verify_preserved_bundle,
 )
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
 from .competition_cohort_model_static_review import (
@@ -181,6 +183,7 @@ class CohortModelUploads:
             maximum_bytes=config.maximum_metadata_bytes,
         )
         ensure_private_directory(self.root / "files")
+        self._retained_reuse = AssignmentVerificationReuse()
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
         request, key, sub = authorize_model_delivery(self.intake, request, capture)
@@ -215,15 +218,24 @@ class CohortModelUploads:
             )
         return key
 
+    @canonical_json_reuse()
     def retained(self, key: str) -> CohortParticipationRequest:
         if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
             raise ValueError("invalid model delivery identity")
-        value = self.journal.get("upload", key)
-        if value is None:
+        # Read current bytes and the journal conflict fence on every call. Only
+        # successful static decoding and its exact request identity are reusable;
+        # admission, capacity, payload and current authority remain separate.
+        raw = self.journal.get_raw("upload", key)
+        if raw is None:
             raise FileNotFoundError("model delivery is not reserved")
-        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(value))
+        identity = hashlib.sha256(raw).digest()
+        cached = self._retained_reuse.lookup(key, identity)
+        if cached is not None:
+            return cached
+        request = CohortParticipationRequest.model_validate_json(raw)
         if digest(request) != key:
             raise ValueError("retained model delivery changed")
+        self._retained_reuse.remember(key, identity, request)
         return request
 
     def retry(self, request: CohortParticipationRequest) -> str | None:

@@ -1701,6 +1701,14 @@ still loads current ledger rows and checks their current indexes. Changed bytes,
 failed or noncanonical decoding and inherited process entries never reuse a
 result. This cache grants no registration, finality, admission or reward authority.
 
+Retained model-upload requests similarly reuse successful static decoding and
+request-identity checks within a private, process-local 64 MiB / 256-entry cache.
+Every lookup reads the current canonical journal bytes and conflict fence first;
+a removed, changed or held reservation cannot use an older result. Returned
+objects are private copies. Failures, evictions and inherited fork results require
+ordinary decoding. Admission, capacity, payload verification and current authority
+are checked separately and are not granted by this reuse.
+
 Historical participation replay reuses a successful native admission result only
 for the exact retained consent, historical registration observation, policy and
 signed history bytes. The bounded process-local cache returns private copies;
