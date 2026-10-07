@@ -1610,6 +1610,23 @@ retained container, including a stopped one, prevents this automatic refresh.
 The supervisor must first reconcile and remove its own prior worker. Keep each
 validator on its dedicated service account.
 
+### Finality observer process diagnostics
+
+The owned finality sidecar reports a nonzero process exit as
+`finality_observer_process_failed`, with the exit code, received and expected
+record counts, and a fixed failure class. Its stderr is drained with bounded
+memory; raw messages, URLs and arguments are not copied into the report. Unknown
+messages remain `unknown`. Use these fields to locate the failure boundary before
+changing a provider or retry policy. They do not authenticate finality or prove
+RPC throttling. Invalid evidence still holds, and persisted verified headers
+remain the recovery boundary.
+
+The wrapper allows 30 seconds for normal process exit after the last verified
+record, and 30 seconds for cooperative termination before reaping a stalled
+observer. These are child-process cleanup allowances, not extensions of finality
+freshness or proof acceptance. Failure to start the diagnostic reader or selector
+still reaps the child and removes its private staged inputs.
+
 ### Authenticated RPC providers
 
 Successor hosts can select an operational RPC route with the service environment

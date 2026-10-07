@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -207,6 +209,129 @@ def test_subprocess_adapter_accepts_canonical_attestation(
     assert records[0].sequence == 0
     assert records[0].block.number == 10
     assert records[0].ancestry_complete_since_previous is False
+
+
+@pytest.mark.parametrize(
+    "footer,failure_class",
+    [
+        (b"startup timed out", "startup_timeout"),
+        (b"light client RPC timed out: secret-method", "rpc_timeout"),
+        (b"light client failed: https://secret.example/token", "light_client_failed"),
+        (b"finality_rollback", "finality_rollback"),
+        (b"secret-private-error", "unknown"),
+    ],
+)
+def test_failed_observer_drains_large_stderr_without_logging_private_details(
+    observer, tmp_path, caplog, footer, failure_class
+):
+    binary = tmp_path / "failed-observer"
+    _write_fixture_executable(binary)
+    diagnostic = b"umi-grandpa-finality-observer: " + footer + b"\n"
+    source = binary.read_text() + (
+        '\nsys.stderr.buffer.write(b"x" * (1024 * 1024) + b"\\n")\n'
+        f"sys.stderr.buffer.write({diagnostic!r})\n"
+        "raise SystemExit(7)\n"
+    )
+    binary.chmod(0o700)
+    binary.write_text(source)
+    binary.chmod(0o500)
+    selected = GrandpaFinalityObserver(
+        binary_path=binary,
+        expected_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+        chain_spec_path=observer._chain_spec_path,
+        expected_chain_spec_sha256=observer._expected_chain_spec_sha256,
+        expected_genesis_hash=observer._expected_genesis_hash,
+        bootstrap_block_number=observer.bootstrap_block_number,
+        bootstrap_block_hash=observer.bootstrap_block_hash,
+        record_timeout_seconds=10,
+    )
+    with pytest.raises(GrandpaFinalityObserverError, match="observer_failed"):
+        list(selected.attestations(minimum_finalized_block=10, maximum_records=2))
+    reports = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.grandpa_finality"
+    ]
+    assert reports == [
+        {
+            "status": "finality_observer_process_failed",
+            "returncode": 7,
+            "records_received": 1,
+            "expected_records": 2,
+            "failure_class": failure_class,
+        }
+    ]
+    assert "secret" not in caplog.text
+    assert not any(t.name == "umi-finality-diagnostics" for t in threading.enumerate())
+
+
+def test_observer_allows_graceful_exit_after_last_verified_record(observer, tmp_path):
+    binary = tmp_path / "slow-exit-observer"
+    binary_hash = _write_fixture_executable(binary, stall_after_output=3)
+    selected = GrandpaFinalityObserver(
+        binary_path=binary,
+        expected_binary_sha256=binary_hash,
+        chain_spec_path=observer._chain_spec_path,
+        expected_chain_spec_sha256=observer._expected_chain_spec_sha256,
+        expected_genesis_hash=observer._expected_genesis_hash,
+        bootstrap_block_number=observer.bootstrap_block_number,
+        bootstrap_block_hash=observer.bootstrap_block_hash,
+    )
+    records = list(selected.attestations(minimum_finalized_block=10))
+    assert len(records) == 1 and records[0].block.number == 10
+    assert not any(t.name == "umi-finality-diagnostics" for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("boundary", ["diagnostic_thread", "selector_open", "selector_register"])
+def test_observer_reaps_child_and_staging_when_reader_setup_fails(
+    observer, tmp_path, monkeypatch, boundary
+):
+    from umi import grandpa_finality as adapter
+
+    binary = tmp_path / "stalled-observer"
+    _write_fixture_executable(binary, stall_after_output=60)
+    selected = GrandpaFinalityObserver(
+        binary_path=binary,
+        expected_binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+        chain_spec_path=observer._chain_spec_path,
+        expected_chain_spec_sha256=observer._expected_chain_spec_sha256,
+        expected_genesis_hash=observer._expected_genesis_hash,
+        bootstrap_block_number=observer.bootstrap_block_number,
+        bootstrap_block_hash=observer.bootstrap_block_hash,
+    )
+    children = []
+    invoked = []
+    popen = subprocess.Popen
+    selector_factory = adapter.selectors.DefaultSelector
+
+    def spawn(command, *args, **kwargs):
+        invoked.append(Path(command[0]))
+        child = popen(command, *args, **kwargs)
+        children.append(child)
+        return child
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("reader_setup_unavailable")
+
+    monkeypatch.setattr(adapter.subprocess, "Popen", spawn)
+    if boundary == "diagnostic_thread":
+        monkeypatch.setattr(adapter.threading.Thread, "start", fail)
+    elif boundary == "selector_open":
+        monkeypatch.setattr(adapter.selectors, "DefaultSelector", fail)
+    else:
+
+        def selector():
+            value = selector_factory()
+            monkeypatch.setattr(value, "register", fail)
+            return value
+
+        monkeypatch.setattr(adapter.selectors, "DefaultSelector", selector)
+    with pytest.raises(RuntimeError, match="reader_setup_unavailable"):
+        list(selected.attestations(minimum_finalized_block=10))
+    assert len(children) == 1 and children[0].poll() is not None
+    assert children[0].stdout.closed and children[0].stderr.closed
+    assert not invoked[0].parent.exists()
+    assert not any(t.name == "umi-finality-diagnostics" for t in threading.enumerate())
 
 
 def test_bootstrap_allowance_does_not_delay_idle_observer_termination(tmp_path, monkeypatch):

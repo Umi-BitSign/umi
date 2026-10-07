@@ -1,68 +1,27 @@
 # Miner cohort updater
 
-`upgrade.py` is the stable updater for standard Linux miners managed by systemd.
-The operator supplies one policy choice: whether the miner intends to enter the
-public-model track. The current canonical manifest supplies the cohort, runtime,
-policies, eligible tracks, authority bindings and new state namespace.
+Operator commands, supported installations, status meanings and future-cohort
+upgrades are maintained in the [current miner connection guide](../../docs/miners/connection.md#upgrade-an-existing-miner).
 
-The updater requires the live public status to match the manifest's policy and
-track profile. It selects the runtime revision from that matching deployment
-record, so a cached static manifest cannot strand enrollment after a compatible
-runtime rollout. A policy or track change still requires a new manifest and is
-rejected until both public records agree.
+`upgrade.py` is a single-file bootstrap for Python 3.8 or newer. It discovers one
+running systemd miner, inspects its runtime, startup schema, service account and
+state paths, and selects a supported migration before changing services. Updates
+under the same cohort authority preserve existing startup bytes, journals and
+custom directory bindings in place, including root-run miners. Unsupported
+transitions stop before cutover.
 
-Run the current updater as one shell command:
+`current.json` is the canonical profile for policy, transport, track and authority
+bindings. A matching live deployment can supply a newer compatible source
+revision. Policy or track changes require matching public records; future cohort
+rules are selected by the manifest rather than inferred from cohort numbers.
 
-```sh
-curl -fsSLo /tmp/umi-miner-upgrade.py \
-  https://raw.githubusercontent.com/Umi-BitSign/umi/main/deploy/miner-upgrade/upgrade.py \
-  && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
-```
+Runtime installation uses the exact policy-selected CPython and dependency pins,
+isolated imports and an absolute `/usr/bin/env` executable. The service account
+verifies source and scoring pins before promotion. A failed runtime or health
+check keeps or restores the previous selected installation. Enrollment retries
+retain the exact signed request and claim instead of creating new signatures.
 
-Use `yes` instead of `no` to record public-model participation intent. The intent
-does not assert contribution rights or upload model bytes. A public-model
-submission still needs its ordinary signed consent, rights decision and bundle.
-
-The updater discovers exactly one running `umi.miner` systemd service. It derives
-the hotkey, model revision and serving origin from the retained deployment,
-downloads hash-bound current inputs, installs the pinned UMI runtime beside the
-old one, and creates a fresh policy state root. If the miner uses the standard
-Unix-socket model sidecar, the updater clones its configuration with the new
-transport binding and socket.
-
-The downloaded bootstrap runs with Python 3.8 or newer and locates the existing
-miner's CPython 3.12 interpreter. It builds an isolated dependency-complete
-runtime, verifies the exact Git revision and imports, then makes that runtime
-root-owned before a service can execute it.
-
-The live transaction stops the miner, switches systemd to hash-bound command
-files, starts the updated sidecar when present, and verifies exact sidecar and
-miner health. A failure restores the previous systemd overrides and starts the
-old services. Prior cohort databases and configuration remain intact.
-
-For an endpoint-enabled cohort, the installed timer retains and retries both the
-signed endpoint participation request and the signed service-work claim. It runs
-every 15 minutes and after reboot until the endpoint certificate and service-work
-admission are both retained. Rerunning the updater reuses those exact bytes.
-
-The script installs itself at `/usr/local/libexec/umi-miner-upgrade`. For later
-cohorts, run the same installed updater:
-
-```sh
-sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
-```
-
-The current manifest determines the allowed answer; the updater never infers a
-track from the cohort number. The selected C6-C10 profile has no endpoint
-pathway. A manifest that publishes that profile rejects `no`, records public-model
-intent, and leaves the previous endpoint service unchanged as a recoverable prior
-deployment. The operator then signs the ordinary rights declaration and submits
-the selected bundle. A future successor manifest may replace any unopened
-cohort's selected profile. Once a cohort opens, the accepted manifest remains
-fixed for that cohort. An endpoint-only manifest rejects `yes`.
-
-The automatic path deliberately refuses ambiguous or custom deployments before
-stopping anything: multiple miner services, a root-run miner, a non-systemd
-sidecar, an unrecognized entry point, mismatched sidecar config, or an existing
-incomplete runtime. Operators of custom containers should use the same manifest
-and health contract in their deployment tooling.
+Qualification lives in `tests/test_miner_upgrade.py`, including older startup
+layouts, repeated updates, custom paths, root services, policy-pin refusal and a
+PATH-shadowed `env` executable. Existing protocol state must never be reset to
+work around an unsupported upgrade.

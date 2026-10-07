@@ -956,9 +956,22 @@ def test_runtime_exact_pins_are_verified_before_promotion(tmp_path, monkeypatch,
     monkeypatch.setattr(upgrade, "policy_python", lambda *_args: "/root-owned/python3.12.14")
     target = upgrade.runtime_directory(manifest["runtime"], policy)
     calls = []
+    shadow_bin = tmp_path / "shadow-bin"
+    shadow_bin.mkdir()
+    shadow_marker = tmp_path / "shadow-env-ran"
+    shadow_env = shadow_bin / "env"
+    shadow_env.write_text(f"#!/bin/sh\ntouch '{shadow_marker}'\nexit 0\n")
+    shadow_env.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shadow_bin) + os.pathsep + os.environ.get("PATH", ""))
 
     def run(*args, **kwargs):
         calls.append((args, kwargs))
+        if "install" in args:
+            interpreter_index = next(
+                index for index, value in enumerate(args) if value.endswith("/venv/bin/python")
+            )
+            subprocess.run([*args[:interpreter_index], "/usr/bin/true"], check=True)
+            assert not shadow_marker.exists()
         if "venv" in args:
             python = Path(args[-1]) / "bin/python"
             python.parent.mkdir(parents=True)

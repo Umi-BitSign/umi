@@ -45,6 +45,7 @@ def scheduler(tmp_path, *, miners=(0, 1, 2), concurrency=2, batch_size=2):
     )
     worker.batch_size, worker.concurrency = batch_size, concurrency
     worker.capacity, worker.serial = asyncio.Semaphore(concurrency), asyncio.Lock()
+    worker._operation_stages = {}
     worker.transport = SimpleNamespace(timeout=30)
     return worker, rows
 

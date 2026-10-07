@@ -135,6 +135,13 @@ The public TLS edge must proxy `POST /v1/translate`,
 retirement route without changing paths, bodies or authentication headers. A
 static edge `/healthz` response does not prove those routes work.
 
+The assignment route carries the complete signed grant and accepts bodies up to
+**16 MiB**. Give that route the same allowance at every reverse proxy or tunnel;
+a generic 64-KiB JSON limit is too small for grants. Translation, response
+recovery and retirement keep their selected transport-policy limits. An HTTP 413
+on grant delivery leaves the assignment pending. Check the receiving process and
+edge body limits before rebuilding the miner or creating new enrollment state.
+
 ## Check the running miner
 
 Read `/healthz` directly from the protocol process. Expect:

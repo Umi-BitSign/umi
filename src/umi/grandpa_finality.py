@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 import selectors
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -52,6 +55,60 @@ _TRANSCRIPT_DOMAIN = b"umi-grandpa-finality-attestation-v1\0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _HEX_RE = re.compile(r"^0x(?:[0-9a-f]{2})+$")
+_LOGGER = logging.getLogger(__name__)
+
+
+class _ObserverDiagnostics:
+    """Drain stderr with bounded memory; retain only fixed failure labels."""
+
+    def __init__(self, stream):
+        self.failure_class = "unknown"
+        self._stream = stream
+        self._thread = threading.Thread(target=self._read, name="umi-finality-diagnostics")
+        self._thread.start()
+
+    def _line(self, line):
+        prefix = b"umi-grandpa-finality-observer: "
+        if not line.startswith(prefix):
+            return
+        message = line[len(prefix) :]
+        known = {
+            b"startup timed out": "startup_timeout",
+            b"finality subscription ended": "subscription_ended",
+            b"pinned timestamp storage unavailable": "timestamp_unavailable",
+            b"chain specification I/O failed": "chain_spec_io",
+            b"output failed": "output_failed",
+            b"finality_rollback": "finality_rollback",
+            b"ancestry_gap": "ancestry_gap",
+            b"timestamp_rollback": "timestamp_rollback",
+            b"record_size_limit": "record_size_limit",
+        }
+        self.failure_class = known.get(message, "unknown")
+        for beginning, label in (
+            (b"light client RPC timed out: ", "rpc_timeout"),
+            (b"light client failed: ", "light_client_failed"),
+            (b"JSON failed: ", "json_failed"),
+        ):
+            if message.startswith(beginning):
+                self.failure_class = label
+
+    def _read(self):
+        pending = b""
+        try:
+            while chunk := self._stream.read(4096):
+                lines = (pending + chunk).split(b"\n")
+                pending = lines.pop()[-4096:]
+                for line in lines:
+                    self._line(line)
+            self._line(pending)
+        except (OSError, ValueError):
+            self.failure_class = "diagnostic_unavailable"
+
+    def finish(self):
+        # The owner terminates/reaps the child first, closing its stderr writer.
+        self._thread.join()
+        self._stream.close()
+
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -480,7 +537,7 @@ class GrandpaFinalityObserver:
             return
         try:
             os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=1.0)
+            process.wait(timeout=30.0)
         except (OSError, subprocess.TimeoutExpired):
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -526,7 +583,7 @@ class GrandpaFinalityObserver:
                 [str(staged["binary"])],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 close_fds=True,
                 start_new_session=True,
                 env={"LANG": "C", "LC_ALL": "C"},
@@ -541,6 +598,8 @@ class GrandpaFinalityObserver:
             process.stdin.close()
         except OSError as error:
             self._terminate(process)
+            if stderr := getattr(process, "stderr", None):
+                stderr.close()
             staging.__exit__(None, None, None)
             raise GrandpaFinalityObserverError("config_write_failed") from error
 
@@ -550,8 +609,24 @@ class GrandpaFinalityObserver:
         previous_number: int | None = None
         previous_timestamp_ms: int | None = None
         buffer = bytearray()
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
+        diagnostics = None
+        selector = None
+        try:
+            assert process.stderr is not None
+            diagnostics = _ObserverDiagnostics(process.stderr)
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+        except BaseException:
+            if selector is not None:
+                selector.close()
+            self._terminate(process)
+            if diagnostics is not None:
+                diagnostics.finish()
+            elif process.stderr is not None:
+                process.stderr.close()
+            process.stdout.close()
+            staging.__exit__(None, None, None)
+            raise
         try:
             while expected_sequence < maximum_records:
                 if stop_requested is not None and stop_requested():
@@ -607,10 +682,24 @@ class GrandpaFinalityObserver:
                 previous_timestamp_ms = attestation.block.timestamp_ms
 
             try:
-                return_code = process.wait(timeout=2.0)
+                return_code = process.wait(timeout=30.0)
             except subprocess.TimeoutExpired as error:
                 raise GrandpaFinalityObserverError("observer_did_not_exit") from error
             if return_code != 0:
+                diagnostics.finish()
+                with suppress(Exception):
+                    _LOGGER.warning(
+                        json.dumps(
+                            {
+                                "status": "finality_observer_process_failed",
+                                "returncode": return_code,
+                                "records_received": expected_sequence,
+                                "expected_records": maximum_records,
+                                "failure_class": diagnostics.failure_class,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
                 raise GrandpaFinalityObserverError("observer_failed")
             tail = process.stdout.read(self._limits.maximum_record_bytes + 1)
             if expected_sequence != maximum_records or buffer.strip() or tail.strip():
@@ -618,6 +707,7 @@ class GrandpaFinalityObserver:
         finally:
             selector.close()
             self._terminate(process)
+            diagnostics.finish()
             staging.__exit__(None, None, None)
 
     def validate_attestation(
