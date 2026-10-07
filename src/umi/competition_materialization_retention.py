@@ -8,7 +8,9 @@ module never deletes current, the registry, delivery packages or partial stages.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import stat
 import uuid
 
@@ -155,9 +157,15 @@ def _candidate_identity(path):
         )
     finally:
         os.close(fd)
-    return material.parse_canonical_successor_supervisor_directive_history(
-        payload
-    ).head.directive_sha256
+    # This is only an exclusion hint from an already sealed stage, never
+    # retirement authority. Fully replay the page and retained source below
+    # whenever the declared identity matches a recovery run.
+    page = json.loads(payload)
+    head = page.get("head") if isinstance(page, dict) else None
+    identity = head.get("directive_sha256") if isinstance(head, dict) else None
+    if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+        raise material.SuccessorMaterializationError("invalid cached candidate identity")
+    return identity
 
 
 @log_phase("cache_retirement")

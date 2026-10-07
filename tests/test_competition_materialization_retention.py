@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from dataclasses import replace
@@ -9,6 +10,7 @@ import pytest
 
 from umi import competition_materialization as material
 from umi import competition_materialization_retention as retention
+from umi.validator_supervisor import ValidatorSupervisorError
 
 from .test_competition_materialization import (  # noqa: F401
     _stage,
@@ -105,6 +107,47 @@ def test_candidate_identity_change_does_not_authorize_deletion(installed, monkey
     with pytest.raises(ValueError, match="candidate identity changed"):
         _retire(installed, {candidate: (installed.case.selection, installed.case.files)})
     installed.first.recheck()
+
+
+def test_candidate_filter_does_not_replay_history(installed, monkeypatch):
+    def no_replay(*args, **kwargs):
+        raise AssertionError("unmatched stage filtering must not replay history")
+
+    monkeypatch.setattr(
+        material, "parse_canonical_successor_supervisor_directive_history", no_replay
+    )
+    assert (
+        retention._candidate_identity(installed.first.path)
+        == installed.case.selection.directive_sha256
+    )
+
+
+@pytest.mark.parametrize("declared", [None, True, "g" * 64, "a" * 63])
+def test_invalid_candidate_hint_never_authorizes_retirement(installed, monkeypatch, declared):
+    monkeypatch.setattr(
+        material,
+        "_read_at",
+        lambda *args: json.dumps({"head": {"directive_sha256": declared}}).encode(),
+    )
+    with pytest.raises(ValueError, match="invalid cached candidate identity"):
+        retention._candidate_identity(installed.first.path)
+    assert installed.first.path.exists()
+
+
+def test_declared_hint_cannot_replace_full_retirement_validation(installed, monkeypatch):
+    original = material._read_at
+    stage_inode = installed.first.path.stat().st_ino
+    fake = json.dumps({"head": {"directive_sha256": "a" * 64}}).encode()
+
+    def changed_hint(fd, *args, **kwargs):
+        return fake if os.fstat(fd).st_ino == stage_inode else original(fd, *args, **kwargs)
+
+    monkeypatch.setattr(material, "_read_at", changed_hint)
+    # A matching hint still reaches full native parsing and cannot authorize
+    # deletion of an incomplete page.
+    with pytest.raises(ValidatorSupervisorError, match="successor_history_noncanonical"):
+        _retire(installed, {"a" * 64: (installed.case.selection, installed.case.files)})
+    assert installed.first.path.exists()
 
 
 def test_quota_accounting_does_not_read_file_contents(installed, monkeypatch):
