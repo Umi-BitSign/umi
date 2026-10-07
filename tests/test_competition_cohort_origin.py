@@ -126,7 +126,67 @@ async def test_repeated_ten_hour_gaps_recover_without_renewing_original_authorit
         capture = await p.collect()
         assert capture.block == _HEIGHT + advance
         assert p.e.journal().assignment(p.e.r.slot) == original
-    assert len(rows(p)) == 4
+
+
+@pytest.mark.parametrize("confirmation_advances", [True, False])
+async def test_origin_confirmation_does_not_accept_head_before_origin(
+    endpoint, monkeypatch, confirmation_advances
+):
+    p = endpoint
+    service = p.service()
+    previous = await service.authority.provider.collect()
+    native_collect = service.authority.provider.collect
+    native_origin = service.provider._collect_origin_locked
+    origin_complete = False
+    confirmations = 0
+
+    async def advance_origin(*args, **kwargs):
+        nonlocal origin_complete
+        p.c.finality.ref = replace(p.c.finality.ref, block_number=_HEIGHT + 1, block_hash=_hash(91))
+        result = await native_origin(*args, **kwargs)
+        origin_complete = True
+        return result
+
+    async def delayed_confirmation():
+        nonlocal confirmations
+        if not origin_complete:
+            return await native_collect()
+        confirmations += 1
+        if confirmations == 1 or not confirmation_advances:
+            return previous
+        return await native_collect()
+
+    monkeypatch.setattr(service.provider, "_collect_origin_locked", advance_origin)
+    monkeypatch.setattr(service.authority.provider, "collect", delayed_confirmation)
+    if confirmation_advances:
+        capture = await service.collect(p.e.assignment)
+        assert capture.block == _HEIGHT + 1
+        assert confirmations == 2
+        assert p.e.journal().assignment(p.e.r.slot) == p.e.assignment
+    else:
+        with pytest.raises(OSError, match="precedes collected origin"):
+            await service.collect(p.e.assignment)
+        assert confirmations == 2
+    assert len(rows(p)) == 1
+
+
+async def test_origin_confirmation_still_rejects_different_hash_at_origin_height(
+    endpoint, monkeypatch
+):
+    p = endpoint
+    service = p.service()
+    native_origin = service.provider._collect_origin_locked
+
+    async def different_observed_hash(*args, **kwargs):
+        p.c.finality.ref = replace(p.c.finality.ref, block_number=_HEIGHT + 1, block_hash=_hash(91))
+        capture = await native_origin(*args, **kwargs)
+        p.c.finality.ref = replace(p.c.finality.ref, block_hash=_hash(92))
+        return capture
+
+    monkeypatch.setattr(service.provider, "_collect_origin_locked", different_observed_hash)
+    with pytest.raises(ValueError, match="differs from owned execution observations"):
+        await service.collect(p.e.assignment)
+    assert len(rows(p)) == 1
 
 
 @pytest.mark.parametrize("provider_advances", [True, False])

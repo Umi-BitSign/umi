@@ -1716,6 +1716,14 @@ same single-flight collector. A genuinely lagging owned head stays pending.
 Current history, registration proof, freshness and same-block fact comparisons
 remain enforced. This refresh grants no new cohort or reward authority.
 
+Endpoint origin confirmation likewise requires an owned head at least as high
+as the independently collected origin proof. It recollects once after a lower
+head or a concurrent journal advance, rechecking unchanged authority before and
+after each capture. Persistent lag remains pending; changed authority and
+same-height hash or state-root disagreement still prevent execution. Recollection
+uses the native provider's unchanged-head registration reuse and does not renew
+the original assignment or require a miner upgrade.
+
 Historical participation replay reuses a successful native admission result only
 for the exact retained consent, historical registration observation, policy and
 signed history bytes. The bounded process-local cache returns private copies;

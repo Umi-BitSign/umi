@@ -100,7 +100,7 @@ class CohortEndpointOrigin:
                 public_https_origin(job.submission.submission.endpoint_url),
                 recovery=scope,
             )
-            finished = await self._confirm(assignment, source)
+            finished = await self._confirm(assignment, source, minimum_block=capture.block)
             if not started.block <= capture.block <= finished.block or any(
                 boundary.block == capture.block
                 and (boundary.block_hash, boundary.state_root)
@@ -112,7 +112,11 @@ class CohortEndpointOrigin:
             return capture
 
     async def _confirm(
-        self, assignment: CohortExecutionAssignment, source: CohortOrderHistory
+        self,
+        assignment: CohortExecutionAssignment,
+        source: CohortOrderHistory,
+        *,
+        minimum_block: int,
     ) -> ExecutionBoundary:
         """Recheck unchanged authenticated authority without repeating slow replay."""
         authority = self.authority
@@ -136,15 +140,19 @@ class CohortEndpointOrigin:
                 if row != (digest(source),):
                     raise ValueError("retained endpoint authority changed during collection")
 
-        # Another owned operation may advance the shared journal while the
-        # post-collection history check waits. Recollect once, retaining all
-        # authority and finality checks; a genuinely lagging provider still holds.
+        # The independent origin observer or another owned operation may advance
+        # while confirmation waits. Recollect once, retaining all authority and
+        # finality checks; a genuinely lagging provider still holds.
         for attempt in range(2):
             await unchanged()
             boundary = execution_boundary(
                 await wait_for_owned(authority.provider.collect(), timeout=timeout)
             )
             await unchanged()
+            if boundary.block < minimum_block:
+                if attempt:
+                    raise OSError("owned confirmation precedes collected origin")
+                continue
             try:
                 await run_owned_thread(retained, boundary)
             except FinalizedHeadRegression:
