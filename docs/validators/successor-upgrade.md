@@ -1787,3 +1787,10 @@ verified block; their evidence digests need not be identical. The original
 request and its transcript bytes remain unchanged in the signing journal. A
 missing independent block or disagreement on its hash, state root, time or pins
 still prevents a vote.
+
+Supplied execution assignments also reuse their exact successful static proof
+check during repeated reviewer sweeps. That cache is private and bounded by bytes
+and entries, and changes to the recipient, policy, process or journal
+materialization require verification again. It does not retain an authority,
+terminal decision or permission to execute; current journal and history checks
+remain required by the execution worker.

@@ -128,6 +128,67 @@ async def test_execution_changed_retained_assignment_is_not_reused(execution):
         journal.assignment(e.r.slot)
 
 
+async def test_supplied_execution_assignment_reuses_only_static_proofs(execution, monkeypatch):
+    from umi import competition_cohort_execution_journal as module
+
+    journal = execution.journal()
+    expected = journal.validate_assignment(execution.assignment)
+    monkeypatch.setattr(module, "verify_recovery_quorum", unexpected_replay)
+    saved = journal.validate_assignment(execution.assignment)
+    assert saved == expected and saved is not expected
+    object.__setattr__(saved, "cases", ())
+    assert journal.validate_assignment(execution.assignment) == expected
+    # A static result cannot stand in for a fresh retained record/conflict check.
+    with pytest.raises(FileNotFoundError):
+        journal.assignment(execution.r.slot)
+
+
+async def test_supplied_execution_assignment_changed_signature_is_rejected(execution):
+    journal = execution.journal()
+    journal.validate_assignment(execution.assignment)
+    changed = execution.assignment.model_copy(
+        update={
+            "certificate": execution.assignment.certificate.model_copy(update={"signatures": ()})
+        }
+    )
+    with pytest.raises(ValueError):
+        journal.validate_assignment(changed)
+    assert journal.validate_assignment(execution.assignment) == execution.job
+
+
+async def test_supplied_execution_assignment_changed_recipient_is_rejected(execution):
+    journal = execution.journal()
+    journal.validate_assignment(execution.assignment)
+    other = next(who for who in execution.r.h.order.evaluators if who != journal.config.signer)
+    journal.config = journal.config.model_copy(update={"signer": other})
+    with pytest.raises(ValueError, match="another evaluator"):
+        journal.validate_assignment(execution.assignment)
+
+
+@pytest.mark.parametrize("changed_context", ["policy", "materialization", "process"])
+async def test_supplied_execution_assignment_context_changes_reverify(
+    execution, monkeypatch, changed_context
+):
+    from umi import competition_assignment_reuse as reuse
+    from umi import competition_cohort_execution_journal as module
+
+    journal = execution.journal()
+    journal.validate_assignment(execution.assignment)
+    if changed_context == "policy":
+        journal.policy = journal.policy.model_copy(update={"evaluation_runtime_sha256": "f" * 64})
+    elif changed_context == "materialization":
+        replacement = journal.journal.path.with_suffix(".copy")
+        shutil.copyfile(journal.journal.path, replacement)
+        replacement.chmod(0o600)
+        replacement.replace(journal.journal.path)
+    else:
+        owner = journal._supplied_assignment_reuse._pid
+        monkeypatch.setattr(reuse.os, "getpid", lambda: owner + 1)
+    monkeypatch.setattr(module, "verify_recovery_quorum", unexpected_replay)
+    with pytest.raises(AssertionError, match="reverified"):
+        journal.validate_assignment(execution.assignment)
+
+
 def test_assignment_reuse_capacity_and_caller_isolation():
     cache = AssignmentVerificationReuse(maximum_bytes=32, maximum_entries=1)
     value = {"answer": "one"}

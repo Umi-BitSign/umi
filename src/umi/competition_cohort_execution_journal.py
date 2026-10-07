@@ -7,6 +7,7 @@ this local journal does not fence a migrated host or authorize reward weights.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -115,6 +116,7 @@ class CohortExecutionJournal:
             raise ValueError("execution journal evaluator is not in its policy")
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
         self._assignment_reuse = AssignmentVerificationReuse()
+        self._supplied_assignment_reuse = AssignmentVerificationReuse()
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -154,8 +156,18 @@ class CohortExecutionJournal:
         finally:
             os.close(fd)
 
+    @canonical_json_reuse()
     def validate_assignment(self, value: CohortExecutionAssignment) -> RecoverableExecutionJob:
-        value = CohortExecutionAssignment.model_validate_json(canonical_json_bytes(value))
+        """Check static supplied proofs; this does not grant execution authority."""
+        raw = canonical_json_bytes(value)
+        slot = hashlib.sha256(raw).hexdigest()
+        key = assignment_reuse_key(
+            self.journal, slot, (raw,), self.config, self.policy, self.cohorts
+        )
+        cached = self._supplied_assignment_reuse.lookup(slot, key)
+        if cached is not None:
+            return cached
+        value = CohortExecutionAssignment.model_validate_json(raw)
         order = value.certificate.order
         verify_recovery_quorum(order, value.certificate.signatures, self.policy)
         if any(
@@ -166,7 +178,9 @@ class CohortExecutionJournal:
         receipt = check_delivery_receipt(value.certificate, value.delivery)
         if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
             raise ValueError("execution delivery belongs to another evaluator")
-        return recoverable_order_job(order, self.config.signer)
+        job = recoverable_order_job(order, self.config.signer)
+        self._supplied_assignment_reuse.remember(slot, key, job)
+        return job
 
     def retain(self, value: CohortExecutionAssignment, source: CohortOrderHistory, block: int):
         job = self.validate_assignment(value)

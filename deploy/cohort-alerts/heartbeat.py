@@ -399,8 +399,16 @@ def heartbeat(
         result["schema"] = "umi-service-heartbeat/3"
         result["resources"] = resources
     if lifecycle_cohorts:
-        latest_round, public_rounds = public_round_index(public_round_index_url)
         result["schema"] = "umi-service-heartbeat/4"
+        try:
+            latest_round, public_rounds = public_round_index(public_round_index_url)
+        except (OSError, ValueError, TimeoutError):
+            # An unavailable public API must not suppress the independent host
+            # heartbeat. The monitor treats null lifecycle observations as
+            # missing, preserving its existing lifecycle alarm rather than
+            # claiming publication or progress succeeded.
+            result["lifecycles"] = {name: None for name in lifecycle_cohorts}
+            return result
         result["lifecycles"] = {
             name: (
                 None
