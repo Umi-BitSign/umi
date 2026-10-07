@@ -1695,3 +1695,12 @@ a different database inode, configuration, policy or history prefix require nati
 reconstruction again. Restart begins without this process cache. Publication still
 checks the current registration observation, history adoption and closure evidence;
 a reused seal grants no current authority or service credit.
+
+Weight-cache accounting permits a known SQLite WAL, SHM or rollback-journal
+sidecar to disappear after directory enumeration: SQLite can remove it when a
+connection closes or checkpoints. This does not permit missing persistent
+databases or namespace budgets, unsafe ownership, links, unknown files or an
+exhausted byte budget. Existing cache and proof records remain in place; current
+chain authority is still collected independently. Paid service owner exports
+likewise wait for genuine local journal contention within their operation budget
+rather than treating a busy assignment read as unavailable evidence.

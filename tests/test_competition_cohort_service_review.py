@@ -19,6 +19,7 @@ from umi.competition_cohort_service_export import (
     PATH,
     ServiceWorkExporter,
     ServiceWorkHTTPClient,
+    ServiceWorkLookup,
     ServiceWorkReader,
     SignedServiceWorkResponse,
     service_work_routes,
@@ -39,6 +40,7 @@ from umi.competition_cohort_service_vote_http import ServiceVotePeer, service_vo
 from umi.competition_execution import execution_boundary
 from umi.competition_historical_registration import HistoricalRegistrationProvider
 from umi.open_competition import digest, sign_object, verify_signature
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_service_authority import base_policy as base_policy
@@ -68,6 +70,28 @@ from .test_competition_cohort_service_grants import fresh_window
 from .test_competition_cohort_service_worker import finish, history_tip, wallet
 from .test_competition_cohort_service_worker import loop as loop
 from .test_competition_historical_registration import change_block
+
+
+async def test_service_owner_lookup_waits_for_actual_queue_contention(reviewed, monkeypatch):
+    original = reviewed.c.queue.assignment
+    attempts = 0
+
+    def assignment(claim):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, 11)
+        return original(claim)
+
+    monkeypatch.setattr(reviewed.c.queue, "assignment", assignment)
+    request = ServiceWorkLookup(
+        schema="umi-service-work-lookup/1", claim=reviewed.c.claim, challenge="cd" * 32
+    )
+    result = SignedServiceWorkResponse.model_validate_json(await reviewed.exporter.respond(request))
+    assert attempts == 2
+    assert result.response.challenge == request.challenge
+    assert result.response.assignment == reviewed.c.assignment
+    verify_signature(result.response, result.signature)
 
 
 @pytest.fixture

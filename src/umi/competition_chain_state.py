@@ -76,15 +76,28 @@ _CACHE_DATABASE_FILES = frozenset(
     for name in ("registrations.sqlite3", "finality.sqlite3")
     for suffix in ("", "-wal", "-shm", "-journal")
 )
+_CACHE_TRANSIENT_FILES = frozenset(
+    name + suffix
+    for name in ("registrations.sqlite3", "finality.sqlite3")
+    for suffix in ("-wal", "-shm", "-journal")
+)
 _CACHE_BUDGET_FILE = "namespace-budget.json"
 _CACHE_LOCK_FILE = "namespace.lock"
 _CACHE_NAMESPACE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _cache_file_info(directory: int, name: str, *, budget: bool = False):
-    descriptor = os.open(
-        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
-    )
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
+        )
+    except FileNotFoundError:
+        # SQLite removes sidecars on checkpoint/connection close. A directory
+        # entry can therefore disappear after scandir without cache corruption.
+        # Missing persistent databases/budgets and every other error still hold.
+        if not budget and name in _CACHE_TRANSIENT_FILES:
+            return 0
+        raise
     try:
         info = os.fstat(descriptor)
         if (
