@@ -1714,6 +1714,18 @@ sends, signatures and journal writes finish cooperative cancellation. Reports
 include in-flight operations; neither those counts nor selected grants establish
 completed service work or reward credit.
 
+Request-vote collection proceeds when verified retained signatures satisfy the
+configured independent-group quorum, without requiring a redundant reviewer's
+response. Every certificate still passes native policy verification; votes
+from the same group cannot replace a required independent group. Outstanding
+peer requests drain cooperatively, and already committed votes remain recoverable.
+
+Current authority-history reads use the intake owner's preferred queue. Reads
+remain exclusive and validate the same private database and configuration; they
+cannot interrupt the current owner. After at most eight preferred reads, queued
+background work gets a turn. Preference changes waiting order, not authority,
+retained request bytes or persistence rules.
+
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same
 verified block; their evidence digests need not be identical. The original

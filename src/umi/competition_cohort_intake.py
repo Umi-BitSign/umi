@@ -364,7 +364,7 @@ class CohortIntake:
 
     def history(self, cohort: str) -> CohortRecoveryHistory:
         self._allowed(cohort)
-        with self._connection() as (_, store):
+        with self._connection(prefer_history=True) as (_, store):
             return store.published_history(cohort)
 
     def export_records(

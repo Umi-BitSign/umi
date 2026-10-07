@@ -584,3 +584,70 @@ async def test_fresh_service_window_completes_native_work_and_restarts(loop, mon
     _, retained, _ = await finish(s)
     assert canonical_json_bytes(retained) == exact
     assert p.model.calls == 1
+
+
+@pytest.mark.parametrize("shared_control_group", [True], indirect=True)
+@pytest.mark.parametrize("slow_name", ["Eve", "Dave"])
+async def test_service_certificate_waits_for_quorum_not_redundant_reviewer(
+    loop, slow_name, monkeypatch
+):
+    s = loop
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    slow_key = wallet(slow_name).hotkey.ss58_address
+
+    async def slow(body):
+        entered.set()
+        try:
+            await release.wait()
+            return sign_object(body, wallet(slow_name))
+        finally:
+            cancelled.set()
+
+    async def extra(body):
+        return sign_object(body, wallet("Eve"))
+
+    s.reviewers[wallet("Eve").hotkey.ss58_address] = extra
+    s.reviewers[slow_key] = slow
+    worker = s.worker()
+    same_group_retained = asyncio.Event()
+    retained_signers = set()
+    event_loop = asyncio.get_running_loop()
+    collect = worker.requests.collect
+
+    def retained(who):
+        retained_signers.add(who)
+        if {
+            wallet("Charlie").hotkey.ss58_address,
+            wallet("Eve").hotkey.ss58_address,
+        } <= retained_signers:
+            same_group_retained.set()
+
+    def tracked_collect(slot, signature):
+        result = collect(slot, signature)
+        event_loop.call_soon_threadsafe(retained, signature.hotkey)
+        return result
+
+    monkeypatch.setattr(worker.requests, "collect", tracked_collect)
+    body = await worker._prepare(s.c.assignment)
+    task = asyncio.create_task(worker._certificate(body))
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        if slow_name == "Dave":
+            # Both same-group votes are already natively verified and persisted;
+            # neither an early wakeup nor their raw count supplies Dave's group.
+            await asyncio.wait_for(same_group_retained.wait(), 120)
+            with pytest.raises(ValueError, match="lacks the policy evaluator quorum"):
+                await worker._local(worker.requests.certificate, service_grant_slot(body))
+            assert not task.done()
+            release.set()
+        grant = await asyncio.wait_for(asyncio.shield(task), 45)
+        assert grant.body == body
+        assert len(grant.signatures) == worker.requests.policy.required_evaluator_groups
+        assert cancelled.is_set()
+        if slow_name == "Eve":
+            assert not release.is_set()
+        assert worker.requests.certificate(service_grant_slot(body)) == grant
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

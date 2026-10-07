@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,49 @@ def request_for(scenario, *, sequence=1, block=200, name="Alice"):
     )
     consent = scenario["consent"].__class__(consent=body, signature=sign_object(body, wallet(name)))
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
+
+
+def test_authority_history_advances_ahead_of_queued_background_transaction(
+    intake, scenario, monkeypatch
+):
+    cohort = digest(scenario["intake_history"].plan)
+    order = []
+    gate = intake._process_lock
+    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+
+    published_history = CohortRecoveryStore.published_history
+
+    def retained_history(store, current):
+        result = published_history(store, current)
+        order.append("history")
+        return result
+
+    monkeypatch.setattr(CohortRecoveryStore, "published_history", retained_history)
+
+    def background():
+        with intake._connection():
+            order.append("background")
+
+    def history():
+        return intake.history(cohort)
+
+    # Enqueue the actual history reader after a background transaction while
+    # retaining the current owner. Both still use the native private connection.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with gate.hold():
+            writer = pool.submit(background)
+            with gate._condition:
+                assert gate._condition.wait_for(lambda: len(gate._normal) == 1, timeout=120)
+            reader = pool.submit(history)
+            with gate._condition:
+                assert gate._condition.wait_for(
+                    lambda: len(gate._normal) + len(gate._preferred) == 2, timeout=120
+                )
+        observed = reader.result(timeout=120)
+        writer.result(timeout=120)
+    assert observed == scenario["intake_history"]
+    assert order == ["history", "background"]
+    assert not gate._normal and not gate._preferred and gate._owner is None
 
 
 def seal_and_close(intake, scenario, *, block=300):

@@ -132,12 +132,31 @@ class ServiceWorkWorker:
                     raise ValueError("service request vote came from another reviewer")
                 async with self.vote_writes:
                     await self._local(self.requests.collect, slot, signed)
+                return who
             except _RETRY:
                 # Another independent quorum may be available this pass.
                 return
 
-        await self._gather(vote(who, port) for who, port in self.reviewers.items())
-        return await self._local(self.requests.certificate, slot)
+        tasks = [asyncio.create_task(vote(who, port)) for who, port in self.reviewers.items()]
+        pending = set(tasks)
+        groups = set()
+        reviewer_groups = {
+            identity(e.hotkey): e.control_group for e in self.requests.policy.evaluators
+        }
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    who = task.result()
+                    if who is not None:
+                        groups.add(reviewer_groups[who])
+                if len(groups) >= self.requests.policy.required_evaluator_groups:
+                    return await self._local(self.requests.certificate, slot)
+            return await self._local(self.requests.certificate, slot)
+        finally:
+            # A redundant peer cannot delay a native policy quorum. Cancel its
+            # delivery cooperatively, retaining any already committed signature.
+            await self._stop_tasks(tasks)
 
     async def _prepare(self, assignment, *, parent=None, decision=None, retirement=None):
         loop = asyncio.get_running_loop()
