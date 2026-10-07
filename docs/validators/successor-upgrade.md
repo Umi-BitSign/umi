@@ -1685,7 +1685,10 @@ registration bridge.
 
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
-Current execution and reward authority remain independently verified.
+Endpoint response recovery reads the assignment and its already verified job
+as one pair, including when validating retained replacement ancestry. New
+caller-supplied assignments still require full native validation. Current
+execution and reward authority remain independently verified.
 
 
 The intake owner also retains bounded private verified seals while it is running.

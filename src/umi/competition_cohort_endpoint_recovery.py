@@ -85,8 +85,10 @@ class CohortEndpointResponseRecovery:
     def _validate_one(self, selected: EndpointSelection, assignment=None):
         selected = parse_endpoint_selection(canonical_json_bytes(selected))
         if assignment is None:
-            assignment = self.journal.assignment(selected.assignment_slot)
-        job = self.journal.validate_assignment(assignment)
+            assignment, job = self.journal.assignment_and_job(selected.assignment_slot)
+        else:
+            # New, caller-supplied assignments have no retained proof receipt.
+            job = self.journal.validate_assignment(assignment)
         validate = (
             validate_case_attempt
             if isinstance(selected, CohortEndpointReplacementSelection)

@@ -219,19 +219,18 @@ async def send_original(p, index=0):
         )
 
 
-async def test_selection_reuse_releases_bytes_and_rechecks_assignment(recovery_case, monkeypatch):
+async def test_selection_reuse_releases_bytes_and_rechecks_changed_assignment(
+    recovery_case, monkeypatch
+):
     p = recovery_case
     recovery = p.consumer()
     original = recovery.journal.validate_assignment
     caches = []
-    reject = False
 
     def validate(assignment):
         cache = canonical_reuse._ACTIVE.get()
         assert cache is not None and not cache.closed
         caches.append(cache)
-        if reject:
-            raise ValueError("assignment verification changed")
         return original(assignment)
 
     monkeypatch.setattr(recovery.journal, "validate_assignment", validate)
@@ -239,12 +238,44 @@ async def test_selection_reuse_releases_bytes_and_rechecks_assignment(recovery_c
     first = caches[-1]
     assert first.closed and not first.entries and canonical_reuse._ACTIVE.get() is None
 
-    reject = True
-    with pytest.raises(ValueError, match="assignment verification changed"):
+    saved = recovery.journal.assignment(p.slot)
+    forged = saved.model_copy(
+        update={
+            "delivery": saved.delivery.model_copy(
+                update={
+                    "signature": saved.delivery.signature.model_copy(
+                        update={"signature": "0x" + "00" * 64}
+                    )
+                }
+            )
+        }
+    )
+    with recovery.journal.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='assignment' AND id=?",
+            (canonical_json_bytes(forged), p.slot),
+        )
+    with pytest.raises(ValueError, match="signature"):
         recovery.selection(p.slot)
     second = caches[-1]
     assert second is not first
     assert second.closed and not second.entries and canonical_reuse._ACTIVE.get() is None
+
+
+async def test_retained_selection_reuses_verified_assignment_job(recovery_case, monkeypatch):
+    p = recovery_case
+    recovery = p.consumer()
+    expected = recovery.selection(p.slot)
+
+    def unexpected_replay(*args, **kwargs):
+        raise AssertionError("unchanged retained assignment was reverified")
+
+    monkeypatch.setattr(recovery.journal, "validate_assignment", unexpected_replay)
+    changed = recovery.selection(p.slot)
+    assert changed == expected
+    object.__setattr__(changed[1].certificate, "signatures", ())
+    assert recovery.selection(p.slot) == expected
+    assert canonical_reuse._ACTIVE.get() is None
 
 
 @pytest.mark.parametrize("failure", [False, True])

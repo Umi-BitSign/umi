@@ -212,6 +212,13 @@ class CohortExecutionJournal:
     def assignment(self, slot: str) -> CohortExecutionAssignment:
         return self._validated_assignment(slot)[0]
 
+    @canonical_json_reuse()
+    def assignment_and_job(
+        self, slot: str
+    ) -> tuple[CohortExecutionAssignment, RecoverableExecutionJob]:
+        """Reuse exact retained static proofs; this grants no current authority."""
+        return self._validated_assignment(slot)
+
     def step(self, job: RecoverableExecutionJob, index: int) -> ExecutionStep | None:
         raw = self.journal.get("step", execution_step_key(job, index))
         if raw is None:
