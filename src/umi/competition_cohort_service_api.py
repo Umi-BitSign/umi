@@ -320,25 +320,46 @@ class ServiceWorkAdmissionAPI:
     async def _commit_current(
         self, queue, signed, submission, participant, source, capture, raw, metadata
     ):
-        try:
-            return await run_owned_thread(
-                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
-            )
-        except FinalizedHeadRegression:
-            # Preparation and the last history fetch may outlive a shared head.
-            # Keep the already verified immutable roster, but recollect current
-            # history before the new owned capture. The locked commit still
-            # checks publication and replays participant, phase and proof binding.
-            # Retry only once: a genuinely lagging provider must remain held.
-            await self._unchanged(queue, source)
-            capture = await self._call(self.capture())
-            await run_owned_thread(self._remember, queue, source, capture)
-            boundary = execution_boundary(capture)
-            raw, metadata = await self._call(self.archive(boundary))
-            await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
-            return await run_owned_thread(
-                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
-            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        refresh = regressed = False
+        while True:
+            try:
+                if refresh:
+                    # Contention can outlive the owned head. Keep the immutable
+                    # roster, but recollect history, capture and original proof
+                    # bytes before retrying the locked native commit.
+                    await self._unchanged(queue, source)
+                    capture = await self._call(self.capture())
+                    await run_owned_thread(self._remember, queue, source, capture)
+                    boundary = execution_boundary(capture)
+                    raw, metadata = await self._call(self.archive(boundary))
+                    await run_owned_thread(
+                        _check_archive, capture.snapshot, boundary, raw, metadata
+                    )
+                return await run_owned_thread(
+                    self._commit,
+                    queue,
+                    signed,
+                    submission,
+                    participant,
+                    source,
+                    capture,
+                    raw,
+                    metadata,
+                )
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(1.0, remaining))
+                refresh = True
+            except FinalizedHeadRegression:
+                # Preserve the existing single regression recovery. A genuinely
+                # lagging provider must not turn an unchanged retry into authority.
+                if regressed:
+                    raise
+                regressed = refresh = True
 
     async def admit(self, catalog: str, signed: SignedServiceWorkClaim):
         queue = self.selected(catalog)

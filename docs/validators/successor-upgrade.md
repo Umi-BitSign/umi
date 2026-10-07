@@ -21,9 +21,12 @@ Retain the original host and controls while worker or recovery consumers use the
 Keep the maintenance approval while this executable is selected; remove it after
 a later installed transition no longer depends on the original receipt.
 
-The supervisor reuses immutable package verification within one process, checking
-all file bytes and bounds on each load. Restart verifies the package again. Reward
-authority and current chain state are checked separately for each execution.
+The supervisor verifies each sealed package once within its process and binds
+reuse to the exact directory and file identities, policy, release and capacity
+bounds. Unchanged packages are not reread or rehashed on each load. A replaced or
+changed file cannot borrow that result. Restart currently rebuilds the parsed
+package cache. Reward authority and current chain state remain separate checks
+for each execution.
 
 While the chain weight interval is pending, an already stopped supervisor may
 reuse its completed transaction audit only within the same process and while the
@@ -31,6 +34,11 @@ registry, weight journal and every audited sealed package remain unchanged.
 Container absence is checked again, and startup still collects a fresh owned
 proof and repeats all preflight gates. Changed inputs, uncertain state or process
 restart require full recovery. Waiting never authorizes a transaction.
+
+Service claim commits wait through local mutex contention without changing the
+retained signed request. Each retry recollects owned history, capture and proof
+inputs; it does not reuse a stale head. Validation or I/O failures still hold the
+claim, cancellation drains owned work, and duplicate recovery makes no new claim.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
 for capacity (bounded by the exporter timeout). A queued read rechecks that its
@@ -216,6 +224,12 @@ Current inputs, the original root anchor, signed histories, transaction journals
 and delivery packages are preserved. Unstarted, unmatched and partial stages
 are preserved too. An equivalent but byte-different history does not authorize
 removal of the original copy.
+
+Cache quota accounting walks bounded filesystem metadata without reading model
+or package contents. A sealed stage without a retained recovery source is
+skipped before full package and history verification. This preliminary identity
+only excludes cleanup candidates; a matching stage still undergoes the complete
+verification before any rename or unlink.
 
 A private `retiring-<directive digest>-<random id>` directory records the cleanup
 intent. The host fsyncs that rename before unlinking. Following interruption, it

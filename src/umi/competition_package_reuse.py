@@ -1,8 +1,9 @@
 """Process-local reuse of immutable package verification within one service.
 
 No journal receipt, authorization, finality observation or transaction result is
-retained here. Callers must read and hash the entire sealed package before lookup.
-Restart drops the cache and requires a fresh complete verification.
+retained here. Callers bind lookup to exact sealed file identities and policy,
+release and capacity bounds. Unchanged files need no repeated content reads.
+Restart currently drops the parsed-object cache; durable reuse is separate.
 """
 
 from __future__ import annotations

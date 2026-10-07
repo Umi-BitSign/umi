@@ -70,6 +70,63 @@ def test_unretained_and_partial_stages_are_preserved(installed):
     assert note.read_bytes() == b"interrupted input"
 
 
+def test_unretained_stage_skips_full_validation_but_current_is_checked(installed, monkeypatch):
+    original = material._read_current
+    checked = []
+
+    def read_current(path, **kwargs):
+        checked.append(path)
+        assert path != installed.first.path
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(material, "_read_current", read_current)
+    assert _retire(installed, {}) == 0
+    assert checked == [installed.source / "current"]
+    assert installed.first.path.exists()
+
+
+def test_retained_candidate_still_requires_full_validation(installed, monkeypatch):
+    original = material._read_current
+
+    def read_current(path, **kwargs):
+        if path == installed.first.path:
+            raise material.SuccessorMaterializationError("injected candidate failure")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(material, "_read_current", read_current)
+    with pytest.raises(ValueError, match="injected candidate failure"):
+        _retire(installed)
+    installed.first.recheck()
+
+
+def test_candidate_identity_change_does_not_authorize_deletion(installed, monkeypatch):
+    candidate = "a" * 64
+    monkeypatch.setattr(retention, "_candidate_identity", lambda path: candidate)
+    with pytest.raises(ValueError, match="candidate identity changed"):
+        _retire(installed, {candidate: (installed.case.selection, installed.case.files)})
+    installed.first.recheck()
+
+
+def test_quota_accounting_does_not_read_file_contents(installed, monkeypatch):
+    expected_size, _ = material._tree(installed.first.path, installed.case.limits, sealed=True)
+
+    def no_content_read(*args):
+        raise AssertionError("quota accounting must not read file contents")
+
+    monkeypatch.setattr(material.os, "read", no_content_read)
+    with material._cache_lock(installed.cache) as fd:
+        assert material._cache_usage(installed.cache, fd, installed.case.limits) == (
+            1,
+            expected_size,
+        )
+        with pytest.raises(ValueError, match="byte bound exceeded"):
+            material._cache_usage(
+                installed.cache,
+                fd,
+                installed.case.limits.model_copy(update={"maximum_cache_bytes": expected_size - 1}),
+            )
+
+
 @pytest.mark.parametrize("after_unlinks", [0, 1, 4])
 def test_interrupted_retirement_resumes_from_durable_sources(installed, monkeypatch, after_unlinks):
     original = retention.os.unlink

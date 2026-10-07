@@ -446,8 +446,8 @@ def load_competition_package(
     if cached is not None:
         return cached
     verified = _load_competition_package(package_path, **arguments)
-    # Verification can be slow. Retain it only if the complete input bytes
-    # still match, independently of pathname or file metadata.
+    # Verification can be slow. Retain it only while the exact sealed files
+    # remain the same objects; later reads need no content hashing.
     if _package_reuse_key(package_path, **arguments) != (key, input_bytes):
         raise ValueError("package changed during verification")
     reuse.remember(key, verified, input_bytes)
@@ -457,46 +457,46 @@ def load_competition_package(
 def _package_reuse_key(
     package_path, *, expected_package_sha256, expected_policy_sha256, observed_release, limits
 ):
-    """Hash every byte under the same ownership, type, size and seal checks."""
+    """Bind reuse to exact sealed objects and caller bounds without reading bytes."""
     _require_hex32(expected_package_sha256, "expected package digest")
     _require_hex32(expected_policy_sha256, "expected policy digest")
     release = _canonical(CompetitionReleaseIdentity, observed_release)
     limits = _canonical(CompetitionPackageLimits, limits)
     path = _canonical_absolute_path(package_path, "package")
     with _opened_sealed_directory(path) as root_fd:
-        before = _directory_identity(root_fd)
+        before = _file_identity(os.fstat(root_fd))
         _check_exact_tree(root_fd)
-        body = _read_sealed_file(
-            root_fd, "manifest.json", maximum_bytes=limits.maximum_manifest_bytes
-        )
-        manifest = _parse_canonical(CompetitionPackageManifest, body, "package manifest")
-        if competition_package_digest(manifest) != expected_package_sha256:
-            raise ValueError("package digest differs from the caller's expected digest")
-        if manifest.policy_sha256 != expected_policy_sha256:
-            raise ValueError("package policy differs from the caller's expected policy")
-        declared = {item.name: item for item in manifest.files}
-        _preflight_declared_sizes(root_fd, declared, limits, len(body))
-        fingerprints = [("manifest.json", len(body), hashlib.sha256(body).hexdigest())]
-        total = len(body)
-        for name in _PAYLOAD_NAMES:
-            item = declared[name]
-            body = _read_sealed_file(
-                root_fd,
-                name,
-                maximum_bytes=_limit_for(name, limits),
-                expected_size=item.size_bytes,
-                expected_sha256=item.sha256,
+        fingerprints = []
+        total = 0
+        for name in sorted(_TREE_NAMES):
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            maximum = (
+                limits.maximum_manifest_bytes
+                if name == "manifest.json"
+                else _limit_for(name, limits)
             )
-            fingerprints.append((name, len(body), item.sha256))
-            total += len(body)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o400
+                or not 0 < info.st_size <= maximum
+            ):
+                raise ValueError("package object is not a bounded sealed regular file")
+            fingerprints.append((name, _file_identity(info)))
+            total += info.st_size
+            if total > limits.maximum_aggregate_bytes:
+                raise ValueError("package exceeds the aggregate byte limit")
         _check_exact_tree(root_fd)
-        if before != _directory_identity(root_fd):
-            raise ValueError("package directory changed while it was read")
+        if before != _file_identity(os.fstat(root_fd)):
+            raise ValueError("package directory changed during metadata inspection")
     return (
         expected_package_sha256,
         expected_policy_sha256,
         canonical_json_bytes(release),
         canonical_json_bytes(limits),
+        str(path),
+        before,
         tuple(fingerprints),
     ), total
 

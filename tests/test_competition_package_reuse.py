@@ -39,7 +39,7 @@ def _count_verification(monkeypatch):
     return calls
 
 
-def test_identical_copies_reuse_verification_but_never_return_shared_models(
+def test_each_copy_verifies_once_and_never_returns_shared_models(
     monkeypatch, package_case, policy, package_limits, release_identity, tmp_path
 ):
     calls = _count_verification(monkeypatch)
@@ -52,7 +52,7 @@ def test_identical_copies_reuse_verification_but_never_return_shared_models(
             second = _load(package_case, policy, package_limits, release_identity)
             assert first == second and first is not second
             assert first.evidence is not second.evidence
-            assert len(calls) == 1
+            assert len(calls) == 2
             # Even deliberate mutation of a returned model cannot poison the
             # cache's private copy or the next caller's verified projection.
             object.__setattr__(first, "package_sha256", "f" * 64)
@@ -62,11 +62,11 @@ def test_identical_copies_reuse_verification_but_never_return_shared_models(
             copied.chmod(0o700)
     assert current_package_reuse() is None
     _load(package_case, policy, package_limits, release_identity)
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize("mutation", ["bytes", "mode", "extra", "hardlink", "symlink"])
-def test_reuse_rechecks_sealed_files(
+def test_changed_sealed_object_cannot_borrow_verification(
     mutation, package_case, policy, package_limits, release_identity
 ):
     with package_verification_session():
@@ -157,3 +157,39 @@ def test_context_exit_clears_even_after_failure():
         raise RuntimeError("shutdown")
     assert current_package_reuse() is None
     assert reuse.lookup(("anything",)) is None
+
+
+def test_verified_package_lookup_does_not_read_contents(
+    monkeypatch, package_case, policy, package_limits, release_identity
+):
+    with package_verification_session():
+        first = _load(package_case, policy, package_limits, release_identity)
+
+        def no_read(*args, **kwargs):
+            raise AssertionError("verified package must not reread contents")
+
+        monkeypatch.setattr(package, "_read_sealed_file", no_read)
+        assert _load(package_case, policy, package_limits, release_identity) == first
+
+
+def test_change_during_verification_is_not_remembered(
+    monkeypatch, package_case, policy, package_limits, release_identity
+):
+    original = package._load_competition_package
+    calls = []
+
+    def changed(*args, **kwargs):
+        calls.append(1)
+        result = original(*args, **kwargs)
+        item = package_case.path / "evidence.json"
+        item.chmod(0o600)
+        item.chmod(0o400)
+        return result
+
+    with package_verification_session():
+        monkeypatch.setattr(package, "_load_competition_package", changed)
+        with pytest.raises(ValueError, match="changed during verification"):
+            _load(package_case, policy, package_limits, release_identity)
+        monkeypatch.setattr(package, "_load_competition_package", original)
+        assert _load(package_case, policy, package_limits, release_identity)
+    assert calls == [1]
