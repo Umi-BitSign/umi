@@ -94,6 +94,84 @@ async def test_service_owner_lookup_waits_for_actual_queue_contention(reviewed, 
     verify_signature(result.response, result.signature)
 
 
+@pytest.mark.parametrize("fresh", [False, True])
+async def test_independent_window_transcripts_preserve_exact_request(reviewed, monkeypatch, fresh):
+    from umi.competition_cohort_request_window import capture_cohort_attempt_window
+    from umi.competition_cohort_service_grant import service_wire_ids
+
+    s = reviewed
+    if fresh:
+        window = await capture_cohort_attempt_window(
+            s.p.transport_policy, s.p.finality, s.body.request.issued_block, s.c.assignment, 1
+        )
+        item = s.c.assignment.catalog.catalog.work[s.c.assignment.admission.ordinal - 1]
+        s.body = s.body.model_copy(
+            update={
+                "window": window,
+                "request": window.request_with_ids(
+                    item,
+                    s.p.service_video,
+                    service_wire_ids(s.c.assignment, s.body.evaluator_hotkey, 1),
+                    s.p.transport_policy,
+                ),
+            }
+        )
+    reviewer = s.reviewer()
+    original = reviewer.blocks.verified_block_at
+
+    async def independent(height):
+        block = await original(height)
+        if block is None:
+            return None
+        evidence = canonical_json_bytes(
+            {"fixture_proof_hex": block.finality_evidence.hex(), "observer": "independent"}
+        )
+        return replace(
+            block,
+            finality_evidence=evidence,
+            finality_evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+        )
+
+    monkeypatch.setattr(reviewer.blocks, "verified_block_at", independent)
+    before = canonical_json_bytes(s.body)
+    signature = await reviewer.attest(ServiceRequestReview(body=s.body))
+    verify_signature(s.body, signature)
+    assert canonical_json_bytes(s.body) == before
+    # Recovery must return the retained exact vote without fresh owner access.
+    s.offline = True
+    assert await reviewer.attest(ServiceRequestReview(body=s.body)) == signature
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("block_hash", "0x" + "cd" * 32),
+        ("state_root", "0x" + "cd" * 32),
+        ("timestamp_ms", 1),
+        ("scoring_policy_hash", "cd" * 32),
+        ("finality_verifier_sha256", "cd" * 32),
+    ],
+)
+async def test_independent_window_fact_disagreement_never_signs(
+    reviewed, monkeypatch, field, value
+):
+    s, reviewer = reviewed, reviewed.reviewer()
+    original = reviewer.blocks.verified_block_at
+
+    async def changed(height):
+        block = await original(height)
+        if block is None:
+            return None
+        if field == "timestamp_ms":
+            return replace(block, timestamp_ms=block.timestamp_ms + value)
+        return replace(block, **{field: value})
+
+    monkeypatch.setattr(reviewer.blocks, "verified_block_at", changed)
+    with pytest.raises((ValueError, RuntimeError)):
+        await reviewer.attest(ServiceRequestReview(body=s.body))
+    assert s.signatures == 0
+
+
 @pytest.fixture
 async def reviewed(loop, tmp_path):
     s, c, p = loop, loop.c, loop.p

@@ -1704,3 +1704,10 @@ exhausted byte budget. Existing cache and proof records remain in place; current
 chain authority is still collected independently. Paid service owner exports
 likewise wait for genuine local journal contention within their operation budget
 rather than treating a busy assignment read as unavailable evidence.
+
+Independent service-request review compares exact finalized block facts, policy
+pins, schedule and attempt context. Observer transcripts can differ for the same
+verified block; their evidence digests need not be identical. The original
+request and its transcript bytes remain unchanged in the signing journal. A
+missing independent block or disagreement on its hash, state root, time or pins
+still prevents a vote.
