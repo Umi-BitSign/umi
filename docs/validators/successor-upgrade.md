@@ -1671,3 +1671,16 @@ also require real evaluation evidence, finalized-chain preflight and an approved
 signed transition. Historical finite bootstrap or policy expiry still applies
 if successor work is delayed; this is separate from the current no-sunset
 registration bridge.
+
+Reviewer assignment reads reuse private parsed objects after static proof
+verification, with fresh retained-input and conflict checks on every read.
+Current execution and reward authority remain independently verified.
+
+
+The intake owner also retains bounded private verified seals while it is running.
+Each lookup reads the exact seal, original consent rows and indexes, and selected
+model-acceptance bytes under the existing intake lock. Changed or missing inputs,
+a different database inode, configuration, policy or history prefix require native
+reconstruction again. Restart begins without this process cache. Publication still
+checks the current registration observation, history adoption and closure evidence;
+a reused seal grants no current authority or service credit.

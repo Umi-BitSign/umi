@@ -64,8 +64,8 @@ failed runtime check stops the upgrade while the existing miner remains selected
 
 The runtime installs beside the old runtime, with its directory bound to both
 the source revision and scoring profile. The private state namespace remains
-bound to the current transport policy. Nonce, assignment, finality, grant and
-model-sidecar state from earlier policies remain intact.
+bound to the current transport policy. Nonce, assignment,
+finality, grant and model-sidecar state from earlier policies remain intact.
 
 Rerunning the command installs a changed runtime even within the same cohort.
 An existing receipt skips cutover only when its revision and the running miner's

@@ -15,6 +15,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_cohort_execution import RecoverableExecutionEvidence, RecoverableExecutionJob
 from .competition_cohort_order_queue import SignedOrderDeliveryReceipt, check_delivery_receipt
 from .competition_cohort_order_signer import (
@@ -113,6 +114,7 @@ class CohortExecutionJournal:
         if identity(self.config.signer) not in {identity(e.hotkey) for e in self.policy.evaluators}:
             raise ValueError("execution journal evaluator is not in its policy")
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
+        self._assignment_reuse = AssignmentVerificationReuse()
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -188,16 +190,27 @@ class CohortExecutionJournal:
         self.journal.put_many((("assignment", slot, value),), index=index)
         return job
 
+    def _validated_assignment(self, slot: str):
+        with self.journal.transaction() as db:
+            raw = self.journal.get_raw("assignment", slot, db=db)
+            if raw is None:
+                raise FileNotFoundError("execution assignment has not been retained")
+            key = assignment_reuse_key(
+                self.journal, slot, (raw,), self.config, self.policy, self.cohorts
+            )
+            cached = self._assignment_reuse.lookup(slot, key)
+            if cached is not None:
+                return cached
+            saved = CohortExecutionAssignment.model_validate_json(raw)
+            job = self.validate_assignment(saved)
+            if order_slot(saved.certificate.order) != slot:
+                raise ValueError("retained execution assignment changed its slot")
+            self._assignment_reuse.remember(slot, key, (saved, job))
+            return saved, job
+
     @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:
-        value = self.journal.get("assignment", slot)
-        if value is None:
-            raise FileNotFoundError("execution assignment has not been retained")
-        saved = CohortExecutionAssignment.model_validate_json(canonical_json_bytes(value))
-        self.validate_assignment(saved)
-        if order_slot(saved.certificate.order) != slot:
-            raise ValueError("retained execution assignment changed its slot")
-        return saved
+        return self._validated_assignment(slot)[0]
 
     def step(self, job: RecoverableExecutionJob, index: int) -> ExecutionStep | None:
         raw = self.journal.get("step", execution_step_key(job, index))
@@ -379,8 +392,7 @@ class CohortExecutionJournal:
 
     @canonical_json_reuse()
     def evidence(self, slot: str) -> RecoverableExecutionEvidence | None:
-        assignment = self.assignment(slot)
-        job = self.validate_assignment(assignment)
+        _, job = self._validated_assignment(slot)
         steps = []
         for index in range(step_count(job)):
             step = self.step(job, index)

@@ -207,7 +207,8 @@ async def test_cached_history_never_bypasses_proof_or_freshness_checks(history, 
     if mode == "bad_proof":
         rpc.bad_proof = True
     elif mode == "old_timestamp":
-        history.clock.now += 109_000  # Current head is fresh; previous is not.
+        history.clock.now += history.config.maximum_head_age_ms - 6_000
+        # Current head is fresh by six seconds; the previous head is stale.
     else:
         a, b = (wallet(n).hotkey.ss58_address for n in ("Alice", "Bob"))
         for uid, hotkey in enumerate((b, a)):
@@ -239,7 +240,7 @@ async def test_history_checks_again_after_storage_proofs(history, monkeypatch, m
 
             monkeypatch.setattr(history.finality, "verified_finalized_snapshot", advanced)
         else:
-            history.clock.now += 109_000
+            history.clock.now += history.config.maximum_head_age_ms - 6_000
         return result
 
     monkeypatch.setattr(history.proofs, "storage_reads", delayed)
@@ -297,7 +298,7 @@ async def test_historical_identity_timeout_cancels_and_keeps_cache_empty(history
 
 
 async def test_current_head_must_be_fresh_even_when_requested_history_is_valid(history):
-    history.records[_HEIGHT].timestamp = _NOW - 121_000
+    history.records[_HEIGHT].timestamp = _NOW - history.config.maximum_head_age_ms - 1
     with pytest.raises(ValueError, match="stale"):
         await history.provider.collect_at(_HEIGHT - 1)
     assert not history.finality.identities

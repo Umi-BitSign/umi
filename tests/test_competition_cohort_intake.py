@@ -444,3 +444,93 @@ async def test_native_publisher_drains_commit_before_cancellation(intake, scenar
     with pytest.raises(asyncio.CancelledError):
         await task
     assert intake.history(digest(history.plan)) == history
+
+
+def test_verified_seal_reuse_keeps_private_copies_and_fresh_publication(
+    intake, scenario, monkeypatch
+):
+    import umi.competition_cohort_intake as module
+
+    intake.retain(request_for(scenario), capture_at(210))
+    closed, evidence, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected  # First complete verification.
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unchanged original seal was reconstructed again")
+
+    monkeypatch.setattr(module, "_build_intake_seal_from_participations", unexpected)
+    caller = intake.sealed(cohort, tip)
+    object.__setattr__(caller, "selected", ())
+    assert intake.sealed(cohort, tip) == expected
+    intake.publish(closed, capture_at(310), closure_input=evidence)
+    intake.publish(closed, capture_at(320), closure_input=evidence)
+    with pytest.raises(ValueError):
+        intake.publish(closed, capture_at(150), closure_input=evidence)
+
+
+@pytest.mark.parametrize("damage", ["seal", "body", "missing-consent", "tip-index"])
+def test_verified_seal_reuse_rechecks_changed_original_inputs(intake, scenario, damage):
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    with intake._connection() as (db, _):
+        if damage == "seal":
+            db.execute("UPDATE cohort_intake_seals SET body=?", (b"{}",))
+        elif damage == "body":
+            db.execute("UPDATE cohort_consents SET body=?", (b"{}",))
+        elif damage == "missing-consent":
+            db.execute("DELETE FROM cohort_consents")
+        else:
+            db.execute("UPDATE cohort_consents SET recovery_tip=?", ("00" * 32,))
+    with pytest.raises(ValueError):
+        intake.sealed(cohort, tip)
+
+
+@pytest.mark.parametrize("change", ["restart", "database", "index"])
+def test_verified_seal_reuse_reconstructs_new_materialization(
+    intake, scenario, monkeypatch, change
+):
+    import shutil
+
+    import umi.competition_cohort_intake as module
+
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    original = module._build_intake_seal_from_participations
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_build_intake_seal_from_participations", counted)
+    if change == "restart":
+        intake = CohortIntake(intake.config, intake.policy)
+    elif change == "database":
+        path = Path(intake.config.directory) / "intake.sqlite3"
+        replacement = path.with_suffix(".replacement")
+        shutil.copyfile(path, replacement)
+        replacement.chmod(0o600)
+        replacement.replace(path)
+    else:
+        with intake._connection() as (db, _):
+            db.execute("UPDATE cohort_consents SET observed=observed+1")
+    assert intake.sealed(cohort, tip) == expected
+    assert calls == [1]
+
+
+def test_verified_seal_reuse_cannot_ignore_new_original_consent(intake, scenario):
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    with intake._connection() as (db, _):
+        row = db.execute("SELECT * FROM cohort_consents").fetchone()
+        changed = ("00" * 32, *row[1:4], row[4] + 1, *row[5:])
+        db.execute("INSERT INTO cohort_consents VALUES (?,?,?,?,?,?,?,?)", changed)
+    with pytest.raises(ValueError):
+        intake.sealed(cohort, tip)

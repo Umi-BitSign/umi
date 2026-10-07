@@ -154,3 +154,113 @@ def test_new_policy_constraints_still_apply(tmp_path, policy, monkeypatch):
     restrictive = policy.model_copy(update={"accepted_model_licenses": ("MIT",)})
     with pytest.raises(ValueError):
         artifacts.verify_preserved_bundle(bundle, archive, restrictive)
+
+
+def test_copied_archive_gets_its_own_receipt_once(tmp_path, policy, monkeypatch):
+    import shutil
+
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    restored = tmp_path / "restored"
+    shutil.copytree(archive, restored)
+    calls = []
+    original = artifacts._copy_verified
+
+    def counted(stream, record, target):
+        calls.append(record.path)
+        return original(stream, record, target)
+
+    monkeypatch.setattr(artifacts, "_copy_verified", counted)
+    assert artifacts.verify_preserved_bundle(bundle, restored, policy) == digest(bundle)
+    assert calls == [record.path for record in bundle.files]
+    monkeypatch.setattr(artifacts, "_copy_verified", forbid_hashing)
+    assert artifacts.verify_preserved_bundle(bundle, restored, policy) == digest(bundle)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+
+
+def test_copied_receipt_never_authorizes_changed_destination(tmp_path, policy):
+    import shutil
+
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    restored = tmp_path / "restored"
+    shutil.copytree(archive, restored)
+    target = restored / digest(bundle) / "model" / bundle.files[0].path
+    target.chmod(0o600)
+    target.write_bytes(b"x" * target.stat().st_size)
+    target.chmod(0o400)
+    with pytest.raises(ValueError, match="immutable manifest"):
+        artifacts.verify_preserved_bundle(bundle, restored, policy)
+
+
+def test_legacy_receipt_reuses_only_unchanged_materialization(tmp_path, policy, monkeypatch):
+    import json
+    import shutil
+
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    receipt = archive / (".verified-" + digest(bundle) + ".json")
+    legacy = json.loads(receipt.read_bytes())
+    legacy.pop("archive_identity")
+    legacy["schema"] = "umi-preserved-content-verification/1"
+    receipt.chmod(0o600)
+    receipt.write_bytes(canonical_json_bytes(legacy))
+    receipt.chmod(0o400)
+    restored = tmp_path / "legacy-copy"
+    shutil.copytree(archive, restored)
+    monkeypatch.setattr(artifacts, "_copy_verified", forbid_hashing)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+    with pytest.raises(ValueError, match="changed after verification"):
+        artifacts.verify_preserved_bundle(bundle, restored, policy)
+
+
+def test_other_archive_entries_do_not_expire_verified_content(tmp_path, policy, monkeypatch):
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    (archive / "other-unrelated-entry").mkdir(mode=0o700)
+    monkeypatch.setattr(artifacts, "_copy_verified", forbid_hashing)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+
+
+def test_atomically_restored_file_gets_one_new_verification(tmp_path, policy, monkeypatch):
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    target = archive / digest(bundle) / "model" / bundle.files[0].path
+    replacement = target.with_name(target.name + ".restoring")
+    replacement.write_bytes(target.read_bytes())
+    replacement.chmod(0o400)
+    os.replace(replacement, target)
+    calls = []
+    original = artifacts._copy_verified
+
+    def counted(stream, record, output):
+        calls.append(record.path)
+        return original(stream, record, output)
+
+    monkeypatch.setattr(artifacts, "_copy_verified", counted)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+    assert calls == [record.path for record in bundle.files]
+    monkeypatch.setattr(artifacts, "_copy_verified", forbid_hashing)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+
+
+def test_replaced_file_cannot_inherit_trust_for_wrong_bytes(tmp_path, policy):
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    receipt = archive / (".verified-" + digest(bundle) + ".json")
+    old_receipt = receipt.read_bytes()
+    target = archive / digest(bundle) / "model" / bundle.files[0].path
+    replacement = target.with_name(target.name + ".restoring")
+    replacement.write_bytes(b"x" * target.stat().st_size)
+    replacement.chmod(0o400)
+    os.replace(replacement, target)
+    with pytest.raises(ValueError, match="immutable manifest"):
+        artifacts.verify_preserved_bundle(bundle, archive, policy)
+    assert receipt.read_bytes() == old_receipt
+
+
+def test_directory_change_cannot_hide_in_place_corruption(tmp_path, policy):
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    target = archive / digest(bundle) / "model" / bundle.files[0].path
+    target.chmod(0o600)
+    target.write_bytes(b"x" * target.stat().st_size)
+    target.chmod(0o400)
+    scratch = target.parent / ".discarded-restore"
+    scratch.write_bytes(b"temporary")
+    scratch.unlink()
+    with pytest.raises(ValueError, match="immutable manifest"):
+        artifacts.verify_preserved_bundle(bundle, archive, policy)

@@ -425,3 +425,25 @@ def test_capacity_hold_preserves_proposal_until_capacity_is_increased(prepared):
     assert owner.intent(cohort, digest(subs[0])).acceptance == publication.certificate.acceptance
     owner.intake.capacity = before
     assert owner.publish(publication, capture_at(20000)) == publication
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_verified_seal_reuse_never_hides_changed_model_acceptance(prepared, damage):
+    owner, cohort, subs, inputs = prepared
+    for sub in subs:
+        owner.publish(certify(owner, cohort, sub, inputs), capture_at(220))
+    tip = history_tip(owner.intake.history(cohort))
+    expected = owner.intake.seal(cohort, capture_at(300), expected_tip_sha256=tip)
+    assert owner.intake.sealed(cohort, tip) == expected
+    with owner.intake._connection() as (db, _):
+        if damage == "missing":
+            db.execute(
+                "DELETE FROM cohort_model_acceptances WHERE submission=?", (digest(subs[0]),)
+            )
+        else:
+            db.execute(
+                "UPDATE cohort_model_acceptances SET body=? WHERE submission=?",
+                (b"{}", digest(subs[0])),
+            )
+    with pytest.raises((ValueError, PendingModelArtifacts)):
+        owner.intake.sealed(cohort, tip)
