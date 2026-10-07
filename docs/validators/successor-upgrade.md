@@ -572,6 +572,13 @@ Fresh owner challenges and a second local promotion replay detect changes during
 review. Supply original model/promotion evidence and archive replication before
 enabling this service.
 
+The preparation owner keeps a private parsed copy of one verified retained round
+instead of parsing and hashing the complete roster again on every retry. Every
+reuse still verifies current certified history and authority, and compares the
+retained database bytes, digest and original observation. A changed record is
+rejected; a new history generation requires native replay. Returned objects are
+separate copies and cannot change the owner's cached evidence.
+
 Request completion uses `RequestReviewExporter` and
 `RemoteRequestProgressReviewer` at `POST /internal/cohorts/request-review`.
 Configure the certified prepared roster, complete service catalog set and
