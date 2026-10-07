@@ -454,6 +454,12 @@ class ServiceWorkAdmissionAPI:
             "service_credit_authorized": False,
             "chain_submission_authorized": False,
         }
+        # Readiness must not queue behind a long admission or another probe.
+        # Reporting a hold leaves that owned operation and its generous budget
+        # intact; only the normal unlocked path can establish fresh readiness.
+        if self.serial[catalog].locked():
+            result["reason_code"] = "admission_busy"
+            return result
         async with self.serial[catalog]:
             try:
                 result["reason_code"] = "queue_unavailable"

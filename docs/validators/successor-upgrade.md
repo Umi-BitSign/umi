@@ -42,6 +42,10 @@ Service claim commits wait through local mutex contention without changing the
 retained signed request. Each retry recollects owned history, capture and proof
 inputs; it does not reuse a stale head. Validation or I/O failures still hold the
 claim, cancellation drains owned work, and duplicate recovery makes no new claim.
+Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
+while a claim or another readiness probe owns the catalog's admission lock.
+It does not queue an HTTP request behind that long operation or cancel it.
+Only the ordinary fresh-input checks can return `ready: true`.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
 for capacity (bounded by the exporter timeout). A queued read rechecks that its
