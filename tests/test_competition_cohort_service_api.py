@@ -549,7 +549,9 @@ async def test_readiness_capacity_and_seal_preserve_duplicate_recovery(api_case,
     status = await ready(s)
     assert not status.json()["ready"]
     assert status.json()["reason_code"] == ("sealed" if fence == "sealed" else "capacity_exhausted")
+    s.calls.clear()
     assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == 503
+    assert not s.calls  # No fresh proof/history work can create capacity.
     s.offline = {"history", "capture", "roster", "archive"}
     assert (await post(s)).json() == first.json()
 

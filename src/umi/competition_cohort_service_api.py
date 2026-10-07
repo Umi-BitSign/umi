@@ -29,7 +29,11 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_roster import RecoverableRosterEvidence
-from .competition_cohort_service_queue import MAX_ADMISSION_BYTES, ServiceWorkQueue
+from .competition_cohort_service_queue import (
+    MAX_ADMISSION_BYTES,
+    ServiceQueueBackpressure,
+    ServiceWorkQueue,
+)
 from .competition_cohort_service_seal import MAX_SERVICE_SEAL_BYTES
 from .competition_cohort_service_work import (
     MAX_CLAIM_BYTES,
@@ -367,6 +371,12 @@ class ServiceWorkAdmissionAPI:
             # Recovery must precede every live history, preparation and capture call.
             admission = await self._local(queue.lookup, signed)
             if admission is None:
+                # A full or sealed queue cannot accept new work. Check its local
+                # fence before collecting fresh owner inputs; accepted retries
+                # still recover first, and the commit rechecks capacity atomically.
+                reason, _ = await self._local(self._capacity, queue)
+                if reason != "accepting":
+                    raise ServiceQueueBackpressure("service queue has no unreserved claim capacity")
                 _, source, capture, roster = await self._current(queue)
                 member = next(
                     (

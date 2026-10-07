@@ -763,6 +763,9 @@ bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
 the claim nonce on retry. The queue commits the accepted claim and original proof
 bytes together before acknowledging it; insufficient capacity accepts no new work.
 Accepted duplicates recover without live RPC, history or preparation calls.
+New claims check the local full/sealed queue fence before collecting owner
+history, registration proofs or the roster. The admission commit still rechecks
+capacity atomically; the local check never grants execution or reward authority.
 `GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
 checks current admission inputs and capacity. This is admission readiness only;
 the request-phase service clock must also check actual dispatch. Readiness,
