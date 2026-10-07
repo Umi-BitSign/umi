@@ -266,9 +266,11 @@ async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryab
     worker = object.__new__(ServiceWorkWorker)
     worker.serial, worker.capacity = asyncio.Lock(), asyncio.Semaphore(1)
     worker.journal = SimpleNamespace(root=tmp_path)
-    admission = SimpleNamespace(claim=SimpleNamespace(claim=SimpleNamespace(
-        hotkey="5HTFEEFA13x4hom2Nz5EFo7RSQ6PSAyCH1BgM8CbZhhdrSDb"
-    )))
+    admission = SimpleNamespace(
+        claim=SimpleNamespace(
+            claim=SimpleNamespace(hotkey="5HTFEEFA13x4hom2Nz5EFo7RSQ6PSAyCH1BgM8CbZhhdrSDb")
+        )
+    )
     worker._batch = lambda: [admission]
     calls = 0
 
@@ -286,7 +288,8 @@ async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryab
         assert report["work_pending"] == 1 and report["work_complete"] == 0
         assert report["retry_count"] == 1
         assert [e["reason_code"] for e in report["last_retry_details"]] == [
-            "validation_failed", "os_error"
+            "validation_failed",
+            "os_error",
         ]
         assert report["retry_examples"] == [report["last_retry_details"]]
         assert "private" not in json.dumps(report)

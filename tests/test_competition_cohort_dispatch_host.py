@@ -46,10 +46,17 @@ from .test_competition_cohort_service_worker import loop as loop
 
 
 async def test_dispatch_logs_worker_failure_boundary(caplog):
-    report = {"status": "cohort_service_worker", "work_pending": 1,
-              "last_retry_details": [{"error_type": "builtins.ValueError",
-                                      "reason_code": "validation_failed",
-                                      "source_frames": []}]}
+    report = {
+        "status": "cohort_service_worker",
+        "work_pending": 1,
+        "last_retry_details": [
+            {
+                "error_type": "builtins.ValueError",
+                "reason_code": "validation_failed",
+                "source_frames": [],
+            }
+        ],
+    }
 
     class Worker:
         async def run(self, stop, *, poll_seconds, report):
