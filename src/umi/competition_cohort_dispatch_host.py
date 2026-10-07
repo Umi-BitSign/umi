@@ -29,6 +29,7 @@ from .competition_reward_service import _close_provider
 from .competition_transport_finality import CompetitionTransportFinality
 from .concurrency import run_owned_thread
 from .open_competition import Hotkey, Signature, digest, identity
+from .private_state_wait import run_private_state_operation
 from .protocol import StrictProtocolModel, Video, canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -133,22 +134,24 @@ class ServiceDispatchHost:
             await authority.observe(assignment)
             item = assignment.catalog.catalog.work[assignment.admission.ordinal - 1]
             video = await self.clips(item.video_sha256)
-            height = await blocks.finalized_head_height()
             permitted = self.config.request_window_miner_hotkeys
             miner = identity(assignment.admission.submission.submission.hotkey)
             if self.config.request_window_version == 2 and (
                 permitted is None or miner in {identity(key) for key in permitted}
             ):
-                latest = await run_owned_thread(
+                latest = await run_private_state_operation(
                     requests.latest,
                     assignment.admission.claim,
                     transport.evaluator,
+                    timeout=self.config.operation_timeout_seconds,
                 )
                 number = 1 if latest is None else latest.attempt_number + 1
+                height = await blocks.finalized_head_height()
                 window = await capture_cohort_attempt_window(
                     source.transport, blocks, height, assignment, number
                 )
             else:
+                height = await blocks.finalized_head_height()
                 window = await capture_request_window(source.transport, blocks, height)
             return ServiceRequestInputs(video=video, window=window)
 

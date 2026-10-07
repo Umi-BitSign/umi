@@ -33,7 +33,8 @@ from .competition_progress import _failure_details
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .endpoint_retirement import SignedEndpointRetirementReceipt
 from .open_competition import Signature, digest, identity
-from .private_files import lock_private_file
+from .private_files import PrivateStateBusyError, lock_private_file
+from .private_state_wait import run_private_state_operation
 from .protocol import Video
 
 _RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
@@ -106,17 +107,20 @@ class ServiceWorkWorker:
     async def _call(self, awaitable):
         return await wait_for_owned(awaitable, timeout=self.transport.timeout)
 
+    async def _local(self, function, *args):
+        return await run_private_state_operation(function, *args, timeout=self.transport.timeout)
+
     async def _certificate(self, body):
         slot = service_grant_slot(body)
-        raw = await run_owned_thread(self.journal.get, "service_grant", slot)
+        raw = await self._local(self.journal.get, "service_grant", slot)
         if raw is not None:
-            return await run_owned_thread(self.requests.certificate, slot)
+            return await self._local(self.requests.certificate, slot)
 
         async def vote(who, port):
             if who == identity(body.assignment.admission.submission.submission.hotkey):
                 return
             key = self.requests._vote_key(slot, self.reviewer_keys[who])
-            raw = await run_owned_thread(self.journal.get, "service_request_vote", key)
+            raw = await self._local(self.journal.get, "service_request_vote", key)
             try:
                 signed = (
                     Signature.model_validate(raw)
@@ -126,49 +130,57 @@ class ServiceWorkWorker:
                 if identity(signed.hotkey) != who:
                     raise ValueError("service request vote came from another reviewer")
                 async with self.vote_writes:
-                    await run_owned_thread(self.requests.collect, slot, signed)
+                    await self._local(self.requests.collect, slot, signed)
             except _RETRY:
                 # Another independent quorum may be available this pass.
                 return
 
         await self._gather(vote(who, port) for who, port in self.reviewers.items())
-        return await run_owned_thread(self.requests.certificate, slot)
+        return await self._local(self.requests.certificate, slot)
 
     async def _prepare(self, assignment, *, parent=None, decision=None, retirement=None):
-        inputs = await self._call(self.inputs(assignment))
-        source, capture = await self._call(self.observation(assignment))
-        return await run_owned_thread(
-            partial(
-                self.requests.prepare,
-                assignment.admission.claim,
-                self.transport.evaluator,
-                inputs.video,
-                inputs.window,
-                source,
-                capture,
-                parent=parent,
-                decision=decision,
-                retirement=retirement,
-            ),
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.transport.timeout
+        while True:
+            inputs = await self._call(self.inputs(assignment))
+            source, capture = await self._call(self.observation(assignment))
+            try:
+                return await run_owned_thread(
+                    partial(
+                        self.requests.prepare,
+                        assignment.admission.claim,
+                        self.transport.evaluator,
+                        inputs.video,
+                        inputs.window,
+                        source,
+                        capture,
+                        parent=parent,
+                        decision=decision,
+                        retirement=retirement,
+                    ),
+                )
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # Never retry persistence with the same authority/head after a wait.
+                await asyncio.sleep(min(1.0, remaining))
 
     async def _advance(self, admission):
-        assignment = await run_owned_thread(self.queue.assignment, admission.claim)
-        if await run_owned_thread(self.terminals.read, assignment) is not None:
+        assignment = await self._local(self.queue.assignment, admission.claim)
+        if await self._local(self.terminals.read, assignment) is not None:
             return "completed", "original_terminal_retained"
-        body = await run_owned_thread(
-            self.requests.latest, admission.claim, self.transport.evaluator
-        )
+        body = await self._local(self.requests.latest, admission.claim, self.transport.evaluator)
         if body is None:
             body = await self._prepare(assignment)
         slot = service_grant_slot(body)
         # A prepared terminal survives a signing outage and needs no new media,
         # chain observation, grant delivery, retirement or model execution.
-        intent = await run_owned_thread(
+        intent = await self._local(
             self.journal.get, "service_terminal_intent", admission.work_sha256
         )
         if intent is not None:
-            terminal = await run_owned_thread(self.terminals.prepare, slot)
+            terminal = await self._local(self.terminals.prepare, slot)
         else:
             grant = await self._certificate(body)
             result = await self.transport.advance(slot)
@@ -192,7 +204,7 @@ class ServiceWorkWorker:
                 execution_boundary(capture),
             )
         signature = await self._call(self.sign(terminal))
-        await run_owned_thread(self.terminals.retain, terminal, signature)
+        await self._local(self.terminals.retain, terminal, signature)
         return "completed", "terminal_retained"
 
     def _batch(self):
@@ -217,7 +229,7 @@ class ServiceWorkWorker:
         async with self.serial:
             lease = lock_private_file(self.journal.root / "service-worker.lock")
             try:
-                rows = await run_owned_thread(self._batch)
+                rows = await self._local(self._batch)
                 miners = {identity(r.claim.claim.hotkey): asyncio.Lock() for r in rows}
                 retries = []
 

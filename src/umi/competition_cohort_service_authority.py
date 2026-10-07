@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from .competition_chain import FinalizedRegistrationProvider, RegistrationCapture
@@ -14,6 +15,8 @@ from .competition_execution import execution_boundary
 from .competition_origin import EndpointOriginCapture, public_https_origin
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest
+from .private_files import PrivateStateBusyError
+from .private_state_wait import run_private_state_operation
 from .protocol import canonical_json_bytes
 
 
@@ -65,17 +68,29 @@ class ServiceWorkAuthority:
 
     async def _current(self, assignment):
         cohort = assignment.catalog.catalog.cohort_sha256
-        source = await wait_for_owned(self.history(cohort), timeout=self.timeout)
-        capture = await wait_for_owned(self.provider.collect(), timeout=self.timeout)
-        await run_owned_thread(
-            self._remember, assignment, source, execution_boundary(capture).block
-        )
-        return source, capture
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        while True:
+            source = await wait_for_owned(self.history(cohort), timeout=self.timeout)
+            capture = await wait_for_owned(self.provider.collect(), timeout=self.timeout)
+            try:
+                await run_owned_thread(
+                    self._remember, assignment, source, execution_boundary(capture).block
+                )
+                return source, capture
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # Refresh both inputs; lock contention cannot extend an old head.
+                await asyncio.sleep(min(1.0, remaining))
 
     async def observe(
         self, assignment: ServiceWorkAssignment
     ) -> tuple[CohortOrderHistory, RegistrationCapture]:
-        assignment = await run_owned_thread(self._owned, assignment)
+        assignment = await run_private_state_operation(
+            self._owned, assignment, timeout=self.timeout
+        )
         source, capture = await self._current(assignment)
         if (
             await wait_for_owned(self.history(assignment.round.cohort_sha256), timeout=self.timeout)
@@ -86,7 +101,9 @@ class ServiceWorkAuthority:
         return source, capture
 
     async def origin(self, assignment: ServiceWorkAssignment) -> EndpointOriginCapture:
-        assignment = await run_owned_thread(self._owned, assignment)
+        assignment = await run_private_state_operation(
+            self._owned, assignment, timeout=self.timeout
+        )
         source, started = await self.observe(assignment)
         scope = CohortServiceOriginScope(
             schema="umi-cohort-service-origin-scope/1",

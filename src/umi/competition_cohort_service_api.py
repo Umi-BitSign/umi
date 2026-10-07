@@ -54,6 +54,7 @@ from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .private_files import PrivateStateBusyError
+from .private_state_wait import run_private_state_operation
 from .protocol import canonical_json_bytes
 
 PATH = "/v1/competition/service-work"
@@ -205,24 +206,7 @@ class ServiceWorkAdmissionAPI:
         return await wait_for_owned(awaitable, timeout=self.timeout)
 
     async def _local(self, function, *args):
-        """Wait for a genuine local mutex hold without retrying validation failures.
-
-        Each attempt drains its owned thread before yielding. Only acquisition
-        contention is retried; failed I/O, corrupt records and changed authority
-        retain their original failure. Cancellation releases the HTTP owner.
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.timeout
-        delay = 0.05
-        while True:
-            try:
-                return await run_owned_thread(function, *args)
-            except PrivateStateBusyError:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise
-                await asyncio.sleep(min(delay, remaining))
-                delay = min(1.0, delay * 2)
+        return await run_private_state_operation(function, *args, timeout=self.timeout)
 
     @staticmethod
     def _remember(queue, source, capture):

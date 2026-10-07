@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_export import ServiceWorkLookup, SignedServiceWorkResponse
 from umi.competition_cohort_service_transport import ServiceWorkTransport
 from umi.open_competition import digest
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_service_authority import base_policy as base_policy
@@ -320,4 +322,46 @@ async def test_service_request_windows_are_scoped_to_qualified_miners(host, vers
         assert captured.window != s.c.window
     else:
         assert captured.window == s.c.window
+    assert s.p.model.calls == 0 and s.signatures == 0
+
+
+async def test_attempt_window_reads_finalized_head_after_real_journal_contention(host, monkeypatch):
+    h, s = host.open(), host.s
+    h.config = h.config.model_copy(update={"request_window_version": 2})
+    original = dispatch.ServiceWorkRequests.latest
+    capture = dispatch.capture_cohort_attempt_window
+    events = []
+
+    def latest(requests, *args):
+        events.append("latest")
+        if len(events) == 1:
+            held = lock_private_file(requests.journal.lock_path)
+            try:
+                with pytest.raises(PrivateStateBusyError) as caught:
+                    original(requests, *args)
+                events.append("busy")
+                raise caught.value
+            finally:
+                os.close(held)
+        return original(requests, *args)
+
+    head = s.p.finality.finalized_head_height
+
+    async def finalized_head():
+        if events:
+            events.append("head")
+        return await head()
+
+    async def capture_window(*args):
+        assert events == ["latest", "busy", "latest", "head"]
+        return await capture(*args)
+
+    monkeypatch.setattr(dispatch.ServiceWorkRequests, "latest", latest)
+    monkeypatch.setattr(s.p.finality, "finalized_head_height", finalized_head)
+    monkeypatch.setattr(dispatch, "capture_cohort_attempt_window", capture_window)
+    worker = await h.worker(host.catalog)
+    captured = await worker.inputs(s.c.assignment)
+    assert captured.video == s.p.service_video
+    # The native capture independently rechecks finality after host issuance.
+    assert events == ["latest", "busy", "latest", "head", "head"]
     assert s.p.model.calls == 0 and s.signatures == 0

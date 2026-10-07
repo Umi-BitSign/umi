@@ -5,6 +5,7 @@ installed coordinator, external reviewer host or chain effect is represented.
 """
 
 import asyncio
+import errno
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ from umi.endpoint_protocol import (
 )
 from umi.miner import create_app
 from umi.open_competition import digest, sign_object
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes, request_digest
 
 from .test_competition_cohort_intake import history_tip
@@ -192,6 +194,24 @@ async def test_native_service_work_completes_and_restarts_offline(loop):
     assert s.signs == 1
 
 
+async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):
+    s = loop
+    worker = s.worker()
+    original = worker.requests.prepare
+    attempts = []
+
+    def contended(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(worker.requests, "prepare", contended)
+    body = await worker._prepare(s.c.assignment)
+    assert len(attempts) == 2 and s.inputs == 2
+    assert body.assignment == s.c.assignment
+
+
 @pytest.mark.parametrize("path", [COHORT_GRANT_PATH, TRANSLATE_PATH, COHORT_RETIRE_PATH])
 async def test_service_lost_acknowledgements_recover_without_duplicate_inference(loop, path):
     s = loop
@@ -266,6 +286,7 @@ async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryab
     worker = object.__new__(ServiceWorkWorker)
     worker.serial, worker.capacity = asyncio.Lock(), asyncio.Semaphore(1)
     worker.journal = SimpleNamespace(root=tmp_path)
+    worker.transport = SimpleNamespace(timeout=5)
     admission = SimpleNamespace(
         claim=SimpleNamespace(
             claim=SimpleNamespace(hotkey="5HTFEEFA13x4hom2Nz5EFo7RSQ6PSAyCH1BgM8CbZhhdrSDb")
