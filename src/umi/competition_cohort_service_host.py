@@ -371,6 +371,11 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                     Path(self.admission_owner.directory),
                     Path(self.admission_owner.owner_key_file),
                     Path(self.admission_owner.export_token_file),
+                    *(
+                        (Path(self.admission_owner.windows.directory),)
+                        if self.admission_owner.windows
+                        else ()
+                    ),
                 )
                 if self.admission_owner
                 else ()

@@ -246,6 +246,7 @@ async def test_recurring_dispatch_waits_for_inputs_then_drains(host):
 @pytest.mark.parametrize("fault", [None, "startup", "backups", "policy"])
 async def test_dispatch_owns_origin_provider_until_context_drains(host, monkeypatch, fault):
     h, events = host.open(), []
+    windows = object()
     cfg = h.config.origins.model_copy(
         update={"proof_rpc_fallback_urls": ("wss://backup-one.example", "wss://backup-two.example")}
     )
@@ -281,8 +282,10 @@ async def test_dispatch_owns_origin_provider_until_context_drains(host, monkeypa
                 h.key,
                 h.sign,
                 "a" * 64,
+                windows=windows,
             )
             assert isinstance(result, ServiceDispatchHost)
+            assert result.windows is windows
             assert events == ["created", "started"]
 
     if fault:

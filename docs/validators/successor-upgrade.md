@@ -1859,17 +1859,50 @@ oldest stage. Stage state is removed after completion, failure or cooperative
 cancellation and includes no miner identity or request content. Neither those
 counts nor selected grants establish completed service work or reward credit.
 
+The admission owner can coordinate the miner's active-window limit across paid
+work, endpoint benchmarks, evaluator processes and configured cohorts. Configure
+`admission_owner.windows` with a dedicated private `directory`, the pinned
+`transports`, and `bootstrap_sources` naming every existing dispatch journal.
+Enable `endpoint.shared_miner_windows` on each endpoint reviewer. They use the
+existing authenticated owner origin and token; the private route is
+`/internal/cohorts/miner-windows`. It is not a public intake route.
+
+Before enabling this on an existing installation, cooperatively stop every
+dispatch writer and preserve snapshots of its original journals. Import all
+original sends, uncertain sends and bound retirement receipts with
+`import_window_source`, then seal the complete configured source inventory.
+Keep the writers stopped until the owner and all dispatchers select the shared
+configuration. Missing source records or an incomplete bootstrap hold new
+dispatch. A fresh empty database must not imply that an existing miner is free.
+Retain the original snapshots and migration receipts. These migration steps
+remain necessary while an installation has sends made before shared reservation.
+If a cutover is rolled back to dispatchers without shared reservations, preserve
+the abandoned index and rebuild a new generation from current original journals
+before enabling it again. The old sealed inventory no longer covers intervening
+sends. Do not erase or reopen that sealed inventory.
+
+The owner reserves an exact request before transmission. Requests in the same
+window share its allowance; a different window waits until all reserved requests
+in the old window have verified retirement receipts. Unknown sends survive a
+restart. Response recovery and retirement remain available while new admission
+is held, and a saved local retirement is synchronized again after owner recovery.
+Reservations neither extend signed deadlines nor authorize scoring or rewards.
+Static grant checks are reused only for their exact retained inputs and bound
+policy; current execution authority remains the dispatcher's and miner's job.
+
 Request-vote collection proceeds when verified retained signatures satisfy the
 configured independent-group quorum, without requiring a redundant reviewer's
 response. Every certificate still passes native policy verification; votes
 from the same group cannot replace a required independent group. Outstanding
 peer requests drain cooperatively, and already committed votes remain recoverable.
 
-Current authority-history reads use the intake owner's preferred queue. Reads
-remain exclusive and validate the same private database and configuration; they
-cannot interrupt the current owner. After at most eight preferred reads, queued
-background work gets a turn. Preference changes waiting order, not authority,
-retained request bytes or persistence rules.
+Current authority-history reads use a query-only SQLite snapshot, so admission
+or model-preservation work does not own their application lock. Each snapshot
+binds the published history and its supporting records, checks the original
+private file identity and configuration, and cannot write or repair state.
+Writers retain their exclusive transaction and generation checks. The owner
+still signs each fresh response; cached historical proofs do not grant current
+execution authority.
 
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same

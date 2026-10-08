@@ -877,7 +877,13 @@ async def run_pipeline(
             )
             for name in nodes:
                 node = evaluator(name)
-                assert (await node.worker.poll_once())["jobs_complete"] == recovered_jobs
+                report = await node.worker.poll_once()
+                assert report["steps_advanced"] == report["retry_count"] == 0
+                # The scheduler reports one rotating page, not all historical
+                # jobs. Verify each original's durable native evidence offline.
+                retained_slots = node.inbox.assignments(limit=256)
+                assert len(retained_slots) == recovered_jobs
+                assert all(node.execution.evidence(slot) is not None for slot in retained_slots)
                 with pytest.raises(OSError):
                     await node.exporter.poll_once()
                 # Already published immutable exports remain readable even when

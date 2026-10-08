@@ -56,6 +56,7 @@ class EndpointHostConfig(StrictProtocolModel):
         None
     )
     concurrency: Annotated[int, Field(strict=True, ge=1, le=32)] | None = None
+    shared_miner_windows: bool = False
     requests: EndpointRequestSignerConfig
     decisions: CohortEndpointDecisionConfig
     origins: CompetitionChainConfig
@@ -73,6 +74,8 @@ class EndpointHostConfig(StrictProtocolModel):
             value.pop("request_window_miner_hotkeys", None)
         if self.concurrency is None:
             value.pop("concurrency", None)
+        if not self.shared_miner_windows:
+            value.pop("shared_miner_windows", None)
         return value
 
     def stores(self):
@@ -117,11 +120,15 @@ class EndpointHostConfig(StrictProtocolModel):
 
 
 class EndpointHost:
-    def __init__(self, config, benchmark, origins, client, credentials, key, sign, clips):
+    def __init__(
+        self, config, benchmark, origins, client, credentials, key, sign, clips, *, windows=None
+    ):
         self.config = c = EndpointHostConfig.model_validate_json(
             canonical_json_bytes(config.endpoint)
         )
         self.manifest, self.policy, self.benchmark = config.manifest, config.policy, benchmark
+        if c.shared_miner_windows != (windows is not None):
+            raise ValueError("endpoint shared-window selection differs from its client")
         self.clips, self.readiness_assignments = clips, {}
         self.readiness_stamp = None
         self.objects = SettlementEvidenceFiles(Path(c.objects_directory))
@@ -159,7 +166,7 @@ class EndpointHost:
             benchmark.execution, benchmark.provider, benchmark.history
         )
         self.recovery = CohortEndpointResponseRecovery(
-            CohortEndpointOrigin(authority, origins), key
+            CohortEndpointOrigin(authority, origins), key, windows=windows
         )
 
         async def video(job, case):

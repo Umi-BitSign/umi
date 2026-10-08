@@ -27,6 +27,7 @@ from .competition_cohort_request_admission import CohortRequestWindowAuthority
 from .competition_cohort_service_grant import service_grant_slot
 from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_work import ServiceWorkAssignment
+from .competition_cohort_window_store import WindowAdmissionHeld
 from .competition_origin import EndpointOriginCapture, public_https_origin
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread, wait_for_owned
@@ -88,6 +89,7 @@ class ServiceWorkTransport:
         *,
         timeout_seconds: float = 2400,
         transport: httpx.AsyncBaseTransport | None = None,
+        windows=None,
     ):
         if (
             isinstance(timeout_seconds, bool)
@@ -101,6 +103,7 @@ class ServiceWorkTransport:
         if identity(self.evaluator) not in {identity(e.hotkey) for e in requests.policy.evaluators}:
             raise ValueError("service transport signer is outside evaluator policy")
         self.timeout, self.transport = timeout_seconds, transport
+        self.windows = windows
         self.limits = Limits.from_policy(requests.transport)
 
     def _response(self, grant, raw):
@@ -273,6 +276,25 @@ class ServiceWorkTransport:
                     live = bt.timelock.current_round() < grant.body.request.response_close_round
                 except MinerAdmissionError:
                     live = False
+                if live and self.windows is not None:
+                    try:
+                        reservation = await self.windows.reserve(grant, grant.body.request)
+                    except (OSError, WindowAdmissionHeld):
+                        return ServiceTransportOutcome("miner_window_admission_pending", response)
+                    if reservation not in {"reserved", "retired"}:
+                        raise ValueError("window owner did not reserve the service request")
+                    # Reservation latency cannot extend the original clocks.
+                    try:
+                        await wait_for_owned(
+                            authority.authorize(grant.body.request), timeout=self.timeout
+                        )
+                        live = (
+                            reservation == "reserved"
+                            and bt.timelock.current_round()
+                            < grant.body.request.response_close_round
+                        )
+                    except MinerAdmissionError:
+                        live = False
                 if live:
                     prepared = prepare_request_attempt(
                         grant.body.request, wallet=self.wallet, miner_hotkey=capture.hotkey
@@ -367,6 +389,8 @@ class ServiceWorkTransport:
             self._agrees(retired, response)
             await run_owned_thread(self.journal.put, "service_retirement", slot, retired)
         self._agrees(retired, response)
+        if self.windows is not None:
+            await self.windows.retire(grant, grant.body.request, retired)
         return ServiceTransportOutcome(
             "response_retained" if response else "retry_required", response, retired
         )

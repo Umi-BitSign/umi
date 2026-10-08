@@ -122,7 +122,9 @@ class CohortEndpointAttemptWorker:
             if phase == "certification"
             else await dispatcher.dispatch(slot, case_id)
         )
-        if sent["status"] == "pending" and sent["reason"].startswith("miner_grant_"):
+        if sent["status"] == "pending" and sent["reason"].startswith(
+            ("miner_grant_", "miner_window_")
+        ):
             return {
                 "status": "pending",
                 "reason": sent["reason"],

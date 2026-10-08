@@ -66,8 +66,10 @@ class CohortEndpointResponseRecovery:
         wallet: Any,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        windows=None,
     ):
         self.origin, self.wallet, self.transport = origin, wallet, transport
+        self.windows = windows
         self.journal = origin.authority.journal
         # Retained replacement ancestry stays in the working set until every
         # case closes. Size this cache for cohort-scale histories rather than

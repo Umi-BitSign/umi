@@ -24,6 +24,7 @@ from .competition_cohort_endpoint_selection import (
 )
 from .competition_cohort_grant_delivery import CohortEndpointGrantDelivery, verify_grant_receipt
 from .competition_cohort_request_admission import CohortRequestWindowAuthority
+from .competition_cohort_window_store import WindowAdmissionHeld
 from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread, wait_for_owned
 from .config import Limits
@@ -67,6 +68,21 @@ class CohortDispatchReceipt(StrictProtocolModel):
 class CohortEndpointDispatcher:
     def __init__(self, recovery, finalized_blocks):
         self.recovery, self.finalized_blocks = recovery, finalized_blocks
+
+    async def _reserve_window(self, selected, assignment, case_id):
+        if self.recovery.windows is None:
+            return None
+        try:
+            status = await self.recovery.windows.reserve(
+                selection_grant(selected, assignment), selected_request(selected, case_id)
+            )
+        except (OSError, WindowAdmissionHeld):
+            return {"status": "pending", "reason": "miner_window_admission_pending"}
+        if status == "retired":
+            return {"status": "pending", "reason": "dispatch_request_retired"}
+        if status != "reserved":
+            raise ValueError("window owner did not reserve the selected request")
+        return None
 
     def _intent(self, selected, job, case_id):
         journal = self.recovery.journal.journal
@@ -218,6 +234,9 @@ class CohortEndpointDispatcher:
             capture.hotkey
         ) != identity(job.submission.submission.hotkey):
             raise ValueError("dispatch retry origin differs from its assigned miner")
+        held = await self._reserve_window(selected, assignment, case_id)
+        if held is not None:
+            return held
         try:
             await wait_for_owned(authority.authorize(request), timeout=timeout)
         except MinerAdmissionError as error:
@@ -342,6 +361,9 @@ class CohortEndpointDispatcher:
                 capture.hotkey
             ) != identity(job.submission.submission.hotkey):
                 raise ValueError("dispatch origin differs from its assigned miner")
+            held = await self._reserve_window(selected, assignment, case_id)
+            if held is not None:
+                return held
             # Slow origin proofs may cross either deadline. Recheck before intent.
             try:
                 await wait_for_owned(authority.authorize(request), timeout=timeout)
