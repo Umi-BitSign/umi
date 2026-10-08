@@ -244,6 +244,7 @@ class CohortExecutionWorker:
         # must not make their own local reads compete for that nonblocking lock.
         self.inbox_reads = asyncio.Lock()
         self.serial = asyncio.Lock()
+        self.source_priority_due = True
 
     async def poll_once(self):
         async with self.serial:
@@ -344,16 +345,27 @@ class CohortExecutionWorker:
                     if len(rows) > 1:
                         raise ValueError("execution cursor is invalid")
                     after = rows[0][0] if rows else ""
+                available = self.concurrency - len(active)
+                chosen = []
+                # One fixed source unlocks many consumers. Revisit it promptly
+                # rather than putting each of its steps behind the whole roster.
+                # Keep peer capacity; a single-slot host alternates with normal
+                # work even if this source is repeatedly unavailable.
+                if self.concurrency > 1 or self.source_priority_due:
+                    sources = self.executor.journal.unfinished_incumbent_sources()
+                    chosen = [slot for slot in sources if slot not in active][:1]
+                self.source_priority_due = not bool(chosen)
                 slots = self.inbox.assignments(after=after, limit=self.batch_size)
                 if not slots and after:
                     slots = self.inbox.assignments(limit=self.batch_size)
-                chosen, last = [], None
-                for slot in slots:
-                    last = slot
-                    if slot not in active:
-                        chosen.append(slot)
-                    if len(chosen) >= self.concurrency - len(active):
-                        break
+                last = None
+                if len(chosen) < available:
+                    for slot in slots:
+                        last = slot
+                        if slot not in active and slot not in chosen:
+                            chosen.append(slot)
+                        if len(chosen) >= available:
+                            break
                 if last is not None:
                     with journal.transaction() as db:
                         db.execute("DELETE FROM execution_cursor")

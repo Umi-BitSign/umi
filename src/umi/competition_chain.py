@@ -46,6 +46,7 @@ from .open_competition import (
     digest,
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
+from .private_files import PrivateStateBusyError
 from .proof_rpc_cache import BlockPinnedRpcCache
 from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
@@ -65,6 +66,7 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
+_RETENTION_MUTEX_WAIT_SECONDS = 60.0
 # Reconnect silent follow streams before consuming the full freshness budget.
 # Give a live record up to half of the configured head-age allowance so slow RPC
 # or finality verification cannot cause a permanent fifteen-second retry loop.
@@ -1264,6 +1266,25 @@ class FinalizedRegistrationProvider:
         ):
             raise ValueError("registration finalized head rolled back or changed")
 
+    def _retained_blocks(self, cancelled: threading.Event | None) -> frozenset[int]:
+        """Wait for a validated local mutex without collecting the proof again."""
+        deadline = time.monotonic() + _RETENTION_MUTEX_WAIT_SECONDS
+        while True:
+            if cancelled is not None and cancelled.is_set():
+                raise ValueError("registration persistence cancelled")
+            try:
+                return self._retained_capture_blocks()
+            except PrivateStateBusyError as error:
+                # Never retry corruption, missing records or an untrusted subclass.
+                remaining = deadline - time.monotonic()
+                if type(error) is not PrivateStateBusyError or remaining <= 0:
+                    raise
+                pause = min(0.1, remaining)
+                if cancelled is None:
+                    time.sleep(pause)
+                else:
+                    cancelled.wait(pause)
+
     def _save(
         self,
         capture: RegistrationCapture,
@@ -1308,7 +1329,7 @@ class FinalizedRegistrationProvider:
                 # back every deletion. observed_head remains the rollback guard.
                 retained = frozenset()
                 if self._retained_capture_blocks is not None:
-                    retained = self._retained_capture_blocks()
+                    retained = self._retained_blocks(cancelled)
                     if cancelled is not None and cancelled.is_set():
                         raise ValueError("registration persistence cancelled")
                     if not isinstance(retained, frozenset) or any(

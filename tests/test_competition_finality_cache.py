@@ -21,11 +21,17 @@ from umi.competition_finality_cache import (
     _refresh_source_frames,
 )
 from umi.competition_submission_checkpoint import SubmissionCheckpointError
+from umi.private_files import PrivateStateBusyError
 from umi.validator_chain import ValidatorChainError
 
 from .test_open_competition import policy as policy
 
 _PRIVATE_URL = "wss://private-provider.invalid/token/should-never-be-logged"
+
+
+def test_retention_mutex_failure_has_fixed_private_safe_classification():
+    error = PrivateStateBusyError("round_journal_lock", "ab" * 32, 11)
+    assert _refresh_failure(error) == ("PrivateStateBusyError", "retention_mutex_busy")
 
 
 class ControlledProvider:
@@ -407,7 +413,8 @@ async def test_unknown_refresh_logs_native_line_without_provider_message(policy,
     with caplog.at_level("WARNING", logger="umi.competition_finality_cache"):
         await cache._run()
     boundary = next(
-        r.getMessage() for r in caplog.records
+        r.getMessage()
+        for r in caplog.records
         if r.getMessage().startswith("registration_refresh_boundary native_frames=")
     )
     frames = json.loads(boundary.split("=", 1)[1])

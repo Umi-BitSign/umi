@@ -297,6 +297,25 @@ this command alone is not an open-mining launch.
 
 <a id="open-competition-native-evaluator"></a>
 
+## Recoverable cohort scheduling
+
+The recoverable cohort worker retains each completed case separately. For new
+endpoint comparator jobs with identical preparation, round, evaluator, model,
+runtime and input clips, it reserves one source before inference and preserves
+that source's observations when other jobs reuse them. Existing per-job attempts
+keep their original recovery path. The worker gives the unfinished fixed source
+one priority slot so its next case does not wait behind the entire roster. Other
+jobs retain capacity; a single-slot worker alternates priority with ordinary
+work. An unavailable source remains pending and cannot authorize a different
+source or fabricate a result.
+
+Registration persistence waits up to 60 seconds for an explicitly classified
+private mutex before abandoning its collected proof. It retries the local
+retention lookup without repeating RPC collection. Cancellation drains the
+owned persistence operation and rolls back pruning; corruption, missing evidence
+and other errors are not treated as mutex contention. Freshness, registration,
+authority and retained-evidence checks remain required.
+
 ## Native Mac Studio evaluator
 
 The opt-in `umi-offline-mps-runtime/1` backend runs preserved Python model

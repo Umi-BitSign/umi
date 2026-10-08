@@ -304,6 +304,22 @@ class CohortExecutionJournal:
             check_boundary(evidence.steps[0].started, source.reserved_at)
         return evidence
 
+    def unfinished_incumbent_sources(self) -> tuple[str, ...]:
+        """Scheduling hints only; execution still checks current authority."""
+        with self.journal.transaction() as db:
+            sources = db.execute(
+                "SELECT id, body FROM records WHERE kind='incumbent_source' ORDER BY id"
+            ).fetchall()
+        pending = []
+        for key, raw in sources:
+            source = CohortIncumbentSource.model_validate_json(raw)
+            _, job = self.assignment_and_job(source.source_slot)
+            if key != source.scope_sha256 or incumbent_scope(job) != key:
+                raise ValueError("shared incumbent scheduling source changed its scope")
+            if self._source_evidence(job, source) is None:
+                pending.append(source.source_slot)
+        return tuple(pending)
+
     def reuse_endpoint_incumbent(self, slot, job, observed):
         """Reserve one future source, keeping legacy executions in place.
 

@@ -1,5 +1,7 @@
 """Native original orders, journals and boundary replay with synthetic sandbox calls."""
 
+import asyncio
+
 import pytest
 
 from umi.competition_cohort_execution_journal import (
@@ -49,6 +51,78 @@ async def finish(e, assignment):
         e.r.h.block += 1
         result = await executor.advance(assignment)
     return result
+
+
+def cursor_before_peer(e, peer_slot):
+    with e.journal().journal.transaction() as db:
+        db.execute("DELETE FROM execution_cursor")
+        db.execute(
+            "INSERT INTO execution_cursor VALUES (?)",
+            (e.r.slot if e.r.slot < peer_slot else "",),
+        )
+
+
+async def test_fixed_source_advances_ahead_of_cursor_and_survives_worker_restart(execution):
+    e = execution
+    if e.job.mode != "endpoint_incumbent":
+        return
+    await e.executor().advance(e.assignment)
+    assignment, peer_slot, _ = await other_assignment(e)
+    cursor_before_peer(e, peer_slot)
+    worker, active = e.worker(concurrency=1), {}
+    await worker._rolling_poll(active)
+    assert tuple(active) == (e.r.slot,)
+    try:
+        await asyncio.gather(*active.values())
+    finally:
+        await worker._drain(active.values())
+    # A restart reads the original reservation and keeps its exact observations.
+    while e.journal().evidence(e.r.slot) is None:
+        worker, active = e.worker(concurrency=1), {}
+        await worker._rolling_poll(active)
+        assert tuple(active) == (e.r.slot,)
+        try:
+            await asyncio.gather(*active.values())
+        finally:
+            await worker._drain(active.values())
+    assert e.journal().unfinished_incumbent_sources() == ()
+    calls = len(e.calls)
+    assert await e.executor().advance(assignment) is not None
+    assert len(e.calls) == calls
+
+
+async def test_unavailable_fixed_source_does_not_starve_single_slot_peer(execution):
+    e = execution
+    if e.job.mode != "endpoint_incumbent":
+        return
+    await e.executor().advance(e.assignment)
+    assignment, peer_slot, _ = await other_assignment(e)
+    # Keep this independent legacy attempt on its own recovery path.
+    executor = e.executor()
+    source, started = await executor.current(assignment)
+    peer_job = executor.journal.retain(assignment, source, started.block)
+    executor.journal.begin(peer_job, 0, source, started)
+    invoke = e.port.invoke
+
+    async def unavailable_source(job, attempt):
+        if digest(job) == digest(e.job):
+            raise OSError("source unavailable")
+        return await invoke(job, attempt)
+
+    e.port.invoke = unavailable_source
+    cursor_before_peer(e, peer_slot)
+    worker, active = e.worker(concurrency=1), {}
+    await worker._rolling_poll(active)
+    assert tuple(active) == (e.r.slot,)
+    await asyncio.gather(*active.values())
+    await worker._rolling_poll(active)
+    assert tuple(active) == (peer_slot,)
+    try:
+        await asyncio.gather(*active.values())
+        assert e.journal().step(peer_job, 0) is not None
+        assert e.journal().evidence(e.r.slot) is None
+    finally:
+        await worker._drain(active.values())
 
 
 async def test_one_forward_source_replays_for_other_original_entry_and_restart(execution):

@@ -1,10 +1,13 @@
 """Blocking retention owns its thread without blocking intake or outliving its lock."""
 
 import asyncio
+import os
 import sqlite3
 import threading
 
 import pytest
+
+from umi.private_files import PrivateStateBusyError, lock_private_file
 
 from .test_competition_chain import _HEIGHT
 from .test_competition_chain import chain as chain
@@ -27,6 +30,62 @@ def blocked_retention(provider, monkeypatch):
 
     monkeypatch.setattr(provider, "_retained_capture_blocks", retained)
     return entered, release, threads
+
+
+async def test_busy_retention_reuses_collected_proof_and_preserves_prior_capture(
+    chain, monkeypatch, tmp_path
+):
+    provider = chain.provider
+    await provider.collect()
+    before = retained_rows(provider)
+    advance(chain, _HEIGHT + chain.policy.maximum_snapshot_age_blocks + 1)
+    path = tmp_path / "retention.lock"
+    path.write_bytes(b"")
+    path.chmod(0o600)
+    held = lock_private_file(path)
+    busy = threading.Event()
+
+    def retained():
+        try:
+            descriptor = lock_private_file(path)
+        except PrivateStateBusyError:
+            busy.set()
+            raise
+        os.close(descriptor)
+        return frozenset({_HEIGHT})
+
+    monkeypatch.setattr(provider, "_retained_capture_blocks", retained)
+    task = asyncio.create_task(provider.collect())
+    try:
+        assert await asyncio.to_thread(busy.wait, 120)
+        calls = tuple(chain.rpc.calls)
+        assert not task.done()
+    finally:
+        os.close(held)
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.result().snapshot.block == chain.finality.ref.block_number
+    assert tuple(chain.rpc.calls) == calls
+    assert retained_rows(provider)[0] == before[0]
+
+
+async def test_cancelled_retention_mutex_wait_drains_without_pruning(chain, monkeypatch):
+    provider = chain.provider
+    await provider.collect()
+    before = retained_rows(provider)
+    advance(chain, _HEIGHT + chain.policy.maximum_snapshot_age_blocks + 1)
+    busy = threading.Event()
+
+    def retained():
+        busy.set()
+        raise PrivateStateBusyError("round_journal_lock", "ab" * 32, 11)
+
+    monkeypatch.setattr(provider, "_retained_capture_blocks", retained)
+    task = asyncio.create_task(provider._collect_locked())
+    assert await asyncio.to_thread(busy.wait, 120)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled() and not provider._lock.locked()
+    assert retained_rows(provider) == before
 
 
 async def test_blocking_retention_does_not_block_intake_event_loop(chain, monkeypatch):

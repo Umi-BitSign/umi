@@ -26,6 +26,7 @@ from .competition_chain import (
 from .competition_submission_checkpoint import SubmissionCheckpointError
 from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
+from .private_files import PrivateStateBusyError
 from .protocol import canonical_json_bytes
 from .validator_chain import ValidatorChainError
 
@@ -107,6 +108,7 @@ _CHAIN_REFRESH_REASONS = frozenset(
     }
 )
 _REFRESH_FAILURE_CLASSES = {
+    PrivateStateBusyError: ("PrivateStateBusyError", "retention_mutex_busy"),
     OwnedFinalityStale: ("OwnedFinalityStale", "owned_finality_stale"),
     RegistrationCacheFull: ("RegistrationCacheFull", "registration_cache_capacity"),
     RegistrationProviderTimeout: (
