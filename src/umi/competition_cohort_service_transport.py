@@ -2,7 +2,8 @@
 
 The owning worker holds its process lease across these calls. Origin providers
 must authenticate current cohort authority and fresh chain registration. A
-selected request is sent once; uncertain sends use recovery and retirement.
+selected request permits at most two durable sends within its signed budget;
+uncertain sends first recover the sealed response and still require retirement.
 """
 
 from __future__ import annotations
@@ -61,6 +62,13 @@ class ServiceDispatchIntent(StrictProtocolModel):
     grant_sha256: Hex32
     origin_evidence_sha256: Hex32
     started_at_unix_ns: Annotated[str, Field(pattern=r"^(?:0|[1-9][0-9]{0,19})$")]
+
+
+class ServiceDispatchRetryIntent(StrictProtocolModel):
+    schema_: Literal["umi-cohort-service-dispatch-retry-intent/1"] = Field(alias="schema")
+    original_intent_sha256: Hex32
+    transmission_number: Literal[2] = 2
+    intent: ServiceDispatchIntent
 
 
 @dataclass(frozen=True)
@@ -226,7 +234,29 @@ class ServiceWorkTransport:
                 intent = ServiceDispatchIntent.model_validate_json(canonical_json_bytes(intent))
                 if intent.grant_sha256 != digest(grant):
                     raise ValueError("service dispatch intent changed its grant")
-            if response is None and intent is None:
+            retry = await run_owned_thread(self.journal.get, "service_dispatch_retry_intent", slot)
+            if retry is not None:
+                retry = ServiceDispatchRetryIntent.model_validate_json(canonical_json_bytes(retry))
+                if (
+                    intent is None
+                    or retry.original_intent_sha256 != digest(intent)
+                    or (
+                        retry.intent.grant_sha256 != digest(grant)
+                        or int(retry.intent.started_at_unix_ns) < int(intent.started_at_unix_ns)
+                    )
+                ):
+                    raise ValueError("service dispatch retry changed its original intent")
+            if response is None and intent is not None:
+                response = await self._recover(grant, capture)
+            retry_allowed = (
+                retry is None
+                and min(
+                    self.limits.maximum_request_transmissions_per_assignment,
+                    self.limits.maximum_response_bodies_per_assignment,
+                )
+                >= 2
+            )
+            if response is None and (intent is None or retry_allowed):
                 # Grant acknowledgement may be slow. Acquire fresh origin and
                 # authority after it, then check the transport window again.
                 capture = await self._capture(grant)
@@ -247,15 +277,32 @@ class ServiceWorkTransport:
                     prepared = prepare_request_attempt(
                         grant.body.request, wallet=self.wallet, miner_hotkey=capture.hotkey
                     )
-                    intent = ServiceDispatchIntent(
+                    send_intent = ServiceDispatchIntent(
                         schema="umi-cohort-service-dispatch-intent/1",
                         grant_sha256=digest(grant),
                         origin_evidence_sha256=capture.evidence_sha256,
                         started_at_unix_ns=str(time.time_ns()),
                     )
-                    await run_owned_thread(
-                        self.journal.put, "service_dispatch_intent", slot, intent
-                    )
+                    if intent is None:
+                        await run_owned_thread(
+                            self.journal.put, "service_dispatch_intent", slot, send_intent
+                        )
+                    else:
+                        await run_owned_thread(
+                            self.journal.reserve_records,
+                            digest(["umi-service-dispatch-retry-reservation/1", slot]),
+                            (RecordReservation("service_dispatch_retry_intent", slot, 4096),),
+                        )
+                        retry = ServiceDispatchRetryIntent(
+                            schema="umi-cohort-service-dispatch-retry-intent/1",
+                            original_intent_sha256=digest(intent),
+                            intent=send_intent,
+                        )
+                        # A missing acknowledgement consumes the second send;
+                        # future passes only recover/retire this same request.
+                        await run_owned_thread(
+                            self.journal.put, "service_dispatch_retry_intent", slot, retry
+                        )
                     outcome = await send_prepared_request(
                         prepared,
                         miner_url=capture.origin,
@@ -282,7 +329,7 @@ class ServiceWorkTransport:
                                     schema="umi-recovered-endpoint-response/1",
                                     envelope_hex=outcome.envelope_bytes.hex(),
                                     signature=outcome.response_signature,
-                                    retrieval_started_at_unix_ns=intent.started_at_unix_ns,
+                                    retrieval_started_at_unix_ns=send_intent.started_at_unix_ns,
                                     retrieved_at_unix_ns=outcome.received_at_unix_ns,
                                 ),
                             )

@@ -293,20 +293,17 @@ async def test_service_owner_commit_loss_recovers_original(loop, monkeypatch, ki
         report = await worker.poll_once()
     assert report["work_pending"] == 1 and len(saved) == 1
     restart_miner(s.c)
-    if kind == "service_dispatch_intent":
-        # A crash immediately before send cannot prove remote absence. Its
-        # original attempt stays pending until expiry, retirement and quorum.
-        await s.worker().poll_once()
-        assert s.paths.count(TRANSLATE_PATH) == 0
-        assert s.p.model.calls == 0
-        return
     if kind in {"service_terminal_intent", "service_terminal"}:
         s.offline = True
     restarted, value, _ = await finish(s)
     slot = service_grant_slot(
         restarted.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
     )
-    key = slot if kind == "service_response" else value.terminal.work_sha256
+    key = (
+        slot
+        if kind in {"service_response", "service_dispatch_intent"}
+        else value.terminal.work_sha256
+    )
     assert canonical_json_bytes(restarted.journal.get(kind, key)) == saved[0]
     assert s.paths.count(TRANSLATE_PATH) == 1
     assert s.p.model.calls == 1
@@ -562,9 +559,20 @@ async def test_cancelled_native_send_drains_transport_before_releasing_worker(lo
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 5)
     s.before_request = None
-    report = await s.worker().poll_once()
-    assert report["work_pending"] == 1
-    assert s.paths.count(TRANSLATE_PATH) == 1 and s.p.model.calls == 0
+    grant = worker.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
+    slot = service_grant_slot(grant)
+    intent = canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot))
+    restarted = s.worker()
+    await restarted.poll_once()
+    value = restarted.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, restarted.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert canonical_json_bytes(restarted.journal.get("service_dispatch_intent", slot)) == intent
+    assert restarted.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address) == grant
+    assert s.paths.count(TRANSLATE_PATH) == 2 and s.p.model.calls == s.p.fetcher.calls == 1
+    s.offline = True
+    await s.worker().poll_once()
+    assert s.paths.count(TRANSLATE_PATH) == 2 and s.p.model.calls == 1
 
 
 async def test_missing_original_selection_cannot_be_replaced_by_fresh_work(loop):
@@ -697,3 +705,87 @@ async def test_service_certificate_waits_for_quorum_not_redundant_reviewer(
         release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def service_reject_first(s):
+    seen = []
+    worker = s.worker()
+    original = worker.transport.transport
+
+    class RejectFirst(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == TRANSLATE_PATH:
+                seen.append((request.content, dict(request.headers)))
+                if len(seen) == 1:
+                    return httpx.Response(503, content=b"temporary admission unavailable")
+            return await original.handle_async_request(request)
+
+    worker.transport.transport = RejectFirst()
+    first = await worker.poll_once()
+    assert first["work_pending"] == 1 and s.p.model.calls == 0
+    grant = worker.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
+    return worker, service_grant_slot(grant), seen
+
+
+async def test_service_admission_retries_original_without_replacing_grant(loop):
+    s = loop
+    worker, slot, seen = await service_reject_first(s)
+    original = canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot))
+    await worker.poll_once()
+    value = worker.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert len(seen) == 2 and seen[0][0] == seen[1][0] and seen[0][1] != seen[1][1]
+    assert s.p.model.calls == s.p.fetcher.calls == 1
+    assert canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot)) == original
+    s.offline = True
+    await s.worker().poll_once()
+    assert s.p.model.calls == 1
+
+
+@pytest.mark.parametrize("after", [False, True])
+async def test_service_retry_intent_crash_consumes_at_most_two_sends(loop, monkeypatch, after):
+    s = loop
+    worker, _slot, seen = await service_reject_first(s)
+    put = worker.journal.put
+
+    def interrupted(kind, key, value):
+        if kind == "service_dispatch_retry_intent":
+            if after:
+                put(kind, key, value)
+            raise OSError("retry intent acknowledgement lost")
+        return put(kind, key, value)
+
+    with monkeypatch.context() as m:
+        m.setattr(worker.journal, "put", interrupted)
+        assert (await worker.poll_once())["work_pending"] == 1
+    await worker.poll_once()
+    if after:
+        assert len(seen) == 1 and s.p.model.calls == 0
+        assert worker.terminals.read(s.c.assignment) is None
+    else:
+        assert len(seen) == 2 and s.p.model.calls == 1
+        assert worker.terminals.read(s.c.assignment) is not None
+    before = len(seen)
+    await worker.poll_once()
+    assert len(seen) == before
+
+
+async def test_service_unknown_second_send_cannot_repeat_after_restart(loop):
+    s = loop
+    worker, slot, seen = await service_reject_first(s)
+    original = worker.transport.transport
+
+    class LostAgain(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == TRANSLATE_PATH:
+                seen.append((request.content, dict(request.headers)))
+                raise httpx.ReadTimeout("second outcome unknown")
+            return await original.handle_async_request(request)
+
+    worker.transport.transport = LostAgain()
+    assert (await worker.poll_once())["work_pending"] == 1
+    for _ in range(2):
+        assert (await s.worker().poll_once())["work_pending"] == 1
+    assert len(seen) == 2 and s.p.model.calls == 0
+    assert worker.journal.get("service_dispatch_retry_intent", slot) is not None

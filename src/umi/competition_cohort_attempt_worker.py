@@ -63,8 +63,9 @@ class CohortEndpointAttemptWorker:
 
     async def advance(self, original_slot, case_id, *, video=None):
         slot, selected, assignment, _ = await run_owned_thread(self.current, original_slot, case_id)
-        # Lost sends only poll the original response. Retirement performs the
-        # remote fence before any replacement request can be constructed.
+        # Recover the sealed response first, then permit one durable retry of
+        # the original request within its signed transmission/window budget.
+        # Retirement fences execution before a replacement can be constructed.
         dispatcher = CohortEndpointDispatcher(
             self.recovery, self.requests.signer.blocks_for(selected.transport_policy)
         )

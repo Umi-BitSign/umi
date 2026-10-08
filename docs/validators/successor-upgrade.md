@@ -916,6 +916,20 @@ types. Independent request closure and quality replay still determine completion
 and service credit. Preserve the queue and its worker binding across restart;
 changing the evaluator requires an authorized migration, not a configuration edit.
 
+The endpoint cohort dispatcher and paid-service transport permit one durable
+retransmission of the same selected request when the signed policy allows at
+least two request transmissions and response bodies. Each checks for the sealed original response
+first, then rechecks current authority, origin and the original request window.
+Only HTTP authentication is refreshed; the request, clip capability, selection
+and original intent/receipt remain unchanged. A separate retry intent commits
+before the second network call, without changing existing reservation manifests.
+An intent without a receipt consumes that send,
+so restart can recover or retire it but cannot authorize a third transmission.
+Expired or retired requests cannot be retransmitted. A missing response or a
+proxy 503 is not proof that inference did not execute; miner assignment locking
+and sealed response reuse prevent a repeated request from repeating inference.
+Independent retirement, certification and complete archive replay still apply.
+
 `CohortLifecycleService.run` owns a separate sampling task, with a five-second
 default interval, so slow certification does not stop readiness observations.
 Only initialized phase drivers can sample; prior result publication still gates
