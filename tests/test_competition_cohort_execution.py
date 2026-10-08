@@ -45,8 +45,20 @@ receipt_scenario = receipt_fixtures.scenario
 
 
 @pytest.fixture
-def policy(base_policy, runtime):
-    return base_policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
+def policy(base_policy, runtime, request):
+    result = base_policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
+    if getattr(request, "param", None) == "redundant_reviewer":
+        from umi.open_competition import Evaluator
+
+        result = result.model_copy(
+            update={
+                "evaluators": (
+                    *result.evaluators,
+                    Evaluator(hotkey=wallet("Eve").hotkey.ss58_address, control_group="e"),
+                )
+            }
+        )
+    return result
 
 
 def setup_scenario(original, tmp_path, runtime, *, mode="paired_model", baseline_entry=False):

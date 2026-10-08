@@ -46,6 +46,8 @@ def scheduler(tmp_path, *, miners=(0, 1, 2), concurrency=2, batch_size=2):
     worker.batch_size, worker.concurrency = batch_size, concurrency
     worker.capacity, worker.serial = asyncio.Semaphore(concurrency), asyncio.Lock()
     worker._operation_stages = {}
+    worker._operation_lanes = {}
+    worker._ready_stage = lambda _: "dispatch"
     worker.transport = SimpleNamespace(timeout=30)
     return worker, rows
 
@@ -55,7 +57,7 @@ async def test_ready_service_crosses_batch_boundary_while_first_miner_waits(tmp_
     entered, third, release, stop = (asyncio.Event() for _ in range(4))
     seen = []
 
-    async def advance(row):
+    async def advance(row, **kwargs):
         seen.append(row.ordinal)
         if row.ordinal == 1:
             entered.set()
@@ -82,7 +84,7 @@ async def test_service_serializes_one_miner_without_blocking_other_miners(tmp_pa
     same_miner = 0
     maximum_same_miner = 0
 
-    async def advance(row):
+    async def advance(row, **kwargs):
         nonlocal same_miner, maximum_same_miner
         if row.ordinal <= 2:
             same_miner += 1
@@ -112,7 +114,7 @@ async def test_service_cursor_keeps_unstarted_work_and_recovers_after_restart(tm
     worker, _rows = scheduler(tmp_path, batch_size=3, concurrency=1)
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def waiting(row):
+    async def waiting(row, **kwargs):
         entered.set()
         await release.wait()
         return "completed", "fixture_terminal"
@@ -122,13 +124,13 @@ async def test_service_cursor_keeps_unstarted_work_and_recovers_after_restart(tm
     await worker._rolling_poll(active)
     await asyncio.wait_for(entered.wait(), 15)
     with worker.journal.transaction() as db:
-        assert db.execute("SELECT ordinal FROM service_worker_cursor").fetchone() == (1,)
+        assert db.execute("SELECT ordinal FROM service_worker_cursor").fetchone() == (3,)
     await worker._stop_tasks(task for _, task in active.values())
-    # A newly created worker reads the existing durable cursor and original rows.
+    # Capacity-blocked rows remain accepted; restart rotates through all original rows.
     restarted = object.__new__(ServiceWorkWorker)
     restarted.journal, restarted.queue = worker.journal, worker.queue
     restarted.batch_size = worker.batch_size
-    assert [row.ordinal for row in restarted._batch()] == [2, 3]
+    assert [row.ordinal for row in restarted._batch()] == [1, 2, 3]
 
 
 async def test_service_run_drains_repeated_cancellation_before_releasing_lease(tmp_path):
@@ -137,7 +139,7 @@ async def test_service_run_drains_repeated_cancellation_before_releasing_lease(t
     worker, _rows = scheduler(tmp_path)
     entered, cleaning, release = (asyncio.Event() for _ in range(3))
 
-    async def waiting(row):
+    async def waiting(row, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -164,7 +166,7 @@ async def test_service_run_drains_repeated_cancellation_before_releasing_lease(t
 async def test_service_rolling_reports_retry_without_secret_exception_text(tmp_path):
     worker, _rows = scheduler(tmp_path)
 
-    async def failing(row):
+    async def failing(row, **kwargs):
         raise OSError("https://private.example/?token=private-capability")
 
     worker._advance = failing

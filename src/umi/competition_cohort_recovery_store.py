@@ -104,8 +104,7 @@ class CohortRecoveryStore:
             ),
         }
         existing = {
-            row[0]
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         # Existing recovery reads need no schema write transaction. Keep atomic
         # initialization for new or incomplete layouts; all record validation,

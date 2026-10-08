@@ -137,13 +137,13 @@ class CohortEndpointSchedule:
             )
 
     def pending(
-        self, limit: int, *, exclude: tuple[str, ...] = ()
+        self, limit: int, *, exclude: tuple[str, ...] = (), advance: bool = True
     ) -> tuple[tuple[str, str, str], ...]:
         if type(limit) is not int or not 1 <= limit <= 256:
             raise ValueError("endpoint schedule batch is outside bounds")
         if (
             type(exclude) is not tuple
-            or len(exclude) > 32
+            or len(exclude) > 128
             or any(
                 type(slot) is not str
                 or len(slot) != 64
@@ -185,7 +185,7 @@ class CohortEndpointSchedule:
                 "ORDER BY ready_band,band,slot LIMIT ?",
                 (cursor, *exclude, limit),
             ).fetchall()
-            if rows:
+            if rows and advance:
                 db.execute(
                     "INSERT INTO endpoint_schedule_cursor VALUES ('cases',?) "
                     "ON CONFLICT(name) DO UPDATE SET position=excluded.position",
@@ -197,6 +197,33 @@ class CohortEndpointSchedule:
                     ((slot, obligation) for obligation, slot, _ in rows),
                 )
             return tuple(rows)
+
+    def admit_case(self, row):
+        """Advance a case cursor only after its bounded operation is admitted."""
+        obligation, slot, _case_id = row
+        with self.journal.transaction() as db:
+            if (
+                db.execute(
+                    "SELECT 1 FROM endpoint_schedule_queue "
+                    "WHERE obligation=? AND slot=? AND case_id=?",
+                    row,
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("endpoint admission changed its scheduled case")
+            db.execute(
+                "INSERT INTO endpoint_schedule_case_cursor VALUES (?,?) "
+                "ON CONFLICT(slot) DO UPDATE SET position=excluded.position",
+                (slot, obligation),
+            )
+
+    def advance_case_scan(self, slot):
+        with self.journal.transaction() as db:
+            db.execute(
+                "INSERT INTO endpoint_schedule_cursor VALUES ('cases',?) "
+                "ON CONFLICT(name) DO UPDATE SET position=excluded.position",
+                (slot,),
+            )
 
     def reference(self, original_slot: str, case_id: str) -> EndpointTerminalCase | None:
         """Authenticate the selected ancestry, retirement, response and quorum."""

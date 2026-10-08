@@ -74,15 +74,33 @@ class CohortEndpointAttemptWorker:
                 pending.append((peer_slot, case.case_id))
         return pending
 
-    async def advance(self, original_slot, case_id, *, video=None):
+    def phase(self, original_slot, case_id):
+        slot, selected, _, _ = self.current(original_slot, case_id)
+        if self.decisions.retirement.retained(slot, case_id) is not None:
+            return "certification"
+        if (
+            self.recovery.journal.journal.get(
+                "endpoint_dispatch_intent", case_record_key(selected, case_id)
+            )
+            is not None
+            or self.recovery.retained(slot, case_id) is not None
+        ):
+            return "recovery"
+        return "dispatch"
+
+    async def advance(self, original_slot, case_id, *, video=None, one_stage=False):
         slot, selected, assignment, job = await run_owned_thread(
             self.current, original_slot, case_id
         )
+        phase = await run_owned_thread(self.phase, original_slot, case_id) if one_stage else None
         # A response can be saved while its retirement HTTP exchange is held.
         # Rotating to another case must not leave that answered window occupying
         # the miner's slots. Fence existing answers before transmitting more work;
         # do not wait for their scoring or reviewer votes, or rerun those answers.
-        if await run_owned_thread(self.recovery.retained, slot, case_id) is None:
+        if (
+            phase != "certification"
+            and await run_owned_thread(self.recovery.retained, slot, case_id) is None
+        ):
             peers = await run_owned_thread(self._answered_peers, original_slot, case_id, job)
             for peer_slot, peer_case in peers:
                 retired = await self.decisions.retirement.retire(peer_slot, peer_case)
@@ -99,11 +117,24 @@ class CohortEndpointAttemptWorker:
         dispatcher = CohortEndpointDispatcher(
             self.recovery, self.requests.signer.blocks_for(selected.transport_policy)
         )
-        sent = await dispatcher.dispatch(slot, case_id)
+        sent = (
+            {"status": "pending", "reason": "retirement_retained"}
+            if phase == "certification"
+            else await dispatcher.dispatch(slot, case_id)
+        )
         if sent["status"] == "pending" and sent["reason"].startswith("miner_grant_"):
             return {
                 "status": "pending",
                 "reason": sent["reason"],
+                "selection_slot": slot,
+            }
+        if one_stage and phase != "certification":
+            if phase == "dispatch":
+                return {"status": "pending", "reason": sent["reason"], "selection_slot": slot}
+            retired = await self.decisions.retirement.retire(slot, case_id)
+            return {
+                "status": "pending",
+                "reason": "retirement_retained" if retired.value is not None else retired.reason,
                 "selection_slot": slot,
             }
         result = await self.decisions.advance(slot, case_id)

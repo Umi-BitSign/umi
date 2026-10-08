@@ -197,7 +197,7 @@ class ServiceWorkTransport:
             )
         return result.response
 
-    async def advance(self, slot: str) -> ServiceTransportOutcome:
+    async def advance(self, slot: str, *, retire: bool = True) -> ServiceTransportOutcome:
         grant = await run_owned_thread(self.requests.certificate, slot)
         if identity(grant.body.evaluator_hotkey) != identity(self.evaluator):
             raise ValueError("service transport signer differs from original evaluator")
@@ -341,6 +341,10 @@ class ServiceWorkTransport:
                             )
             if response is None:
                 response = await self._recover(grant, capture)
+            if not retire:
+                # Dispatch ownership has drained and its durable intent/reply
+                # survives. Let the scheduler give retirement its own capacity.
+                return ServiceTransportOutcome("request_retirement_pending", response)
             raw = await self._exchange(capture, COHORT_RETIRE_PATH, grant.body.request, 16 * 1024)
             if raw is None:
                 return ServiceTransportOutcome("retirement_pending", response)

@@ -722,7 +722,7 @@ async def test_hanging_grant_control_exchange_is_bounded_and_retryable(delivery)
 
     p = delivery
     journal = p.delivery_recovery.journal
-    assert control_exchange_timeout_seconds(journal.config) == 120
+    assert control_exchange_timeout_seconds(journal.config) == journal.config.read_timeout_seconds
     journal.config = journal.config.model_copy(update={"read_timeout_seconds": 1})
     inner = p.delivery_recovery.transport
 

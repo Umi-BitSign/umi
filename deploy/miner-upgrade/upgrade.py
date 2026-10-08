@@ -18,7 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 DEFAULT_MANIFEST = (
@@ -262,12 +262,14 @@ def miner_command(
         updated = [runtime_python, "-I", "-B", "-m", "umi.miner", *updated[1:]]
     else:
         raise ValueError("unsupported miner entry point")
+    existing_cohort = option(arguments, "--competition-cohort-config", required=False)
     for name in (
         "--competition-feed",
         "--competition-authorization",
-        "--competition-chain-config",
     ):
         remove_option(updated, name)
+    if existing_cohort is None:
+        remove_option(updated, "--competition-chain-config")
     remove_option(updated, "--competition-predecessor-policy", repeatable=True)
     inputs = state / "inputs"
     protocol = state / "protocol"
@@ -280,7 +282,6 @@ def miner_command(
         "--finality-state": str(protocol / "finality.sqlite3"),
         "--max-recovery-assignments": str(manifest["maximum_recovery_assignments"]),
     }
-    existing_cohort = option(arguments, "--competition-cohort-config", required=False)
     for name, value in replacements.items():
         if existing_cohort is not None and name in {
             "--nonce-db",
@@ -574,6 +575,48 @@ def unit_for_pid(pid: int) -> str | None:
     return None
 
 
+def runtime_limits(arguments: list[str], state: Path) -> dict:
+    """Use the selected runtime's resolver, without wallets or service changes."""
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from umi.config import Limits; from umi.open_competition import CompetitionPolicy; "
+        "from umi.policy import ScoringPolicy; "
+        "p=CompetitionPolicy.model_validate_json(Path(sys.argv[1]).read_bytes()); "
+        "t=ScoringPolicy.model_validate_json(Path(sys.argv[2]).read_bytes()); "
+        "override=None if not sys.argv[3] else float(sys.argv[3]); "
+        "lifecycle=None if not sys.argv[4] else float(sys.argv[4]); "
+        "v=Limits.from_policy(t,competition_policy=p,inference_timeout_seconds=override,"
+        "backend_lifecycle_timeout_seconds=lifecycle); "
+        "print(json.dumps({'inference_seconds':v.inference_timeout_seconds,"
+        "'startup_seconds':2*v.backend_lifecycle_timeout_seconds}))"
+    )
+    result = run(
+        arguments[0],
+        "-I",
+        "-B",
+        "-c",
+        code,
+        str(state / "inputs/competition-policy.json"),
+        str(state / "inputs/transport-policy.json"),
+        option(arguments, "--inference-timeout", required=False) or "",
+        option(arguments, "--backend-lifecycle-timeout", required=False) or "",
+    )
+    value = document(result.stdout.encode(), label="effective runtime limits")
+    for key in ("inference_seconds", "startup_seconds"):
+        budget = value.get(key)
+        if (
+            isinstance(budget, bool)
+            or not isinstance(budget, (int, float))
+            or not 0 < budget < float("inf")
+        ):
+            raise ValueError("selected runtime returned an invalid " + key)
+    return value
+
+
+def runtime_inference_seconds(arguments: list[str], state: Path) -> float:
+    return runtime_limits(arguments, state)["inference_seconds"]
+
+
 def prepare_sidecar(
     arguments: list[str], state: Path, account: pwd.struct_passwd, transport: str
 ) -> tuple[Service | None, list[str], Path | None]:
@@ -582,7 +625,10 @@ def prepare_sidecar(
         return None, arguments, None
     capacity_path = Path(socket + ".capacity.json")
     capacity = document(capacity_path.read_bytes(), label="model capacity")
-    if capacity.get("scoring_policy_sha256") == transport:
+    inference_seconds = runtime_inference_seconds(arguments, state)
+    if capacity.get("scoring_policy_sha256") == transport and capacity.get(
+        "maximum_inference_milliseconds"
+    ) == round(inference_seconds * 1000):
         return None, arguments, Path(socket)
     pid = capacity.get("process_id")
     if type(pid) is not int or pid <= 0:
@@ -601,18 +647,34 @@ def prepare_sidecar(
     config = document(raw, label="model sidecar configuration")
     if config.get("socket_path") != socket:
         raise ValueError("model sidecar socket differs")
-    new_socket = state / "model" / "model.sock"
+    workers = config.get("workers")
+    if (
+        config.get("schema") != "umi-community-model-service/1"
+        or not isinstance(workers, list)
+        or not workers
+        or any(not isinstance(w, dict) or "inference_seconds" not in w for w in workers)
+    ):
+        raise ValueError("model sidecar budget migration is unsupported; services unchanged")
+    for worker in workers:
+        worker["inference_seconds"] = inference_seconds
+    scope = sha256(canonical([transport, inference_seconds, capacity.get("model_revision")]))[:16]
+    new_socket = state / "model" / scope / "model.sock"
+    service_directory(state / "model", account)
+    service_directory(new_socket.parent, account)
     config["socket_path"] = str(new_socket)
     config["scoring_policy_sha256"] = transport
     config_raw = canonical(config)
-    new_config = state / "inputs" / "model-service.json"
+    new_config = state / "inputs" / ("model-service-" + sha256(config_raw) + ".json")
     write_private(new_config, config_raw, account)
     updated_miner = list(arguments)
     replace_option(updated_miner, "--translator-unix-socket", str(new_socket))
-    return sidecar, updated_miner, new_socket
+    updated_sidecar = list(sidecar.arguments)
+    replace_option(updated_sidecar, "--config", str(new_config))
+    replace_option(updated_sidecar, "--expected-config-sha256", sha256(config_raw))
+    return replace(sidecar, arguments=updated_sidecar), updated_miner, new_socket
 
 
-def wait_health(port: int, policy: str, transport: str, model: str, seconds: int = 600) -> dict:
+def wait_health(port: int, policy: str, transport: str, model: str, *, seconds: float) -> dict:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -632,7 +694,7 @@ def wait_health(port: int, policy: str, transport: str, model: str, seconds: int
     raise ValueError("miner startup timed out")
 
 
-def wait_capacity(socket: Path, transport: str, model: str, seconds: int = 600) -> dict:
+def wait_capacity(socket: Path, transport: str, model: str, *, seconds: float) -> dict:
     deadline = time.monotonic() + seconds
     capacity_path = socket.with_name(socket.name + ".capacity.json")
     while time.monotonic() < deadline:
@@ -912,6 +974,7 @@ def activate_services(
     policy: str,
     transport: str,
     model: str,
+    startup_seconds: float,
 ) -> dict:
     miner_dropin = SYSTEMD_ROOT / f"{miner.name}.d" / "90-umi-cohort-upgrade.conf"
     sidecar_dropin = (
@@ -941,9 +1004,9 @@ def activate_services(
             run("systemctl", "start", sidecar.name)
             if new_socket is None:
                 raise ValueError("prepared model socket is missing")
-            wait_capacity(new_socket, transport, model)
+            wait_capacity(new_socket, transport, model, seconds=startup_seconds)
         run("systemctl", "start", miner.name)
-        return wait_health(port, policy, transport, model)
+        return wait_health(port, policy, transport, model, seconds=startup_seconds)
     except Exception:
         run("systemctl", "stop", miner.name, check=False)
         if sidecar is not None:
@@ -1701,16 +1764,14 @@ def main() -> None:
     sidecar, updated, new_socket = prepare_sidecar(
         updated, state, account, manifest["transport"]["value_sha256"]
     )
-    miner_command_path = inputs / "miner-command.json"
+    effective_limits = runtime_limits(updated, state)
+    miner_command_path = inputs / ("miner-command-" + sha256(canonical(updated)) + ".json")
     miner_command_sha = command_file(miner_command_path, updated, account)
     sidecar_command_path = None
     sidecar_command_sha = None
     if sidecar is not None:
-        sidecar_command_path = inputs / "model-command.json"
-        config_path = inputs / "model-service.json"
         prepared = list(sidecar.arguments)
-        replace_option(prepared, "--config", str(config_path))
-        replace_option(prepared, "--expected-config-sha256", sha256(config_path.read_bytes()))
+        sidecar_command_path = inputs / ("model-command-" + sha256(canonical(prepared)) + ".json")
         sidecar_command_sha = command_file(sidecar_command_path, prepared, account)
     install_launcher(Path(__file__))
     observed = activate_services(
@@ -1726,12 +1787,14 @@ def main() -> None:
         policy=manifest["policy"]["value_sha256"],
         transport=manifest["transport"]["value_sha256"],
         model=model,
+        startup_seconds=effective_limits["startup_seconds"],
     )
     if retained_policy_raw is None:
         raise ValueError("competition policy was not retained")
     report = {
         **summary,
         "health": observed,
+        "effective_limits": effective_limits,
         "runtime_revision": manifest["runtime"]["revision"],
         "state_root": str(state),
         "status": "miner_upgrade_verified",

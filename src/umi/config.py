@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .open_competition import CompetitionPolicy
     from .policy import ScoringPolicy
 
 
@@ -143,11 +144,12 @@ class Limits:
         cls,
         policy: ScoringPolicy,
         *,
-        inference_timeout_seconds: float = 120.0,
-        backend_lifecycle_timeout_seconds: float = 60.0,
-        inference_admission_timeout_seconds: float = 10.0,
+        inference_timeout_seconds: float | None = None,
+        competition_policy: CompetitionPolicy | None = None,
+        backend_lifecycle_timeout_seconds: float | None = None,
+        inference_admission_timeout_seconds: float | None = None,
         maximum_inference_concurrency: int = 1,
-        request_body_timeout_seconds: float = 5.0,
+        request_body_timeout_seconds: float | None = None,
     ) -> Limits:
         """Derive every protocol ceiling from one canonical scoring policy."""
 
@@ -155,6 +157,27 @@ class Limits:
 
         if not isinstance(policy, ScoringPolicy):
             raise TypeError("policy must be a ScoringPolicy")
+        inference_timeout_seconds = resolve_inference_timeout(
+            competition_policy, requested_seconds=inference_timeout_seconds
+        )
+        if competition_policy is not None:
+            from .competition_authorization import validate_transport_cohort
+
+            validate_transport_cohort(competition_policy, policy)
+        # Operational patience belongs in this resolver, not independent CLI,
+        # sidecar or deployment defaults. Explicit local overrides stay visible.
+        # These waits never extend a signed request's response opportunity.
+        cohort = competition_policy is not None
+        if backend_lifecycle_timeout_seconds is None:
+            backend_lifecycle_timeout_seconds = (
+                max(120.0, 3 * inference_timeout_seconds) if cohort else 60.0
+            )
+        if inference_admission_timeout_seconds is None:
+            inference_admission_timeout_seconds = (
+                max(60.0, 2 * inference_timeout_seconds) if cohort else 10.0
+            )
+        if request_body_timeout_seconds is None:
+            request_body_timeout_seconds = 30.0 if cohort else 5.0
         limits = policy.limits
         canary_fraction = policy.thresholds.canary_fraction.fraction
         canaries = max(
@@ -172,7 +195,7 @@ class Limits:
             2 * assignments * limits.maximum_request_transmissions_per_assignment,
         )
         maximum_nonce_rows_total = maximum_nonce_rows_per_validator * registered_validators
-        return cls(
+        result = cls(
             maximum_request_body_bytes=limits.maximum_request_body_bytes,
             maximum_response_body_bytes=limits.maximum_response_body_bytes,
             maximum_response_plaintext_bytes=min(
@@ -210,11 +233,50 @@ class Limits:
             btauth_max_age_seconds=float(limits.btauth_max_age_seconds),
             btauth_allowed_skew_seconds=float(limits.btauth_allowed_skew_seconds),
             request_body_timeout_seconds=request_body_timeout_seconds,
+            video_fetch_timeout_seconds=(
+                max(120.0, inference_timeout_seconds / 5) if cohort else 30.0
+            ),
             backend_lifecycle_timeout_seconds=backend_lifecycle_timeout_seconds,
             inference_admission_timeout_seconds=inference_admission_timeout_seconds,
             inference_timeout_seconds=inference_timeout_seconds,
             maximum_inference_concurrency=maximum_inference_concurrency,
         )
+        if competition_policy is not None:
+            result = replace(
+                result,
+                maximum_hypothesis_utf8_bytes=min(
+                    result.maximum_hypothesis_utf8_bytes, competition_policy.maximum_output_bytes
+                ),
+            )
+        return result
+
+
+def resolve_inference_timeout(
+    policy: CompetitionPolicy | None, *, requested_seconds: float | None = None
+) -> float:
+    """Resolve the execution budget from retained policy and explicit local intent.
+
+    Omitting an override supports the cohort's full inference allowance. This
+    calculation is shared by miners, sidecars and deployment preflight; it never
+    requires a live settings service or changes an already signed request clock.
+    The legacy component runtime retains its 120-second default.
+    """
+    if policy is not None:
+        from .open_competition import CompetitionPolicy
+
+        if not isinstance(policy, CompetitionPolicy):
+            raise TypeError("policy must be a CompetitionPolicy")
+    if requested_seconds is not None and (
+        isinstance(requested_seconds, bool)
+        or not isinstance(requested_seconds, (float, int))
+        or not math.isfinite(requested_seconds)
+        or requested_seconds <= 0
+    ):
+        raise ValueError("inference_timeout_seconds must be positive")
+    maximum = None if policy is None else policy.maximum_inference_ms / 1000
+    if requested_seconds is None:
+        return 120.0 if maximum is None else maximum
+    return float(requested_seconds if maximum is None else min(requested_seconds, maximum))
 
 
 def _ceil_fraction(value: Fraction) -> int:

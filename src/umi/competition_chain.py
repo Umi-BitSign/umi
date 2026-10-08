@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -420,7 +421,21 @@ class _PrefetchRpc:
 
     def __init__(self, rpc: Any):
         self.rpc = rpc
-        self.values: dict[tuple[str, str], Any] = {}
+        self._values: ContextVar[dict[tuple[str, str], Any] | None] = ContextVar(
+            "registration_prefetch_values", default=None
+        )
+
+    @property
+    def values(self) -> dict[tuple[str, str], Any]:
+        values = self._values.get()
+        if values is None:
+            values = {}
+            self._values.set(values)
+        return values
+
+    @values.setter
+    def values(self, value: dict[tuple[str, str], Any]) -> None:
+        self._values.set(value)
 
     async def request(self, method: str, params: Sequence[Any]) -> Any:
         if method == "state_getStorageAt" and tuple(params) in self.values:
@@ -428,7 +443,9 @@ class _PrefetchRpc:
         return await self.rpc.request(method, params)
 
     async def prefetch(self, block_hash: str, keys: Sequence[bytes]) -> None:
-        self.values.clear()
+        # Each concurrent proof collection owns its prefetched immutable block
+        # claims. Finishing one request cannot clear another request's inputs.
+        self.values = {}
         if getattr(self.rpc, "bulk_storage_reads", False):
             self.values = await self.rpc.storage_values(block_hash, keys)
             return

@@ -4,6 +4,7 @@ Finality, peer transport, DNS and inference are fixtures. Proof bytes are retain
 but the fixture finality verifier is not a production chain qualification.
 """
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -772,3 +773,33 @@ async def test_fresh_replacement_works_inside_legacy_blackout(
     assert result["status"] == "recovered"
     assert p.model.calls == 1 and len(p.transmissions) == transmissions
     assert canonical_json_bytes(p.grant) == parent_bytes
+
+
+@pytest.mark.parametrize("dependency", ["history", "collect"])
+async def test_request_proof_wait_does_not_block_another_vote(signing, monkeypatch, dependency):
+    s, entered, release = signing, asyncio.Event(), asyncio.Event()
+    signer = s.signer()
+    owner = signer if dependency == "history" else signer.provider
+    original = getattr(owner, dependency)
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(owner, dependency, delayed)
+    first = asyncio.create_task(signer.attest(s.plan))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        with signer.journal.journal.locked():
+            pass
+        vote = await asyncio.wait_for(signer.attest(s.plan), 30)
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, 30)
+    assert result == vote
+    assert len(s.calls) == 1

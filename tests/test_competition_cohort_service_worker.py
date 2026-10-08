@@ -200,7 +200,14 @@ async def test_rolling_reports_native_wait_stage_without_private_work(
 
     monkeypatch.setattr(owner, name, held)
     active = {}
-    await worker._rolling_poll(active)
+
+    # Native stage boundaries persist before the next stage is scheduled.
+    async def reach_stage():
+        while not entered.is_set():
+            await worker._rolling_poll(active)
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(reach_stage(), 120)
     try:
         await asyncio.wait_for(entered.wait(), 120)
         report = await worker._rolling_poll(active)
@@ -238,6 +245,75 @@ async def test_native_service_work_completes_and_restarts_offline(loop):
     worker, value, _ = await finish(s)
     assert canonical_json_bytes(value) == original and tuple(s.paths) == paths
     assert s.signs == 1
+
+
+async def test_each_service_phase_resumes_after_restart_without_repeating_work(loop):
+    s = loop
+    reasons = []
+    for _ in range(8):
+        worker = s.worker()
+        status, reason = await worker._advance(s.c.assignment.admission, one_stage=True)
+        reasons.append(reason)
+        if status == "completed":
+            break
+    assert reasons == [
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+        "terminal_retained",
+    ]
+    value = worker.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert s.p.model.calls == s.p.fetcher.calls == 1
+    assert s.inputs == 1 and s.votes == 2 and s.signs == 1
+    s.offline = True
+    assert await s.worker()._advance(s.c.assignment.admission, one_stage=True) == (
+        "completed",
+        "original_terminal_retained",
+    )
+
+
+async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monkeypatch):
+    worker = loop.worker(concurrency=1)
+    rows = [
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=SimpleNamespace(claim=SimpleNamespace(hotkey=wallet(name).hotkey.ss58_address)),
+        )
+        for i, name in enumerate(("Alice", "Bob", "Charlie"), 1)
+    ]
+    entered, dispatched, release = (asyncio.Event() for _ in range(3))
+    started = []
+    monkeypatch.setattr(worker, "_batch", lambda **kwargs: rows)
+    monkeypatch.setattr(worker, "_advance_cursor", lambda _: None)
+    monkeypatch.setattr(
+        worker, "_ready_stage", lambda r: "dispatch" if r.ordinal == 3 else "preparation"
+    )
+
+    async def advance(row, **kwargs):
+        started.append(row.ordinal)
+        if row.ordinal == 3:
+            dispatched.set()
+            return "pending", "response_retained"
+        entered.set()
+        await release.wait()
+        return "pending", "request_prepared"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 30)
+        await asyncio.wait_for(dispatched.wait(), 30)
+        assert started == [1, 3]
+        assert report["in_flight_phase_counts"] == {"preparation": 1, "dispatch": 1}
+        assert not release.is_set()
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
 
 
 async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):

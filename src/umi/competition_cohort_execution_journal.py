@@ -38,12 +38,16 @@ from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
-CONTROL_EXCHANGE_TIMEOUT_SECONDS = 120
-
 
 def control_exchange_timeout_seconds(config: CohortExecutionConfig) -> int:
-    """Bound retry-safe miner control calls without shortening inference."""
-    return min(config.read_timeout_seconds, CONTROL_EXCHANGE_TIMEOUT_SECONDS)
+    """Use the selected read budget for grants, response recovery and retirement.
+
+    These calls may wait for the miner's authority or finalized-head checks.
+    An independent short ceiling can abandon otherwise valid work repeatedly.
+    The configured budget remains bounded and retry-safe; signed clocks and
+    transmission counts are separate protocol checks.
+    """
+    return config.read_timeout_seconds
 
 
 class CohortExecutionConfig(CohortOrderSignerConfig):

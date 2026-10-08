@@ -100,6 +100,7 @@ class UnixSocketTranslator:
     expected_scoring_policy_sha256: str | None = None
     required_validator_slots: int = 1
     maximum_inference_seconds: float = 120.0
+    require_full_inference_budget: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.socket_path, str) or not self.socket_path:
@@ -155,6 +156,9 @@ class UnixSocketTranslator:
             expected_scoring_policy_sha256=self.expected_scoring_policy_sha256,
             required_validator_slots=self.required_validator_slots,
             maximum_inference_seconds=self.maximum_inference_seconds,
+            minimum_inference_seconds=(
+                self.maximum_inference_seconds if self.require_full_inference_budget else None
+            ),
         )
 
     async def translate(self, video: bytes, request: TranslationRequest) -> str:

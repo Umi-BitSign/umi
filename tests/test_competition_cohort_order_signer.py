@@ -484,3 +484,62 @@ def test_order_history_reuse_never_accepts_changed_native_inputs(harness, monkey
         policy = policy.model_copy(update={"netuid": policy.netuid + 1})
     with pytest.raises(ValueError):
         native.remember_order_history(journal.journal, journal.cohorts, policy, source, h.block + 1)
+
+
+@pytest.mark.parametrize("dependency", ["history", "collect"])
+async def test_waiting_for_network_does_not_own_selection_lease(harness, dependency):
+    h, entered, release = harness, asyncio.Event(), asyncio.Event()
+    worker = h.worker()
+    owner = worker if dependency == "history" else worker.provider
+    original = getattr(owner, dependency)
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    setattr(owner, dependency, delayed)
+    first = asyncio.create_task(worker.attest(h.order, h.participant))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        # Another operation can own the durable selection while the first waits.
+        with worker.journal.journal.locked():
+            pass
+        vote = await asyncio.wait_for(worker.attest(h.order, h.participant), 30)
+        assert len(h.calls) == 1
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, 30)
+    assert result == vote
+    assert len(h.calls) == 1
+
+
+async def test_concurrent_authority_advance_fences_prepared_vote(harness):
+    h, entered, release = harness, asyncio.Event(), asyncio.Event()
+    worker, source = h.worker(), h.source
+    calls = 0
+
+    async def delayed(cohort):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+            await release.wait()
+        return source
+
+    worker.history = delayed
+    first = asyncio.create_task(worker.attest(h.order, h.participant))
+    await asyncio.wait_for(entered.wait(), 30)
+    try:
+        with worker.journal.journal.locked():
+            worker.journal.remember(source_for(h.batch, h.batch["history"]), 5000)
+    finally:
+        release.set()
+    with pytest.raises(OSError, match="authority advanced"):
+        await asyncio.wait_for(first, 30)
+    assert not h.calls
+    assert worker.journal.load(order_slot(h.order))[1] is None

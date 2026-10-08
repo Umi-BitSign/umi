@@ -18,7 +18,9 @@ for the active competition profile, transport allowance and service arguments.
 
 A custom model can use the [in-process or isolated sidecar interface](model.md).
 The sidecar must advertise the same model revision and transport digest as the
-protocol miner, with capacity that fits the signed inference allowance. Verify
+protocol miner, with the same effective inference budget shown by the miner's
+`/healthz` `effective_limits`. Omitted cohort inference timeouts come from the
+pinned policy; retain any deliberate local override on both processes. Verify
 that agreement before restarting the protocol service. Preserve the model assets,
 wallet and durable state specified by the connection guide.
 

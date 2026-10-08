@@ -718,3 +718,35 @@ def _write_model_response(
     body: bytes,
 ) -> None:
     writer.write(MODEL_RESPONSE_MAGIC + digest + revision + len(body).to_bytes(4, "big") + body)
+
+
+@pytest.mark.parametrize("sidecar_budget", [120, 600])
+async def test_cohort_sidecar_cannot_silently_shorten_inference_budget(sidecar_budget):
+    async def model(_video, _metadata):
+        return "model output"
+
+    with _private_socket_path() as path:
+        server = await start_model_sidecar(
+            path,
+            model,
+            model_revision=None,
+            scoring_policy_sha256=POLICY_HASH,
+            validator_slot_count=4,
+            maximum_concurrency=4,
+            maximum_inference_seconds=sidecar_budget,
+        )
+        async with server:
+            options = dict(
+                socket_path=path,
+                maximum_request_metadata_bytes=64 * 1024,
+                maximum_response_bytes=128,
+                expected_scoring_policy_sha256=POLICY_HASH,
+                required_validator_slots=4,
+                maximum_inference_seconds=600,
+                require_full_inference_budget=True,
+            )
+            if sidecar_budget < 600:
+                with pytest.raises(RuntimeError, match="binding does not match"):
+                    UnixSocketTranslator(**options)
+            else:
+                UnixSocketTranslator(**options)

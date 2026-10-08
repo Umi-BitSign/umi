@@ -19,7 +19,11 @@ from .competition_cohort_endpoint_decision_contracts import (
     CohortEndpointCaseDecision,
     SignedCohortEndpointCaseDecision,
 )
-from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
+from .competition_cohort_order_signer import (
+    CohortOrderHistory,
+    remember_order_history,
+    require_retained_order_history,
+)
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_cohort_request_window import (
     CohortAttemptRequestWindow,
@@ -297,20 +301,11 @@ class ServiceWorkReviewer:
     async def _current(self, review, body):
         source = await self._call(self.history(body.assignment.round.cohort_sha256))
         observation = execution_boundary(await self._call(self.provider.collect()))
-        await run_owned_thread(
-            remember_order_history,
-            self.journal,
-            self.cohorts,
-            self.policy,
-            source,
-            observation.block,
-        )
         observed_round = (
             await self._call(self.current_round())
             if isinstance(review, ServiceRetryReview)
             else None
         )
-        self._check_current(review, body, source, observation.block, observed_round)
         return source, observation, observed_round
 
     async def attest(self, review: ServiceRequestReview | ServiceRetryReview) -> Signature:
@@ -322,67 +317,85 @@ class ServiceWorkReviewer:
         }
         async with self.serial:
             with self.journal.locked():
-                old = await run_owned_thread(self.journal.get, kind + "_intent", slot)
-                if old is not None:
-                    intent = await run_owned_thread(
-                        self._check_intent,
-                        ServiceReviewIntent.model_validate_json(canonical_json_bytes(old)),
+                old, vote = await run_owned_thread(
+                    self._selection, kind, slot, work, binding, review, value
+                )
+                if vote is not None:
+                    return vote
+        source, observation, observed_round = await self._current(review, body)
+        async with self.serial:
+            with self.journal.locked():
+                await run_owned_thread(
+                    self._remember_current, review, body, source, observation, observed_round
+                )
+        candidate = None
+        if old is None:
+            accepted = await self._call(self.owner(body.assignment))
+            expected = body.assignment.admission.observation
+            raw, metadata = await self._call(self.archive(expected))
+            replay = await self._call(self.provider.review_archive(expected, raw, metadata))
+            if (
+                replay.original != expected
+                or replay.snapshot != body.assignment.admission.registration
+                or replay.replayed_at.block_number < expected.block
+            ):
+                raise ValueError("service registration proof changed its original admission")
+            if isinstance(body.window, CohortAttemptRequestWindow):
+                window = await self._call(
+                    capture_cohort_attempt_window(
+                        self.transport,
+                        self.blocks,
+                        body.request.issued_block,
+                        body.assignment,
+                        body.attempt_number,
                     )
-                    if (
-                        intent.review != review
-                        or self.journal.get("service_review_work", work) != binding
-                    ):
-                        raise ValueError("service review changed its original intent")
-                    vote = await run_owned_thread(self.journal.get, kind + "_vote", slot)
-                    if vote is not None:
-                        return self._vote(value, vote)
-                source, observation, observed_round = await self._current(review, body)
+                )
+            else:
+                window = await self._call(
+                    capture_request_window(self.transport, self.blocks, body.request.issued_block)
+                )
+            if not _same_window_facts(window, body.window):
+                raise ValueError("service request window differs from independent finality")
+            candidate = ServiceReviewIntent(
+                schema="umi-service-review-intent/1",
+                review=review,
+                owner=accepted,
+                source=source,
+                observation=observation,
+                observed_round=observed_round,
+                registration_hex=raw.hex(),
+                metadata_hex=metadata.hex(),
+            )
+            await run_owned_thread(self._check_intent, candidate)
+        async with self.serial:
+            with self.journal.locked():
+                old, vote = await run_owned_thread(
+                    self._selection, kind, slot, work, binding, review, value
+                )
+                if vote is not None:
+                    return vote
+                await run_owned_thread(require_retained_order_history, self.journal, source)
                 if old is None:
-                    accepted = await self._call(self.owner(body.assignment))
-                    expected = body.assignment.admission.observation
-                    raw, metadata = await self._call(self.archive(expected))
-                    replay = await self._call(self.provider.review_archive(expected, raw, metadata))
-                    if (
-                        replay.original != expected
-                        or replay.snapshot != body.assignment.admission.registration
-                        or replay.replayed_at.block_number < expected.block
-                    ):
-                        raise ValueError(
-                            "service registration proof changed its original admission"
-                        )
-                    if isinstance(body.window, CohortAttemptRequestWindow):
-                        window = await self._call(
-                            capture_cohort_attempt_window(
-                                self.transport,
-                                self.blocks,
-                                body.request.issued_block,
-                                body.assignment,
-                                body.attempt_number,
-                            )
-                        )
-                    else:
-                        window = await self._call(
-                            capture_request_window(
-                                self.transport, self.blocks, body.request.issued_block
-                            )
-                        )
-                    if not _same_window_facts(window, body.window):
-                        raise ValueError("service request window differs from independent finality")
-                    intent = ServiceReviewIntent(
-                        schema="umi-service-review-intent/1",
-                        review=review,
-                        owner=accepted,
-                        source=source,
-                        observation=observation,
-                        observed_round=observed_round,
-                        registration_hex=raw.hex(),
-                        metadata_hex=metadata.hex(),
-                    )
-                    await run_owned_thread(self._check_intent, intent)
-                    await run_owned_thread(self._reserve, kind, slot, work, binding, intent)
-                # Detect owner equivocation or phase closure during slow proof replay.
-                await self._call(self.owner(body.assignment))
-                current, _, _ = await self._current(review, body)
+                    await run_owned_thread(self._reserve, kind, slot, work, binding, candidate)
+        # Detect owner equivocation or phase closure during slow proof replay.
+        # These reads never hold the lease needed by unrelated service work.
+        await self._call(self.owner(body.assignment))
+        current, current_observation, current_round = await self._current(review, body)
+        async with self.serial:
+            with self.journal.locked():
+                _, vote = await run_owned_thread(
+                    self._selection, kind, slot, work, binding, review, value
+                )
+                if vote is not None:
+                    return vote
+                await run_owned_thread(
+                    self._remember_current,
+                    review,
+                    body,
+                    current,
+                    current_observation,
+                    current_round,
+                )
                 if current != source:
                     raise OSError("service authority changed during review; retry unchanged")
 
@@ -392,6 +405,25 @@ class ServiceWorkReviewer:
                     return signature
 
                 return await wait_for_owned(commit(), timeout=self.config.signing_timeout_seconds)
+
+    def _remember_current(self, review, body, source, observation, observed_round):
+        remember_order_history(self.journal, self.cohorts, self.policy, source, observation.block)
+        self._check_current(review, body, source, observation.block, observed_round)
+
+    def _selection(self, kind, slot, work, binding, review, value):
+        previous = self.journal.get("service_review_work", work)
+        if previous is not None and previous != binding:
+            raise ValueError("service review changed its original intent")
+        old = self.journal.get(kind + "_intent", slot)
+        if old is None:
+            return None, None
+        intent = self._check_intent(
+            ServiceReviewIntent.model_validate_json(canonical_json_bytes(old))
+        )
+        if intent.review != review or previous != binding:
+            raise ValueError("service review changed its original intent")
+        vote = self.journal.get(kind + "_vote", slot)
+        return intent, None if vote is None else self._vote(value, vote)
 
     def _reserve(self, kind, slot, work, binding, intent):
         self.journal.reserve_records(

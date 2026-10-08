@@ -20,7 +20,7 @@ from .competition_cohort_endpoint_decision_signer import CohortEndpointDecisionS
 from .competition_cohort_endpoint_recovery import recovery_slot
 from .competition_cohort_endpoint_retirement import CohortEndpointRetirement
 from .competition_round_journal import RecordReservation
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import Signature, digest, identity
 from .protocol import canonical_json_bytes
 
@@ -135,24 +135,8 @@ class CohortEndpointCaseCoordinator:
         await self.signer.attest(review)
         decision_slot = case_decision_slot(decision)
         certificate = await self._certificate(decision_slot)
-        for reviewer in self.signer.journal.policy.evaluators:
-            if certificate is not None:
-                break
-            if await run_owned_thread(self.signer.journal.vote, decision_slot, reviewer.hotkey):
-                continue
-            try:
-                vote = await wait_for_owned(
-                    self.request_vote(reviewer.hotkey, review),
-                    timeout=self.signer.journal.config.read_timeout_seconds,
-                )
-                if identity(vote.hotkey) != identity(reviewer.hotkey):
-                    raise ValueError("case reviewer returned another identity")
-                await self.signer.collect(decision_slot, vote)
-                certificate = await self._certificate(decision_slot)
-            except (ValueError, OSError, asyncio.TimeoutError):
-                # A faulty/unavailable reviewer cannot erase already retained
-                # votes or prevent another independent group being tried.
-                continue
+        if certificate is None:
+            certificate = await self._peer_certificate(decision_slot, review)
         if certificate is None:
             return EndpointCaseDecisionOutcome("pending", "case_decision_quorum_pending")
         with journal.locked(recovery_slot(slot)):
@@ -161,3 +145,45 @@ class CohortEndpointCaseCoordinator:
                 raise ValueError("case evidence changed during decision review")
             await run_owned_thread(journal.journal.put, "endpoint_case_decision", key, certificate)
         return EndpointCaseDecisionOutcome("certified", "case_decision_retained", certificate)
+
+    async def _peer_certificate(self, decision_slot, review):
+        async def vote(reviewer):
+            if await run_owned_thread(self.signer.journal.vote, decision_slot, reviewer.hotkey):
+                return
+            try:
+                signature = await wait_for_owned(
+                    self.request_vote(reviewer.hotkey, review),
+                    timeout=self.signer.journal.config.read_timeout_seconds,
+                )
+                if identity(signature.hotkey) != identity(reviewer.hotkey):
+                    raise ValueError("case reviewer returned another identity")
+                await self.signer.collect(decision_slot, signature)
+            except (ValueError, OSError, asyncio.TimeoutError):
+                return
+
+        miner = identity(review.assignment.certificate.order.submission.submission.hotkey)
+        tasks = [
+            asyncio.create_task(vote(reviewer))
+            for reviewer in self.signer.journal.policy.evaluators
+            if identity(reviewer.hotkey) != miner
+        ]
+        pending = set(tasks)
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+                certificate = await self._certificate(decision_slot)
+                if certificate is not None:
+                    return certificate
+            return None
+        finally:
+            # Keep ownership through any in-progress signature or journal write.
+            # An optional peer's network wait cannot delay an available quorum.
+            for task in tasks:
+                task.cancel()
+
+            async def drained():
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            await await_owned_task(asyncio.create_task(drained()))

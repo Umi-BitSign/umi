@@ -478,10 +478,90 @@ async def test_coordinator_stops_after_independent_quorum(decisions):
 
     async def tracked(hotkey, review):
         calls.append(hotkey)
-        assert len(calls) <= d.p.c.policy.required_evaluator_groups - 1
         return await real(hotkey, review)
 
     service.request_vote = tracked
     result = await service.advance(d.p.retire_slot, d.p.case_id)
     assert result.status == "certified"
-    assert len(calls) == d.p.c.policy.required_evaluator_groups - 1
+    assert d.p.c.policy.required_evaluator_groups - 1 <= len(calls) < len(d.p.c.policy.evaluators)
+    calls.clear()
+    again = await service.advance(d.p.retire_slot, d.p.case_id)
+    assert again.certificate == result.certificate and not calls
+
+
+@pytest.mark.parametrize("policy", ["redundant_reviewer"], indirect=True)
+async def test_slow_optional_reviewer_does_not_delay_case_quorum(decisions):
+    d = decisions
+    await d.evidence()
+    service = coordinator(d)
+    real = service.request_vote
+    entered, canceled = asyncio.Event(), asyncio.Event()
+    slow = next(
+        e.hotkey
+        for e in d.p.c.policy.evaluators
+        if identity(e.hotkey) != identity(service.signer.journal.config.signer)
+    )
+
+    async def delayed(hotkey, review):
+        if hotkey == slow:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                canceled.set()
+        await entered.wait()
+        return await real(hotkey, review)
+
+    service.request_vote = delayed
+    result = await asyncio.wait_for(service.advance(d.p.retire_slot, d.p.case_id), 60)
+    assert result.status == "certified"
+    assert canceled.is_set()
+
+
+@pytest.mark.parametrize("dependency", ["history", "collect"])
+async def test_decision_proof_wait_does_not_block_another_case(decisions, monkeypatch, dependency):
+    d = decisions
+    first_review, second_review = await d.evidence(), await d.evidence(index=1)
+    signer = d.worker()
+    owner = signer if dependency == "history" else signer.provider
+    original = getattr(owner, dependency)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(owner, dependency, delayed)
+    first = asyncio.create_task(signer.attest(first_review))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        with signer.journal.journal.locked():
+            pass
+        await asyncio.wait_for(signer.attest(second_review), 30)
+        assert len(d.calls) == 1
+    finally:
+        release.set()
+        await asyncio.wait_for(first, 30)
+    assert len(d.calls) == 2
+
+
+async def test_decision_rechecks_authority_after_pending_proof(decisions, monkeypatch):
+    d = decisions
+    review = await d.evidence()
+    signer = d.worker()
+    original = signer.provider.collect
+
+    async def close_during_proof():
+        result = await original()
+        d.p.e.r.h.source = source_for(d.p.e.r.h.batch, d.p.e.r.h.batch["history"])
+        return result
+
+    monkeypatch.setattr(signer.provider, "collect", close_during_proof)
+    with pytest.raises((ValueError, OSError)):
+        await signer.attest(review)
+    assert not d.calls

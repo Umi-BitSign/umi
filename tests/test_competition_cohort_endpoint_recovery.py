@@ -175,8 +175,11 @@ async def recovery_case(endpoint, tmp_path):
         limits=Limits.from_policy(p.transport_policy),
     )
     initial.resource_ledger.close()
-    miner_wallet = wallet("Bob")
-    assert miner_wallet.hotkey.ss58_address == job.submission.submission.hotkey
+    miner_wallet = next(
+        wallet(name)
+        for name in ("Alice", "Bob")
+        if wallet(name).hotkey.ss58_address == job.submission.submission.hotkey
+    )
     ledger = SQLiteMinerResourceLedger(
         tmp_path / "miner.sqlite",
         miner_hotkey=miner_wallet.hotkey.ss58_address,

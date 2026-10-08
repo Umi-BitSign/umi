@@ -1231,14 +1231,23 @@ async def test_completed_service_terminal_does_not_wait_for_unused_deadline(
     )
     terminal = owner.retain(intent, sign_object(intent, p.validator))
     before = canonical_json_bytes(terminal)
-    assert read_service_terminal(
-        terminal, owner.objects, p.c.policy, p.transport_policy,
-        request_interval=(390, observation.block),
-    ) == c.grant
+    assert (
+        read_service_terminal(
+            terminal,
+            owner.objects,
+            p.c.policy,
+            p.transport_policy,
+            request_interval=(390, observation.block),
+        )
+        == c.grant
+    )
     for interval in [(request.issued_block, observation.block), (390, observation.block - 1)]:
         with pytest.raises(ValueError, match="outside certified request phases"):
             read_service_terminal(
-                terminal, owner.objects, p.c.policy, p.transport_policy,
+                terminal,
+                owner.objects,
+                p.c.policy,
+                p.transport_policy,
                 request_interval=interval,
             )
     assert canonical_json_bytes(owner.read(c.assignment)) == before

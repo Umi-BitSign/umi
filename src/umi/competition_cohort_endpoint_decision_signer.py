@@ -31,6 +31,7 @@ from .competition_cohort_order_signer import (
     CohortOrderHistory,
     OrderFinality,
     remember_order_history,
+    require_retained_order_history,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_round_journal import RecordReservation, RoundJournal
@@ -251,22 +252,21 @@ class CohortEndpointDecisionSigner:
             raise ValueError("miner cannot sign its own endpoint decision")
         async with self.serial:
             with self.journal.journal.locked():
-                old = await run_owned_thread(self.journal.load, slot)
-                if old is not None:
-                    if old.review != review or old.decision != decision:
-                        raise ValueError("endpoint attempt already has another decision intent")
-                    vote = await run_owned_thread(self.journal.vote, slot, config.signer)
-                    if vote is not None:
-                        return vote
-                source = await wait_for_owned(
-                    self.history(decision.cohort_sha256), timeout=config.read_timeout_seconds
-                )
-                observation = execution_boundary(
-                    await wait_for_owned(
-                        self.provider.collect(), timeout=config.read_timeout_seconds
-                    )
-                )
-                observed_round = self.current_round()
+                _, vote = await run_owned_thread(self._selection, slot, review, decision)
+                if vote is not None:
+                    return vote
+        source = await wait_for_owned(
+            self.history(decision.cohort_sha256), timeout=config.read_timeout_seconds
+        )
+        observation = execution_boundary(
+            await wait_for_owned(self.provider.collect(), timeout=config.read_timeout_seconds)
+        )
+        observed_round = self.current_round()
+        async with self.serial:
+            with self.journal.journal.locked():
+                old, vote = await run_owned_thread(self._selection, slot, review, decision)
+                if vote is not None:
+                    return vote
                 await run_owned_thread(self.journal.remember, source, observation.block)
                 await run_owned_thread(
                     partial(
@@ -288,17 +288,25 @@ class CohortEndpointDecisionSigner:
                         observed_round=observed_round,
                     )
                     await run_owned_thread(self.journal.reserve, intent)
-                current = await wait_for_owned(
-                    self.history(decision.cohort_sha256), timeout=config.read_timeout_seconds
-                )
-                if current != source:
-                    fresh = execution_boundary(
-                        await wait_for_owned(
-                            self.provider.collect(), timeout=config.read_timeout_seconds
-                        )
-                    )
+        current = await wait_for_owned(
+            self.history(decision.cohort_sha256), timeout=config.read_timeout_seconds
+        )
+        fresh = (
+            execution_boundary(
+                await wait_for_owned(self.provider.collect(), timeout=config.read_timeout_seconds)
+            )
+            if current != source
+            else None
+        )
+        async with self.serial:
+            with self.journal.journal.locked():
+                _, vote = await run_owned_thread(self._selection, slot, review, decision)
+                if vote is not None:
+                    return vote
+                if fresh is not None:
                     await run_owned_thread(self.journal.remember, current, fresh.block)
                     raise OSError("endpoint decision authority changed during review")
+                await run_owned_thread(require_retained_order_history, self.journal.journal, source)
 
                 async def commit():
                     signature = await self.sign(decision)
@@ -307,6 +315,13 @@ class CohortEndpointDecisionSigner:
                     return await run_owned_thread(self.journal.collect, slot, signature)
 
                 return await wait_for_owned(commit(), timeout=config.signing_timeout_seconds)
+
+    def _selection(self, slot, review, decision):
+        old = self.journal.load(slot)
+        if old is not None and (old.review != review or old.decision != decision):
+            raise ValueError("endpoint attempt already has another decision intent")
+        vote = None if old is None else self.journal.vote(slot, self.journal.config.signer)
+        return old, vote
 
     async def collect(self, slot: str, vote: Signature):
         async with self.serial:

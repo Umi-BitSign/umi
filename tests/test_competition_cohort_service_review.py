@@ -993,3 +993,33 @@ async def test_retry_rejects_early_or_unfenced_replacement(reviewed, monkeypatch
     with pytest.raises(ValueError):
         await s.reviewer().attest(review)
     assert s.signatures == 2
+
+
+@pytest.mark.parametrize("dependency", ["history", "owner", "archive"])
+async def test_service_proof_wait_does_not_block_another_vote(reviewed, monkeypatch, dependency):
+    s, entered, release = reviewed, asyncio.Event(), asyncio.Event()
+    reviewer = s.reviewer()
+    review = ServiceRequestReview(body=s.body)
+    original = getattr(reviewer, dependency)
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(reviewer, dependency, delayed)
+    first = asyncio.create_task(reviewer.attest(review))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        with reviewer.journal.locked():
+            pass
+        vote = await asyncio.wait_for(reviewer.attest(review), 30)
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, 30)
+    assert result == vote
+    assert s.signatures == 1

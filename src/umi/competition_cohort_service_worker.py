@@ -92,6 +92,7 @@ class ServiceWorkWorker:
         self.capacity = asyncio.Semaphore(concurrency)
         self.serial, self.vote_writes = asyncio.Lock(), asyncio.Lock()
         self._operation_stages = {}
+        self._operation_lanes = {}
         with self.journal.transaction() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS service_worker_cursor "
@@ -192,7 +193,26 @@ class ServiceWorkWorker:
         if work in self._operation_stages:
             self._operation_stages[work] = (name, asyncio.get_running_loop().time())
 
-    async def _advance(self, admission):
+    def _ready_stage(self, admission):
+        """Scheduling hints only; each stage still authenticates its native inputs."""
+        work = admission.work_sha256
+        if self.journal.get("service_terminal", work) is not None:
+            return "completed"
+        if self.journal.get("service_terminal_intent", work) is not None:
+            return "certification"
+        body = self.requests.latest(admission.claim, self.transport.evaluator)
+        if body is None:
+            return "preparation"
+        slot = service_grant_slot(body)
+        if self.journal.get("service_retirement", slot) is not None:
+            return "certification"
+        if self.journal.get("service_grant", slot) is None:
+            return "preparation"
+        if self.journal.get("service_dispatch_intent", slot) is not None:
+            return "recovery"
+        return "dispatch"
+
+    async def _advance(self, admission, *, one_stage=False):
         work = admission.work_sha256
         self._stage(work, "assignment_read")
         assignment = await self._local(self.queue.assignment, admission.claim)
@@ -204,6 +224,8 @@ class ServiceWorkWorker:
         if body is None:
             self._stage(work, "request_preparation")
             body = await self._prepare(assignment)
+            if one_stage:
+                return "pending", "request_prepared"
         slot = service_grant_slot(body)
         # A prepared terminal survives a signing outage and needs no new media,
         # chain observation, grant delivery, retirement or model execution.
@@ -216,11 +238,20 @@ class ServiceWorkWorker:
             terminal = await self._local(self.terminals.prepare, slot)
         else:
             self._stage(work, "request_certificate")
+            had_grant = await self._local(self.journal.get, "service_grant", slot)
             grant = await self._certificate(body)
+            if one_stage and had_grant is None:
+                return "pending", "request_certified"
             self._stage(work, "miner_transport")
-            result = await self.transport.advance(slot)
+            had_dispatch = await self._local(self.journal.get, "service_dispatch_intent", slot)
+            had_retirement = await self._local(self.journal.get, "service_retirement", slot)
+            result = await self.transport.advance(
+                slot, retire=not one_stage or had_dispatch is not None
+            )
             if result.retirement is None:
                 return "pending", result.reason
+            if one_stage and had_retirement is None:
+                return "pending", "retirement_retained"
             if result.response is None:
                 self._stage(work, "replacement_review")
                 certificate = await self._call(self.retry(grant, result.retirement))
@@ -347,30 +378,45 @@ class ServiceWorkWorker:
             work = admission.work_sha256
             self._operation_stages[work] = ("starting", asyncio.get_running_loop().time())
             try:
-                status, reason = await self._advance(admission)
+                status, reason = await self._advance(admission, one_stage=True)
                 return status, reason, []
             except _RETRY as error:
                 return "pending", type(error).__name__, _failure_details(error)
             finally:
                 self._operation_stages.pop(work, None)
 
-        if len(active) < self.concurrency:
+        # Each phase owns bounded capacity. Persisted preparation, delivery and
+        # retirement boundaries yield before entering another phase, so slow
+        # reviewer/proof work cannot consume every ready miner's dispatch slot.
+        lanes = ("preparation", "dispatch", "recovery", "certification")
+        counts = Counter(self._operation_lanes[work] for work in active)
+        for work in tuple(self._operation_lanes):
+            if work not in active:
+                del self._operation_lanes[work]
+        if len(active) < len(lanes) * self.concurrency:
             rows = await self._local(partial(self._batch, advance=False))
             miners = {miner for miner, _ in active.values()}
             last = None
             for admission in rows:
-                if len(active) >= self.concurrency:
+                if all(counts[lane] >= self.concurrency for lane in lanes):
                     break
                 last = admission.ordinal
                 miner = identity(admission.claim.claim.hotkey)
                 work = admission.work_sha256
                 if work in active or miner in miners:
                     continue
+                lane = await self._local(self._ready_stage, admission)
+                if lane == "completed":
+                    continue
+                if counts[lane] >= self.concurrency:
+                    continue
+                self._operation_lanes[work] = lane
+                counts[lane] += 1
                 active[work] = (miner, asyncio.create_task(perform(admission)))
                 miners.add(miner)
             if last is not None:
-                # Never move past work that capacity prevented from admission.
-                # Skipped active miners remain accepted and return on rotation.
+                # Rotate past this inspected page; capacity-blocked work stays
+                # accepted and returns on the next complete cursor rotation.
                 await self._local(self._advance_cursor, last)
 
         pending = [reason for status, reason in results if status == "pending"]
@@ -386,6 +432,8 @@ class ServiceWorkWorker:
             "work_complete": sum(status == "completed" for status, _ in results),
             "work_pending": len(pending),
             "in_flight_operations": len(active),
+            "phase_capacity": self.concurrency,
+            "in_flight_phase_counts": dict(sorted((k, v) for k, v in counts.items() if v)),
             "in_flight_stage_counts": dict(sorted(Counter(stage for stage, _ in stages).items())),
             "oldest_in_flight_stage": "" if oldest is None else oldest[0],
             "oldest_in_flight_stage_seconds": (

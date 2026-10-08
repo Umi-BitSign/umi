@@ -6,27 +6,27 @@ const MINER_HOST = 'studio-miner.sam-sn78.workers.dev';
 const COMPETITION_HOST = 'api.umi.vision';
 const ROUTES = new Map([
   [`${MINER_HOST}\n/healthz`, {
-    method: 'GET', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    method: 'GET', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', bodyTimeoutMs: 180_000,
     requestMaxBytes: 0, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${MINER_HOST}\n/v1/translate`, {
-    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', bodyTimeoutMs: 180_000,
     requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${MINER_HOST}\n/v1/translate/response`, {
-    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', bodyTimeoutMs: 180_000,
     requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${MINER_HOST}\n/v1/competition/cohorts/assignments`, {
-    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', bodyTimeoutMs: 180_000,
     requestMaxBytes: MAX_COHORT_GRANT_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${MINER_HOST}\n/v1/competition/cohorts/assignments/retire`, {
-    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', timeoutMs: 180_000,
+    method: 'POST', binding: 'MINER_ORIGIN', origin: 'http://127.0.0.1:8787', bodyTimeoutMs: 180_000,
     requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
   [`${COMPETITION_HOST}\n/v1/competition/assignments/query`, {
-    method: 'POST', binding: 'ASSIGNMENT_ORIGIN', origin: 'http://127.0.0.1:8129', timeoutMs: 30_000,
+    method: 'POST', binding: 'ASSIGNMENT_ORIGIN', origin: 'http://127.0.0.1:8129', bodyTimeoutMs: 30_000,
     requestMaxBytes: MAX_JSON_BODY, responseMaxBytes: MAX_JSON_BODY,
   }],
 ]);
@@ -116,13 +116,17 @@ export default {
     const abort = () => controller.abort(new Error('client_disconnected'));
     request.signal.addEventListener('abort', abort, { once: true });
     if (request.signal.aborted) abort();
-    const timer = setTimeout(() => controller.abort(new Error('deadline_exceeded')), route.timeoutMs);
+    const timer = setTimeout(() => controller.abort(new Error('deadline_exceeded')), route.bodyTimeoutMs);
     let stage = 'request';
     try {
       const body = await readBody(request.body, controller.signal, route.requestMaxBytes);
       const headers = cleanHeaders(request.headers);
       for (const name of ['host', 'content-length', 'cookie', 'forwarded', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-for']) headers.delete(name);
       headers.set('accept-encoding', 'identity');
+      // Once the bounded envelope is received, the native cohort budgets own
+      // execution. A proxy-specific deadline must not truncate legal inference
+      // or authority/recovery work. Client cancellation still propagates.
+      clearTimeout(timer);
       stage = 'origin';
       const binding = route.binding === 'MINER_ORIGIN'
         ? env.MINER_ORIGIN : env.ASSIGNMENT_ORIGIN;

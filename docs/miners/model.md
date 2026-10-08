@@ -324,6 +324,7 @@ model repository's release metadata.
 
 ```python
 import asyncio
+import os
 
 from umi.model_sidecar import CanonicalModelRequest, start_model_sidecar
 
@@ -331,6 +332,7 @@ MODEL_REVISION = "<64 lowercase hexadecimal characters>"
 SCORING_POLICY_SHA256 = "<64 lowercase hexadecimal characters>"
 SOCKET_PATH = "/absolute/private/run/umi-model.sock"
 VALIDATOR_SLOTS = 4  # Exact number of validators in the active policy registry.
+INFERENCE_SECONDS = float(os.environ["UMI_INFERENCE_SECONDS"])
 
 
 async def translate(video: bytes, request: CanonicalModelRequest) -> str:
@@ -347,7 +349,7 @@ async def main() -> None:
         scoring_policy_sha256=SCORING_POLICY_SHA256,
         validator_slot_count=VALIDATOR_SLOTS,
         maximum_concurrency=VALIDATOR_SLOTS,
-        maximum_inference_seconds=120,
+        maximum_inference_seconds=INFERENCE_SECONDS,
     )
     try:
         await server.serve_forever()
@@ -379,8 +381,15 @@ match the initial version 0.1 byte ceilings, but a later policy can differ.
 
 The helper accepts only async callbacks. It cancels cooperative model work when the
 miner closes the request socket and enforces `maximum_inference_seconds` on the
-server side. That deadline is recorded in the capacity descriptor and must be no
-greater than the miner's configured inference timeout. Native work started by an
+server side. In cohort mode that deadline must equal the protocol miner's effective
+inference timeout, which defaults to the pinned policy's `maximum_inference_ms / 1000`.
+Use `umi.config.resolve_inference_timeout` in the pinned protocol environment and
+pass its result to a separate model environment; that environment need not import
+the protocol dependencies. Explicit miner overrides must be reflected in the
+sidecar too. The example receives that resolved value through `UMI_INFERENCE_SECONDS`;
+configure it in the model service's environment, rather than copying a cohort-specific
+number into model code. The legacy component mode permits a shorter sidecar deadline.
+Native work started by an
 async callback may ignore Python task cancellation, so run the worker and miner
 under separate supervisors and give the worker a memory limit and restart policy.
 A timeout never enables a placeholder hypothesis; the miner seals an

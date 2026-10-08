@@ -25,8 +25,11 @@ connectivity, with no static public IP or inbound router port.
   Signed cohort-grant requests alone may be as large as 16 MiB; their responses
   remain limited to 64 KiB. These are JSON envelopes; video is not uploaded
   through these routes. Headers are limited to 16 KiB.
-- 180-second proxy deadline and cancellation on client disconnect. Validator
-  deadlines can be shorter; the 130-second probe is a transport check only.
+- Bounded ingress body reads and cancellation on client disconnect. After the
+  envelope arrives, the proxy does not impose a separate execution timeout: the
+  native miner and calling validator own their cohort budgets. Response recovery
+  remains necessary if the client or the Cloudflare runtime disconnects. A short
+  transport probe does not qualify the complete cohort inference budget.
 - Request body bytes and authentication headers are preserved. The actual
   miner must authenticate each translation request before running inference.
 - Responses are not cached. Proxy logs exclude bodies and credentials.

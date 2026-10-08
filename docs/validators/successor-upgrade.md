@@ -1842,13 +1842,19 @@ chain authority is still collected independently. Paid service owner exports
 likewise wait for genuine local journal contention within their operation budget
 rather than treating a busy assignment read as unavailable evidence.
 
-Paid service scheduling admits the next accepted job when a configured slot
-becomes free, without waiting for every miner in the previous page. Only one
-job per miner runs at a time; the total operational concurrency is unchanged.
+Recurring paid service scheduling gives preparation, dispatch, response recovery
+and retirement, and terminal certification separate bounded capacity. Each phase
+has up to the configured `concurrency` operations, for at most four times that
+many total operations. Endpoint scheduling similarly bounds dispatch, recovery
+and retirement, and certification separately, with one additional discovery
+operation. An operation yields at a retained phase boundary before entering the
+next phase; these counts are not counts of miners actively performing inference.
+Paid work still runs at most one job per miner within its queue. Miner-side
+concurrency and active-window limits remain unchanged.
 The existing private cursor advances only through considered admissions and
 survives restart. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
-include in-flight operation counts, aggregate native stages and the age of the
+include in-flight operation counts, phase capacity, aggregate native stages and the age of the
 oldest stage. Stage state is removed after completion, failure or cooperative
 cancellation and includes no miner identity or request content. Neither those
 counts nor selected grants establish completed service work or reward credit.

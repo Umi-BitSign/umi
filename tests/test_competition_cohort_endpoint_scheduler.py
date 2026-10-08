@@ -604,7 +604,7 @@ async def test_running_scheduler_completes_peer_while_other_preparation_waits(
 ):
     q = scheduled
     other = await add_second_assignment(q)
-    worker = q.worker(concurrency=2)
+    worker = q.worker(concurrency=1)
     assert (await worker._prepare(q.slot))[0] == "prepared"
     entered, release, complete, stop = (asyncio.Event() for _ in range(4))
     original = worker._prepare
@@ -700,7 +700,8 @@ async def test_running_scheduler_discovers_work_beside_rejected_grants(scheduled
         return await original_prepare(slot)
 
     def observe(report):
-        assert report.get("in_flight_operations", 0) <= 1
+        assert report.get("in_flight_operations", 0) <= 4
+        assert all(n <= 1 for n in report.get("in_flight_phase_counts", {}).values())
         if report.get("last_pending_reason") == "miner_grant_http_422":
             rejected.set()
 
@@ -750,7 +751,7 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     observed, stop = asyncio.Event(), asyncio.Event()
     reports = []
 
-    async def failed_case(row):
+    async def failed_case(row, **kwargs):
         raise ValueError("PRIVATE_DISPATCH_EXCEPTION")
 
     def report(value):
@@ -763,7 +764,7 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     try:
         await asyncio.wait_for(observed.wait(), 180)
         value = next(r for r in reports if r.get("last_retry_slot") == q.slot)
-        assert value["last_retry_stage"] == "case"
+        assert value["last_retry_stage"] == "dispatch"
         assert value["last_retry_type"] == "ValueError"
         assert value["retry_examples"][0]["slot"] == q.slot
         assert "PRIVATE_DISPATCH_EXCEPTION" not in canonical_json_bytes(value).decode()

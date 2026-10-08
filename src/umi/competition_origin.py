@@ -28,7 +28,7 @@ from .competition_cohort_origin_scope import (
     review_origin_recovery_scope,
 )
 from .competition_policy_lineage import submission_policy_admitted
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .encoding import account_id32
 from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
 from .open_competition import SignedSubmission, digest
@@ -230,6 +230,8 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             raise ValueError("resolver injection requires in-process test ports")
         super().__init__(config, policy, **test_ports)
         self._resolver = resolver or _system_origin_resolver
+        self._origin_capacity = asyncio.Semaphore(4)
+        self._origin_tasks: set[asyncio.Task] = set()
 
     async def _bind_origin(self, origin: str, announced: str) -> dict | None:
         if origin == announced:
@@ -369,7 +371,25 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         *,
         recovery: CohortEndpointOriginScope | CohortServiceOriginScope | None = None,
     ) -> EndpointOriginCapture:
-        async with self._lock:
+        if self._closed:
+            raise ValueError("endpoint provider is closed")
+        task = asyncio.create_task(self._collect_origin_concurrent(signed, origin, recovery))
+        self._origin_tasks.add(task)
+        try:
+            return await await_owned_task(task, on_cancel=task.cancel)
+        finally:
+            self._origin_tasks.discard(task)
+
+    async def _close(self):
+        # Drain proof work and owned persistence before closing shared RPC ports.
+        tasks = tuple(self._origin_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await super()._close()
+
+    async def _collect_origin_concurrent(self, signed, origin, recovery):
+        async with self._origin_capacity:
             if self._closed:
                 raise ValueError("endpoint provider is closed")
             if self._owned and (self._task is None or self._task.done()):
@@ -422,7 +442,10 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
         block = await self._finality.verified_block_at(ref.block_number)
         self._check_finality(ref, block)
         self._fresh(block.timestamp_ms)
-        await run_owned_thread(self._check_origin_prior, ref)
+        async with self._lock:
+            if self._closed:
+                raise ValueError("endpoint provider is closed")
+            await run_owned_thread(self._check_origin_prior, ref)
         runtime = await self._runtime_context(ref)
         if (
             not isinstance(runtime, PinnedRuntimeContext)
@@ -526,16 +549,19 @@ class FinalizedEndpointProvider(FinalizedRegistrationProvider):
             evidence,
             None if dns is None else announced,
         )
-        cancelled = threading.Event()
-        return await run_owned_thread(
-            partial(
-                self._save_origin,
-                capture,
-                runtime.metadata_bytes,
-                cancelled=cancelled,
-            ),
-            on_cancel=cancelled.set,
-        )
+        async with self._lock:
+            if self._closed:
+                raise ValueError("endpoint provider is closed")
+            cancelled = threading.Event()
+            return await run_owned_thread(
+                partial(
+                    self._save_origin,
+                    capture,
+                    runtime.metadata_bytes,
+                    cancelled=cancelled,
+                ),
+                on_cancel=cancelled.set,
+            )
 
     def _check_origin_prior(self, ref):
         connection = self._connect()

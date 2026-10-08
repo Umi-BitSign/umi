@@ -59,7 +59,9 @@ For a runtime update under the same cohort authority, it retains the exact start
 bytes, grant directory, nonce database, assignment database and finality database
 in place, including custom paths. Relative paths keep the service's existing
 working directory. The updater does not copy a directory-bound grant journal or
-change accounts as part of an upgrade.
+change accounts as part of an upgrade. A same-authority cohort runtime update also
+retains an explicit `--competition-chain-config`, including its owned observer
+state and selected proof-provider budgets.
 The selected miner runs with isolated Python imports, so an old checkout in the
 working directory or an inherited `PYTHONPATH` or `PYTHONHOME` cannot silently
 select the previous source. The working directory still resolves existing data
@@ -95,6 +97,28 @@ sidecar socket and capacity descriptor to the current transport policy before
 starting the miner. It verifies exact policy, transport, model, finality and
 sidecar health. If any check fails, it restores the prior systemd commands and
 restarts the previous miner and sidecar. Rerunning the updater is idempotent.
+
+In cohort mode, omitting `--inference-timeout` selects the full inference allowance
+from the pinned competition policy. An explicit smaller override remains in force;
+the startup `cohort_runtime_limits` report and `/healthz` `effective_limits` show
+the selected values. The sidecar must advertise that same inference budget.
+The same resolver gives omitted cohort startup and queue-wait timeouts three and
+two inference budgets respectively, with minimums of 120 and 60 seconds. Body
+reads get 30 seconds; clip fetching gets at least 120 seconds. Explicit startup,
+queue and body overrides remain selected and appear in the startup report.
+These operational waits do not extend either signed response deadline or change
+authentication freshness, transmission counts, or the active-window limit.
+The updater adjusts supported community-model sidecars using the selected runtime's
+resolved inference allowance and preserves prior configuration and commands for rollback.
+Startup observation uses twice that runtime's effective
+backend lifecycle budget, allowing a complete startup plus observation headroom;
+it returns as soon as health is ready. Health confirms the observer is running,
+not that a fresh chain proof has already been collected. Existing signed clocks
+and proof freshness checks still apply to requests. The updater retains the
+resolved budgets in its receipt.
+An unsupported sidecar layout stops the upgrade before services change. Check any
+external proxy's request timeout as well: a healthy `/healthz` alone does not prove
+that the proxy can carry a full-length translation.
 
 The current runtime shares concurrent RPC reads for the same exact block hash
 and retains them in a bounded cache. Current-head reads remain fresh; cached
