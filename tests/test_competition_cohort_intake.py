@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,49 @@ def request_for(scenario, *, sequence=1, block=200, name="Alice"):
     )
     consent = scenario["consent"].__class__(consent=body, signature=sign_object(body, wallet(name)))
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
+
+
+def test_authority_history_advances_ahead_of_queued_background_transaction(
+    intake, scenario, monkeypatch
+):
+    cohort = digest(scenario["intake_history"].plan)
+    order = []
+    gate = intake._process_lock
+    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+
+    published_history = CohortRecoveryStore.published_history
+
+    def retained_history(store, current):
+        result = published_history(store, current)
+        order.append("history")
+        return result
+
+    monkeypatch.setattr(CohortRecoveryStore, "published_history", retained_history)
+
+    def background():
+        with intake._connection():
+            order.append("background")
+
+    def history():
+        return intake.history(cohort)
+
+    # Enqueue the actual history reader after a background transaction while
+    # retaining the current owner. Both still use the native private connection.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with gate.hold():
+            writer = pool.submit(background)
+            with gate._condition:
+                assert gate._condition.wait_for(lambda: len(gate._normal) == 1, timeout=120)
+            reader = pool.submit(history)
+            with gate._condition:
+                assert gate._condition.wait_for(
+                    lambda: len(gate._normal) + len(gate._preferred) == 2, timeout=120
+                )
+        observed = reader.result(timeout=120)
+        writer.result(timeout=120)
+    assert observed == scenario["intake_history"]
+    assert order == ["history", "background"]
+    assert not gate._normal and not gate._preferred and gate._owner is None
 
 
 def seal_and_close(intake, scenario, *, block=300):
@@ -444,3 +488,166 @@ async def test_native_publisher_drains_commit_before_cancellation(intake, scenar
     with pytest.raises(asyncio.CancelledError):
         await task
     assert intake.history(digest(history.plan)) == history
+
+
+def test_verified_seal_reuse_keeps_private_copies_and_fresh_publication(
+    intake, scenario, monkeypatch
+):
+    import umi.competition_cohort_intake as module
+
+    intake.retain(request_for(scenario), capture_at(210))
+    closed, evidence, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected  # First complete verification.
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unchanged original seal was reconstructed again")
+
+    monkeypatch.setattr(module, "_build_intake_seal_from_participations", unexpected)
+    caller = intake.sealed(cohort, tip)
+    object.__setattr__(caller, "selected", ())
+    assert intake.sealed(cohort, tip) == expected
+    intake.publish(closed, capture_at(310), closure_input=evidence)
+    intake.publish(closed, capture_at(320), closure_input=evidence)
+    with pytest.raises(ValueError):
+        intake.publish(closed, capture_at(150), closure_input=evidence)
+
+
+@pytest.mark.parametrize("damage", ["seal", "body", "missing-consent", "tip-index"])
+def test_verified_seal_reuse_rechecks_changed_original_inputs(intake, scenario, damage):
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    with intake._connection() as (db, _):
+        if damage == "seal":
+            db.execute("UPDATE cohort_intake_seals SET body=?", (b"{}",))
+        elif damage == "body":
+            db.execute("UPDATE cohort_consents SET body=?", (b"{}",))
+        elif damage == "missing-consent":
+            db.execute("DELETE FROM cohort_consents")
+        else:
+            db.execute("UPDATE cohort_consents SET recovery_tip=?", ("00" * 32,))
+    with pytest.raises(ValueError):
+        intake.sealed(cohort, tip)
+
+
+@pytest.mark.parametrize("change", ["restart", "database", "index"])
+def test_verified_seal_reuse_reconstructs_new_materialization(
+    intake, scenario, monkeypatch, change
+):
+    import shutil
+
+    import umi.competition_cohort_intake as module
+
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    original = module._build_intake_seal_from_participations
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_build_intake_seal_from_participations", counted)
+    if change == "restart":
+        intake = CohortIntake(intake.config, intake.policy)
+    elif change == "database":
+        path = Path(intake.config.directory) / "intake.sqlite3"
+        replacement = path.with_suffix(".replacement")
+        shutil.copyfile(path, replacement)
+        replacement.chmod(0o600)
+        replacement.replace(path)
+    else:
+        with intake._connection() as (db, _):
+            db.execute("UPDATE cohort_consents SET observed=observed+1")
+    assert intake.sealed(cohort, tip) == expected
+    assert calls == [1]
+
+
+def test_verified_seal_reuse_cannot_ignore_new_original_consent(intake, scenario):
+    intake.retain(request_for(scenario), capture_at(210))
+    _, _, expected = seal_and_close(intake, scenario)
+    cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
+    assert intake.sealed(cohort, tip) == expected
+    with intake._connection() as (db, _):
+        row = db.execute("SELECT * FROM cohort_consents").fetchone()
+        changed = ("00" * 32, *row[1:4], row[4] + 1, *row[5:])
+        db.execute("INSERT INTO cohort_consents VALUES (?,?,?,?,?,?,?,?)", changed)
+    with pytest.raises(ValueError):
+        intake.sealed(cohort, tip)
+
+
+@pytest.fixture
+def participation_decode_observation(intake, scenario, monkeypatch):
+    import umi.competition_cohort_intake_records as module
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    intake.retain(request_for(scenario), capture_at(210))
+    cohort = digest(scenario["intake_history"].plan)
+    _, raw = intake.export_records(cohort, maximum_bytes=1024**2, maximum_records=1)[0]
+    monkeypatch.setattr(module, "_participation_decode_reuse", AssignmentVerificationReuse())
+    original = module.RetainedCohortParticipation.model_validate_json
+    calls = []
+
+    def counted(cls, body):
+        calls.append(body)
+        return original(body)
+
+    monkeypatch.setattr(
+        module.RetainedCohortParticipation, "model_validate_json", classmethod(counted)
+    )
+    return module, raw, calls
+
+
+def test_participation_decode_reuse_keeps_private_results(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    expected = module.read_participation(raw)
+    caller = module.read_participation(raw)
+    object.__setattr__(caller.observation, "block", 999)
+    assert module.read_participation(raw) == expected
+    assert calls == [raw]
+
+
+def test_participation_decode_reuse_reads_changed_bytes(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    retained = module.read_participation(raw)
+    altered = retained.model_copy(
+        update={"observation": retained.observation.model_copy(update={"block": 211})}
+    )
+    changed = canonical_json_bytes(altered)
+    assert changed != raw
+    assert module.read_participation(changed) == altered
+    assert calls == [raw, changed]
+
+
+def test_participation_decode_reuse_does_not_remember_failure(participation_decode_observation):
+    module, raw, calls = participation_decode_observation
+    module.read_participation(raw)
+    noncanonical = raw + b" "
+    for _ in range(2):
+        with pytest.raises(ValueError, match="not canonical"):
+            module.read_participation(noncanonical)
+    assert calls == [raw, noncanonical, noncanonical]
+    assert module.read_participation(raw)
+    assert len(calls) == 3
+
+
+def test_participation_decode_reuse_refuses_inherited_process_results(
+    participation_decode_observation,
+):
+    module, raw, calls = participation_decode_observation
+    expected = module.read_participation(raw)
+    module._participation_decode_reuse._pid = -1
+    assert module.read_participation(raw) == expected
+    assert calls == [raw, raw]
+
+
+@pytest.mark.parametrize("bad", [b"", b"x" * (4 * 1024**2 + 1), bytearray(b"{}")])
+def test_participation_decode_reuse_preserves_input_bound(participation_decode_observation, bad):
+    module, _, calls = participation_decode_observation
+    with pytest.raises(ValueError, match="byte bound"):
+        module.read_participation(bad)
+    assert not calls

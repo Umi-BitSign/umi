@@ -11,6 +11,7 @@ import bittensor as bt
 import httpx
 import pytest
 
+from umi import canonical_reuse
 from umi.auth import HotkeyAuth, RequestAuthenticator
 from umi.competition_cohort_endpoint import (
     RecoverableEndpointOrder,
@@ -216,6 +217,65 @@ async def send_original(p, index=0):
             content=canonical_json_bytes(p.requests[index]),
             auth=HotkeyAuth(p.validator, p.miner.hotkey_ss58),
         )
+
+
+async def test_selection_reuse_releases_bytes_and_rechecks_changed_assignment(
+    recovery_case, monkeypatch
+):
+    p = recovery_case
+    recovery = p.consumer()
+    original = recovery.journal.validate_assignment
+    caches = []
+
+    def validate(assignment):
+        cache = canonical_reuse._ACTIVE.get()
+        assert cache is not None and not cache.closed
+        caches.append(cache)
+        return original(assignment)
+
+    monkeypatch.setattr(recovery.journal, "validate_assignment", validate)
+    assert recovery.selection(p.slot)[0] == p.selection
+    first = caches[-1]
+    assert first.closed and not first.entries and canonical_reuse._ACTIVE.get() is None
+
+    saved = recovery.journal.assignment(p.slot)
+    forged = saved.model_copy(
+        update={
+            "delivery": saved.delivery.model_copy(
+                update={
+                    "signature": saved.delivery.signature.model_copy(
+                        update={"signature": "0x" + "00" * 64}
+                    )
+                }
+            )
+        }
+    )
+    with recovery.journal.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='assignment' AND id=?",
+            (canonical_json_bytes(forged), p.slot),
+        )
+    with pytest.raises(ValueError, match="signature"):
+        recovery.selection(p.slot)
+    second = caches[-1]
+    assert second is not first
+    assert second.closed and not second.entries and canonical_reuse._ACTIVE.get() is None
+
+
+async def test_retained_selection_reuses_verified_assignment_job(recovery_case, monkeypatch):
+    p = recovery_case
+    recovery = p.consumer()
+    expected = recovery.selection(p.slot)
+
+    def unexpected_replay(*args, **kwargs):
+        raise AssertionError("unchanged retained assignment was reverified")
+
+    monkeypatch.setattr(recovery.journal, "validate_assignment", unexpected_replay)
+    changed = recovery.selection(p.slot)
+    assert changed == expected
+    object.__setattr__(changed[1].certificate, "signatures", ())
+    assert recovery.selection(p.slot) == expected
+    assert canonical_reuse._ACTIVE.get() is None
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -641,3 +701,89 @@ async def test_worker_recovers_partial_preparation_without_original_caller(
         == original.content
     )
     assert p.model.calls == p.fetcher.calls == 1
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+async def test_exact_selection_static_proof_is_reused(recovery_case, monkeypatch, supplied):
+    from umi import competition_cohort_endpoint_recovery as module
+
+    p = recovery_case
+    recovery = p.consumer()
+    assignment = recovery.journal.assignment(p.slot) if supplied else None
+    expected = recovery._validate(p.selection, assignment)
+
+    def replay(*args, **kwargs):
+        raise AssertionError("unchanged selected static transport proof was reverified")
+
+    monkeypatch.setattr(module, "validate_recoverable_endpoint_transport", replay)
+    actual = recovery._validate(p.selection, assignment)
+    assert actual == expected
+    object.__setattr__(actual[0].transport_policy.limits, "maximum_response_body_bytes", 1)
+    assert recovery._validate(p.selection, assignment) == expected
+    assert canonical_reuse._ACTIVE.get() is None
+
+
+async def test_exact_selection_rechecks_changed_signed_transport(recovery_case):
+    p = recovery_case
+    recovery = p.consumer()
+    recovery.selection(p.slot)
+    original = p.selection.order
+    forged = p.selection.model_copy(
+        update={
+            "order": original.model_copy(
+                update={
+                    "signatures": tuple(
+                        s.model_copy(update={"signature": "0x" + "00" * 64})
+                        for s in original.signatures
+                    )
+                }
+            )
+        }
+    )
+    for _ in range(2):
+        with pytest.raises(ValueError, match="signature"):
+            recovery._validate(forged)
+    assert recovery.selection(p.slot)[0] == p.selection
+
+
+async def test_exact_selection_failed_proof_not_remembered(recovery_case, monkeypatch):
+    from umi import competition_cohort_endpoint_recovery as module
+
+    p = recovery_case
+    recovery = p.consumer()
+    original = module.validate_recoverable_endpoint_transport
+    calls = []
+
+    def validate(*args, **kwargs):
+        calls.append(None)
+        if len(calls) <= 2:
+            raise ValueError("temporary static verifier failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "validate_recoverable_endpoint_transport", validate)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="temporary static verifier failure"):
+            recovery.selection(p.slot)
+    assert recovery.selection(p.slot)[0] == p.selection
+    assert recovery.selection(p.slot)[0] == p.selection
+    assert len(calls) == 3
+
+
+async def test_exact_selection_inherited_receipt_is_not_reused(recovery_case, monkeypatch):
+    from umi import competition_cohort_endpoint_recovery as module
+
+    p = recovery_case
+    recovery = p.consumer()
+    expected = recovery.selection(p.slot)
+    original = module.validate_recoverable_endpoint_transport
+    calls = []
+
+    def validate(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "validate_recoverable_endpoint_transport", validate)
+    recovery._selection_reuse._pid = -1
+    assert recovery.selection(p.slot) == expected
+    assert recovery.selection(p.slot) == expected
+    assert len(calls) == 2

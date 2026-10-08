@@ -276,8 +276,10 @@ class ModelBundle(StrictProtocolModel):
         names = [f.path for f in self.files]
         if names != sorted(names) or len({x.casefold() for x in names}) != len(names):
             raise ValueError("bundle paths must be sorted and unique including case")
+        name_set = set(names)
         if any(
-            any(str(p) in names for p in PurePosixPath(n).parents if str(p) != ".") for n in names
+            any(str(p) in name_set for p in PurePosixPath(n).parents if str(p) != ".")
+            for n in names
         ):
             raise ValueError("artifact path cannot also be a directory")
         roles = {f.role for f in self.files}

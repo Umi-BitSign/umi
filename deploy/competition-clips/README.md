@@ -36,6 +36,12 @@ authorize weights. The deployment account must be the account that owns the
 private bucket; set `account_id` in the operator's uncommitted Wrangler config
 when more than one authenticated account is available.
 
+Every uploader targeting this Worker must use that same credential, including
+service-work dispatch and each endpoint reviewer. Keep separate private files
+with the correct service-account ownership, but identical credential values.
+Generating a different token for each role does not grant access to this Worker.
+Credential maintenance must preserve retained clip capabilities and journals.
+
 Prepare a mode-0600 JSON manifest outside the repository:
 
 ```json

@@ -49,7 +49,7 @@ class CompetitionApiLimits(StrictProtocolModel):
     maximum_concurrent_registration_collections: Literal[1] = 1
     maximum_page_offset: Annotated[int, Field(ge=0, le=1_000_000)] = 65_536
     maximum_page_size: Annotated[int, Field(ge=1, le=100)] = 100
-    capacity_wait_seconds: Annotated[float, Field(ge=0.01, le=10)] = 1.0
+    capacity_wait_seconds: Annotated[float, Field(ge=0.01, le=120)] = 1.0
     socket_backlog: Annotated[int, Field(ge=1, le=4096)] = 128
 
 

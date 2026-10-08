@@ -66,7 +66,8 @@ Supply every admitted predecessor, newest first. For the evaluator, replace
 from the review ledger and available for exclusive provider ownership.
 
 The command rejects an early or late application before rolling the ledger to
-the successor policy. It hashes both preserved bundles, collects another fresh
+the successor policy. It checks both preserved bundles using their retained
+verification records (hashing only a previously unverified local archive), collects another fresh
 owned head before the append, and refuses active rounds, disputed history,
 changed assets, a changed parent, and insufficient signatures. The record,
 receipt, content identity and writer fences commit together. Older running
@@ -79,3 +80,14 @@ and the ledger. Never restore an old backup after new admissions or other
 durable work have resumed. Reopen the completed port under the successor and
 its full admitted lineage, verify the expected promotion head, then restart the
 replacement services. This command cannot submit chain weights.
+
+Preserved verification receipts bind the archive materialization as well as the
+manifest and file metadata. Copying a version-2 archive does not transfer trust: the
+new archive is verified once under its native preservation lock and receives its
+own receipt. Restoring a missing file also requires fresh native verification against the
+complete signed manifest before replacing the receipt. A changed model-directory
+generation covers filesystems that recycle the old inode during restoration. Retries and process restarts reuse that receipt while its inputs are
+unchanged. Retained version-1 receipts remain accepted only for their exact
+unchanged materialization; keep this decoder while deployed archives still use
+it. Restore legacy artifacts through the native preservation path rather than
+copying their old local verification receipt to a new materialization.

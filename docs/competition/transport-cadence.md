@@ -10,8 +10,10 @@ Do not edit an issued request or its signed transport policy.
 
 The cohort attempt-window extension requires a qualified compatible reviewer
 and miner release before enabling it. The current updater manifest identifies
-the compatible source; the matching public deployment must advertise that
-release before miners select it through the updater. Enable
+the compatible source and binds it to the matching public deployment. A
+maintenance runtime may explicitly bind to the existing deployment revision;
+this does not replace the cohort's signed launch or change policy or authority.
+Enable
 `request_window_version: 2` in the benchmark endpoint host and service dispatch
 host only after qualifying those consumers. Omission retains version 1.
 For a mixed-version rollout, set `request_window_miner_hotkeys` to the explicit
@@ -68,6 +70,20 @@ Reviewers independently verify the exact request/grant/miner binding, the expiry
 observation, signature and fence before certifying a replacement. This extension
 does not authorize cancellation of a live response opportunity, reward missing
 work, or erase an unknown original transaction or execution outcome.
+
+## Completed work and resource capacity
+
+The active-window ceiling applies to work without a committed, verified signed
+retirement receipt. A signed response alone, a pending retirement intent or an
+unfinished resource operation does not release that slot. When every retained
+assignment in a window is retired, another authorized window may use the freed
+execution capacity without waiting for the completed window's time limit.
+
+Resource counters remain bound to the original window until expiry, so a new
+assignment cannot reopen its consumed policy quota. The response archive and
+retirement fence remain available across restart. Retiring one assignment does
+not discard a shared video while another live assignment needs it. A retained
+old window cannot bypass the active-window ceiling when it receives new work.
 
 ## Select the compatible release
 

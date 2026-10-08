@@ -730,3 +730,69 @@ async def test_nonwaiting_status_does_not_cancel_shared_cold_collection(policy):
     finally:
         provider.release.set()
         await cache.aclose()
+
+
+async def test_recovery_minimum_block_refreshes_one_shared_collection(policy):
+    from umi.competition_chain import RegistrationCapture
+    from umi.open_competition import digest
+
+    provider = CountingProvider()
+    provider.failure = None
+    cache = cache_for(provider, policy)
+    tasks = []
+    try:
+        old = await cache.collect_fresh()
+        assert await cache.collect_for_cohort_recovery(minimum_block=old.snapshot.block) == old
+        assert provider.calls == 1
+        block = old.snapshot.block + 1
+        snapshot = old.snapshot.model_copy(update={"block": block})
+        provider.capture = RegistrationCapture(
+            snapshot=snapshot,
+            provenance={
+                **old.provenance,
+                "block": block,
+                "snapshot_sha256": digest(snapshot),
+            },
+        )
+        provider.started.clear()
+        provider.release.clear()
+        tasks = [
+            asyncio.create_task(cache.collect_for_cohort_recovery(minimum_block=block))
+            for _ in range(4)
+        ]
+        await asyncio.wait_for(provider.started.wait(), 1)
+        await asyncio.sleep(0)
+        assert provider.calls == 2
+        provider.release.set()
+        captures = await asyncio.gather(*tasks)
+        assert all(c.snapshot.block == block for c in captures)
+        assert provider.calls == 2
+    finally:
+        provider.release.set()
+        await cache.aclose()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_recovery_minimum_block_keeps_lagging_owned_head_held(policy):
+    provider = CountingProvider()
+    provider.failure = None
+    cache = cache_for(provider, policy)
+    try:
+        old = await cache.collect_fresh()
+        with pytest.raises(VerifiedCaptureUnavailable, match="precedes required block"):
+            await cache.collect_for_cohort_recovery(minimum_block=old.snapshot.block + 1)
+        assert provider.calls == 2
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.parametrize("minimum", [True, -1, 1.5, 2**53])
+async def test_recovery_minimum_block_rejects_invalid_bound_before_rpc(policy, minimum):
+    provider = CountingProvider()
+    cache = cache_for(provider, policy)
+    try:
+        with pytest.raises(ValueError, match="minimum registration block"):
+            await cache.collect_for_cohort_recovery(minimum_block=minimum)
+        assert provider.calls == 0
+    finally:
+        await cache.aclose()

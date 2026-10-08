@@ -260,6 +260,23 @@ class HeartbeatTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid successor services"):
                 heartbeat(["vali.service"], successor_services=successor)
 
+    @patch("heartbeat.public_round_index", side_effect=OSError("public API unavailable"))
+    @patch("heartbeat.subprocess.run")
+    def test_public_index_outage_does_not_suppress_host_heartbeat(self, run, rounds):
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, "ActiveState=active\nSubState=running\nInvocationID=" + "a" * 32 + "\n", ""
+        )
+        result = heartbeat(
+            ["vali.service"],
+            lifecycle_cohorts={
+                "active-cohort": {"service": "vali.service", "cohort_sha256": "a" * 64}
+            },
+            public_round_index_url="https://api.example/v1/competition/rounds/index",
+        )
+        self.assertEqual(result["schema"], "umi-service-heartbeat/4")
+        self.assertEqual(result["services"], {"vali.service": "running"})
+        self.assertEqual(result["lifecycles"], {"active-cohort": None})
+
     @patch("heartbeat.public_round_index", return_value=(5, {"b" * 64}))
     @patch("heartbeat.lifecycle_status")
     @patch("heartbeat.subprocess.run")

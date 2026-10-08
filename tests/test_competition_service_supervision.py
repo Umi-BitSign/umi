@@ -7,6 +7,8 @@ import pytest
 from umi.competition_chain import FinalizedRegistrationProvider
 from umi.competition_service_supervision import run_supervised_server
 
+from .test_competition_progress import progress_events as progress_events
+
 
 class Server:
     def __init__(self):
@@ -24,6 +26,79 @@ class Server:
             for task in self.server_state.tasks:
                 task.cancel()
             self.closed = True
+
+
+async def test_shutdown_grace_does_not_replace_original_owned_failure(monkeypatch):
+    from umi import competition_service_supervision as supervision
+
+    class SlowServer(Server):
+        async def serve(self):
+            self.started = True
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+
+    stopped = asyncio.create_task(asyncio.sleep(0))
+    await stopped
+    server = SlowServer()
+    monkeypatch.setattr(supervision, "_SERVER_SHUTDOWN_SECONDS", 0.01)
+    with pytest.raises(RuntimeError, match="owned_finality_observer_stopped"):
+        await run_supervised_server(server, (provider(stopped),), poll_seconds=0.001)
+    assert server.closed and server.should_exit
+
+
+@pytest.mark.parametrize("failure_source", ["provider", "owned_task"])
+async def test_original_failure_is_reported_before_owned_request_cleanup(
+    failure_source, progress_events
+):
+    server = Server()
+    entered, cancelling, release = (asyncio.Event() for _ in range(3))
+
+    async def request():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelling.set()
+            await release.wait()
+
+    async def failed():
+        raise ValueError("private diagnostic and https://secret.invalid/bearer")
+
+    request_task = asyncio.create_task(request())
+    dead = asyncio.create_task(failed())
+    await entered.wait()
+    await asyncio.gather(dead, return_exceptions=True)
+    server.server_state.tasks.add(request_task)
+    running = asyncio.create_task(
+        run_supervised_server(
+            server,
+            (provider(dead),) if failure_source == "provider" else (),
+            liveness_tasks=lambda: (dead,) if failure_source == "owned_task" else (),
+            poll_seconds=0.001,
+        )
+    )
+    try:
+        await asyncio.wait_for(cancelling.wait(), timeout=3)
+        assert not running.done()
+        failures = [e for e in progress_events if e["event"] == "failed"]
+        assert len(failures) == 1 and failures[0]["phase"] == "host_service"
+        if failure_source == "provider":
+            assert failures[0]["reason_code"] == "owned_finality_observer_stopped"
+        else:
+            assert failures[0]["reason_code"] == "validation_failed"
+        import json
+
+        assert "secret.invalid" not in json.dumps(progress_events)
+        assert "private diagnostic" not in json.dumps(progress_events)
+        release.set()
+        with pytest.raises((ValueError, RuntimeError)):
+            await asyncio.wait_for(running, timeout=3)
+        assert request_task.done()
+    finally:
+        release.set()
+        await asyncio.gather(running, request_task, return_exceptions=True)
 
 
 async def test_supervisor_retains_cancelled_request_cleanup_on_repeated_cancellation():

@@ -8,7 +8,9 @@ module never deletes current, the registry, delivery packages or partial stages.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import stat
 import uuid
 
@@ -144,6 +146,28 @@ def _cache_names(cache_fd, limits):
     return sorted(names)
 
 
+def _candidate_identity(path):
+    """Filter unmatched stages; this identity never authorizes retirement."""
+    fd = material._directory(path, modes={0o555})
+    try:
+        payload = material._read_at(
+            fd,
+            material.CURRENT_SUCCESSOR_DIRECTIVE_PAGE_FILENAME,
+            material.MAX_SUCCESSOR_HISTORY_BYTES,
+        )
+    finally:
+        os.close(fd)
+    # This is only an exclusion hint from an already sealed stage, never
+    # retirement authority. Fully replay the page and retained source below
+    # whenever the declared identity matches a recovery run.
+    page = json.loads(payload)
+    head = page.get("head") if isinstance(page, dict) else None
+    identity = head.get("directive_sha256") if isinstance(head, dict) else None
+    if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+        raise material.SuccessorMaterializationError("invalid cached candidate identity")
+    return identity
+
+
 @log_phase("cache_retirement")
 def retire_redundant_successor_inputs(*, anchor, limits, retained):
     """Retire exact cache copies backed by the adapter's audited run registry.
@@ -181,6 +205,9 @@ def retire_redundant_successor_inputs(*, anchor, limits, retained):
                 info = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
                 if stat.S_IMODE(info.st_mode) != 0o555:
                     continue  # Partial stages and interrupted exchanges are preserved.
+                candidate = _candidate_identity(path)
+                if candidate not in retained:
+                    continue
                 page = material._read_current(
                     path,
                     config=anchor.config,
@@ -189,8 +216,10 @@ def retire_redundant_successor_inputs(*, anchor, limits, retained):
                     limits=limits,
                 )
                 identity = page.head.directive_sha256
-                if identity not in retained:
-                    continue
+                if identity != candidate:
+                    raise material.SuccessorMaterializationError(
+                        "retirement candidate identity changed"
+                    )
             selection, files = retained[identity]
             if selection.directive_sha256 != identity:
                 raise material.SuccessorMaterializationError("retirement source identity differs")

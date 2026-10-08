@@ -128,6 +128,30 @@ def healthy(phase, scenario, end=300):
     return result
 
 
+@pytest.mark.parametrize("mutation", ["noncanonical", "wrong_index", "bad_signature"])
+def test_initial_fence_rechecks_all_original_records(phase, scenario, mutation):
+    import json
+
+    from umi.protocol import canonical_json_bytes
+
+    healthy(phase, scenario, end=295)
+    with sqlite3.connect(Path(phase.intake.config.directory) / "intake.sqlite3") as db:
+        if mutation == "wrong_index":
+            db.execute("UPDATE cohort_consents SET recovery_tip=?", ("00" * 32,))
+        else:
+            value = json.loads(db.execute("SELECT body FROM cohort_consents LIMIT 1").fetchone()[0])
+            if mutation == "bad_signature":
+                value["request"]["signed_submission"]["signature"] = "0x" + "00" * 64
+                body = canonical_json_bytes(value)
+            else:
+                body = json.dumps(value, indent=2).encode()
+            db.execute("UPDATE cohort_consents SET body=?", (body,))
+    with pytest.raises(ValueError):
+        observe(phase, scenario, 300)
+    with sqlite3.connect(Path(phase.intake.config.directory) / "intake.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM cohort_intake_seals").fetchone()[0] == 0
+
+
 def test_native_fence_survives_signing_outage_and_keeps_original_evidence(phase, scenario):
     result = healthy(phase, scenario)
     assert result.progress.completion == "complete"

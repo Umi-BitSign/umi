@@ -133,8 +133,10 @@ def _read_at(directory_fd, name, maximum, *, expected_sha256=None):
         os.close(fd)
 
 
-def _tree(path, limits, *, sealed: bool, allow_owner_writable_root: bool = False):
-    """Bounded descriptor walk, retaining file hashes and inode identities."""
+def _tree(
+    path, limits, *, sealed: bool, allow_owner_writable_root: bool = False, hash_files: bool = True
+):
+    """Bounded descriptor walk; quota accounting needs metadata, not file hashes."""
     entries = total = 0
     records = {}
     root_modes = {0o555} if sealed else {0o555, 0o700, 0o755}
@@ -180,6 +182,9 @@ def _tree(path, limits, *, sealed: bool, allow_owner_writable_root: bool = False
                     total += before.st_size
                     if total > limits.maximum_cache_bytes:
                         raise SuccessorMaterializationError("materialization byte bound exceeded")
+                    if not hash_files:
+                        records[name] = (_identity(before), None)
+                        continue
                     stream = os.open(
                         child.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd
                     )
@@ -267,7 +272,7 @@ def _cache_usage(cache, cache_fd, limits):
                 raise SuccessorMaterializationError(
                     "materialization cache is full or has unknown entries"
                 )
-            size, _ = _tree(cache / entry.name, limits, sealed=False)
+            size, _ = _tree(cache / entry.name, limits, sealed=False, hash_files=False)
             total += size
             if total > limits.maximum_cache_bytes:
                 raise SuccessorMaterializationError("materialization cache byte quota exceeded")

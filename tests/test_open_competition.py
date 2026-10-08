@@ -156,6 +156,17 @@ def bundle_at(root: Path, marker: str = "baseline", parent=None):
     )
 
 
+@pytest.mark.parametrize("nested_path", ["config.txt/child", "config.txt/a/child"])
+def test_bundle_file_cannot_be_an_ancestor_directory(tmp_path, nested_path):
+    bundle = bundle_at(tmp_path / "source")
+    extra = bundle.files[-1].model_copy(update={"path": nested_path})
+    candidate = bundle.model_copy(
+        update={"files": tuple(sorted((*bundle.files, extra), key=lambda record: record.path))}
+    )
+    with pytest.raises(ValidationError, match="artifact path cannot also be a directory"):
+        ModelBundle.model_validate_json(canonical_json_bytes(candidate))
+
+
 def submission(policy, *, bundle=None, name="Alice", sequence=1, start=100, end=900):
     sub = Submission(
         schema="umi-competition-submission/1",

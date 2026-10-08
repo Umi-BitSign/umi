@@ -247,7 +247,9 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     os.umask(0o077)
     try:
-        with package_verification_session():
+        with package_verification_session(
+            directory=WORKER_REPLAY_STATE_ROOT / "package-verification"
+        ):
             result = asyncio.run(run_worker(args.mode))
         encoded = canonical_json_bytes(result)
         if len(encoded) > _MAX_STDOUT_BYTES:

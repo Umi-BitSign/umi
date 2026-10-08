@@ -22,8 +22,9 @@ from .competition_cohort_service_work import (
     review_service_assignment,
     verify_service_claim,
 )
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import wait_for_owned
 from .open_competition import CompetitionPolicy, Signature, identity, verify_signature
+from .private_state_wait import run_private_state_operation
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 PATH = "/internal/cohorts/service-work"
@@ -64,7 +65,9 @@ class ServiceWorkExporter:
     async def respond(self, request: ServiceWorkLookup) -> bytes:
         request = ServiceWorkLookup.model_validate_json(canonical_json_bytes(request))
         verify_service_claim(request.claim)
-        assignment = await run_owned_thread(self.queue.assignment, request.claim)
+        assignment = await run_private_state_operation(
+            self.queue.assignment, request.claim, timeout=self.timeout_seconds
+        )
         response = ServiceWorkResponse(
             schema="umi-service-work-response/1",
             assignment=assignment,

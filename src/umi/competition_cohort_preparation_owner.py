@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
@@ -16,6 +17,13 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
 from .open_competition import digest
 from .protocol import canonical_json_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedRound:
+    raw: bytes
+    sha256: str
+    value: PreparedCohortRound
 
 
 class CohortPreparation:
@@ -44,7 +52,7 @@ class CohortPreparation:
         # and reuse its canonical result.  Fresh history and retained-row checks
         # below still fence closure, revocation and local state replacement.
         self._retained_lock = threading.Lock()
-        self._retained_cache: dict[tuple[str, str], bytes] = {}
+        self._retained_cache: dict[tuple[str, str], _VerifiedRound] = {}
 
     def prepare(
         self, cohort: str, capture: RegistrationCapture, *, expected_tip_sha256: str
@@ -68,9 +76,8 @@ class CohortPreparation:
         """Replay a retained round without selecting or creating a new one."""
         key = (cohort, expected_tip_sha256)
         with self._retained_lock:
-            raw = self._retained_cache.get(key)
-            if raw is not None:
-                cached = PreparedCohortRound.model_validate_json(raw)
+            cached = self._retained_cache.get(key)
+            if cached is not None:
                 queue, intake = self.queue, self.queue.intake
                 intake._allowed(cohort)
                 with queue._connection() as (db, store):
@@ -96,20 +103,25 @@ class CohortPreparation:
                     ).fetchone()
                     if (
                         row is None
-                        or row[1] != raw
-                        or row[0] != digest(cached)
-                        or row[2] != cached.observation.block
+                        or row[1] != cached.raw
+                        or row[0] != cached.sha256
+                        or row[2] != cached.value.observation.block
                     ):
                         self._retained_cache.pop(key, None)
                         raise ValueError("retained preparation changed after verified replay")
-                return cached
+                return cached.value.model_copy(deep=True)
             result = self._prepare(
                 cohort,
                 None,
                 expected_tip_sha256=expected_tip_sha256,
                 current_block=current_block,
             )
-            self._retained_cache[key] = canonical_json_bytes(result)
+            # Keep one verified generation, bounded by maximum_bytes. Neither
+            # the initial caller nor a cache-hit caller can mutate this copy.
+            self._retained_cache.clear()
+            self._retained_cache[key] = _VerifiedRound(
+                canonical_json_bytes(result), digest(result), result.model_copy(deep=True)
+            )
             return result
 
     def _prepare(

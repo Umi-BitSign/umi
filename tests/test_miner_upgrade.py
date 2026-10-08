@@ -956,9 +956,22 @@ def test_runtime_exact_pins_are_verified_before_promotion(tmp_path, monkeypatch,
     monkeypatch.setattr(upgrade, "policy_python", lambda *_args: "/root-owned/python3.12.14")
     target = upgrade.runtime_directory(manifest["runtime"], policy)
     calls = []
+    shadow_bin = tmp_path / "shadow-bin"
+    shadow_bin.mkdir()
+    shadow_marker = tmp_path / "shadow-env-ran"
+    shadow_env = shadow_bin / "env"
+    shadow_env.write_text(f"#!/bin/sh\ntouch '{shadow_marker}'\nexit 0\n")
+    shadow_env.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shadow_bin) + os.pathsep + os.environ.get("PATH", ""))
 
     def run(*args, **kwargs):
         calls.append((args, kwargs))
+        if "install" in args:
+            interpreter_index = next(
+                index for index, value in enumerate(args) if value.endswith("/venv/bin/python")
+            )
+            subprocess.run([*args[:interpreter_index], "/usr/bin/true"], check=True)
+            assert not shadow_marker.exists()
         if "venv" in args:
             python = Path(args[-1]) / "bin/python"
             python.parent.mkdir(parents=True)
@@ -1093,3 +1106,43 @@ def test_manual_relative_paths_use_running_service_working_directory(tmp_path):
     assert enrollment["wallet_path"] == str(tmp_path / "wallets")
     updated = upgrade.miner_command(arguments, "/new/python", tmp_path / "new", manifest)
     assert upgrade.option(updated, "--assignment-db") == "state/assignments.sqlite3"
+
+
+def test_maintenance_release_keeps_exact_target_and_existing_deployment_identity():
+    manifest = _manifest()
+    status = _status(manifest)
+    deployed_revision = manifest["runtime"]["revision"]
+    manifest["runtime"] = {
+        "repository": "https://github.com/Umi-BitSign/umi.git",
+        "revision": "ab" * 20,
+        "deployment_revision": deployed_revision,
+    }
+    selected = upgrade.deployed_manifest(manifest, status)
+    assert selected["runtime"]["revision"] == "ab" * 20
+    assert selected["runtime"]["deployment_revision"] == deployed_revision
+    assert manifest["runtime"]["revision"] == "ab" * 20
+    upgrade.validate_manifest(selected, status, "yes")
+    upgrade.validate_manifest(selected, status, "no")
+
+
+@pytest.mark.parametrize(
+    "fault", ["deployment", "policy", "tracks", "base_format", "target_format"]
+)
+def test_maintenance_release_refuses_an_unbound_deployment_or_profile(fault):
+    manifest = _manifest()
+    status = _status(manifest)
+    manifest["runtime"]["deployment_revision"] = manifest["runtime"]["revision"]
+    manifest["runtime"]["revision"] = "ab" * 20
+    if fault == "deployment":
+        status["deployment"]["umi_git_revision"] = "cd" * 20
+    elif fault == "policy":
+        status["policy_sha256"] = "de" * 32
+    elif fault == "tracks":
+        status["deployment"]["eligible_tracks"] = ["model"]
+    elif fault == "base_format":
+        manifest["runtime"]["deployment_revision"] = "main"
+    else:
+        manifest["runtime"]["revision"] = "main"
+    selected = upgrade.deployed_manifest(manifest, status)
+    with pytest.raises(ValueError):
+        upgrade.validate_manifest(selected, status, "yes")

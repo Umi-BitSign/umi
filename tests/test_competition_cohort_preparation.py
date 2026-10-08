@@ -123,6 +123,63 @@ def test_repeated_retained_round_reuses_verified_history_generation(preparation,
     assert owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_340) == first
 
 
+def test_retained_round_reuses_private_object_with_fresh_authority(preparation, monkeypatch):
+    from umi import competition_cohort_preparation_owner as owner_module
+
+    h = preparation
+    h.certify()
+    run(h)
+    expected = history_tip(h.history)
+    first = h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_330)
+    original = canonical_json_bytes(first)
+    object.__setattr__(first.observation, "block", 999)
+    calls = []
+    native_verify = owner_module.verify_cohort_history
+
+    def verify(*args, **kwargs):
+        calls.append(kwargs["current_block"])
+        return native_verify(*args, **kwargs)
+
+    def reparse(*args, **kwargs):
+        raise AssertionError("unchanged private prepared round must not be reparsed")
+
+    monkeypatch.setattr(owner_module, "verify_cohort_history", verify)
+    monkeypatch.setattr(PreparedCohortRound, "model_validate_json", reparse)
+    second = h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_340)
+    assert canonical_json_bytes(second) == original
+    assert calls == [100_340]
+    object.__setattr__(second.observation, "block", 998)
+    third = h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_350)
+    assert canonical_json_bytes(third) == original
+    assert calls == [100_340, 100_350]
+    assert len(h.owner._retained_cache) == 1
+
+
+@pytest.mark.parametrize("change", ["body", "digest", "observed", "delete"])
+def test_retained_object_reuse_rejects_changed_durable_record(preparation, change):
+    h = preparation
+    h.certify()
+    run(h)
+    expected = history_tip(h.history)
+    h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_330)
+    with h.queue._connection() as (db, _):
+        if change == "delete":
+            db.execute("DELETE FROM cohort_prepared_rounds WHERE cohort=?", (h.cohort,))
+        elif change == "body":
+            db.execute("UPDATE cohort_prepared_rounds SET body=? WHERE cohort=?", (b"{}", h.cohort))
+        elif change == "digest":
+            db.execute(
+                "UPDATE cohort_prepared_rounds SET digest=? WHERE cohort=?", ("0" * 64, h.cohort)
+            )
+        else:
+            db.execute(
+                "UPDATE cohort_prepared_rounds SET observed=observed+1 WHERE cohort=?", (h.cohort,)
+            )
+    with pytest.raises(ValueError, match="retained preparation changed"):
+        h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=100_340)
+    assert not h.owner._retained_cache
+
+
 def test_original_round_passes_native_roster_review_after_certification(preparation):
     h = preparation
     h.certify()

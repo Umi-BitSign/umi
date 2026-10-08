@@ -45,8 +45,20 @@ Under the configured `CompetitionStore` directory, the reward owner reads
 `model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private
 `CertifiedModelArtifactAcceptance` records. Legacy delivery keeps candidate and
 baseline bytes at
-`model-reward-artifacts/<model-sha256>/{manifest.json,model/}`. Each consumer
-verifies those bytes with the native preserved-bundle reader.
+`model-reward-artifacts/<model-sha256>/{manifest.json,model/}`. Preservation
+verifies the bytes while copying and retains a private verification record
+alongside the content directory. Readers reuse that record across requests and
+process restarts without hashing the model files again. Existing archives without
+a record receive one after their first successful verification. Changed file
+identity or metadata cannot reuse the old record and holds the operation rather
+than silently accepting changed content. The record is host bookkeeping and is
+not part of the published model bundle. Current policy, authorization and chain
+state checks still run.
+
+During legacy upload completion, each finished staging file likewise retains a
+private verification record. Later completion passes and restarted uploaders
+reuse it while other files are still arriving. These temporary records are
+removed with the upload staging tree after the complete archive is preserved.
 
 For a cohort whose signed model-delivery profile selects direct R2 multipart
 delivery, acceptance version 2 also carries the owner's signed immutable R2

@@ -9,6 +9,7 @@ one lock so closing intake cannot race a new receipt.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import sqlite3
 import stat
@@ -22,6 +23,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
@@ -36,12 +38,17 @@ from .competition_cohort_intake_seal import (
     build_intake_seal,
     verify_intake_closure,
 )
-from .competition_cohort_model_acceptance_store import model_acceptances_for_seal
+from .competition_cohort_model_acceptance_store import (
+    MAX_PUBLICATION_BYTES,
+    acceptance_tables,
+    model_acceptances_for_seal,
+)
 from .competition_cohort_participation import (
     CohortParticipationReceipt,
     CohortParticipationRequest,
     admit_recovery_participant,
 )
+from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
@@ -161,6 +168,7 @@ class CohortIntake:
         # this process first so concurrent API, lifecycle and review threads do
         # not consume the external-lock timeout while one sibling owns it.
         self._process_lock = ThreadGate()
+        self._seal_reuse = AssignmentVerificationReuse(8 * 1024**2, 64)
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
@@ -356,7 +364,7 @@ class CohortIntake:
 
     def history(self, cohort: str) -> CohortRecoveryHistory:
         self._allowed(cohort)
-        with self._connection() as (_, store):
+        with self._connection(prefer_history=True) as (_, store):
             return store.published_history(cohort)
 
     def export_records(
@@ -526,6 +534,51 @@ class CohortIntake:
             if tip in tips:
                 yield consent, raw, retained
 
+    def _seal_reuse_key(self, db, prefix, tip, raw, seal):
+        # Read every original row/index under the existing intake lock. A changed,
+        # missing or added consent forces complete native reconstruction again.
+        cohort = digest(prefix.plan)
+        material = hashlib.sha256(b"umi-intake-seal-reuse-v1\0")
+        for row in db.execute(
+            "SELECT consent,cohort,hotkey,track,sequence,observed,recovery_tip,"
+            "substr(body,1,4194305) FROM cohort_consents WHERE cohort=? ORDER BY consent",
+            (cohort,),
+        ):
+            indexes = canonical_json_bytes(list(row[:-1]))
+            material.update(len(indexes).to_bytes(8, "big") + indexes)
+            material.update(hashlib.sha256(row[-1]).digest())
+        # Model certificates are independent of participation. Include their
+        # exact bytes and missing state, not just a selected model's identity.
+        if isinstance(prefix.authority.authority, ModelRewardCohortAuthority):
+            acceptance_tables(db)
+            for selected in seal.selected:
+                if selected.track != "model":
+                    continue
+                material.update(bytes.fromhex(selected.submission_sha256))
+                row = db.execute(
+                    "SELECT substr(body,1,?) FROM cohort_model_acceptances "
+                    "WHERE cohort=? AND submission=?",
+                    (MAX_PUBLICATION_BYTES + 1, cohort, selected.submission_sha256),
+                ).fetchone()
+                if row is None:
+                    material.update(b"missing")
+                else:
+                    material.update(b"present" + hashlib.sha256(row[0]).digest())
+        stored = (self.directory / "intake.sqlite3").stat()
+        return (
+            os.getpid(),
+            str(self.directory),
+            stored.st_dev,
+            stored.st_ino,
+            digest(self.config),
+            digest(self.policy),
+            self.tracks,
+            digest(prefix),
+            tip,
+            hashlib.sha256(raw).digest(),
+            material.digest(),
+        )
+
     def _seal(self, db, history, tip):
         row = db.execute(
             "SELECT substr(body,1,4194305) FROM cohort_intake_seals WHERE cohort=? AND tip=?",
@@ -543,6 +596,11 @@ class CohortIntake:
         if tip not in tips:
             raise ValueError("sealed intake does not belong to the current history")
         prefix = history.model_copy(update={"transitions": history.transitions[: tips.index(tip)]})
+        slot = (digest(history.plan), tip)
+        key = self._seal_reuse_key(db, prefix, tip, raw, seal)
+        cached = self._seal_reuse.lookup(slot, key)
+        if cached is not None:
+            return cached
         expected = _build_intake_seal_from_participations(
             prefix,
             self.policy,
@@ -559,6 +617,7 @@ class CohortIntake:
         model_acceptances_for_seal(
             db, seal, prefix, self.policy, self._records(db, prefix, track="model")
         )
+        self._seal_reuse.remember(slot, key, seal)
         return seal
 
     def sealed(self, cohort: str, tip: str | None = None) -> CohortIntakeSeal | None:

@@ -37,6 +37,60 @@ def capacity(records: int, payload_bytes: int = 10_000_000) -> AdmissionCapacity
     return AdmissionCapacity(maximum_records=records, maximum_bytes=payload_bytes)
 
 
+async def test_generous_capacity_wait_keeps_reads_bounded_and_observes_new_admission(
+    policy, tmp_path, monkeypatch
+):
+    store = CompetitionStore(tmp_path / "state", policy)
+    entered, release = threading.Event(), threading.Event()
+    original = store.admission_summaries
+    active = maximum = 0
+
+    def blocked_summaries(*, offset=0, limit=20):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        entered.set()
+        try:
+            assert release.wait(timeout=10)
+            return original(offset=offset, limit=limit)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(store, "admission_summaries", blocked_summaries)
+
+    async def current():
+        return snapshot()
+
+    limits = CompetitionApiLimits(maximum_concurrent_reads=1, capacity_wait_seconds=60)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(store, current, limits=limits)),
+        base_url="https://intake.example",
+    ) as client:
+        first = asyncio.create_task(client.get("/v1/competition/submissions"))
+        second = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            second = asyncio.create_task(client.get("/v1/competition/submissions"))
+            await asyncio.sleep(0.15)
+            assert not second.done() and maximum == 1
+            admitted = await client.post(
+                "/v1/competition/submissions",
+                content=canonical_json_bytes(submission(policy)),
+                headers={"content-type": "application/json"},
+            )
+            assert admitted.status_code == 200
+            release.set()
+            responses = await asyncio.gather(first, second)
+            assert all(response.status_code == 200 for response in responses)
+            assert len(responses[1].json()["items"]) == 1
+            assert maximum == 1
+        finally:
+            release.set()
+            await asyncio.gather(
+                first, *(() if second is None else (second,)), return_exceptions=True
+            )
+
+
 def test_record_capacity_is_atomic_and_exact_retries_survive_full_store(policy, tmp_path):
     store = CompetitionStore(tmp_path / "state", policy, admission_capacity=capacity(1))
     alice = submission(policy)

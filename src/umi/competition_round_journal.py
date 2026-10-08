@@ -846,13 +846,17 @@ class RoundJournal:
         A borrowed connection remains owned by the caller. None represents
         either an absent record or a retained JSON null.
         """
+        raw = self.get_raw(kind, key, db=db)
+        return json.loads(raw) if raw is not None else None
+
+    def get_raw(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> bytes | None:
+        """Read bounded canonical bytes with the same fresh conflict fence."""
         if db is None:
             with self.transaction() as db:
-                return self.get(kind, key, db=db)
+                return self.get_raw(kind, key, db=db)
         if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
             raise ValueError("round journal conflict held")
-        raw = self._record(db, kind, key)
-        return json.loads(raw) if raw is not None else None
+        return self._record(db, kind, key)
 
     def keys(self, kind: str) -> list[str]:
         with self.transaction() as db:

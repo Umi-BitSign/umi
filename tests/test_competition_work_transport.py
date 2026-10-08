@@ -461,7 +461,7 @@ def test_evaluator_work_config_rejects_unpaired_or_unbound_inputs(setup, tmp_pat
     elif field == "origin":
         raw["round_coordinator_origin"] = None
     else:
-        raw["work_signing_chain"]["collection_timeout_seconds"] = 121
+        raw["work_signing_chain"]["collection_timeout_seconds"] = 601
     with pytest.raises(ValueError):
         EvaluatorConfig.model_validate(raw)
 

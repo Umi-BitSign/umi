@@ -24,7 +24,11 @@ from .competition_cohort_coordinator import (
     replay_cohort_decisions,
 )
 from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, history_tip
-from .competition_cohort_intake_seal import CohortIntakeSeal, EmptyCohortIntake, build_intake_seal
+from .competition_cohort_intake_seal import (
+    CohortIntakeSeal,
+    EmptyCohortIntake,
+    _build_intake_seal_from_participations,
+)
 from .competition_cohort_model_acceptance_store import (
     PendingModelArtifacts,
     model_acceptances_for_seal,
@@ -193,16 +197,23 @@ class CohortIntakePhaseObserver:
                 # Both records commit together; a crash cannot strand an
                 # irreversible fence without its availability evidence.
                 try:
-                    seal = build_intake_seal(
+                    seal = _build_intake_seal_from_participations(
                         history,
                         self.intake.policy,
                         observation,
                         capture.snapshot,
-                        self.intake._records(db, history),
+                        (
+                            (key, retained)
+                            for key, _, retained in self.intake._parsed_records(db, history)
+                        ),
                         expected_tip_sha256=expected_tip_sha256,
                     )
                     model_acceptances_for_seal(
-                        db, seal, history, self.intake.policy, self.intake._records(db, history)
+                        db,
+                        seal,
+                        history,
+                        self.intake.policy,
+                        self.intake._records(db, history, track="model"),
                     )
                 except (EmptyCohortIntake, PendingModelArtifacts):
                     return NativeIntakeProgress(

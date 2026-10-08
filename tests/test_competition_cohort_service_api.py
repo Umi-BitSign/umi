@@ -549,7 +549,9 @@ async def test_readiness_capacity_and_seal_preserve_duplicate_recovery(api_case,
     status = await ready(s)
     assert not status.json()["ready"]
     assert status.json()["reason_code"] == ("sealed" if fence == "sealed" else "capacity_exhausted")
+    s.calls.clear()
     assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == 503
+    assert not s.calls  # No fresh proof/history work can create capacity.
     s.offline = {"history", "capture", "roster", "archive"}
     assert (await post(s)).json() == first.json()
 
@@ -1002,3 +1004,58 @@ async def test_service_readiness_reports_native_stage_timings(api_case, monkeypa
     assert all(
         set(r) <= {"phase", "phase_id", "parent_phase_id", "event", "elapsed_ms"} for r in phases
     )
+
+
+async def test_busy_readiness_returns_hold_without_waiting_for_admission(api_case):
+    s = api_case
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = s.api.history
+
+    async def held_history(cohort):
+        entered.set()
+        await release.wait()
+        return await original(cohort)
+
+    s.api.history = held_history
+    admission = asyncio.create_task(post(s))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        response = await asyncio.wait_for(ready(s), 2)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["reason_code"] == "admission_busy" and body["ready"] is False
+        assert not body["chain_submission_authorized"]
+        assert not body["service_credit_authorized"]
+        assert body["nonce"] == "ab" * 16
+        assert not admission.done()
+        assert_no_admission_or_archive(s)
+    finally:
+        release.set()
+        accepted = await admission
+    assert accepted.status_code == 200
+    # The ordinary path still collects all fresh owned inputs after the hold.
+    assert (await ready(s)).json()["ready"] is True
+
+
+async def test_second_readiness_does_not_queue_or_cancel_the_first(api_case):
+    s = api_case
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = s.api.history
+
+    async def held_history(cohort):
+        entered.set()
+        await release.wait()
+        return await original(cohort)
+
+    s.api.history = held_history
+    first = asyncio.create_task(ready(s))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        second = await asyncio.wait_for(ready(s), 2)
+        assert second.json()["reason_code"] == "admission_busy"
+        assert second.json()["ready"] is False and not first.done()
+        assert_no_admission_or_archive(s)
+    finally:
+        release.set()
+        completed = await first
+    assert completed.json()["ready"] is True

@@ -17,5 +17,5 @@
     "vitest": "4.1.11",
     "wrangler": "4.144.0"
   },
-  "overrides": { "sharp": "0.35.4" }
+  "overrides": { "sharp": "0.35.5" }
 }

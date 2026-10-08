@@ -29,7 +29,11 @@ from .competition_cohort_order_signer import (
 )
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_roster import RecoverableRosterEvidence
-from .competition_cohort_service_queue import MAX_ADMISSION_BYTES, ServiceWorkQueue
+from .competition_cohort_service_queue import (
+    MAX_ADMISSION_BYTES,
+    ServiceQueueBackpressure,
+    ServiceWorkQueue,
+)
 from .competition_cohort_service_seal import MAX_SERVICE_SEAL_BYTES
 from .competition_cohort_service_work import (
     MAX_CLAIM_BYTES,
@@ -50,6 +54,7 @@ from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .private_files import PrivateStateBusyError
+from .private_state_wait import run_private_state_operation
 from .protocol import canonical_json_bytes
 
 PATH = "/v1/competition/service-work"
@@ -201,24 +206,7 @@ class ServiceWorkAdmissionAPI:
         return await wait_for_owned(awaitable, timeout=self.timeout)
 
     async def _local(self, function, *args):
-        """Wait for a genuine local mutex hold without retrying validation failures.
-
-        Each attempt drains its owned thread before yielding. Only acquisition
-        contention is retried; failed I/O, corrupt records and changed authority
-        retain their original failure. Cancellation releases the HTTP owner.
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.timeout
-        delay = 0.05
-        while True:
-            try:
-                return await run_owned_thread(function, *args)
-            except PrivateStateBusyError:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise
-                await asyncio.sleep(min(delay, remaining))
-                delay = min(1.0, delay * 2)
+        return await run_private_state_operation(function, *args, timeout=self.timeout)
 
     @staticmethod
     def _remember(queue, source, capture):
@@ -320,25 +308,46 @@ class ServiceWorkAdmissionAPI:
     async def _commit_current(
         self, queue, signed, submission, participant, source, capture, raw, metadata
     ):
-        try:
-            return await run_owned_thread(
-                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
-            )
-        except FinalizedHeadRegression:
-            # Preparation and the last history fetch may outlive a shared head.
-            # Keep the already verified immutable roster, but recollect current
-            # history before the new owned capture. The locked commit still
-            # checks publication and replays participant, phase and proof binding.
-            # Retry only once: a genuinely lagging provider must remain held.
-            await self._unchanged(queue, source)
-            capture = await self._call(self.capture())
-            await run_owned_thread(self._remember, queue, source, capture)
-            boundary = execution_boundary(capture)
-            raw, metadata = await self._call(self.archive(boundary))
-            await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
-            return await run_owned_thread(
-                self._commit, queue, signed, submission, participant, source, capture, raw, metadata
-            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        refresh = regressed = False
+        while True:
+            try:
+                if refresh:
+                    # Contention can outlive the owned head. Keep the immutable
+                    # roster, but recollect history, capture and original proof
+                    # bytes before retrying the locked native commit.
+                    await self._unchanged(queue, source)
+                    capture = await self._call(self.capture())
+                    await run_owned_thread(self._remember, queue, source, capture)
+                    boundary = execution_boundary(capture)
+                    raw, metadata = await self._call(self.archive(boundary))
+                    await run_owned_thread(
+                        _check_archive, capture.snapshot, boundary, raw, metadata
+                    )
+                return await run_owned_thread(
+                    self._commit,
+                    queue,
+                    signed,
+                    submission,
+                    participant,
+                    source,
+                    capture,
+                    raw,
+                    metadata,
+                )
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(1.0, remaining))
+                refresh = True
+            except FinalizedHeadRegression:
+                # Preserve the existing single regression recovery. A genuinely
+                # lagging provider must not turn an unchanged retry into authority.
+                if regressed:
+                    raise
+                regressed = refresh = True
 
     async def admit(self, catalog: str, signed: SignedServiceWorkClaim):
         queue = self.selected(catalog)
@@ -346,6 +355,12 @@ class ServiceWorkAdmissionAPI:
             # Recovery must precede every live history, preparation and capture call.
             admission = await self._local(queue.lookup, signed)
             if admission is None:
+                # A full or sealed queue cannot accept new work. Check its local
+                # fence before collecting fresh owner inputs; accepted retries
+                # still recover first, and the commit rechecks capacity atomically.
+                reason, _ = await self._local(self._capacity, queue)
+                if reason != "accepting":
+                    raise ServiceQueueBackpressure("service queue has no unreserved claim capacity")
                 _, source, capture, roster = await self._current(queue)
                 member = next(
                     (
@@ -433,6 +448,12 @@ class ServiceWorkAdmissionAPI:
             "service_credit_authorized": False,
             "chain_submission_authorized": False,
         }
+        # Readiness must not queue behind a long admission or another probe.
+        # Reporting a hold leaves that owned operation and its generous budget
+        # intact; only the normal unlocked path can establish fresh readiness.
+        if self.serial[catalog].locked():
+            result["reason_code"] = "admission_busy"
+            return result
         async with self.serial[catalog]:
             try:
                 result["reason_code"] = "queue_unavailable"

@@ -47,6 +47,7 @@ from .competition_reward_continuity import (
     authorized_reward_row,
     verify_reward_continuation,
 )
+from .competition_weight_timing import require_weight_interval
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -465,11 +466,8 @@ def validate_weight_preflight(
         or observation.block + authorization.mortality_period > authorization.valid_through_block
     ):
         raise ValueError("successor authorization is inactive or lacks mortal headroom")
-    if (
-        submission
-        and observation.validator_last_update + observation.weights_rate_limit > observation.block
-    ):
-        raise ValueError("successor validator weight rate limit has not elapsed")
+    if submission:
+        require_weight_interval(observation)
 
 
 def build_competition_weight_call(

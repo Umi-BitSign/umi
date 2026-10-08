@@ -227,7 +227,9 @@ async def test_transport_failure_is_retryable_and_never_returns_the_previous_val
             raise ConnectionError("fixture provider unavailable")
 
         patch.setattr(item.rpc, "request", unavailable)
-        with pytest.raises(ValidatorChainError, match="finalized_snapshot_rpc_failed"):
+        # The exact owned snapshot was already cross-checked. Its header
+        # reuse skips duplicate RPCs, so this failure occurs at metadata.
+        with pytest.raises(ValidatorChainError, match="runtime_metadata_rpc_failed"):
             await item.provider.collect_control(item.hotkey)
     assert (await item.provider.collect_control(item.hotkey)).control_sha256 == "aa" * 32
     await item.provider.aclose()

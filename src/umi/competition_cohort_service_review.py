@@ -92,6 +92,20 @@ class ServiceReviewIntent(StrictProtocolModel):
     metadata_hex: Annotated[str, Field(max_length=2 * MAX_METADATA_BYTES)]
 
 
+def _same_window_facts(independent, retained):
+    """Compare verified block facts/pins, not process-local proof transcripts.
+
+    The caller captures independent finalized blocks and validates the retained
+    body first. Every scheduling/context field remains exact; neither observer's
+    evidence bytes are substituted into the original signed request.
+    """
+    if type(independent) is not type(retained):
+        return False
+    evidence = {"finality_evidence_hex", "finality_evidence_sha256"}
+    exclude = {"issuance": evidence, "announcement": evidence}
+    return independent.model_dump(exclude=exclude) == retained.model_dump(exclude=exclude)
+
+
 def service_retry_decision(review: ServiceRetryReview) -> CohortEndpointCaseDecision:
     body, fence = review.grant.body, review.retirement
     assignment = body.assignment
@@ -352,7 +366,7 @@ class ServiceWorkReviewer:
                                 self.transport, self.blocks, body.request.issued_block
                             )
                         )
-                    if window != body.window:
+                    if not _same_window_facts(window, body.window):
                         raise ValueError("service request window differs from independent finality")
                     intent = ServiceReviewIntent(
                         schema="umi-service-review-intent/1",

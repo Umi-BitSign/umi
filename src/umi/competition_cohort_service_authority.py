@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from .competition_chain import FinalizedRegistrationProvider, RegistrationCapture
@@ -14,6 +15,8 @@ from .competition_execution import execution_boundary
 from .competition_origin import EndpointOriginCapture, public_https_origin
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest
+from .private_files import PrivateStateBusyError
+from .private_state_wait import run_private_state_operation
 from .protocol import canonical_json_bytes
 
 
@@ -63,30 +66,52 @@ class ServiceWorkAuthority:
             self.queue.journal.put("service_origin_scope", digest(scope), scope)
         return scope
 
-    async def _current(self, assignment):
+    async def _current(self, assignment, *, minimum_block=None):
         cohort = assignment.catalog.catalog.cohort_sha256
-        source = await wait_for_owned(self.history(cohort), timeout=self.timeout)
-        capture = await wait_for_owned(self.provider.collect(), timeout=self.timeout)
-        await run_owned_thread(
-            self._remember, assignment, source, execution_boundary(capture).block
-        )
-        return source, capture
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        while True:
+            source = await wait_for_owned(self.history(cohort), timeout=self.timeout)
+            collect_at_least = getattr(self.provider, "collect_at_least", None)
+            collection = (
+                collect_at_least(minimum_block)
+                if minimum_block is not None and callable(collect_at_least)
+                else self.provider.collect()
+            )
+            capture = await wait_for_owned(collection, timeout=self.timeout)
+            if minimum_block is not None and execution_boundary(capture).block < minimum_block:
+                raise OSError("owned registration head precedes required origin")
+            try:
+                await run_owned_thread(
+                    self._remember, assignment, source, execution_boundary(capture).block
+                )
+                return source, capture
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # Refresh both inputs; lock contention cannot extend an old head.
+                await asyncio.sleep(min(1.0, remaining))
 
     async def observe(
-        self, assignment: ServiceWorkAssignment
+        self, assignment: ServiceWorkAssignment, *, minimum_block=None
     ) -> tuple[CohortOrderHistory, RegistrationCapture]:
-        assignment = await run_owned_thread(self._owned, assignment)
-        source, capture = await self._current(assignment)
+        assignment = await run_private_state_operation(
+            self._owned, assignment, timeout=self.timeout
+        )
+        source, capture = await self._current(assignment, minimum_block=minimum_block)
         if (
             await wait_for_owned(self.history(assignment.round.cohort_sha256), timeout=self.timeout)
             != source
         ):
-            await self._current(assignment)
+            await self._current(assignment, minimum_block=minimum_block)
             raise OSError("service authority changed during observation")
         return source, capture
 
     async def origin(self, assignment: ServiceWorkAssignment) -> EndpointOriginCapture:
-        assignment = await run_owned_thread(self._owned, assignment)
+        assignment = await run_private_state_operation(
+            self._owned, assignment, timeout=self.timeout
+        )
         source, started = await self.observe(assignment)
         scope = CohortServiceOriginScope(
             schema="umi-cohort-service-origin-scope/1",
@@ -98,7 +123,7 @@ class ServiceWorkAuthority:
             public_https_origin(assignment.admission.submission.submission.endpoint_url),
             recovery=scope,
         )
-        current, finished = await self.observe(assignment)
+        current, finished = await self.observe(assignment, minimum_block=capture.block)
         if current != source:
             raise OSError("service authority changed during origin collection")
         before, after = execution_boundary(started), execution_boundary(finished)

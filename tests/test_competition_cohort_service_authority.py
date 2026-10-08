@@ -1,5 +1,6 @@
 """Native service authority with synthetic RPC, finality, codec and DNS boundaries."""
 
+import errno
 import json
 from dataclasses import replace
 
@@ -8,6 +9,7 @@ import pytest
 from umi.competition_cohort_service_authority import ServiceWorkAuthority
 from umi.competition_origin import FinalizedEndpointProvider
 from umi.open_competition import digest
+from umi.private_files import PrivateStateBusyError
 
 from .test_competition_cohort_order_signer import source_for
 from .test_competition_cohort_service_worker import base_policy as base_policy
@@ -124,3 +126,60 @@ async def test_service_origin_survives_repeated_long_coordinator_gaps(authority)
         captured = await owner.origin(original)
         assert captured.block == c.p.c.finality.ref.block_number
         assert owner.queue.assignment(c.claim) == original
+
+
+async def test_contention_recollects_authority_before_persisting(authority, monkeypatch):
+    c, owner = authority
+    original = owner._remember
+    attempts, histories = [], []
+    history = owner.history
+
+    async def counted_history(cohort):
+        histories.append(cohort)
+        return await history(cohort)
+
+    def contended(assignment, source, block):
+        attempts.append(block)
+        if len(attempts) == 1:
+            c.p.e.r.h.source = source_for(c.p.e.r.h.batch, c.p.e.r.h.batch["history"])
+            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+        return original(assignment, source, block)
+
+    owner.history = counted_history
+    monkeypatch.setattr(owner, "_remember", contended)
+    with pytest.raises(ValueError):
+        await owner.observe(c.assignment)
+    assert len(attempts) == 2 and len(histories) == 2
+
+
+async def test_service_origin_confirms_newer_proof_despite_age_valid_cached_capture(
+    authority, monkeypatch
+):
+    c, owner = authority
+    native = owner.provider
+    old = await native.collect()
+    minima = []
+
+    class CachedRegistration:
+        async def collect(self):
+            return old
+
+        async def collect_at_least(self, block):
+            minima.append(block)
+            return await native.collect()
+
+    owner.provider = CachedRegistration()
+    original = owner.origins._collect_origin_locked
+
+    async def advanced(*args, **kwargs):
+        c.p.c.finality.ref = replace(
+            c.p.c.finality.ref,
+            block_number=old.snapshot.block + 1,
+            block_hash="0x" + f"{old.snapshot.block + 1:064x}",
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner.origins, "_collect_origin_locked", advanced)
+    result = await owner.origin(c.assignment)
+    assert result.block == old.snapshot.block + 1
+    assert minima == [result.block]

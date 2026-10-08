@@ -5,6 +5,8 @@ installed coordinator, external reviewer host or chain effect is represented.
 """
 
 import asyncio
+import errno
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -32,6 +34,7 @@ from umi.endpoint_protocol import (
 )
 from umi.miner import create_app
 from umi.open_competition import digest, sign_object
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes, request_digest
 
 from .test_competition_cohort_intake import history_tip
@@ -176,6 +179,52 @@ async def finish(s):
     raise AssertionError(reports)
 
 
+@pytest.mark.parametrize("stage", ["request_preparation", "request_certificate", "miner_transport"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_rolling_reports_native_wait_stage_without_private_work(
+    loop, monkeypatch, stage, cancel
+):
+    worker = loop.worker(concurrency=1)
+    entered, release = asyncio.Event(), asyncio.Event()
+    owner, name = {
+        "request_preparation": (worker, "_prepare"),
+        "request_certificate": (worker, "_certificate"),
+        "miner_transport": (worker.transport, "advance"),
+    }[stage]
+    original = getattr(owner, name)
+
+    async def held(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, held)
+    active = {}
+    await worker._rolling_poll(active)
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        report = await worker._rolling_poll(active)
+        assert report["in_flight_operations"] == 1
+        assert report["in_flight_stage_counts"] == {stage: 1}
+        assert report["oldest_in_flight_stage"] == stage
+        assert report["oldest_in_flight_stage_seconds"] >= 0
+        assert not report["request_closure_authorized"]
+        assert not report["chain_submission_authorized"]
+        encoded = json.dumps(report)
+        assert loop.p.miner.hotkey_ss58 not in encoded
+        assert loop.c.assignment.admission.work_sha256 not in encoded
+        if cancel:
+            await worker._stop_tasks(task for _, task in active.values())
+        else:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*(task for _, task in active.values())), 120)
+        assert not worker._operation_stages
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    assert not worker._operation_stages
+
+
 async def test_native_service_work_completes_and_restarts_offline(loop):
     s = loop
     worker, value, reports = await finish(s)
@@ -189,6 +238,24 @@ async def test_native_service_work_completes_and_restarts_offline(loop):
     worker, value, _ = await finish(s)
     assert canonical_json_bytes(value) == original and tuple(s.paths) == paths
     assert s.signs == 1
+
+
+async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):
+    s = loop
+    worker = s.worker()
+    original = worker.requests.prepare
+    attempts = []
+
+    def contended(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(worker.requests, "prepare", contended)
+    body = await worker._prepare(s.c.assignment)
+    assert len(attempts) == 2 and s.inputs == 2
+    assert body.assignment == s.c.assignment
 
 
 @pytest.mark.parametrize("path", [COHORT_GRANT_PATH, TRANSLATE_PATH, COHORT_RETIRE_PATH])
@@ -255,7 +322,66 @@ async def test_service_wrong_origin_does_not_send(loop):
     s.origin = substituted
     report = await s.worker().poll_once()
     assert report["work_pending"] == 1 and report["last_pending_reason"] == "ValueError"
+    assert report["retry_count"] == 1
+    assert report["last_retry_details"][0]["reason_code"] == "validation_failed"
+    assert report["last_retry_details"][0]["source_frames"]
     assert not s.paths and s.p.model.calls == 0
+
+
+async def test_service_retry_diagnostics_keep_secrets_private_and_remain_retryable(tmp_path):
+    worker = object.__new__(ServiceWorkWorker)
+    worker.serial, worker.capacity = asyncio.Lock(), asyncio.Semaphore(1)
+    worker.journal = SimpleNamespace(root=tmp_path)
+    worker.transport = SimpleNamespace(timeout=5)
+    admission = SimpleNamespace(
+        claim=SimpleNamespace(
+            claim=SimpleNamespace(hotkey="5HTFEEFA13x4hom2Nz5EFo7RSQ6PSAyCH1BgM8CbZhhdrSDb")
+        )
+    )
+    worker._batch = lambda: [admission]
+    calls = 0
+
+    async def failing(_):
+        nonlocal calls
+        calls += 1
+        try:
+            raise OSError("https://private.example/?token=private-capability")
+        except OSError as error:
+            raise ValueError("private response bytes") from error
+
+    worker._advance = failing
+    for _ in range(2):
+        report = await worker.poll_once()
+        assert report["work_pending"] == 1 and report["work_complete"] == 0
+        assert report["retry_count"] == 1
+        assert [e["reason_code"] for e in report["last_retry_details"]] == [
+            "validation_failed",
+            "os_error",
+        ]
+        assert report["retry_examples"] == [report["last_retry_details"]]
+        assert "private" not in json.dumps(report)
+        assert not report["chain_submission_authorized"]
+    assert calls == 2
+
+
+async def test_service_outer_retry_preserves_safe_diagnostics(loop):
+    worker = loop.worker()
+    stop = asyncio.Event()
+    reports = []
+
+    async def failing(_active):
+        raise OSError("private journal path")
+
+    def report(value):
+        reports.append(value)
+        stop.set()
+
+    worker._rolling_poll = failing
+    await worker.run(stop, poll_seconds=0.01, report=report)
+    assert len(reports) == 1
+    assert reports[0]["status"] == "cohort_service_worker_retry"
+    assert reports[0]["last_retry_details"][0]["reason_code"] == "os_error"
+    assert "private" not in json.dumps(reports)
 
 
 async def test_service_shutdown_drains_active_port_and_releases_process_lease(loop):
@@ -504,3 +630,70 @@ async def test_fresh_service_window_completes_native_work_and_restarts(loop, mon
     _, retained, _ = await finish(s)
     assert canonical_json_bytes(retained) == exact
     assert p.model.calls == 1
+
+
+@pytest.mark.parametrize("shared_control_group", [True], indirect=True)
+@pytest.mark.parametrize("slow_name", ["Eve", "Dave"])
+async def test_service_certificate_waits_for_quorum_not_redundant_reviewer(
+    loop, slow_name, monkeypatch
+):
+    s = loop
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    slow_key = wallet(slow_name).hotkey.ss58_address
+
+    async def slow(body):
+        entered.set()
+        try:
+            await release.wait()
+            return sign_object(body, wallet(slow_name))
+        finally:
+            cancelled.set()
+
+    async def extra(body):
+        return sign_object(body, wallet("Eve"))
+
+    s.reviewers[wallet("Eve").hotkey.ss58_address] = extra
+    s.reviewers[slow_key] = slow
+    worker = s.worker()
+    same_group_retained = asyncio.Event()
+    retained_signers = set()
+    event_loop = asyncio.get_running_loop()
+    collect = worker.requests.collect
+
+    def retained(who):
+        retained_signers.add(who)
+        if {
+            wallet("Charlie").hotkey.ss58_address,
+            wallet("Eve").hotkey.ss58_address,
+        } <= retained_signers:
+            same_group_retained.set()
+
+    def tracked_collect(slot, signature):
+        result = collect(slot, signature)
+        event_loop.call_soon_threadsafe(retained, signature.hotkey)
+        return result
+
+    monkeypatch.setattr(worker.requests, "collect", tracked_collect)
+    body = await worker._prepare(s.c.assignment)
+    task = asyncio.create_task(worker._certificate(body))
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        if slow_name == "Dave":
+            # Both same-group votes are already natively verified and persisted;
+            # neither an early wakeup nor their raw count supplies Dave's group.
+            await asyncio.wait_for(same_group_retained.wait(), 120)
+            with pytest.raises(ValueError, match="lacks the policy evaluator quorum"):
+                await worker._local(worker.requests.certificate, service_grant_slot(body))
+            assert not task.done()
+            release.set()
+        grant = await asyncio.wait_for(asyncio.shield(task), 45)
+        assert grant.body == body
+        assert len(grant.signatures) == worker.requests.policy.required_evaluator_groups
+        assert cancelled.is_set()
+        if slow_name == "Eve":
+            assert not release.is_set()
+        assert worker.requests.certificate(service_grant_slot(body)) == grant
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

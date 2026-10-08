@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
+from .competition_progress import progress_phase
 from .concurrency import await_owned_task
+
+_REQUEST_DRAIN_SECONDS = 300
+_SERVER_SHUTDOWN_SECONDS = _REQUEST_DRAIN_SECONDS + 20
 
 
 async def drain_server_requests(server):
@@ -28,23 +32,36 @@ async def drain_server_requests(server):
 
 async def run_supervised_server(server, providers, *, liveness_tasks=lambda: (), poll_seconds=1.0):
     serving = asyncio.create_task(server.serve())
+    failed = False
     try:
-        while not serving.done():
-            if server.started and not server.should_exit:
-                for provider in providers:
-                    provider.ensure_observer_running()
-                for task in liveness_tasks():
-                    if task.done():
-                        if task.cancelled():
+        # Emit the original failure before shutdown can wait on owned durable
+        # cleanup. Wrapping the entire function would hide it until drain ends.
+        with progress_phase("host_service"):
+            while not serving.done():
+                if server.started and not server.should_exit:
+                    for provider in providers:
+                        provider.ensure_observer_running()
+                    for task in liveness_tasks():
+                        if task.done():
+                            if task.cancelled():
+                                raise RuntimeError("owned_service_task_stopped")
+                            task.result()
                             raise RuntimeError("owned_service_task_stopped")
-                        task.result()
-                        raise RuntimeError("owned_service_task_stopped")
-            await asyncio.wait((serving,), timeout=poll_seconds)
-        await serving
+                await asyncio.wait((serving,), timeout=poll_seconds)
+            await serving
+    except BaseException:
+        failed = True
+        raise
     finally:
         server.should_exit = True
         try:
-            await asyncio.wait_for(asyncio.shield(serving), timeout=35)
+            await asyncio.wait_for(asyncio.shield(serving), timeout=_SERVER_SHUTDOWN_SECONDS)
+        except asyncio.TimeoutError:
+            # Preserve the triggering failure after owned cleanup. A shutdown
+            # timeout must not replace the provider/task error we need to repair.
+            # Without an earlier failure, the timeout still fails the invocation.
+            if not failed:
+                raise
         finally:
             if not serving.done():
                 serving.cancel()
@@ -59,7 +76,7 @@ def serve_with_finality_supervision(app, *, liveness_tasks=lambda: (), **options
 
     # Request draining is bounded; lifespan shutdown still closes the providers
     # and retains their journals. The external service manager owns restart.
-    config = uvicorn.Config(app, timeout_graceful_shutdown=15, **options)
+    config = uvicorn.Config(app, timeout_graceful_shutdown=_REQUEST_DRAIN_SECONDS, **options)
     asyncio.run(
         run_supervised_server(
             uvicorn.Server(config),

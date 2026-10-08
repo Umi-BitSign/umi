@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from dataclasses import replace
@@ -9,6 +10,7 @@ import pytest
 
 from umi import competition_materialization as material
 from umi import competition_materialization_retention as retention
+from umi.validator_supervisor import ValidatorSupervisorError
 
 from .test_competition_materialization import (  # noqa: F401
     _stage,
@@ -68,6 +70,104 @@ def test_unretained_and_partial_stages_are_preserved(installed):
     assert installed.first.path.exists() and note.read_bytes() == b"interrupted input"
     assert _retire(installed) == 1
     assert note.read_bytes() == b"interrupted input"
+
+
+def test_unretained_stage_skips_full_validation_but_current_is_checked(installed, monkeypatch):
+    original = material._read_current
+    checked = []
+
+    def read_current(path, **kwargs):
+        checked.append(path)
+        assert path != installed.first.path
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(material, "_read_current", read_current)
+    assert _retire(installed, {}) == 0
+    assert checked == [installed.source / "current"]
+    assert installed.first.path.exists()
+
+
+def test_retained_candidate_still_requires_full_validation(installed, monkeypatch):
+    original = material._read_current
+
+    def read_current(path, **kwargs):
+        if path == installed.first.path:
+            raise material.SuccessorMaterializationError("injected candidate failure")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(material, "_read_current", read_current)
+    with pytest.raises(ValueError, match="injected candidate failure"):
+        _retire(installed)
+    installed.first.recheck()
+
+
+def test_candidate_identity_change_does_not_authorize_deletion(installed, monkeypatch):
+    candidate = "a" * 64
+    monkeypatch.setattr(retention, "_candidate_identity", lambda path: candidate)
+    with pytest.raises(ValueError, match="candidate identity changed"):
+        _retire(installed, {candidate: (installed.case.selection, installed.case.files)})
+    installed.first.recheck()
+
+
+def test_candidate_filter_does_not_replay_history(installed, monkeypatch):
+    def no_replay(*args, **kwargs):
+        raise AssertionError("unmatched stage filtering must not replay history")
+
+    monkeypatch.setattr(
+        material, "parse_canonical_successor_supervisor_directive_history", no_replay
+    )
+    assert (
+        retention._candidate_identity(installed.first.path)
+        == installed.case.selection.directive_sha256
+    )
+
+
+@pytest.mark.parametrize("declared", [None, True, "g" * 64, "a" * 63])
+def test_invalid_candidate_hint_never_authorizes_retirement(installed, monkeypatch, declared):
+    monkeypatch.setattr(
+        material,
+        "_read_at",
+        lambda *args: json.dumps({"head": {"directive_sha256": declared}}).encode(),
+    )
+    with pytest.raises(ValueError, match="invalid cached candidate identity"):
+        retention._candidate_identity(installed.first.path)
+    assert installed.first.path.exists()
+
+
+def test_declared_hint_cannot_replace_full_retirement_validation(installed, monkeypatch):
+    original = material._read_at
+    stage_inode = installed.first.path.stat().st_ino
+    fake = json.dumps({"head": {"directive_sha256": "a" * 64}}).encode()
+
+    def changed_hint(fd, *args, **kwargs):
+        return fake if os.fstat(fd).st_ino == stage_inode else original(fd, *args, **kwargs)
+
+    monkeypatch.setattr(material, "_read_at", changed_hint)
+    # A matching hint still reaches full native parsing and cannot authorize
+    # deletion of an incomplete page.
+    with pytest.raises(ValidatorSupervisorError, match="successor_history_noncanonical"):
+        _retire(installed, {"a" * 64: (installed.case.selection, installed.case.files)})
+    assert installed.first.path.exists()
+
+
+def test_quota_accounting_does_not_read_file_contents(installed, monkeypatch):
+    expected_size, _ = material._tree(installed.first.path, installed.case.limits, sealed=True)
+
+    def no_content_read(*args):
+        raise AssertionError("quota accounting must not read file contents")
+
+    monkeypatch.setattr(material.os, "read", no_content_read)
+    with material._cache_lock(installed.cache) as fd:
+        assert material._cache_usage(installed.cache, fd, installed.case.limits) == (
+            1,
+            expected_size,
+        )
+        with pytest.raises(ValueError, match="byte bound exceeded"):
+            material._cache_usage(
+                installed.cache,
+                fd,
+                installed.case.limits.model_copy(update={"maximum_cache_bytes": expected_size - 1}),
+            )
 
 
 @pytest.mark.parametrize("after_unlinks", [0, 1, 4])

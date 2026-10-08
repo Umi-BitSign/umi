@@ -45,6 +45,7 @@ from .competition_supervisor import (
     verify_signed_successor_supervisor_directive,
     verify_signed_successor_supervisor_directive_history,
 )
+from .competition_weight_timing import WeightRateLimitWait
 from .competition_worker import (
     _open_directory_without_links,
     _open_private_regular_file,
@@ -291,6 +292,8 @@ class SuccessorRuntimeAdapter(Protocol):
     async def start_replay(self, selection: SuccessorWorkerSelection) -> None: ...
 
     async def start_weights(self, selection: SuccessorWorkerSelection) -> None: ...
+
+    async def retry_stopped_start(self) -> bool: ...
 
 
 class SuccessorDirectiveFetcher(Protocol):
@@ -929,6 +932,22 @@ class SuccessorSupervisorRuntime:
             try:
                 self._require_lease()
                 return await self._reconcile()
+            except WeightRateLimitWait:
+                try:
+                    _, _, worker = self._load_history()
+                    if (
+                        self._restart_checked
+                        and worker.phase == "start_intent"
+                        and worker.mode == "competition_weights"
+                        and await self.adapter.retry_stopped_start()
+                    ):
+                        self._store_worker(_idle())
+                        return self._result("waiting", "weights_rate_limited")
+                except Exception:
+                    # A changed journal, unknown worker or failed inspection
+                    # requires the ordinary stop and complete recovery path.
+                    pass
+                return await self._hold("successor_reconcile_failed")
             except Exception:
                 return await self._hold("successor_reconcile_failed")
 

@@ -34,8 +34,12 @@ def public_history_routes(current: Callable[[], CohortHistoryExporter | None]) -
             raise HTTPException(404, "cohort not found")
         acquired = False
         try:
-            await asyncio.wait_for(capacity.acquire(), timeout=0.1)
+            await asyncio.wait_for(capacity.acquire(), timeout=min(exporter.timeout_seconds, 30))
             acquired = True
+            # A queued reader must not sign with an owner replaced or taken
+            # offline during the wait. Repeat the ownership check before work.
+            if current() is not exporter:
+                raise HTTPException(503, "cohort history owner unavailable")
             # Only signed phase decisions and their hash-bound observations.
             # Never expose intake originals, model assets or reference packages.
             raw = await wait_for_owned(exporter.respond(request), timeout=exporter.timeout_seconds)

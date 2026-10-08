@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import Field
 
 from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_order_queue import (
     SignedOrderDeliveryReceipt,
@@ -60,6 +61,7 @@ class CohortOrderInbox:
         self.provider, self.history, self.sign = provider, history, sign
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
         self.serial = asyncio.Lock()
+        self._assignment_reuse = AssignmentVerificationReuse()
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -102,8 +104,21 @@ class CohortOrderInbox:
         """Export only a durably acknowledged assignment, without signing."""
         # An accepting writer may hold its compound-operation mutex across
         # network calls. Acknowledged work needs only a consistent SQLite
-        # snapshot of its immutable inputs, with fresh conflict and proof checks.
+        # snapshot of its immutable inputs, with fresh conflict checks. Static
+        # proofs may be reused only for those exact bytes and owner bindings.
         with canonical_json_reuse(), self.journal.transaction() as db:
+            records = tuple(
+                self.journal.get_raw(kind, slot, db=db)
+                for kind in ("intent", "certificate", "receipt")
+            )
+            key = None
+            if all(raw is not None for raw in records):
+                key = assignment_reuse_key(
+                    self.journal, slot, records, self.config, self.policy, self.cohorts
+                )
+                cached = self._assignment_reuse.lookup(slot, key)
+                if cached is not None:
+                    return cached
             saved = self._load(slot, db=db)
             if saved is None:
                 raise FileNotFoundError("inbox assignment is unavailable")
@@ -115,9 +130,12 @@ class CohortOrderInbox:
             )
             if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
                 raise ValueError("inbox acknowledgement belongs to another evaluator")
-            return CohortExecutionAssignment(
+            assignment = CohortExecutionAssignment(
                 certificate=saved[1], participant=saved[0].participant, delivery=receipt
             )
+            if key is not None:
+                self._assignment_reuse.remember(slot, key, assignment)
+            return assignment
 
     def assignments(self, *, after: str = "", limit: int = 16) -> tuple[str, ...]:
         if type(limit) is not int or not 1 <= limit <= 256:

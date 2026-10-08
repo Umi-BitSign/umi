@@ -119,6 +119,11 @@ or certified sequence change does. The email labels phase targets as
 projections and includes the retained phase, review stage, seal/completion
 state, observed block, public round sequence and configured chain-weight age.
 
+If the public round index is unavailable, the sender still reports independent
+service, validator and storage observations. Lifecycle entries are sent as missing
+evidence until the index is available again; this does not claim that publication
+or cohort progression succeeded.
+
 The heartbeat service needs journal access for the selected owner service.
 Deploy the application lifecycle logging, sender configuration and Worker
 configuration together. A malformed, stale, denied or missing report is

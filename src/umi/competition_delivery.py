@@ -750,8 +750,12 @@ class HTTPSSuccessorArtifactDelivery:
         self._check_lease()
         package_fd = _directory(package_path, modes=(0o700, 0o500))
         try:
-            os.fchmod(package_fd, 0o500)
-            os.fsync(package_fd)
+            # Reapplying the same mode changes ctime and invalidates a stopped
+            # package audit. Seal only the first materialization; cached reads
+            # still verify every declared object and package binding below.
+            if stat.S_IMODE(os.fstat(package_fd).st_mode) != 0o500:
+                os.fchmod(package_fd, 0o500)
+                os.fsync(package_fd)
         finally:
             os.close(package_fd)
         package = load_bound_successor_replay_package(

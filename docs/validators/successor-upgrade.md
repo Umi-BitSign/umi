@@ -21,9 +21,56 @@ Retain the original host and controls while worker or recovery consumers use the
 Keep the maintenance approval while this executable is selected; remove it after
 a later installed transition no longer depends on the original receipt.
 
-The supervisor reuses immutable package verification within one process, checking
-all file bytes and bounds on each load. Restart verifies the package again. Reward
-authority and current chain state are checked separately for each execution.
+The supervisor verifies each sealed package once and retains a small private
+verification receipt under its state root. The worker retains its receipt under
+the existing replay state root. Reuse binds the exact directory and file
+identities, policy, release and capacity bounds. Within a process, unchanged
+packages use the parsed object. After restart, the worker reconstructs the object
+from its sealed files without repeating payload hashes or publication replay.
+Receipts do not duplicate package evidence. A replaced or changed file cannot
+borrow a previous result. Reward authority and current chain state remain
+separate checks for every execution.
+
+While the chain weight interval is pending, an already stopped supervisor may
+reuse its completed transaction audit only within the same process and while the
+registry, weight journal and every audited sealed package remain unchanged.
+Container absence is checked again, and startup still collects a fresh owned
+proof and repeats all preflight gates. Changed inputs, uncertain state or process
+restart require full recovery. Waiting never authorizes a transaction.
+
+First startup prepares its private replay directory before capturing stopped
+recovery inputs. Initial staging therefore cannot invalidate its own registry
+audit by creating that directory. Changed journals or audited packages still
+require full recovery before another start.
+Cached delivery leaves an already sealed package's mode unchanged, preserving
+the metadata bound by its audit. Its declared objects and signed package binding
+are still checked; changed content cannot inherit an earlier result.
+
+Service claim commits wait through local mutex contention without changing the
+retained signed request. Each retry recollects owned history, capture and proof
+inputs; it does not reuse a stale head. Validation or I/O failures still hold the
+claim, cancellation drains owned work, and duplicate recovery makes no new claim.
+Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
+while a claim or another readiness probe owns the catalog's admission lock.
+It does not queue an HTTP request behind that long operation or cancel it.
+Only the ordinary fresh-input checks can return `ready: true`.
+
+Public cohort authority reads have two signing slots and wait up to30 seconds
+for capacity (bounded by the exporter timeout). A queued read rechecks that its
+owner is still selected before signing. Every fresh challenge and complete native
+history still verifies; an offline owner or changed signer remains a503 hold.
+
+The outer API capacity wait is an operational setting, separate from economic
+policy, and can be configured up to120 seconds. A busy host can use a60-second
+wait without increasing concurrent reads, submissions or registration captures.
+Queued requests perform their normal admission checks after acquiring a slot;
+waiting does not create a receipt or bypass freshness, proof or capacity checks.
+
+HTTP services allow five minutes for request shutdown before cancellation and
+retain ownership until durable cleanup finishes. Original provider/task failures
+are reported before cleanup begins and survive a shutdown grace timeout, without
+exception messages or private inputs.
+A listening port and an active process do not establish certified completion.
 
 ### Worker source fixes for an existing certified allocation
 
@@ -192,6 +239,12 @@ Current inputs, the original root anchor, signed histories, transaction journals
 and delivery packages are preserved. Unstarted, unmatched and partial stages
 are preserved too. An equivalent but byte-different history does not authorize
 removal of the original copy.
+
+Cache quota accounting walks bounded filesystem metadata without reading model
+or package contents. A sealed stage without a retained recovery source is
+skipped before full package and history verification. This preliminary identity
+only excludes cleanup candidates; a matching stage still undergoes the complete
+verification before any rename or unlink.
 
 A private `retiring-<directive digest>-<random id>` directory records the cleanup
 intent. The host fsyncs that rename before unlinking. Following interruption, it
@@ -527,6 +580,13 @@ Fresh owner challenges and a second local promotion replay detect changes during
 review. Supply original model/promotion evidence and archive replication before
 enabling this service.
 
+The preparation owner keeps a private parsed copy of one verified retained round
+instead of parsing and hashing the complete roster again on every retry. Every
+reuse still verifies current certified history and authority, and compares the
+retained database bytes, digest and original observation. A changed record is
+rejected; a new history generation requires native replay. Returned objects are
+separate copies and cannot change the owner's cached evidence.
+
 Request completion uses `RequestReviewExporter` and
 `RemoteRequestProgressReviewer` at `POST /internal/cohorts/request-review`.
 Configure the certified prepared roster, complete service catalog set and
@@ -703,6 +763,9 @@ bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
 the claim nonce on retry. The queue commits the accepted claim and original proof
 bytes together before acknowledging it; insufficient capacity accepts no new work.
 Accepted duplicates recover without live RPC, history or preparation calls.
+New claims check the local full/sealed queue fence before collecting owner
+history, registration proofs or the roster. The admission commit still rechecks
+capacity atomically; the local check never grants execution or reward authority.
 `GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
 checks current admission inputs and capacity. This is admission readiness only;
 the request-phase service clock must also check actual dispatch. Readiness,
@@ -1547,6 +1610,38 @@ retained container, including a stopped one, prevents this automatic refresh.
 The supervisor must first reconcile and remove its own prior worker. Keep each
 validator on its dedicated service account.
 
+### Miner HTTP rejection diagnostics
+
+A failed translate logs its HTTP status and a separate `miner_http_rejection`
+record with the original request digest. `reported_reason` accepts only fixed
+protocol codes from a bounded 4-KiB error body; unknown, unreadable or oversized
+bodies use a fixed fallback label. An optional diagnostic read gets at most 30
+seconds and half the remaining exchange budget. Raw error bodies and arbitrary
+exception messages are never logged or included as miner responses.
+
+Treat the reason as the serving endpoint's report, not authenticated execution
+or retirement evidence. `response_window_closed`, `request_transmission_limit`
+and `validator_ingress_busy` require different recovery actions. The original
+HTTP failure, signed request, dispatch receipt and retirement fences stay intact;
+a diagnostic cannot authorize a resend, replacement or reward credit.
+
+### Finality observer process diagnostics
+
+The owned finality sidecar reports a nonzero process exit as
+`finality_observer_process_failed`, with the exit code, received and expected
+record counts, and a fixed failure class. Its stderr is drained with bounded
+memory; raw messages, URLs and arguments are not copied into the report. Unknown
+messages remain `unknown`. Use these fields to locate the failure boundary before
+changing a provider or retry policy. They do not authenticate finality or prove
+RPC throttling. Invalid evidence still holds, and persisted verified headers
+remain the recovery boundary.
+
+The wrapper allows 30 seconds for normal process exit after the last verified
+record, and 30 seconds for cooperative termination before reaping a stalled
+observer. These are child-process cleanup allowances, not extensions of finality
+freshness or proof acceptance. Failure to start the diagnostic reader or selector
+still reaps the child and removes its private staged inputs.
+
 ### Authenticated RPC providers
 
 Successor hosts can select an operational RPC route with the service environment
@@ -1619,3 +1714,123 @@ also require real evaluation evidence, finalized-chain preflight and an approved
 signed transition. Historical finite bootstrap or policy expiry still applies
 if successor work is delayed; this is separate from the current no-sunset
 registration bridge.
+
+Reviewer assignment reads reuse private parsed objects after static proof
+verification, with fresh retained-input and conflict checks on every read.
+Endpoint response recovery reads the assignment and its already verified job
+as one pair, including when validating retained replacement ancestry. Successful
+selection proofs are reused only for the exact selection and assignment bytes,
+policy, cohort configuration, private journal identity and current process. The
+bounded cache returns private copies; changes, failed proofs, restart or fork
+require native verification again. Each replacement still reads and verifies its
+retained parent chain. Current execution and reward authority remain independently
+verified.
+
+
+Canonical participation decoding additionally retains private decoded results for
+exact unchanged canonical row bytes, within 64 MiB and 1,024 entries. The reader
+still loads current ledger rows and checks their current indexes. Changed bytes,
+failed or noncanonical decoding and inherited process entries never reuse a
+result. This cache grants no registration, finality, admission or reward authority.
+
+Retained model-upload requests similarly reuse successful static decoding and
+request-identity checks within a private, process-local 64 MiB / 256-entry cache.
+Every lookup reads the current canonical journal bytes and conflict fence first;
+a removed, changed or held reservation cannot use an older result. Returned
+objects are private copies. Failures, evictions and inherited fork results require
+ordinary decoding. Admission, capacity, payload verification and current authority
+are checked separately and are not granted by this reuse.
+
+Paid-service origin confirmation requires the surrounding registration capture
+to reach the collected origin proof's owned block. An age-valid shared capture
+may be below that block; the owner requests a minimum-height refresh through the
+same single-flight collector. A genuinely lagging owned head stays pending.
+Current history, registration proof, freshness and same-block fact comparisons
+remain enforced. This refresh grants no new cohort or reward authority.
+
+Endpoint origin confirmation likewise requires an owned head at least as high
+as the independently collected origin proof. It recollects once after a lower
+head or a concurrent journal advance, rechecking unchanged authority before and
+after each capture. Persistent lag remains pending; changed authority and
+same-height hash or state-root disagreement still prevent execution. Recollection
+uses the native provider's unchanged-head registration reuse and does not renew
+the original assignment or require a miner upgrade.
+
+Historical participation replay reuses a successful native admission result only
+for the exact retained consent, historical registration observation, policy and
+signed history bytes. The bounded process-local cache returns private copies;
+changed inputs, restart or fork require native verification again. Failed replay
+is never cached. Pending intake sealing still checks its current registration
+snapshot and current history independently; historical reuse grants no current
+execution or reward authority.
+
+Paid-service queue replay likewise reuses successful historical admission checks
+for exact admission, signed catalog, prepared round, order history, policy and
+predecessor bytes. The cache holds at most 256 private results within 64 MiB;
+changed inputs, restart or fork require native review. Failed review is never
+cached. Every queue read still checks its retained indexes, and a new claim must
+respect the current retained history. Reuse does not authorize execution,
+publication, service credit or a chain transaction.
+
+Availability sampling retains the verified observation prefix across the host's
+short-lived database connections in the same process epoch. Each read hashes the
+ordered sequence and exact retained row bytes before reusing that prefix; appended
+observations receive native validation, and changed or missing prefix bytes require
+full replay. The private cache is limited to 64 results within 1 MiB and binds the
+database path/inode, policy, cohort, phase and sampling gap. A new process epoch
+starts cold. Current readiness, history, finalized capture and outage accounting
+remain independently checked; the prefix does not certify phase completion.
+
+The intake owner also retains bounded private verified seals while it is running.
+Each lookup reads the exact seal, original consent rows and indexes, and selected
+model-acceptance bytes under the existing intake lock. Changed or missing inputs,
+a different database inode, configuration, policy or history prefix require native
+reconstruction again. Restart begins without this process cache. Publication still
+checks the current registration observation, history adoption and closure evidence;
+a reused seal grants no current authority or service credit.
+
+Weight-cache accounting permits a known SQLite WAL, SHM or rollback-journal
+sidecar to disappear after directory enumeration: SQLite can remove it when a
+connection closes or checkpoints. This does not permit missing persistent
+databases or namespace budgets, unsafe ownership, links, unknown files or an
+exhausted byte budget. Existing cache and proof records remain in place; current
+chain authority is still collected independently. Paid service owner exports
+likewise wait for genuine local journal contention within their operation budget
+rather than treating a busy assignment read as unavailable evidence.
+
+Paid service scheduling admits the next accepted job when a configured slot
+becomes free, without waiting for every miner in the previous page. Only one
+job per miner runs at a time; the total operational concurrency is unchanged.
+The existing private cursor advances only through considered admissions and
+survives restart. The worker retains its process lease until all outstanding
+sends, signatures and journal writes finish cooperative cancellation. Reports
+include in-flight operation counts, aggregate native stages and the age of the
+oldest stage. Stage state is removed after completion, failure or cooperative
+cancellation and includes no miner identity or request content. Neither those
+counts nor selected grants establish completed service work or reward credit.
+
+Request-vote collection proceeds when verified retained signatures satisfy the
+configured independent-group quorum, without requiring a redundant reviewer's
+response. Every certificate still passes native policy verification; votes
+from the same group cannot replace a required independent group. Outstanding
+peer requests drain cooperatively, and already committed votes remain recoverable.
+
+Current authority-history reads use the intake owner's preferred queue. Reads
+remain exclusive and validate the same private database and configuration; they
+cannot interrupt the current owner. After at most eight preferred reads, queued
+background work gets a turn. Preference changes waiting order, not authority,
+retained request bytes or persistence rules.
+
+Independent service-request review compares exact finalized block facts, policy
+pins, schedule and attempt context. Observer transcripts can differ for the same
+verified block; their evidence digests need not be identical. The original
+request and its transcript bytes remain unchanged in the signing journal. A
+missing independent block or disagreement on its hash, state root, time or pins
+still prevents a vote.
+
+Supplied execution assignments also reuse their exact successful static proof
+check during repeated reviewer sweeps. That cache is private and bounded by bytes
+and entries, and changes to the recipient, policy, process or journal
+materialization require verification again. It does not retain an authority,
+terminal decision or permission to execute; current journal and history checks
+remain required by the execution worker.

@@ -120,6 +120,51 @@ def upload_all(h, owner, key):
     assert owner.poll_once()["models_preserved"] == 1
 
 
+def test_completed_upload_prefix_is_not_rehashed_after_restart(delivery, monkeypatch):
+    from umi import competition_cohort_model_upload as upload
+
+    h = delivery
+    owner = h.owner
+    key = owner.reserve(h.request, capture_at(210))
+    bundle = h.request.signed_submission.submission.model_bundle
+    first = bundle.files[0]
+    put(owner, key, 0, (h.source / first.path).read_bytes())
+    assert not owner.complete(key)
+
+    def rehash_forbidden(*args, **kwargs):
+        raise AssertionError("completed upload prefix was hashed again")
+
+    monkeypatch.setattr(upload, "_copy_verified", rehash_forbidden)
+    # A new uploader instance has no in-memory state to trust.
+    restarted = CohortModelUploads(owner.config, owner.intake, owner.archive)
+    assert not restarted.complete(key)
+    assert not restarted.complete(key)
+
+
+def test_changed_completed_upload_prefix_cannot_reuse_verification(delivery, monkeypatch):
+    from umi import competition_cohort_model_upload as upload
+
+    h = delivery
+    owner = h.owner
+    key = owner.reserve(h.request, capture_at(210))
+    bundle = h.request.signed_submission.submission.model_bundle
+    first = bundle.files[0]
+    put(owner, key, 0, (h.source / first.path).read_bytes())
+    assert not owner.complete(key)
+    _, staging = owner._paths(key)
+    target = staging / "model" / first.path
+    target.chmod(0o600)
+    target.write_bytes(b"x" * target.stat().st_size)
+    target.chmod(0o400)
+
+    def rehash_forbidden(*args, **kwargs):
+        raise AssertionError("changed content was hashed instead of held")
+
+    monkeypatch.setattr(upload, "_copy_verified", rehash_forbidden)
+    with pytest.raises(ValueError, match="changed after verification"):
+        owner.complete(key)
+
+
 def assert_staging_released(owner, key):
     _, staging = owner._paths(key)
     assert list((staging / "model").iterdir()) == []
@@ -537,3 +582,82 @@ async def test_delivery_http_reports_native_failure_stage_and_preserves_reservat
         )
         assert retry.status_code == 200
         assert h.owner.retry(h.request) == key
+
+
+@pytest.fixture
+def retained_decode(delivery, monkeypatch):
+    h = delivery
+    key = h.owner.reserve(h.request, capture_at(210))
+    original = type(h.request).model_validate_json
+    calls = []
+
+    def counted(cls, raw):
+        calls.append(raw)
+        return original(raw)
+
+    monkeypatch.setattr(type(h.request), "model_validate_json", classmethod(counted))
+    return h, key, calls
+
+
+def test_retained_upload_decode_reuse_keeps_private_results(retained_decode):
+    h, key, calls = retained_decode
+    expected = h.owner.retained(key)
+    caller = h.owner.retained(key)
+    object.__setattr__(caller.signed_submission.submission, "model_revision", "f" * 64)
+    assert h.owner.retained(key) == expected
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["hold", "delete", "replace", "noncanonical"])
+def test_retained_upload_decode_reads_current_journal_fence(retained_decode, change):
+    h, key, calls = retained_decode
+    h.owner.retained(key)
+    with h.owner.journal.transaction() as db:
+        if change == "hold":
+            db.execute("INSERT INTO holds VALUES (?)", (key,))
+        elif change == "delete":
+            db.execute("DELETE FROM records WHERE kind='upload' AND id=?", (key,))
+        elif change == "replace":
+            changed = h.request.model_copy(
+                update={
+                    "signed_submission": h.request.signed_submission.model_copy(
+                        update={
+                            "submission": h.request.signed_submission.submission.model_copy(
+                                update={
+                                    "model_revision": "f" * 64,
+                                }
+                            ),
+                        }
+                    ),
+                }
+            )
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='upload' AND id=?",
+                (canonical_json_bytes(changed), key),
+            )
+        else:
+            raw = db.execute(
+                "SELECT body FROM records WHERE kind='upload' AND id=?", (key,)
+            ).fetchone()[0]
+            db.execute("UPDATE records SET body=? WHERE kind='upload' AND id=?", (raw + b" ", key))
+    for _ in range(2):
+        with pytest.raises((ValueError, FileNotFoundError)):
+            h.owner.retained(key)
+    # Replacement schema failures/identity failures never enter reuse.
+    assert len(calls) == (3 if change == "replace" else 1)
+
+
+def test_retained_upload_decode_refuses_inherited_process_results(retained_decode):
+    h, key, calls = retained_decode
+    expected = h.owner.retained(key)
+    h.owner._retained_reuse._pid = -1
+    assert h.owner.retained(key) == expected
+    assert len(calls) == 2
+
+
+def test_retained_upload_decode_eviction_preserves_native_result(retained_decode):
+    h, key, calls = retained_decode
+    h.owner._retained_reuse.maximum_bytes = 1
+    assert h.owner.retained(key) == h.request
+    assert h.owner.retained(key) == h.request
+    assert len(calls) == 2
