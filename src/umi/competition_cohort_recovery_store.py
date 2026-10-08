@@ -82,6 +82,7 @@ def _decode(model: type[_Record], raw: bytes, maximum: int) -> _Record:
 class CohortRecoveryStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.db = connection
+        self._snapshot_reading = False
         if self.db.in_transaction:
             raise ValueError("cohort recovery cannot take over an existing transaction")
         # The host owns WAL/DELETE choice and filesystem bounds. FULL is required
@@ -117,6 +118,9 @@ class CohortRecoveryStore:
     @contextmanager
     def _transaction(self, *, write: bool = True) -> Iterator[None]:
         if self.db.in_transaction:
+            if not write and self._snapshot_reading:
+                yield
+                return
             raise ValueError("cohort recovery requires its own atomic transaction")
         self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
@@ -125,6 +129,18 @@ class CohortRecoveryStore:
         except BaseException:
             self.db.rollback()
             raise
+
+    @contextmanager
+    def read_snapshot(self):
+        """Keep related immutable history and source reads in one owned snapshot."""
+        if self._snapshot_reading:
+            raise ValueError("cohort recovery snapshot is already owned")
+        with self._transaction(write=False):
+            self._snapshot_reading = True
+            try:
+                yield self
+            finally:
+                self._snapshot_reading = False
 
     def admit(
         self,

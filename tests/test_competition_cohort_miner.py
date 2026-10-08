@@ -971,3 +971,88 @@ async def test_concurrent_closure_fences_prepared_admission(granted, monkeypatch
     assert p.model.calls == p.fetcher.calls == 0
     p.miner = p.rebuild()
     assert (await translate(p)).status_code == 422
+
+
+async def test_concurrent_admissions_share_initial_history_but_confirm_independently(
+    granted, monkeypatch
+):
+    p = granted
+    authority = p.miner.competition_authority
+    history = authority.history
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def held(cohort):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await history(cohort)
+
+    monkeypatch.setattr(authority, "history", held)
+    first = asyncio.create_task(authority._current(p.grant))
+    second = asyncio.create_task(authority._current(p.grant))
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        await asyncio.sleep(0)
+        assert calls == 1
+        release.set()
+        left, right = await asyncio.wait_for(asyncio.gather(first, second), 60)
+        assert left == right and calls == 3
+        await authority._current(p.grant)
+        assert calls == 5  # Neither the initial nor confirmation result is cached.
+        assert not authority._history_reads and not authority._history_waiters
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.parametrize("cancel_all", [False, True])
+async def test_shared_history_cancellation_preserves_other_waiters_and_drains_last(
+    granted, monkeypatch, cancel_all
+):
+    p = granted
+    authority = p.miner.competition_authority
+    history = authority.history
+    entered, release, cleaning, finish, finished = (asyncio.Event() for _ in range(5))
+    cohort = p.grant.attempt.order.job.round.cohort_sha256
+
+    async def held(cohort):
+        try:
+            entered.set()
+            await release.wait()
+            return await history(cohort)
+        finally:
+            cleaning.set()
+            await finish.wait()
+            finished.set()
+
+    monkeypatch.setattr(authority, "history", held)
+    first = asyncio.create_task(authority._shared_history(cohort))
+    second = asyncio.create_task(authority._shared_history(cohort))
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 60)
+        assert not second.done() and not cleaning.is_set()
+        if cancel_all:
+            second.cancel()
+            await asyncio.wait_for(cleaning.wait(), 60)
+            second.cancel()
+            await asyncio.sleep(0)
+            assert not second.done() and not finished.is_set()
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(second, 60)
+        else:
+            release.set()
+            finish.set()
+            assert await asyncio.wait_for(second, 60) == await history(cohort)
+        assert finished.is_set()
+        assert not authority._history_reads and not authority._history_waiters
+    finally:
+        release.set()
+        finish.set()
+        await asyncio.gather(first, second, return_exceptions=True)

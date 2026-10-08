@@ -125,7 +125,9 @@ class ServiceAdmissionArchive:
         return raw
 
     def read(self, admission: ServiceWorkAdmission) -> tuple[bytes, bytes]:
-        with self.journal.locked(), self.journal.transaction() as db:
+        # Both immutable artifacts were committed together. Recovery can read
+        # that snapshot while another claim owns the compound mutation lock.
+        with self.journal.read_transaction() as db:
             raw = self._read(db, admission.observation.evidence_sha256, MAX_ARCHIVE_BYTES)
             metadata = self._read(
                 db, json.loads(raw)["runtime_metadata_sha256"], MAX_METADATA_BYTES

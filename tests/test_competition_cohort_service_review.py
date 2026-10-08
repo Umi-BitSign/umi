@@ -37,6 +37,7 @@ from umi.competition_cohort_service_review import (
     service_retry_decision,
 )
 from umi.competition_cohort_service_vote_http import ServiceVotePeer, service_vote_routes
+from umi.competition_cohort_service_work import SignedServiceWorkClaim
 from umi.competition_execution import execution_boundary
 from umi.competition_historical_registration import HistoricalRegistrationProvider
 from umi.open_competition import digest, sign_object, verify_signature
@@ -237,6 +238,7 @@ async def reviewed(loop, tmp_path):
     )
     c.assignment = c.queue.assignment(c.claim)
     archive_bytes = await chain.provider.retained_archive(execution_boundary(observed))
+    s.admission_archives = {digest(execution_boundary(observed)): archive_bytes}
     await move(p.finality.head)
     s.move = move
 
@@ -248,8 +250,8 @@ async def reviewed(loop, tmp_path):
 
     async def archive(expected):
         s.archive_reads += 1
-        assert expected == c.assignment.admission.observation
-        return archive_bytes
+        assert digest(expected) in s.admission_archives
+        return s.admission_archives[digest(expected)]
 
     async def owner_sign(body):
         return sign_object(body, p.validator)
@@ -490,6 +492,129 @@ async def test_http_retry_certificate_recovers_lost_commit_ack_without_peers(
     cert = await ServiceWorkPeerReviews(s.requests, s.peers).retry(review.grant, review.retirement)
     assert cert.decision == service_retry_decision(review)
     assert s.deliveries == before and s.signatures == 4
+
+
+async def test_completed_retry_recovers_while_another_work_waits_for_remote_votes(
+    networked, chain, monkeypatch
+):
+    s = networked
+    observed = await chain.provider.collect()
+    s.admission_archives[
+        digest(execution_boundary(observed))
+    ] = await chain.provider.retained_archive(execution_boundary(observed))
+    claim = s.c.claim.claim.model_copy(update={"nonce": "02" * 32})
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, s.p.miner.wallet))
+    s.c.queue.admit(
+        signed,
+        s.c.assignment.admission.submission,
+        s.c.assignment.admission.participant,
+        s.p.e.r.h.source,
+        observed,
+        expected_tip_sha256=history_tip(s.p.e.r.h.source.history),
+    )
+    second = s.requests.prepare(
+        signed,
+        s.p.validator.hotkey.ss58_address,
+        s.p.requests[1].video,
+        s.c.window,
+        s.p.e.r.h.source,
+        await chain.provider.collect(),
+    )
+    worker = s.worker()
+    grants = [await worker._certificate(body) for body in (s.body, second)]
+    s.p.finality.head = max(g.body.request.deadline_block for g in grants) + 3000
+    await s.move(s.p.finality.head)
+    monkeypatch.setattr(
+        bt.timelock,
+        "current_round",
+        lambda: max(g.body.request.response_close_round for g in grants) + 500,
+    )
+    reviews = []
+    for grant in grants:
+        outcome = await worker.transport.advance(service_grant_slot(grant.body))
+        assert outcome.retirement.receipt.result == "no_response_retained"
+        reviews.append(ServiceRetryReview(grant=grant, retirement=outcome.retirement))
+    first, second = reviews
+    completed = await s.retry(first.grant, first.retirement)
+    entered, release = asyncio.Event(), asyncio.Event()
+    for peer in s.peers:
+        original = peer.attest
+
+        async def held(review, original=original):
+            assert review == second
+            entered.set()
+            await release.wait()
+            return await original(review)
+
+        monkeypatch.setattr(peer, "attest", held)
+    task = asyncio.create_task(s.retry(second.grant, second.retirement))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=60)
+        recovered = await asyncio.wait_for(s.retry(first.grant, first.retirement), timeout=60)
+        assert recovered == completed and not task.done()
+        release.set()
+        result = await asyncio.wait_for(task, timeout=60)
+        assert result.decision == service_retry_decision(second)
+        assert s.p.model.calls == 0
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_concurrent_retry_waiters_preserve_one_native_certificate(networked, monkeypatch):
+    s = networked
+    review = await retired_attempt(s, monkeypatch)
+    first, second = await asyncio.wait_for(
+        asyncio.gather(
+            s.retry(review.grant, review.retirement),
+            s.retry(review.grant, review.retirement),
+        ),
+        timeout=60,
+    )
+    assert first == second
+    assert first.decision == service_retry_decision(review)
+    assert s.signatures == 4
+    s.offline = True
+    s.unavailable = {"Charlie", "Dave"}
+    assert await s.retry(review.grant, review.retirement) == first
+
+
+async def test_retry_peer_write_waits_for_native_queue_owner(networked, monkeypatch):
+    import os
+
+    from umi.private_files import lock_private_file
+
+    s = networked
+    review = await retired_attempt(s, monkeypatch)
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    original = s.peer_reviews._prepare
+    calls = 0
+
+    def prepare(value):
+        nonlocal calls
+        calls += 1
+        loop.call_soon_threadsafe(entered.set)
+        return original(value)
+
+    monkeypatch.setattr(s.peer_reviews, "_prepare", prepare)
+    lease = lock_private_file(s.requests.journal.lock_path)
+    task = asyncio.create_task(s.retry(review.grant, review.retirement))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=60)
+        await asyncio.sleep(0.1)
+        assert not task.done()
+        os.close(lease)
+        lease = None
+        result = await asyncio.wait_for(task, timeout=60)
+        assert result.decision == service_retry_decision(review)
+        assert calls >= 2
+    finally:
+        if lease is not None:
+            os.close(lease)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_transport_view_preserves_owned_proofs_and_requires_same_pins(reviewed):

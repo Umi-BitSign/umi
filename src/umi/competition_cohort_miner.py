@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -53,7 +54,7 @@ from .competition_cohort_service_grant import (
 )
 from .competition_origin import public_https_origin
 from .competition_round_journal import FinalizedHeadRegression, RoundJournal
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthority
 from .open_competition import (
     CompetitionPolicy,
@@ -129,6 +130,7 @@ class CohortMinerAuthorizationAuthority:
         )
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
         self.serial = asyncio.Lock()
+        self._history_reads, self._history_waiters = {}, {}
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -273,6 +275,36 @@ class CohortMinerAuthorizationAuthority:
             current = parent
         return grant
 
+    async def _shared_history(self, cohort):
+        """Share only an unfinished initial read; never cache current authority.
+
+        Confirmation after local review still starts a separate fresh read. One
+        cancelled admission cannot cancel a read that another admission needs;
+        the last departing caller cancels and drains the bounded HTTP operation.
+        """
+        task = self._history_reads.get(cohort)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                wait_for_owned(self.history(cohort), timeout=self.config.read_timeout_seconds)
+            )
+            self._history_reads[cohort] = task
+        self._history_waiters[task] = self._history_waiters.get(task, 0) + 1
+        try:
+            await asyncio.wait((task,))
+            return task.result()
+        finally:
+            self._history_waiters[task] -= 1
+            if self._history_waiters[task] == 0:
+                del self._history_waiters[task]
+                if self._history_reads.get(cohort) is task:
+                    del self._history_reads[cohort]
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await await_owned_task(task)
+                elif not task.cancelled():
+                    task.exception()
+
     async def _current(self, grant):
         timeout = self.config.read_timeout_seconds
         cohort = (
@@ -281,7 +313,7 @@ class CohortMinerAuthorizationAuthority:
             else grant.attempt.order.job.round.cohort_sha256
         )
         try:
-            source = await wait_for_owned(self.history(cohort), timeout=timeout)
+            source = await self._shared_history(cohort)
             head = await wait_for_owned(
                 self.finalized_blocks.finalized_head_height(), timeout=timeout
             )

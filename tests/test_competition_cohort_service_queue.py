@@ -705,3 +705,36 @@ def test_empty_seal_cannot_admit_later_or_manufacture_credit(queue_case):
     assert result.accepted == () and not result.chain_submission_authorized
     with pytest.raises(ServiceQueueBackpressure):
         admit(c)
+
+
+@pytest.mark.parametrize(
+    "reader", ["lookup", "entries", "assignment", "retained_registration_blocks"]
+)
+def test_immutable_queue_reads_do_not_require_compound_writer_lease(queue_case, reader):
+    c = queue_case
+    admitted = admit(c)
+    signed = inputs(c)[0]
+    expected = {
+        "lookup": lambda: c.queue.lookup(signed),
+        "entries": lambda: c.queue.entries(),
+        "assignment": lambda: c.queue.assignment(signed),
+        "retained_registration_blocks": lambda: c.queue.retained_registration_blocks(),
+    }
+    before = expected[reader]()
+    # Another compound owner may be retaining votes for unrelated work. Its
+    # process lease must not block a snapshot of the already committed claim.
+    with c.queue.journal.locked():
+        assert expected[reader]() == before
+    assert c.queue.lookup(signed) == admitted
+
+
+def test_read_assignment_still_observes_new_conflict_hold(queue_case):
+    c = queue_case
+    admitted = admit(c)
+    signed = inputs(c)[0]
+    assert c.queue.assignment(signed).admission == admitted
+    changed = admitted.model_copy(update={"ordinal": admitted.ordinal + 1})
+    with pytest.raises(ValueError):
+        c.queue.journal.put("service_admission", admitted.work_sha256, changed)
+    with pytest.raises(ValueError, match="conflict"):
+        c.queue.assignment(signed)

@@ -750,3 +750,64 @@ async def test_cohort_sidecar_cannot_silently_shorten_inference_budget(sidecar_b
                     UnixSocketTranslator(**options)
             else:
                 UnixSocketTranslator(**options)
+
+
+async def test_current_cohort_maximum_video_and_hypothesis_cross_native_sidecar():
+    import hashlib
+    from pathlib import Path
+
+    from umi.config import Limits
+    from umi.open_competition import CompetitionPolicy
+    from umi.policy import ScoringPolicy, scoring_policy_hash
+    from umi.protocol import normalized_grapheme_count, normalized_token_count
+
+    documents = Path(__file__).resolve().parents[1] / "docs/competition"
+    transport = ScoringPolicy.model_validate_json(
+        (documents / "C5_TRANSPORT_POLICY.json").read_bytes()
+    )
+    competition = CompetitionPolicy.model_validate_json((documents / "C5_POLICY.json").read_bytes())
+    limits = Limits.from_policy(transport, competition_policy=competition)
+    video = bytes(limits.maximum_clip_size_bytes)
+    # Two regional indicators form one grapheme and eight UTF-8 bytes, so
+    # the byte-boundary output also fits the cohort's grapheme/token bounds.
+    output = "🇺🇸" * (limits.maximum_hypothesis_utf8_bytes // 8)
+    assert len(output.encode()) == limits.maximum_hypothesis_utf8_bytes
+    assert normalized_grapheme_count(output) <= limits.maximum_hypothesis_graphemes
+    assert normalized_token_count(output) <= limits.maximum_hypothesis_tokens
+    request = challenge_request()
+    request = request.model_copy(
+        update={
+            "video": request.video.model_copy(
+                update={"size_bytes": len(video), "sha256": hashlib.sha256(video).hexdigest()}
+            )
+        }
+    )
+    calls = []
+
+    async def model(received, metadata):
+        assert received == video
+        assert metadata.canonical_json == canonical_json_bytes(request)
+        calls.append(1)
+        return output
+
+    with _private_socket_path() as path:
+        # Exercise the shipped sidecar defaults against the actual pinned
+        # cohort byte limits, rather than two test helpers sharing tiny bounds.
+        server = await start_model_sidecar(
+            path,
+            model,
+            model_revision=None,
+            competition_policy=competition,
+            scoring_policy_sha256=scoring_policy_hash(transport),
+        )
+        async with server:
+            translator = UnixSocketTranslator(
+                socket_path=path,
+                maximum_request_metadata_bytes=limits.maximum_request_body_bytes,
+                maximum_response_bytes=limits.maximum_hypothesis_utf8_bytes,
+                maximum_inference_seconds=limits.inference_timeout_seconds,
+                expected_scoring_policy_sha256=scoring_policy_hash(transport),
+                require_full_inference_budget=True,
+            )
+            assert await translator.translate(video, request) == output
+    assert calls == [1]
