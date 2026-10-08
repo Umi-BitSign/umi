@@ -754,6 +754,7 @@ async def run_pipeline(
                 await service.miner(stack)
                 catalog_key = await service.claim(endpoint_request, client)
                 service_worker = await app.state.dispatch.worker(catalog_key)
+                service_assignment = service_worker.queue.assignment(service.claimed)
 
             # The actual recurring host owns the remaining execution and export
             # work. This loop advances only the synthetic chain, never a stage.
@@ -778,20 +779,26 @@ async def run_pipeline(
                             if task.done():
                                 task.result()
                                 raise AssertionError("evaluator exited before completion")
-                        if all(
-                            node.files.terminal(certificate, node.config.orders.signer) is not None
-                            for name, node in nodes.items()
-                            for certificate in certificates[name]
-                        ) and (
-                            not service
-                            or (service_reports and service_reports[-1].get("work_complete") == 1)
+                        # Rolling reports describe only this poll. A completed
+                        # item leaves the scheduling queue, so a later zero is
+                        # not evidence that its durable terminal disappeared.
+                        service_complete = not service or (
+                            await service_worker._local(
+                                service_worker.terminals.read, service_assignment
+                            )
+                            is not None
+                        )
+                        if (
+                            all(
+                                node.files.terminal(certificate, node.config.orders.signer)
+                                is not None
+                                for name, node in nodes.items()
+                                for certificate in certificates[name]
+                            )
+                            and service_complete
                         ):
                             return
-                        if (
-                            service
-                            and service_reports
-                            and service_reports[-1].get("work_complete") == 1
-                        ):
+                        if service and service_complete:
                             # Endpoint benchmark leases can outlast the paid
                             # service window. Real finalized time keeps moving
                             # independently of evaluator progress, so advance

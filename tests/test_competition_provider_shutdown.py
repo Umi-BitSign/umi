@@ -97,7 +97,7 @@ async def test_weight_close_owns_rpc_cleanup_and_namespace_lease(chain, cancella
 
 
 @pytest.mark.parametrize("kind", ["endpoint", "weight"])
-async def test_queued_subclass_collection_checks_closed_after_lock(chain, monkeypatch, kind):
+async def test_queued_subclass_collection_cannot_read_after_shutdown(chain, monkeypatch, kind):
     if kind == "endpoint":
         provider = FinalizedEndpointProvider(
             chain.config,
@@ -106,16 +106,20 @@ async def test_queued_subclass_collection_checks_closed_after_lock(chain, monkey
             proofs=chain.proofs,
             now_ms=lambda: chain.clock.now,
         )
+        # Origin proof reads now queue on their bounded network capacity, not
+        # the short persistence lock. Close cancels and drains those tasks.
+        gate = provider._origin_capacity = asyncio.Semaphore(1)
         collect = provider._collect_origin_locked(None, None)
     else:
         provider = weight_provider(chain)
+        gate = provider._lock
         collect = provider._collect_weights_locked(None, (), None)
 
     async def unexpected_read():
         pytest.fail("a queued collection read finality after shutdown began")
 
     monkeypatch.setattr(provider._proofs, "finalized_snapshot", unexpected_read)
-    await provider._lock.acquire()
+    await gate.acquire()
     collection = asyncio.create_task(collect)
     closing = None
     try:
@@ -125,13 +129,17 @@ async def test_queued_subclass_collection_checks_closed_after_lock(chain, monkey
         await asyncio.sleep(0)
         assert provider._closed
     finally:
-        provider._lock.release()
+        gate.release()
         await asyncio.gather(collection, return_exceptions=True)
         if closing is not None:
             await asyncio.gather(closing, return_exceptions=True)
         await provider.aclose()
-    with pytest.raises(ValueError, match=f"{kind} provider is closed"):
-        collection.result()
+    if kind == "endpoint":
+        with pytest.raises(asyncio.CancelledError):
+            collection.result()
+    else:
+        with pytest.raises(ValueError, match="weight provider is closed"):
+            collection.result()
     assert closing.result() is None
 
 
