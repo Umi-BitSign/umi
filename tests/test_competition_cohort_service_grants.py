@@ -366,6 +366,44 @@ async def accept(c, grant=None):
     return await request(c.p, COHORT_GRANT_PATH, c.grant if grant is None else grant)
 
 
+async def test_retained_service_certificate_reads_through_another_writer(service):
+    c, p = service, service.p
+    producer = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    before = canonical_json_bytes(c.grant)
+    with producer.journal.locked():
+        retained = producer.certificate(slot)
+    assert canonical_json_bytes(retained) == before
+    assert p.model.calls == 0
+
+
+async def test_retained_service_certificate_still_checks_original_selection(service, monkeypatch):
+    c, p = service, service.p
+    producer = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    req = c.grant.body.request
+    changed = signed_grant(
+        c.grant.body.model_copy(
+            update={
+                "request": req.model_copy(
+                    update={"video": req.video.model_copy(update={"url": req.video.url + "?other"})}
+                )
+            }
+        )
+    )
+    verify_service_grant(changed, p.c.policy, p.transport_policy)
+    original = producer.journal.get
+
+    def conflicting(kind, key, **kwargs):
+        if kind == "service_grant" and key == slot:
+            return changed.model_dump(mode="json", by_alias=True)
+        return original(kind, key, **kwargs)
+
+    monkeypatch.setattr(producer.journal, "get", conflicting)
+    with producer.journal.locked(), pytest.raises(ValueError, match="selected request"):
+        producer.certificate(slot)
+
+
 async def test_service_grant_accepts_equivalent_serving_origin_spelling(service):
     c, p = service, service.p
     p.miner = p.rebuild(

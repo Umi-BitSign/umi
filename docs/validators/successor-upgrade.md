@@ -1890,11 +1890,22 @@ Reservations neither extend signed deadlines nor authorize scoring or rewards.
 Static grant checks are reused only for their exact retained inputs and bound
 policy; current execution authority remains the dispatcher's and miner's job.
 
+An issued request whose response opportunity expires before transmission enters
+the recovery lane even if it has no send intent. Expiry alone does not release a
+reservation or score a case: the original request still needs a native signed
+retirement and any replacement still needs its normal independent certificate.
+This applies to endpoint and paid work and preserves both legacy and current
+retirement semantics.
+
 Request-vote collection proceeds when verified retained signatures satisfy the
 configured independent-group quorum, without requiring a redundant reviewer's
 response. Every certificate still passes native policy verification; votes
 from the same group cannot replace a required independent group. Outstanding
 peer requests drain cooperatively, and already committed votes remain recoverable.
+Reading an already-retained paid-work certificate does not acquire the queue's
+writer lease. It still verifies the certificate and its original selected request;
+creating a certificate retains the exclusive lease and rechecks for an existing
+certificate before committing.
 
 Current authority-history reads use a query-only SQLite snapshot, so admission
 or model-preservation work does not own their application lock. Each snapshot

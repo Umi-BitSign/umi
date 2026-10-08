@@ -160,6 +160,26 @@ async def test_inbox_to_complete_terminal_selection_and_offline_restart(schedule
     assert all(r.recovered is not None for r in reviews)
 
 
+async def test_expired_unsent_endpoint_reaches_retirement_lane(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    selected, assignment, _ = p.delivery_recovery.selection(q.slot)
+    grant = selection_grant(selected, assignment)
+    original = canonical_json_bytes(grant)
+    case = p.e.job.cases[0].case_id
+    expire_child(p, grant, monkeypatch)
+    assert q.worker().attempts.phase(q.slot, case) == "recovery"
+    result = await q.worker().attempts.advance(q.slot, case, one_stage=True)
+    assert result["reason"] == "retirement_retained"
+    assert q.worker().attempts.phase(q.slot, case) == "certification"
+    assert TRANSLATE_PATH not in p.paths and p.model.calls == 0
+    assert (
+        canonical_json_bytes(selection_grant(*p.delivery_recovery.selection(q.slot)[:2]))
+        == original
+    )
+
+
 @pytest.mark.parametrize("retirement_held", [False, True])
 async def test_answered_peer_retires_before_next_case_without_repeating_inference(
     scheduled, monkeypatch, retirement_held

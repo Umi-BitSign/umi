@@ -236,19 +236,30 @@ class ServiceWorkRequests:
             self.journal.put("service_request_vote", key, signature)
             return signature
 
+    def _retained_certificate(self, slot, body) -> ServiceMinerGrant | None:
+        old = self.journal.get("service_grant", slot)
+        if old is None:
+            return None
+        value = verify_service_grant(
+            ServiceMinerGrant.model_validate_json(canonical_json_bytes(old)),
+            self.policy,
+            self.transport,
+        )
+        if value.body != body:
+            raise ValueError("service certificate changed its selected request")
+        return value
+
     def certificate(self, slot) -> ServiceMinerGrant:
         body = self._body(slot)
+        # Retained grants and selections are immutable. Recovery must not take
+        # queue writer ownership just to authenticate a completed certificate.
+        retained = self._retained_certificate(slot, body)
+        if retained is not None:
+            return retained
         with self.journal.locked():
-            old = self.journal.get("service_grant", slot)
-            if old is not None:
-                value = verify_service_grant(
-                    ServiceMinerGrant.model_validate_json(canonical_json_bytes(old)),
-                    self.policy,
-                    self.transport,
-                )
-                if value.body != body:
-                    raise ValueError("service certificate changed its selected request")
-                return value
+            retained = self._retained_certificate(slot, body)
+            if retained is not None:
+                return retained
             self._reserve(slot, body)
             votes, groups = [], set()
             for evaluator in sorted(self.policy.evaluators, key=lambda e: identity(e.hotkey)):

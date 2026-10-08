@@ -192,6 +192,11 @@ a generic 64-KiB JSON limit is too small for grants. Translation, response
 recovery and retirement keep their selected transport-policy limits. An HTTP 413
 on grant delivery leaves the assignment pending. Check the receiving process and
 edge body limits before rebuilding the miner or creating new enrollment state.
+For nginx, set `client_max_body_size 16m;` in the existing assignment-route
+location, retaining its proxy settings. A smaller location-level value overrides
+a server-level allowance. Validate and reload with
+`sudo nginx -t && sudo systemctl reload nginx`; the miner and its state can stay
+in place.
 
 ## Check the running miner
 

@@ -17,6 +17,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 
+import bittensor as bt
+
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
 from .competition_cohort_order_signer import CohortOrderHistory
@@ -208,7 +210,12 @@ class ServiceWorkWorker:
             return "certification"
         if self.journal.get("service_grant", slot) is None:
             return "preparation"
-        if self.journal.get("service_dispatch_intent", slot) is not None:
+        if (
+            self.journal.get("service_dispatch_intent", slot) is not None
+            or bt.timelock.current_round() >= body.request.response_close_round
+        ):
+            # Unsent expiry must yield to native retirement/replacement too;
+            # it is neither a missing send intent nor evidence of zero work.
             return "recovery"
         return "dispatch"
 
@@ -246,7 +253,12 @@ class ServiceWorkWorker:
             had_dispatch = await self._local(self.journal.get, "service_dispatch_intent", slot)
             had_retirement = await self._local(self.journal.get, "service_retirement", slot)
             result = await self.transport.advance(
-                slot, retire=not one_stage or had_dispatch is not None
+                slot,
+                retire=(
+                    not one_stage
+                    or had_dispatch is not None
+                    or bt.timelock.current_round() >= body.request.response_close_round
+                ),
             )
             if result.retirement is None:
                 return "pending", result.reason

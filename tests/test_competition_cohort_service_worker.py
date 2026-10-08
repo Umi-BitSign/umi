@@ -529,6 +529,29 @@ async def test_expired_service_attempt_waits_for_certified_replacement_then_fini
     assert s.paths.count(TRANSLATE_PATH) == 1 and p.model.calls == 1
 
 
+async def test_expired_unsent_service_reaches_retirement_lane(loop, monkeypatch):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    original = canonical_json_bytes(body)
+    p.finality.head = body.request.deadline_block + 3000
+    monkeypatch.setattr(
+        bt.timelock, "current_round", lambda: body.request.response_close_round + 500
+    )
+    assert s.worker()._ready_stage(s.c.assignment.admission) == "recovery"
+    assert await s.worker()._advance(s.c.assignment.admission, one_stage=True) == (
+        "pending",
+        "retirement_retained",
+    )
+    assert s.worker()._ready_stage(s.c.assignment.admission) == "certification"
+    assert s.paths.count(TRANSLATE_PATH) == 0 and p.model.calls == 0
+    assert (
+        canonical_json_bytes(worker.requests.latest(s.c.claim, p.validator.hotkey.ss58_address))
+        == original
+    )
+
+
 async def test_queue_rotation_survives_restart_and_unavailable_first_miner_work(loop):
     s, c, p = loop, loop.c, loop.p
     claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})

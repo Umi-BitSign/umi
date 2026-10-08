@@ -6,6 +6,7 @@ owner HTTP, miner ASGI, requests, responses and retirement are native.
 
 import json
 
+import bittensor as bt
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -49,6 +50,43 @@ from .test_competition_cohort_service_grants import service_owner as service_own
 from .test_competition_cohort_service_grants import shared_control_group as shared_control_group
 from .test_competition_cohort_service_worker import loop as loop
 from .test_competition_cohort_window_owner import TOKEN, owner_at
+
+
+async def test_expired_unsent_reservation_requires_native_retirement(loop, tmp_path, monkeypatch):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    grant = await worker._certificate(body)
+    local = LocalWindowClient(owner_at(s.c, tmp_path / "unsent-window"))
+    assert await local.reserve(grant, body.request) == "reserved"
+    worker.transport.windows = local
+    monkeypatch.setattr(
+        bt.timelock, "current_round", lambda: body.request.response_close_round + 500
+    )
+    # Expiry selects the recovery lane but cannot itself release occupancy.
+    # The current miner can sign a v2 response-opportunity fence before the
+    # legacy block deadline; that exact native receipt is still mandatory.
+    assert p.finality.head < body.request.deadline_block
+    assert worker._ready_stage(s.c.assignment.admission) == "recovery"
+    original = worker.transport.transport
+
+    class HoldRetirement(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == COHORT_RETIRE_PATH:
+                return httpx.Response(503)
+            return await original.handle_async_request(request)
+
+    worker.transport.transport = HoldRetirement()
+    outcome = await worker._advance(s.c.assignment.admission, one_stage=True)
+    assert outcome[0] == "pending" and outcome[1] != "retirement_retained"
+    assert await local.reserve(grant, body.request) == "reserved"
+    worker.transport.transport = original
+    assert await worker._advance(s.c.assignment.admission, one_stage=True) == (
+        "pending",
+        "retirement_retained",
+    )
+    assert await local.reserve(grant, body.request) == "retired"
+    assert TRANSLATE_PATH not in s.paths and p.model.calls == 0
 
 
 @pytest.mark.parametrize("bootstrap_existing", [False, True])

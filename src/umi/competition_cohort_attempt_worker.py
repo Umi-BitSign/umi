@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import bittensor as bt
 from pydantic import Field
 
 from .competition_cohort_endpoint_dispatch import CohortEndpointDispatcher
@@ -84,7 +85,11 @@ class CohortEndpointAttemptWorker:
             )
             is not None
             or self.recovery.retained(slot, case_id) is not None
+            or bt.timelock.current_round()
+            >= selected_request(selected, case_id).response_close_round
         ):
+            # An expired unsent request still needs native retirement and a
+            # certified replacement. A scheduling hint never proves absence.
             return "recovery"
         return "dispatch"
 
