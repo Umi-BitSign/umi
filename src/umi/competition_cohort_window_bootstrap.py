@@ -10,6 +10,7 @@ import hashlib
 from collections.abc import Mapping
 
 from .anchors import VerifiedAuthEvidence
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_endpoint_dispatch import CohortDispatchIntent, CohortDispatchRetryIntent
 from .competition_cohort_endpoint_retirement import CohortRetiredEndpointCase
 from .competition_cohort_endpoint_selection import (
@@ -169,6 +170,7 @@ def _service(records):
         )
 
 
+@canonical_json_reuse()
 def import_window_source(
     owner: CohortWindowOwner,
     name: str,

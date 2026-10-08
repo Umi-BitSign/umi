@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_endpoint import validate_recoverable_endpoint_transport
 from .competition_cohort_miner_case import (
     CohortCaseMinerGrant,
@@ -141,6 +142,7 @@ class CohortWindowOwner:
         self.store._selected(result)
         return result
 
+    @canonical_json_reuse()
     def selected(self, operation: WindowOperation) -> WindowRequest:
         if operation.request not in grant_requests(operation.grant):
             raise ValueError("window request is not present in its exact signed grant")
@@ -166,6 +168,7 @@ class CohortWindowOwner:
         self.store.journal.put("verified_window_request", key, result)
         return result
 
+    @canonical_json_reuse()
     def apply(self, operation: WindowOperation) -> WindowResult:
         # Enforce wire parsing even for a local in-process consumer.
         operation = WindowOperation.model_validate_json(canonical_json_bytes(operation))
