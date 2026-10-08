@@ -19,12 +19,16 @@ from umi.competition_cohort_endpoint_archive import (
     JournalEndpointObjects,
     endpoint_archive_cases,
 )
+from umi.competition_cohort_endpoint_dispatch import CohortEndpointDispatcher
 from umi.competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery
-from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
+from umi.competition_cohort_endpoint_retirement import (
+    CohortEndpointRetirement,
+    CohortRetirementOutcome,
+)
 from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
 from umi.competition_cohort_endpoint_worker import CohortEndpointWorker
 from umi.competition_cohort_execution_journal import CohortExecutionJournal
-from umi.endpoint_protocol import COHORT_GRANT_PATH
+from umi.endpoint_protocol import COHORT_GRANT_PATH, COHORT_RETIRE_PATH, TRANSLATE_PATH
 from umi.miner import create_app
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -154,6 +158,47 @@ async def test_inbox_to_complete_terminal_selection_and_offline_restart(schedule
     reviews = tuple(endpoint_archive_cases(archive, objects.__getitem__, p.c.policy))
     assert [r.retirement.case_id for r in reviews] == [c.case_id for c in terminal.cases]
     assert all(r.recovered is not None for r in reviews)
+
+
+@pytest.mark.parametrize("retirement_held", [False, True])
+async def test_answered_peer_retires_before_next_case_without_repeating_inference(
+    scheduled, monkeypatch, retirement_held
+):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    first, second = p.e.job.cases[:2]
+    sent = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        q.slot, first.case_id
+    )
+    assert sent["status"] == "recovered" and p.model.calls == 1
+    original_response = canonical_json_bytes(p.delivery_recovery.retained(q.slot, first.case_id))
+    retirement = worker.attempts.decisions.retirement
+    native_retire = retirement.retire
+
+    async def held(slot, case_id):
+        if case_id == first.case_id:
+            return CohortRetirementOutcome("pending", "retirement_transport_unavailable")
+        return await native_retire(slot, case_id)
+
+    p.paths.clear()
+    if retirement_held:
+        monkeypatch.setattr(retirement, "retire", held)
+        result = await worker.attempts.advance(q.slot, second.case_id)
+        assert result["status"] == "pending"
+        assert result["reason"] == "answered_peer_retirement_pending"
+        assert p.model.calls == 1 and TRANSLATE_PATH not in p.paths
+        assert p.delivery_recovery.retained(q.slot, second.case_id) is None
+        monkeypatch.setattr(retirement, "retire", native_retire)
+    result = await worker.attempts.advance(q.slot, second.case_id)
+    assert result["status"] == "completed", result
+    assert p.paths.index(COHORT_RETIRE_PATH) < p.paths.index(TRANSLATE_PATH)
+    assert retirement.retained(q.slot, first.case_id) is not None
+    assert p.model.calls == 2
+    assert (
+        canonical_json_bytes(p.delivery_recovery.retained(q.slot, first.case_id))
+        == original_response
+    )
 
 
 async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):

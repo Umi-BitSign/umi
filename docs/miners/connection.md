@@ -18,6 +18,13 @@ requests release their active-window resource slot only after a verified signed
 retirement receipt is committed. Their counters, response archive and execution
 fence remain retained; pending work continues to occupy its slot.
 
+The coordinator recovers saved responses and retires answered peer cases before
+dispatching another case from the same assignment. If that retirement cannot be
+acknowledged, further work remains pending. A retryable HTTP 429 or 503 without a
+valid signed response is an unresolved delivery attempt, not a zero-quality
+answer. Preserve the existing request and response state while recovery retries;
+do not raise the window limit or reset the miner to bypass a held retirement.
+
 The previous certified allocation remains effective until the active cohort
 produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance

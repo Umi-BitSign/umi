@@ -61,8 +61,38 @@ class CohortEndpointAttemptWorker:
             verify_replacement_parent(grant, selection_grant(selected, assignment))
             slot = successor.selection_slot
 
+    def _answered_peers(self, original_slot, case_id, job):
+        """Find authenticated answers still occupying this miner's old windows."""
+        pending = []
+        for case in job.cases:
+            if case.case_id == case_id:
+                continue
+            peer_slot, _, _, _ = self.current(original_slot, case.case_id)
+            if self.recovery.retained(peer_slot, case.case_id) is None:
+                continue
+            if self.decisions.retirement.retained(peer_slot, case.case_id) is None:
+                pending.append((peer_slot, case.case_id))
+        return pending
+
     async def advance(self, original_slot, case_id, *, video=None):
-        slot, selected, assignment, _ = await run_owned_thread(self.current, original_slot, case_id)
+        slot, selected, assignment, job = await run_owned_thread(
+            self.current, original_slot, case_id
+        )
+        # A response can be saved while its retirement HTTP exchange is held.
+        # Rotating to another case must not leave that answered window occupying
+        # the miner's slots. Fence existing answers before transmitting more work;
+        # do not wait for their scoring or reviewer votes, or rerun those answers.
+        if await run_owned_thread(self.recovery.retained, slot, case_id) is None:
+            peers = await run_owned_thread(self._answered_peers, original_slot, case_id, job)
+            for peer_slot, peer_case in peers:
+                retired = await self.decisions.retirement.retire(peer_slot, peer_case)
+                if retired.value is None:
+                    return {
+                        "status": "pending",
+                        "reason": "answered_peer_retirement_pending",
+                        "retirement_reason": retired.reason,
+                        "selection_slot": slot,
+                    }
         # Recover the sealed response first, then permit one durable retry of
         # the original request within its signed transmission/window budget.
         # Retirement fences execution before a replacement can be constructed.
