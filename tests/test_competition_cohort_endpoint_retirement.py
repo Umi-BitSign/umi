@@ -7,6 +7,7 @@ and host fencing are not simulated by these tests.
 import asyncio
 import hashlib
 import json
+import threading
 import time
 from dataclasses import replace
 
@@ -53,6 +54,40 @@ async def retiring(delivery):
     p.retire_slot = p.delivery_selection.assignment_slot
     p.retire = lambda: p.retirement.retire(p.retire_slot, p.case_id)
     return p
+
+
+@pytest.mark.parametrize("operation", ["dispatch", "grant", "retirement", "recovery"])
+async def test_endpoint_retained_selection_keeps_event_loop_free(delivery, monkeypatch, operation):
+    from umi.competition_cohort_endpoint_dispatch import CohortEndpointDispatcher
+
+    p = delivery
+    recovery = p.delivery_recovery
+    slot = p.delivery_selection.assignment_slot
+    main_thread = threading.get_ident()
+    original = recovery.selection
+    calls = []
+
+    def selection(*args):
+        assert threading.get_ident() != main_thread, "retained proof ran on the event loop"
+        calls.append(1)
+        return original(*args)
+
+    if operation in {"retirement", "recovery"}:
+        assert (await p.deliver()).status == "retained"
+        assert (await translate(p)).status_code == 200
+    monkeypatch.setattr(recovery, "selection", selection)
+    if operation == "dispatch":
+        result = await CohortEndpointDispatcher(recovery, p.finality).dispatch(slot, p.case_id)
+        assert result["status"] == "recovered"
+    elif operation == "grant":
+        assert (await p.deliver()).status == "retained"
+    elif operation == "retirement":
+        assert (
+            await CohortEndpointRetirement(recovery).retire(slot, p.case_id)
+        ).status == "retained"
+    else:
+        assert (await recovery.recover(slot, p.case_id)).status == "recovered"
+    assert calls
 
 
 def expire_both(p, monkeypatch):

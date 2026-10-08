@@ -1,6 +1,8 @@
 """Static assignment reuse never replaces fresh journal/conflict checks."""
 
+import asyncio
 import shutil
+import threading
 
 import pytest
 
@@ -126,6 +128,34 @@ async def test_execution_changed_retained_assignment_is_not_reused(execution):
         db.execute("UPDATE records SET body=? WHERE kind='assignment' AND id=?", (b"{}", e.r.slot))
     with pytest.raises(ValueError):
         journal.assignment(e.r.slot)
+
+
+async def test_execution_static_validation_releases_journal_for_other_reads(execution, monkeypatch):
+    e = execution
+    journal = e.journal()
+    journal.retain(e.assignment, e.r.h.source, e.r.h.block)
+    entered, release = threading.Event(), threading.Event()
+    validate = journal.validate_assignment
+
+    def held(value):
+        entered.set()
+        assert release.wait(30), "fixture validation was not released"
+        return validate(value)
+
+    monkeypatch.setattr(journal, "validate_assignment", held)
+    first = asyncio.create_task(asyncio.to_thread(journal.assignment, e.r.slot))
+    second = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 20)
+        second = asyncio.create_task(asyncio.to_thread(journal.journal.get, "assignment", e.r.slot))
+        done, _ = await asyncio.wait((second,), timeout=5)
+        assert second in done, "static proof validation held the shared journal lock"
+        assert canonical_json_bytes(second.result()) == canonical_json_bytes(e.assignment)
+    finally:
+        release.set()
+        await first
+        if second is not None:
+            await second
 
 
 async def test_supplied_execution_assignment_reuses_only_static_proofs(execution, monkeypatch):

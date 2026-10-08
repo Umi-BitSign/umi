@@ -1770,6 +1770,13 @@ registration bridge.
 
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
+The exact assignment is read in a short read-only snapshot; static verification
+runs after releasing the journal lock. Endpoint grant delivery, dispatch,
+response recovery and retirement use owned worker threads for retained-selection
+reads, so a slow proof cannot block the main event loop. Cancellation drains
+that read before releasing its existing operation lock. Paid-service history
+reads use the same read-only intake snapshot as public history exports and do
+not acquire the intake writer gate.
 Endpoint response recovery reads the assignment and its already verified job
 as one pair, including when validating retained replacement ancestry. Successful
 selection proofs are reused only for the exact selection and assignment bytes,
