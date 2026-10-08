@@ -4,6 +4,25 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Intake runtime maintenance
+
+An intake runtime repair does not require a new public deployment, cohort,
+miner enrollment or public launch. Keep the existing `public_deployment` and
+accepted journals unchanged. The private intake configuration may select a
+`runtime_source` record with schema `umi-competition-intake-runtime/1`:
+`deployment_sha256` binds the canonical existing public deployment, while
+`umi_git_revision` and `umi_source_tree_sha256` identify the qualified replacement.
+Startup rejects a different deployment or a source tree that does not match.
+Without this record, the original deployment source check remains mandatory.
+
+Stage and qualify the complete replacement under the actual intake account,
+including this source binding and the retained launch identity, before selecting
+its service path. The public status keeps the original `deployment` for existing
+miner maintenance manifests and reports the effective code separately as
+`runtime`. Do not rewrite the public deployment merely to make a new executable
+start. Preserve generous cooperative stop budgets and verify application readiness
+and completed work after startup; `systemctl start` alone is insufficient.
+
 ## Supervisor maintenance for an installed successor
 
 A supervisor fix can retain the installed worker release, reward package,

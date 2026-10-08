@@ -128,6 +128,15 @@ class IntakeScheduleHold(StrictProtocolModel):
     cohort_eligibility_confirmed: Literal[False] = False
 
 
+class IntakeRuntimeSource(StrictProtocolModel):
+    """Operator-selected maintenance code bound to an unchanged public deployment."""
+
+    schema_: Literal["umi-competition-intake-runtime/1"] = Field(alias="schema")
+    deployment_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    umi_git_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+    umi_source_tree_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
 class PublicIntakeDeployment(StrictProtocolModel):
     """Public identity of the deployed intake, separate from repository HEAD."""
 

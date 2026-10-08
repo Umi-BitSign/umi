@@ -30,7 +30,7 @@ from .competition_cohort_order_signer import (
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
-from .concurrency import run_owned_thread, wait_for_owned
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
 
@@ -232,6 +232,7 @@ class CohortExecutionWorker:
         ):
             raise ValueError("execution and inbox state must remain separate")
         self.inbox, self.executor, self.batch_size = inbox, executor, batch_size
+        self.concurrency = concurrency
         self.defer_endpoint_until_terminal = defer_endpoint_until_terminal
         self.capacity = asyncio.Semaphore(concurrency)
         # All assignments share one private inbox lock. Parallel sandbox jobs
@@ -267,39 +268,7 @@ class CohortExecutionWorker:
 
                 await run_owned_thread(advance)
 
-            async def one(slot):
-                async with self.capacity:
-                    try:
-                        async with self.inbox_reads:
-                            assignment = await run_owned_thread(self.inbox.assignment, slot)
-                        if self.defer_endpoint_until_terminal:
-                            job = await run_owned_thread(
-                                self.executor.journal.validate_assignment, assignment
-                            )
-                            if (
-                                job.mode == "endpoint_incumbent"
-                                and await run_owned_thread(
-                                    journal.get, "endpoint_terminal_selection", slot
-                                )
-                                is None
-                            ):
-                                # Endpoint origin capture and local incumbent execution
-                                # share the assignment authority lock. Let the miner
-                                # request become terminal before beginning a long local
-                                # inference so the two workers cannot starve each other.
-                                return slot, "deferred", "endpoint_terminal_pending"
-                        result = await self.executor.advance(assignment)
-                        return slot, "complete" if result is not None else "progress", ""
-                    except (
-                        OSError,
-                        ValueError,
-                        RuntimeError,
-                        sqlite3.Error,
-                        asyncio.TimeoutError,
-                    ) as error:
-                        return slot, "pending", type(error).__name__
-
-            tasks = [asyncio.create_task(one(slot)) for slot in slots]
+            tasks = [asyncio.create_task(self._one(slot)) for slot in slots]
             try:
                 results = await asyncio.gather(*tasks)
             finally:
@@ -324,6 +293,102 @@ class CohortExecutionWorker:
                 "chain_submission_authorized": False,
             }
 
+    async def _one(self, slot):
+        async with self.capacity:
+            journal = self.executor.journal.journal
+            try:
+                async with self.inbox_reads:
+                    assignment = await run_owned_thread(self.inbox.assignment, slot)
+                if self.defer_endpoint_until_terminal:
+                    job = await run_owned_thread(
+                        self.executor.journal.validate_assignment, assignment
+                    )
+                    if (
+                        job.mode == "endpoint_incumbent"
+                        and await run_owned_thread(journal.get, "endpoint_terminal_selection", slot)
+                        is None
+                    ):
+                        # Endpoint origin capture and local incumbent execution
+                        # share the assignment authority lock. Let the miner
+                        # request become terminal before beginning a long local
+                        # inference so the two workers cannot starve each other.
+                        return slot, "deferred", "endpoint_terminal_pending"
+                result = await self.executor.advance(assignment)
+                return slot, "complete" if result is not None else "progress", ""
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                asyncio.TimeoutError,
+            ) as error:
+                return slot, "pending", type(error).__name__
+
+    async def _rolling_poll(self, active):
+        results = []
+        for slot, task in tuple(active.items()):
+            if task.done():
+                results.append(task.result())
+                del active[slot]
+        if len(active) < self.concurrency:
+            journal = self.executor.journal.journal
+
+            def scan():
+                with journal.transaction() as db:
+                    rows = db.execute("SELECT slot FROM execution_cursor LIMIT 2").fetchall()
+                    if len(rows) > 1:
+                        raise ValueError("execution cursor is invalid")
+                    after = rows[0][0] if rows else ""
+                slots = self.inbox.assignments(after=after, limit=self.batch_size)
+                if not slots and after:
+                    slots = self.inbox.assignments(limit=self.batch_size)
+                chosen, last = [], None
+                for slot in slots:
+                    last = slot
+                    if slot not in active:
+                        chosen.append(slot)
+                    if len(chosen) >= self.concurrency - len(active):
+                        break
+                if last is not None:
+                    with journal.transaction() as db:
+                        db.execute("DELETE FROM execution_cursor")
+                        db.execute("INSERT INTO execution_cursor VALUES (?)", (last,))
+                return chosen
+
+            async with self.inbox_reads:
+                slots = await run_owned_thread(scan)
+            for slot in slots:
+                active[slot] = asyncio.create_task(self._one(slot))
+        pending = [r for r in results if r[1] == "pending"]
+        deferred = [r for r in results if r[1] == "deferred"]
+        return {
+            "status": "cohort_execution_pending"
+            if pending or deferred or active
+            else "cohort_execution_current",
+            "jobs_complete": sum(r[1] == "complete" for r in results),
+            "steps_advanced": sum(r[1] == "progress" for r in results),
+            "jobs_deferred": len(deferred),
+            "in_flight_operations": len(active),
+            "retry_count": len(pending),
+            "last_retry_slot": pending[-1][0] if pending else "",
+            "last_retry_type": pending[-1][2] if pending else "",
+            "last_deferred_reason": deferred[-1][2] if deferred else "",
+            "chain_submission_authorized": False,
+        }
+
+    @staticmethod
+    async def _drain(tasks):
+        tasks = tuple(tasks)
+        for task in tasks:
+            task.cancel()
+
+        async def drained():
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Keep the process alive until owned sandbox writes and cleanup drain,
+        # even if repeated shutdown signals arrive.
+        await await_owned_task(asyncio.create_task(drained()))
+
     async def run(
         self,
         stop: asyncio.Event,
@@ -333,31 +398,37 @@ class CohortExecutionWorker:
     ):
         if isinstance(poll_seconds, bool) or not 0 < poll_seconds <= 60:
             raise ValueError("execution poll interval is outside bounds")
-        while not stop.is_set():
-            task, stopping = asyncio.create_task(self.poll_once()), asyncio.create_task(stop.wait())
+        active = {}
+        async with self.serial:
             try:
-                done, _ = await asyncio.wait((task, stopping), return_when=asyncio.FIRST_COMPLETED)
-                if stopping in done:
-                    return
-                try:
-                    result = task.result()
-                except (
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                    sqlite3.Error,
-                    asyncio.TimeoutError,
-                ) as error:
-                    result = {
-                        "status": "cohort_execution_pending",
-                        "last_retry_type": type(error).__name__,
-                        "chain_submission_authorized": False,
-                    }
-                if report is not None:
-                    report(result)
+                while not stop.is_set():
+                    task = asyncio.create_task(self._rolling_poll(active))
+                    stopping = asyncio.create_task(stop.wait())
+                    try:
+                        done, _ = await asyncio.wait(
+                            (task, stopping), return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if stopping in done:
+                            return
+                        try:
+                            result = task.result()
+                        except (
+                            OSError,
+                            ValueError,
+                            RuntimeError,
+                            sqlite3.Error,
+                            asyncio.TimeoutError,
+                        ) as error:
+                            result = {
+                                "status": "cohort_execution_pending",
+                                "last_retry_type": type(error).__name__,
+                                "chain_submission_authorized": False,
+                            }
+                        if report is not None:
+                            report(result)
+                    finally:
+                        await self._drain((task, stopping))
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
             finally:
-                task.cancel()
-                stopping.cancel()
-                await asyncio.gather(task, stopping, return_exceptions=True)
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                await self._drain(active.values())
