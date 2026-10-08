@@ -306,8 +306,16 @@ class CohortEndpointWorker:
                 archive = await run_owned_thread(
                     self.schedule.journal.get, "endpoint_replay_archive", slot
                 )
-                if selected is not None and (terminal is None or archive is not None):
-                    continue
+                if selected is not None:
+                    if archive is not None:
+                        continue
+                    if terminal is None and await run_owned_thread(
+                        self.schedule.has_pending_cases, slot
+                    ):
+                        continue
+                    # A crash after the last case commit can precede the
+                    # aggregate commit. No pending case will revisit it; resume
+                    # native aggregate/archive construction through discovery.
                 chosen = slot
                 start("prepare", slot, lambda slot=slot: self._prepare(slot))
                 break

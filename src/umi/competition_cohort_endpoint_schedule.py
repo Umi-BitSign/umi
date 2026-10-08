@@ -136,6 +136,19 @@ class CohortEndpointSchedule:
                 (position,),
             )
 
+    def has_pending_cases(self, slot: str) -> bool:
+        """Scheduling hint only; aggregate creation still authenticates every case."""
+        with self.journal.read_transaction() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM endpoint_schedule_queue q WHERE q.slot=? "
+                    "AND NOT EXISTS (SELECT 1 FROM records r "
+                    "WHERE r.kind='endpoint_terminal_case' AND r.id=q.obligation) LIMIT 1",
+                    (slot,),
+                ).fetchone()
+                is not None
+            )
+
     def pending(
         self, limit: int, *, exclude: tuple[str, ...] = (), advance: bool = True
     ) -> tuple[tuple[str, str, str], ...]:

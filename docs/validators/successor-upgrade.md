@@ -1863,6 +1863,9 @@ operation. An operation yields at a retained phase boundary before entering the
 next phase; these counts are not counts of miners actively performing inference.
 Paid work still runs at most one job per miner within its queue. Miner-side
 concurrency and active-window limits remain unchanged.
+Discovery also resumes interrupted aggregate completion after the last endpoint
+case was retained. It authenticates the original case decisions and builds the
+missing archive without repeating inference or creating new signed requests.
 The existing private cursor advances only through considered admissions and
 survives restart. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports

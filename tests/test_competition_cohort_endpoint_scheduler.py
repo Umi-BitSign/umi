@@ -793,3 +793,51 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     finally:
         stop.set()
         await asyncio.wait_for(task, 120)
+
+
+async def test_rolling_restart_finishes_interrupted_terminal_selection(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    journal = p.delivery_recovery.journal.journal
+    original_put = journal.put
+    interrupted = False
+
+    def put(kind, key, value):
+        nonlocal interrupted
+        if kind == "endpoint_terminal_selection":
+            interrupted = True
+            raise OSError("interrupted before aggregate terminal commit")
+        return original_put(kind, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "put", put)
+        for _ in range(12):
+            await q.worker().poll_once()
+            if interrupted:
+                break
+    assert interrupted
+    assert journal.get("endpoint_terminal_selection", q.slot) is None
+    worker = q.worker()
+    assert worker.schedule.pending(16) == ()
+    calls = list(p.paths), len(q.s.calls), p.model.calls
+    p.c.finality.fail = True
+    p.finality.blocks.clear()
+    q.s.peers_offline = q.media_fail = q.policy_fail = True
+    active = {}
+    try:
+        await worker._rolling_poll(active)
+        assert q.slot in active, "completed cases must still reach aggregate recovery"
+        await asyncio.wait_for(asyncio.gather(*(task for _, task in active.values())), 180)
+        report = await worker._rolling_poll(active)
+        assert report["assignments_complete"] == 1
+        archive = EndpointReplayArchive.model_validate(
+            journal.get("endpoint_replay_archive", q.slot)
+        )
+        reviews = tuple(
+            endpoint_archive_cases(archive, JournalEndpointObjects(journal), p.c.policy)
+        )
+        assert len(reviews) == len(p.e.job.cases)
+        assert (list(p.paths), len(q.s.calls), p.model.calls) == calls
+    finally:
+        for _, task in active.values():
+            task.cancel()
+        await asyncio.gather(*(task for _, task in active.values()), return_exceptions=True)

@@ -42,7 +42,7 @@ curl -fsSLo /tmp/umi-miner-upgrade.py \
   && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
 ```
 
-Use `yes` instead of `no` for public-model participation. The active signed
+Use `yes` instead of `no` for public-model participation. The published upgrade
 manifest decides which answers are allowed, and the updater stops before changing
 the service if the selected track is unavailable. When endpoint participation is
 allowed, the updater signs and retains the endpoint request with the running
@@ -163,10 +163,10 @@ cohort's inputs and allowed tracks:
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-If a signed manifest offers only public-model participation, the updater rejects
+If the published manifest offers only public-model participation, the updater rejects
 `no`, records model-track intent, and leaves the existing endpoint service
 unchanged as a recoverable prior deployment. The model submission still requires
-the operator's signed rights declaration and selected bundle. Signed manifests,
+the operator's signed rights declaration and selected bundle. Published manifests,
 rather than cohort numbers baked into the script, enforce the profile published
 before intake. No cohort-specific replacement script is needed.
 
