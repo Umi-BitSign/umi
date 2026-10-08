@@ -56,6 +56,15 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _HEX_RE = re.compile(r"^0x(?:[0-9a-f]{2})+$")
 _LOGGER = logging.getLogger(__name__)
+RECOVERABLE_OBSERVER_FAILURES = frozenset(
+    {
+        "record_timeout",
+        "startup_timeout",
+        "subscription_ended",
+        "timestamp_unavailable",
+        "rpc_timeout",
+    }
+)
 
 
 class _ObserverDiagnostics:
@@ -700,7 +709,13 @@ class GrandpaFinalityObserver:
                             separators=(",", ":"),
                         )
                     )
-                raise GrandpaFinalityObserverError("observer_failed")
+                # Only fixed transport/unavailability labels permit a new run.
+                # The finally block still closes and reaps this exact child;
+                # no missing record or timestamp is accepted as evidence.
+                reason = diagnostics.failure_class
+                raise GrandpaFinalityObserverError(
+                    reason if reason in RECOVERABLE_OBSERVER_FAILURES else "observer_failed"
+                )
             tail = process.stdout.read(self._limits.maximum_record_bytes + 1)
             if expected_sequence != maximum_records or buffer.strip() or tail.strip():
                 raise GrandpaFinalityObserverError("record_count_mismatch")

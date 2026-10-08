@@ -1636,6 +1636,14 @@ changing a provider or retry policy. They do not authenticate finality or prove
 RPC throttling. Invalid evidence still holds, and persisted verified headers
 remain the recovery boundary.
 
+After the child closes and is reaped, record and startup timeouts, ended
+subscriptions, unavailable pinned timestamp storage and light-client RPC timeouts
+retry from the last committed header with bounded backoff. This keeps the owning
+reviewer running and preserves its static-proof caches. Unknown process failures,
+malformed evidence, rollback and store faults remain terminal. New observer runs
+still verify every record, expose restart gaps and reject stale or unavailable
+headers; recovery does not invent the missing timestamp or finalized history.
+
 The wrapper allows 30 seconds for normal process exit after the last verified
 record, and 30 seconds for cooperative termination before reaping a stalled
 observer. These are child-process cleanup allowances, not extensions of finality
@@ -1721,7 +1729,10 @@ Endpoint response recovery reads the assignment and its already verified job
 as one pair, including when validating retained replacement ancestry. Successful
 selection proofs are reused only for the exact selection and assignment bytes,
 policy, cohort configuration, private journal identity and current process. The
-bounded cache returns private copies; changes, failed proofs, restart or fork
+endpoint host keeps at most 2,048 successful selections within 512 MiB so that
+repeated sweeps can retain a cohort's working replacement ancestry. Eviction is
+still bounded and requires native verification on the next read. The cache
+returns private copies; changes, failed proofs, restart or fork
 require native verification again. Each replacement still reads and verifies its
 retained parent chain. Current execution and reward authority remain independently
 verified.

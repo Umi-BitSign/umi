@@ -723,6 +723,20 @@ async def test_exact_selection_static_proof_is_reused(recovery_case, monkeypatch
     assert canonical_reuse._ACTIVE.get() is None
 
 
+async def test_selection_reuse_keeps_cohort_scale_working_inventory(recovery_case):
+    p = recovery_case
+    recovery = p.consumer()
+    verified = recovery.selection(p.slot)
+    cache = recovery._selection_reuse
+
+    # A replacement history has more proof identities than original miners.
+    # Rotate the whole inventory before revisiting an earlier verified entry.
+    for index in range(600):
+        cache.remember(str(index), ("verified-working-inventory", index), verified)
+    for index in range(600):
+        assert cache.lookup(str(index), ("verified-working-inventory", index)) == verified
+
+
 async def test_exact_selection_rechecks_changed_signed_transport(recovery_case):
     p = recovery_case
     recovery = p.consumer()
