@@ -299,6 +299,13 @@ this command alone is not an open-mining launch.
 
 ## Recoverable cohort scheduling
 
+Remote endpoint concurrency is separate from local inference concurrency. The
+reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
+the existing16-connection control budget for history, votes and exports. Slow
+remote translates therefore cannot occupy the entire configured pool. A
+model-only host retains its existing16-connection budget. This changes neither
+signed request limits nor per-miner assignment and retirement fences.
+
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
 runtime and input clips, it reserves one source before inference and preserves

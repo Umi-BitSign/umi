@@ -73,6 +73,21 @@ def _token(path: str) -> str:
     )
 
 
+def _http_limits(config: PhaseReviewServiceConfig) -> httpx.Limits:
+    # Endpoint translates may keep one connection per remote slot occupied.
+    # Preserve the existing control-plane budget for history, votes and exports
+    # instead of making those requests wait for the translates they authorize.
+    endpoint_slots = (
+        0
+        if config.endpoint is None
+        else config.endpoint.concurrency or config.benchmark.concurrency
+    )
+    return httpx.Limits(
+        max_connections=16 + endpoint_slots,
+        max_keepalive_connections=8 + endpoint_slots,
+    )
+
+
 @asynccontextmanager
 async def phase_review_app(config: PhaseReviewServiceConfig):
     config = PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(config))
@@ -97,7 +112,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             httpx.AsyncClient(
                 trust_env=False,
                 follow_redirects=False,
-                limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+                limits=_http_limits(config),
             )
         )
         proofs = RewardProofArchive(Path(config.proof_import_directory))
