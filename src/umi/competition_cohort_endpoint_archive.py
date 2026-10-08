@@ -152,7 +152,8 @@ def endpoint_archive_cases(
                 opened, closed = request_interval
                 request = selected_request(selected, ref.case_id)
                 if not (
-                    opened < request.issued_block <= request.deadline_block <= closed
+                    opened < request.issued_block <= closed
+                    and request.issued_block <= request.deadline_block
                     and request.issued_block <= review.retirement.observed_block <= closed
                 ):
                     raise ValueError("endpoint attempt is outside certified request phases")

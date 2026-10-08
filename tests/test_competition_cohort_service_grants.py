@@ -1212,6 +1212,39 @@ async def test_service_terminal_replays_native_response_and_all_parents(
             read_service_terminal(terminal, owner.objects, p.c.policy, p.transport_policy)
 
 
+@pytest.mark.parametrize("replace_attempt", [False, True])
+async def test_completed_service_terminal_does_not_wait_for_unused_deadline(
+    service, monkeypatch, replace_attempt
+):
+    from umi.competition_cohort_service_terminal import read_service_terminal
+    from umi.competition_execution import execution_boundary
+
+    c, p = service, service.p
+    if replace_attempt:
+        c.grant, _, _ = await replacement(c, monkeypatch)
+    owner, response, retirement, source, _ = await terminal_response(c)
+    request = c.grant.body.request
+    observation = execution_boundary(capture(request.issued_block + 1))
+    assert observation.block < request.deadline_block
+    intent = owner.prepare(
+        service_grant_slot(c.grant.body), response, retirement, source, observation
+    )
+    terminal = owner.retain(intent, sign_object(intent, p.validator))
+    before = canonical_json_bytes(terminal)
+    assert read_service_terminal(
+        terminal, owner.objects, p.c.policy, p.transport_policy,
+        request_interval=(390, observation.block),
+    ) == c.grant
+    for interval in [(request.issued_block, observation.block), (390, observation.block - 1)]:
+        with pytest.raises(ValueError, match="outside certified request phases"):
+            read_service_terminal(
+                terminal, owner.objects, p.c.policy, p.transport_policy,
+                request_interval=interval,
+            )
+    assert canonical_json_bytes(owner.read(c.assignment)) == before
+    assert p.model.calls == 1
+
+
 @pytest.mark.parametrize("stage", ["service_terminal_intent", "service_terminal"])
 @pytest.mark.parametrize("after_commit", [False, True])
 async def test_service_terminal_interruption_replays_exact_committed_intent(

@@ -107,7 +107,8 @@ def review_service_terminal(
             opened, closed = request_interval
             req = current.body.request
             if not (
-                opened < req.issued_block <= req.deadline_block <= closed
+                opened < req.issued_block <= closed
+                and req.issued_block <= req.deadline_block
                 and req.issued_block <= terminal.observation.block <= closed
             ):
                 raise ValueError("service terminal lies outside certified request phases")
