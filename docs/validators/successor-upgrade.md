@@ -884,6 +884,18 @@ its intent. A replacement review includes its exact parent grant. Retry votes
 require a signed no-response retirement receipt and independently observed
 request expiry; assemble them with `certify_service_retry`.
 
+If the owned observer skipped an original request block, transport review recovers
+its header from an owned finalized descendant and proves `Timestamp.Now` against
+that header's state root. Recovery progresses in bounded, durable batches without
+a cutoff on the age of the request. Concurrent pending requests retain separate
+progress; a completed historical proof is reused across transport views. This
+does not create an observer record, move a signed deadline, or replace the fresh
+current-authority check. Preserve the registration cache and finality history
+during recovery; a missing header is a retryable hold, not a miner failure.
+The window's current-head check uses the owned observer directly; it does not
+repeat subnet membership collection. Admission and service review still perform
+their required registration and authority checks.
+
 Preserve the review journal across restarts. It binds each work item to its
 original assignment and evaluator, reserves vote space before signing, and
 recovers completed votes without live sources. Unfinished signing uses retained

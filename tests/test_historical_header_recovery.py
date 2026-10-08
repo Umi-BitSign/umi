@@ -273,8 +273,45 @@ async def test_verified_memory_eviction_preserves_recoverability(walk, monkeypat
     block_hash = w.by_height[height]
     header = w.headers[block_hash]
     target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
-    assert target.block_hash not in service._verified
+    assert height not in service._verified
     assert (await service.recover(w.anchor, target, w.request)).snapshot == target
     assert service._verified_bytes <= 600
     assert (await finish(service, w)).snapshot == w.target
     assert len(w.calls) == len(set(w.calls)) == len(w.headers) - 1
+
+
+async def test_alternating_owned_anchors_preserve_each_pending_walk(walk, chain_config, policy):
+    w = walk
+    lower = {n: h for n, h in w.by_height.items() if n < w.anchor.height - 10}
+    anchors = (w.anchor, make_anchor(chain_config, policy, w.headers, lower))
+    service = HistoricalHeaderRecovery(w.connect, batch_size=4)
+    completed = set()
+    for _ in range(12):
+        for anchor in anchors:
+            if anchor.height in completed:
+                continue
+            try:
+                result = await service.recover(anchor, w.target, w.request)
+            except HistoricalHeaderRecoveryPending:
+                continue
+            assert result.snapshot == w.target
+            completed.add(anchor.height)
+    assert completed == {a.height for a in anchors}
+    assert len(w.calls) == len(set(w.calls)) == w.anchor.height - w.target.block_number
+
+
+async def test_gap_beyond_2048_recovers_height_without_rpc_hash_claim(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect, batch_size=256)
+    for _ in range(12):
+        try:
+            result = await service.recover_height(w.anchor, w.target.block_number, w.request)
+            break
+        except HistoricalHeaderRecoveryPending:
+            pass
+    else:
+        pytest.fail("height recovery did not converge")
+    assert result.snapshot == w.target
+    assert len(w.calls) == len(set(w.calls)) == 2050
+    assert (await service.recover(w.anchor, w.target, w.request)).snapshot == w.target
+    assert len(w.calls) == 2050

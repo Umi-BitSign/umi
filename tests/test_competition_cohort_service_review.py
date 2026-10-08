@@ -583,11 +583,11 @@ async def test_concurrent_retry_waiters_preserve_one_native_certificate(networke
 async def test_retry_peer_write_waits_for_native_queue_owner(networked, monkeypatch):
     import os
 
-    from umi.private_files import lock_private_file
+    from umi.private_files import PrivateStateBusyError, lock_private_file
 
     s = networked
     review = await retired_attempt(s, monkeypatch)
-    entered = asyncio.Event()
+    contended = asyncio.Event()
     loop = asyncio.get_running_loop()
     original = s.peer_reviews._prepare
     calls = 0
@@ -595,19 +595,23 @@ async def test_retry_peer_write_waits_for_native_queue_owner(networked, monkeypa
     def prepare(value):
         nonlocal calls
         calls += 1
-        loop.call_soon_threadsafe(entered.set)
-        return original(value)
+        try:
+            return original(value)
+        except PrivateStateBusyError:
+            loop.call_soon_threadsafe(contended.set)
+            raise
 
     monkeypatch.setattr(s.peer_reviews, "_prepare", prepare)
     lease = lock_private_file(s.requests.journal.lock_path)
     task = asyncio.create_task(s.retry(review.grant, review.retirement))
     try:
-        await asyncio.wait_for(entered.wait(), timeout=60)
-        await asyncio.sleep(0.1)
+        # Signal actual native mutex contention, not entry before potentially
+        # slow signature verification. A sleep can release the lock too early.
+        await asyncio.wait_for(contended.wait(), timeout=180)
         assert not task.done()
         os.close(lease)
         lease = None
-        result = await asyncio.wait_for(task, timeout=60)
+        result = await asyncio.wait_for(task, timeout=180)
         assert result.decision == service_retry_decision(review)
         assert calls >= 2
     finally:

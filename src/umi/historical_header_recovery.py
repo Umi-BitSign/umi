@@ -39,22 +39,36 @@ class HistoricalHeaderRecovery:
         if type(batch_size) is not int or not 1 <= batch_size <= 4096:
             raise ValueError("historical header batch must be bounded")
         self.connect, self.maximum_bytes, self.batch_size = connect, maximum_bytes, batch_size
-        self.progress = {}
+        self.progress = OrderedDict()
+        self._progress_bytes = 0
         self._lock = asyncio.Lock()
         self._anchor = None
         self._verified = OrderedDict()
         self._verified_bytes = 0
 
-    def _remember(self, block_hash, encoded):
-        old = self._verified.pop(block_hash, None)
+    def _remember(self, height, encoded):
+        old = self._verified.pop(height, None)
         if old is not None:
             self._verified_bytes -= len(old)
-        self._verified[block_hash] = encoded
+        self._verified[height] = encoded
         self._verified_bytes += len(encoded)
         limit = min(self.maximum_bytes, MAXIMUM_VERIFIED_HEADER_BYTES)
         while self._verified_bytes > limit:
             _, old = self._verified.popitem(last=False)
             self._verified_bytes -= len(old)
+
+    def _forget_progress(self, key):
+        old = self.progress.pop(key, None)
+        if old is not None:
+            self._progress_bytes -= len(old)
+
+    def _remember_progress(self, key, encoded):
+        self._forget_progress(key)
+        self.progress[key] = encoded
+        self._progress_bytes += len(encoded)
+        while self._progress_bytes > min(self.maximum_bytes, MAXIMUM_VERIFIED_HEADER_BYTES):
+            _, old = self.progress.popitem(last=False)
+            self._progress_bytes -= len(old)
 
     def _open(self):
         db = self.connect()
@@ -104,15 +118,23 @@ class HistoricalHeaderRecovery:
                 raise
 
     async def recover(self, anchor, target: FinalizedSnapshotRef, request):
+        if not isinstance(target, FinalizedSnapshotRef):
+            raise TypeError("historical recovery requires an exact target")
         async with self._lock:
             return await self._recover(anchor, target, request)
 
+    async def recover_height(self, anchor, height: int, request):
+        """Derive the historical identity from the owned anchor, never RPC height claims."""
+        if type(height) is not int:
+            raise TypeError("historical recovery requires an integer height")
+        async with self._lock:
+            return await self._recover(anchor, height, request)
+
     async def _recover(self, anchor, target, request):
-        if not isinstance(anchor, VerifiedFinalizedBlock) or not isinstance(
-            target, FinalizedSnapshotRef
-        ):
-            raise TypeError("historical recovery requires an owned anchor and exact target")
-        if not 1 <= target.block_number < anchor.height:
+        if not isinstance(anchor, VerifiedFinalizedBlock):
+            raise TypeError("historical recovery requires an owned anchor")
+        height = target.block_number if isinstance(target, FinalizedSnapshotRef) else target
+        if not 1 <= height < anchor.height:
             raise ValueError("historical recovery target is not before its anchor")
         record = json.loads(anchor.finality_evidence)
         if record.get("evidence_class") != EVIDENCE_CLASS:
@@ -130,20 +152,21 @@ class HistoricalHeaderRecovery:
             self._anchor = identity
             self._verified.clear()
             self._verified_bytes = 0
-            self.progress.clear()
-        key = (anchor.finality_evidence_sha256, target)
+        # Each cursor was checked from its own exact anchor. Switching between
+        # pending requests must not erase another request's bounded progress.
+        key = (anchor.finality_evidence_sha256, height)
         # Only this process's completed ancestry checks are reusable. Durable
         # hints are still rehashed from the owned anchor after every restart.
-        cached = self._verified.get(target.block_hash)
+        cached = self._verified.get(height)
         if cached is not None:
-            self._verified.move_to_end(target.block_hash)
+            self._verified.move_to_end(height)
         encoded = cached or self.progress.get(key, encoded)
         current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-        if cached is not None and current["number"] != target.block_number:
+        if cached is not None and current["number"] != height:
             raise ValueError("historical registration differs from finalized ancestry")
         used = 0
         for _ in range(self.batch_size):
-            if current["number"] == target.block_number:
+            if current["number"] == height:
                 break
             block_hash = current["parent_hash"]
             next_encoded = await run_owned_thread(self._load, block_hash)
@@ -157,19 +180,19 @@ class HistoricalHeaderRecovery:
                 await run_owned_thread(self._save, block_hash, next_encoded)
             # Advance only after the exact hint is durable. Cancellation during
             # persistence leaves the old cursor; retry rechecks the stored hint.
-            self._remember(block_hash, next_encoded)
-            self.progress.clear()
-            self.progress[key] = encoded = next_encoded
+            self._remember(next_header["number"], next_encoded)
+            self._remember_progress(key, next_encoded)
+            encoded = next_encoded
             current = next_header
             used += (len(encoded) - 2) // 2
             if used >= MAXIMUM_PATH_BYTES:
                 break
-        if current["number"] != target.block_number:
+        if current["number"] != height:
             raise HistoricalHeaderRecoveryPending("historical header recovery in progress")
         recovered = FinalizedSnapshotRef(
             current["number"], current["hash"], current["parent_hash"], current["state_root"]
         )
-        if recovered != target:
+        if isinstance(target, FinalizedSnapshotRef) and recovered != target:
             raise ValueError("historical registration differs from finalized ancestry")
-        self.progress.pop(key, None)
+        self._forget_progress(key)
         return RecoveredHistoricalHeader(recovered, encoded)

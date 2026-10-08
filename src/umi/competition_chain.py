@@ -27,6 +27,7 @@ from typing_extensions import Self
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_resources import CompetitionChainResources
+from .competition_historical_blocks import HistoricalRequestBlocks
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
 from .concurrency import await_owned_task, run_owned_thread
@@ -602,6 +603,7 @@ class FinalizedRegistrationProvider:
             )
         self._finality = finality
         self._proofs = proofs
+        self._historical_request_blocks = HistoricalRequestBlocks(self)
 
     def _load_storage_codec(self):
         value = self.resources.storage_codec_metadata_path
