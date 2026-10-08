@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -29,6 +30,10 @@ ROOT = Path("/var/lib/umi-miner-cohorts")
 RUNTIME_ROOT = Path("/opt/umi-miner-runtimes")
 LAUNCHER = Path("/usr/local/libexec/umi-miner-upgrade")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
+SYSTEMD_RUNTIME_ROOT = Path("/run/systemd/system")
+COOPERATIVE_SERVICE_SETTINGS = (
+    "TimeoutStopSec=infinity\nSendSIGKILL=no\nKillMode=mixed\nKillSignal=SIGTERM\nSendSIGHUP=no\n"
+)
 ENROLLMENT_SERVICE = "umi-miner-cohort-enrollment.service"
 ENROLLMENT_TIMER = "umi-miner-cohort-enrollment.timer"
 SERVICE_CLAIM_TIMEOUT_SECONDS = 3600
@@ -431,7 +436,9 @@ def python_module_miner(arguments: list[str]) -> bool:
     )
 
 
-def run(*arguments: str, check: bool = True, timeout: int = 300) -> subprocess.CompletedProcess:
+def run(
+    *arguments: str, check: bool = True, timeout: int | None = 300
+) -> subprocess.CompletedProcess:
     result = subprocess.run(arguments, check=False, text=True, capture_output=True, timeout=timeout)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "no command output").strip()[-2000:]
@@ -548,12 +555,15 @@ def override(
     command_path: Path,
     command_sha256: str,
     launcher_python: Path,
+    startup_seconds: float,
 ) -> Path:
     if not launcher_python.is_absolute():
         raise ValueError("launcher interpreter is not absolute")
     path = SYSTEMD_ROOT / f"{service_name}.d" / "90-umi-cohort-upgrade.conf"
     raw = (
-        "[Service]\nExecStart=\n"
+        "[Service]\n"
+        + COOPERATIVE_SERVICE_SETTINGS
+        + f"TimeoutStartSec={startup_seconds}s\nExecStart=\n"
         f"ExecStart={launcher_python} -I -B {LAUNCHER} --run-command "
         f"{command_path} {command_sha256}\n"
     ).encode()
@@ -960,6 +970,77 @@ def install_launcher(source: Path) -> None:
     os.replace(pending, LAUNCHER)
 
 
+@contextmanager
+def cooperative_upgrade(services: tuple[Service, ...]):
+    """Protect the installed version before its first stop, including rollback.
+
+    A runtime drop-in survives an interrupted updater until reboot. It is only
+    removed after systemd is no longer starting or draining any affected unit.
+    The selected permanent override retains the same cooperative stop behavior.
+    """
+    paths = []
+    raw = ("[Service]\n" + COOPERATIVE_SERVICE_SETTINGS + "TimeoutStartSec=infinity\n").encode()
+    for entry in services:
+        if SYSTEMD_UNIT.fullmatch(entry.name) is None:
+            raise ValueError("systemd unit name differs")
+        path = SYSTEMD_RUNTIME_ROOT / f"{entry.name}.d" / "zz-umi-cohort-upgrade-drain.conf"
+        if path.exists() and (path.is_symlink() or path.read_bytes() != raw):
+            raise ValueError("existing cooperative upgrade guard differs")
+        paths.append(path)
+    try:
+        for path in paths:
+            _root_file(path, raw, 0o644)
+        run("systemctl", "daemon-reload")
+        for entry in services:
+            observed = run(
+                "systemctl",
+                "show",
+                entry.name,
+                "--property=TimeoutStopUSec,TimeoutStartUSec,SendSIGKILL,KillMode,KillSignal,SendSIGHUP",
+            )
+            expected = {
+                "TimeoutStopUSec=infinity",
+                "TimeoutStartUSec=infinity",
+                "SendSIGKILL=no",
+                "KillMode=mixed",
+                "KillSignal=15",
+                "SendSIGHUP=no",
+            }
+            if set(observed.stdout.splitlines()) != expected:
+                raise ValueError("installed service does not support cooperative upgrade")
+        yield
+    finally:
+        # Never remove protection while an interrupted command is still
+        # draining. In particular, Ctrl-C must not restore a short kill timer.
+        settled = True
+        for entry in services:
+            try:
+                result = run(
+                    "systemctl",
+                    "show",
+                    entry.name,
+                    "--property=ActiveState,ControlGroup",
+                    check=False,
+                )
+                values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+                state, group = values.get("ActiveState"), values.get("ControlGroup")
+                drained = state == "active"
+                if state in {"inactive", "failed"} and group is not None:
+                    drained = not group
+                    if group:
+                        events = Path("/sys/fs/cgroup") / group.lstrip("/") / "cgroup.events"
+                        drained = "populated 0" in events.read_text().splitlines()
+                settled = settled and result.returncode == 0 and drained
+            except Exception:
+                settled = False
+        if settled:
+            for path in paths:
+                path.unlink(missing_ok=True)
+            run("systemctl", "daemon-reload", check=False)
+        else:
+            print(canonical({"status": "miner_upgrade_drain_guard_retained"}).decode(), flush=True)
+
+
 def activate_services(
     *,
     miner: Service,
@@ -988,43 +1069,53 @@ def activate_services(
         if sidecar_dropin is not None and sidecar_dropin.exists()
         else None
     )
-    try:
-        run("systemctl", "stop", miner.name)
-        if sidecar is not None:
-            run("systemctl", "stop", sidecar.name)
-        override(miner.name, miner_command_path, miner_command_sha, launcher_python)
-        if (
-            sidecar is not None
-            and sidecar_command_path is not None
-            and sidecar_command_sha is not None
-        ):
-            override(sidecar.name, sidecar_command_path, sidecar_command_sha, launcher_python)
-        run("systemctl", "daemon-reload")
-        if sidecar is not None:
-            run("systemctl", "start", sidecar.name)
-            if new_socket is None:
-                raise ValueError("prepared model socket is missing")
-            wait_capacity(new_socket, transport, model, seconds=startup_seconds)
-        run("systemctl", "start", miner.name)
-        return wait_health(port, policy, transport, model, seconds=startup_seconds)
-    except Exception:
-        run("systemctl", "stop", miner.name, check=False)
-        if sidecar is not None:
-            run("systemctl", "stop", sidecar.name, check=False)
-        for path, raw in ((miner_dropin, previous_miner), (sidecar_dropin, previous_sidecar)):
-            if path is None:
-                continue
-            if raw is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_bytes(raw)
-                os.chown(path, 0, 0)
-                path.chmod(0o644)
-        run("systemctl", "daemon-reload", check=False)
-        if sidecar is not None:
-            run("systemctl", "start", sidecar.name, check=False)
-        run("systemctl", "start", miner.name, check=False)
-        raise
+    services = (miner,) if sidecar is None else (miner, sidecar)
+    with cooperative_upgrade(services):
+        try:
+            run("systemctl", "stop", miner.name, timeout=None)
+            if sidecar is not None:
+                run("systemctl", "stop", sidecar.name, timeout=None)
+            override(
+                miner.name, miner_command_path, miner_command_sha, launcher_python, startup_seconds
+            )
+            if (
+                sidecar is not None
+                and sidecar_command_path is not None
+                and sidecar_command_sha is not None
+            ):
+                override(
+                    sidecar.name,
+                    sidecar_command_path,
+                    sidecar_command_sha,
+                    launcher_python,
+                    startup_seconds,
+                )
+            run("systemctl", "daemon-reload")
+            if sidecar is not None:
+                run("systemctl", "start", sidecar.name, timeout=None)
+                if new_socket is None:
+                    raise ValueError("prepared model socket is missing")
+                wait_capacity(new_socket, transport, model, seconds=startup_seconds)
+            run("systemctl", "start", miner.name, timeout=None)
+            return wait_health(port, policy, transport, model, seconds=startup_seconds)
+        except Exception:
+            run("systemctl", "stop", miner.name, timeout=None)
+            if sidecar is not None:
+                run("systemctl", "stop", sidecar.name, timeout=None)
+            for path, raw in ((miner_dropin, previous_miner), (sidecar_dropin, previous_sidecar)):
+                if path is None:
+                    continue
+                if raw is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(raw)
+                    os.chown(path, 0, 0)
+                    path.chmod(0o644)
+            run("systemctl", "daemon-reload", check=False)
+            if sidecar is not None:
+                run("systemctl", "start", sidecar.name, check=False, timeout=None)
+            run("systemctl", "start", miner.name, check=False, timeout=None)
+            raise
 
 
 class EnrollmentRetry(RuntimeError):

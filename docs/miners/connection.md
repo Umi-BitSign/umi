@@ -115,7 +115,14 @@ backend lifecycle budget, allowing a complete startup plus observation headroom;
 it returns as soon as health is ready. Health confirms the observer is running,
 not that a fresh chain proof has already been collected. Existing signed clocks
 and proof freshness checks still apply to requests. The updater retains the
-resolved budgets in its receipt.
+resolved budgets in its receipt. Before stopping an installed miner, it verifies
+cooperative service shutdown settings and waits for the miner to drain before
+stopping its model service. There is no separate five-minute stop-command cutoff
+or systemd forced-kill timer. The selected service retains cooperative shutdown
+and the resolved startup allowance for subsequent boots. If interrupted during
+drain, the temporary protection stays in place until the service settles; rerun
+the updater to complete the upgrade. Existing grants, responses and state paths
+remain in place.
 An unsupported sidecar layout stops the upgrade before services change. Check any
 external proxy's request timeout as well: a healthy `/healthz` alone does not prove
 that the proxy can carry a full-length translation.
