@@ -309,12 +309,22 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
-Registration persistence waits up to 60 seconds for an explicitly classified
-private mutex before abandoning its collected proof. It retries the local
-retention lookup without repeating RPC collection. Cancellation drains the
-owned persistence operation and rolls back pruning; corruption, missing evidence
-and other errors are not treated as mutex contention. Freshness, registration,
-authority and retained-evidence checks remain required.
+Registration persistence distinguishes a temporarily busy retention mutex from
+invalid retention data. If the trusted mutex is busy, it preserves every existing
+capture and defers pruning while retaining the fresh verified proof. All captures
+with unknown pin status count against the working-cache budget; no archive-budget
+exemption or new authority is invented. Cancellation still drains owned persistence
+and rolls back. Corruption, conflicting records, stale proofs and untrusted error
+subclasses continue to hold collection. Routine pruning resumes on a successful
+pin projection.
+
+Before endpoint proof collection, the origin observer waits to reach the owned
+execution start height. After collection, a lagging authority observer may catch
+up within the configured operational read allowance. The retained capture is
+reused during this wait; its freshness, unchanged authority and journal rollback
+checks remain mandatory. A stopped observer, conflicting head or changed authority
+cannot grant delivery. Cancellation releases the assignment fence after owned
+operations drain. This coordination does not change signed request windows.
 
 ## Native Mac Studio evaluator
 

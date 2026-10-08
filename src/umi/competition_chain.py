@@ -66,7 +66,6 @@ from .validator_plans import VerifiedFinalizedBlock
 
 _MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 _STARTUP_POLL_SECONDS = 0.25
-_RETENTION_MUTEX_WAIT_SECONDS = 60.0
 # Reconnect silent follow streams before consuming the full freshness budget.
 # Give a live record up to half of the configured head-age allowance so slow RPC
 # or finality verification cannot cause a permanent fifteen-second retry loop.
@@ -1266,25 +1265,6 @@ class FinalizedRegistrationProvider:
         ):
             raise ValueError("registration finalized head rolled back or changed")
 
-    def _retained_blocks(self, cancelled: threading.Event | None) -> frozenset[int]:
-        """Wait for a validated local mutex without collecting the proof again."""
-        deadline = time.monotonic() + _RETENTION_MUTEX_WAIT_SECONDS
-        while True:
-            if cancelled is not None and cancelled.is_set():
-                raise ValueError("registration persistence cancelled")
-            try:
-                return self._retained_capture_blocks()
-            except PrivateStateBusyError as error:
-                # Never retry corruption, missing records or an untrusted subclass.
-                remaining = deadline - time.monotonic()
-                if type(error) is not PrivateStateBusyError or remaining <= 0:
-                    raise
-                pause = min(0.1, remaining)
-                if cancelled is None:
-                    time.sleep(pause)
-                else:
-                    cancelled.wait(pause)
-
     def _save(
         self,
         capture: RegistrationCapture,
@@ -1328,8 +1308,23 @@ class FinalizedRegistrationProvider:
                 # Pruning and insertion commit together; a failed save rolls
                 # back every deletion. observed_head remains the rollback guard.
                 retained = frozenset()
+                conservative_retention = False
                 if self._retained_capture_blocks is not None:
-                    retained = self._retained_blocks(cancelled)
+                    conservative_retention = False
+                    try:
+                        retained = self._retained_capture_blocks()
+                    except PrivateStateBusyError as error:
+                        if type(error) is not PrivateStateBusyError:
+                            raise
+                        # Pin projection is unavailable, not invalid. Preserve
+                        # every existing capture and defer only garbage collection.
+                        # No callback lock is needed to keep the already verified
+                        # fresh proof. Unknown pins get no archive-budget exemption.
+                        conservative_retention = True
+                        retained = frozenset(
+                            row[0] for row in connection.execute("SELECT block FROM captures")
+                        )
+                        _LOGGER.warning("registration_retention_pruning_deferred")
                     if cancelled is not None and cancelled.is_set():
                         raise ValueError("registration persistence cancelled")
                     if not isinstance(retained, frozenset) or any(
@@ -1347,8 +1342,14 @@ class FinalizedRegistrationProvider:
                 sizes = connection.execute(
                     "SELECT block, length(evidence) FROM captures"
                 ).fetchall()
-                archived = sum(size for block, size in sizes if block in retained)
-                total = sum(size for block, size in sizes if block not in retained)
+                archived = (
+                    0
+                    if conservative_retention
+                    else sum(size for block, size in sizes if block in retained)
+                )
+                total = sum(
+                    size for block, size in sizes if conservative_retention or block not in retained
+                )
                 total += connection.execute(
                     "SELECT COALESCE(SUM(length(body)), 0) FROM artifacts"
                 ).fetchone()[0]
@@ -1356,10 +1357,19 @@ class FinalizedRegistrationProvider:
                 # Receipt-bound evidence is a durable archive, not disposable
                 # cache. Its growth is governed by the admission ledger's
                 # record/byte limits and disk capacity, not the polling budget.
-                added_evidence = 0 if snapshot.block in retained else len(evidence)
+                added_evidence = (
+                    0
+                    if not conservative_retention and snapshot.block in retained
+                    else len(evidence)
+                )
                 capacity = (
                     total + added_evidence + added_metadata,
-                    archived + (len(evidence) if snapshot.block in retained else 0),
+                    archived
+                    + (
+                        len(evidence)
+                        if not conservative_retention and snapshot.block in retained
+                        else 0
+                    ),
                 )
                 if capacity[0] > self.config.maximum_cache_bytes:
                     self._report_capacity(*capacity)

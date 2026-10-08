@@ -129,8 +129,9 @@ async def test_repeated_ten_hour_gaps_recover_without_renewing_original_authorit
 
 
 @pytest.mark.parametrize("confirmation_advances", [True, False])
+@pytest.mark.parametrize("lagging_reads", [1, 4])
 async def test_origin_confirmation_does_not_accept_head_before_origin(
-    endpoint, monkeypatch, confirmation_advances
+    endpoint, monkeypatch, confirmation_advances, lagging_reads
 ):
     p = endpoint
     service = p.service()
@@ -152,21 +153,25 @@ async def test_origin_confirmation_does_not_accept_head_before_origin(
         if not origin_complete:
             return await native_collect()
         confirmations += 1
-        if confirmations == 1 or not confirmation_advances:
+        if confirmations <= lagging_reads or not confirmation_advances:
             return previous
         return await native_collect()
 
+    if not confirmation_advances:
+        service.authority.journal.config = service.authority.journal.config.model_copy(
+            update={"read_timeout_seconds": 1}
+        )
     monkeypatch.setattr(service.provider, "_collect_origin_locked", advance_origin)
     monkeypatch.setattr(service.authority.provider, "collect", delayed_confirmation)
     if confirmation_advances:
         capture = await service.collect(p.e.assignment)
         assert capture.block == _HEIGHT + 1
-        assert confirmations == 2
+        assert confirmations == lagging_reads + 1
         assert p.e.journal().assignment(p.e.r.slot) == p.e.assignment
     else:
         with pytest.raises(OSError, match="precedes collected origin"):
             await service.collect(p.e.assignment)
-        assert confirmations == 2
+        assert confirmations >= 1
     assert len(rows(p)) == 1
 
 
@@ -213,6 +218,10 @@ async def test_origin_confirmation_recollects_after_another_owned_observation(
                 )
         return source
 
+    if not provider_advances:
+        service.authority.journal.config = service.authority.journal.config.model_copy(
+            update={"read_timeout_seconds": 1}
+        )
     monkeypatch.setattr(service.authority, "history", concurrent_history)
     if provider_advances:
         capture = await service.collect(p.e.assignment)
@@ -220,7 +229,7 @@ async def test_origin_confirmation_recollects_after_another_owned_observation(
         assert rows(p) == [(capture.evidence,)]
         assert p.e.journal().assignment(p.e.r.slot) == p.e.assignment
     else:
-        with pytest.raises(ValueError, match="finalized head regressed"):
+        with pytest.raises(OSError, match="precedes collected origin"):
             await service.collect(p.e.assignment)
     with p.e.journal().journal.transaction() as db:
         assert db.execute("SELECT block FROM highwater").fetchall() == [(_HEIGHT + 1,)]
@@ -757,3 +766,53 @@ async def test_invalid_assignment_highwater_does_not_retry_authority(endpoint, m
     with pytest.raises(ValueError, match="finalized head regressed"):
         await service.collect(p.e.assignment)
     assert calls == 1 and p.resolutions == []
+
+
+async def test_origin_waits_for_owned_height_without_spending_proof_rpc(endpoint, monkeypatch):
+    p = endpoint
+    service = p.service()
+    original = p.c.finality.ref
+    calls = 0
+
+    async def lagging():
+        nonlocal calls
+        calls += 1
+        return original if calls < 4 else replace(original, block_number=_HEIGHT + 1)
+
+    monkeypatch.setattr(service.provider._finality, "verified_finalized_snapshot", lagging)
+    before = tuple(p.c.rpc.calls)
+    await service._wait_origin_head(_HEIGHT + 1)
+    assert calls == 4 and tuple(p.c.rpc.calls) == before
+    assert not rows(p)
+
+
+async def test_cancelled_origin_alignment_releases_assignment_fence(endpoint, monkeypatch):
+    p = endpoint
+    service = p.service()
+    native_current = service.authority.current
+    waiting = asyncio.Event()
+    current_returned = False
+
+    async def advanced_current(assignment):
+        nonlocal current_returned
+        source, boundary = await native_current(assignment)
+        current_returned = True
+        return source, boundary.model_copy(update={"block": _HEIGHT + 1})
+
+    async def lagging():
+        if current_returned:
+            waiting.set()
+        return p.c.finality.ref
+
+    monkeypatch.setattr(service.authority, "current", advanced_current)
+    monkeypatch.setattr(service.provider._finality, "verified_finalized_snapshot", lagging)
+    task = asyncio.create_task(service.collect(p.e.assignment))
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=120)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert not p.resolutions and not rows(p)
+    with p.e.journal().locked(p.e.r.slot):
+        assert p.e.journal().assignment(p.e.r.slot) == p.e.assignment
