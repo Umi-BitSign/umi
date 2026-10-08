@@ -60,7 +60,6 @@ class CohortEndpointWorker:
         self.schedule = CohortEndpointSchedule(attempts, maximum_cases=maximum_cases)
         self.batch_size = batch_size
         self.concurrency = concurrency
-        self._prepare_turn = True
         self.capacity, self.serial = asyncio.Semaphore(concurrency), asyncio.Lock()
 
     async def _prepare(self, slot):
@@ -108,9 +107,11 @@ class CohortEndpointWorker:
             await run_owned_thread(schedule.advance_inbox, slots[-1])
         return slots
 
-    async def _case(self, row):
+    async def _case(self, row, *, one_stage=False):
         _, slot, case_id = row
-        result = await self.attempts.advance(slot, case_id)
+        result = await self.attempts.advance(
+            slot, case_id, **({"one_stage": True} if one_stage else {})
+        )
         if result["status"] == "completed":
             await run_owned_thread(self.schedule.retain_case, slot, case_id)
             if await run_owned_thread(self.schedule.complete, slot) is not None:
@@ -288,14 +289,9 @@ class CohortEndpointWorker:
         def start(stage, slot, operation):
             active[slot] = (stage, asyncio.create_task(perform(operation)))
 
-        # Reserve one discovery slot when capacity permits. With a single slot,
-        # alternate preparation and cases; repeated pending cases cannot starve
-        # assignments whose request selection has not yet been built.
-        if (
-            len(active) < self.concurrency
-            and not any(stage == "prepare" for stage, _ in active.values())
-            and (self.concurrency > 1 or self._prepare_turn)
-        ):
+        # Discovery has one independently bounded operation. A slow clip or
+        # request vote cannot occupy dispatch, recovery or certification capacity.
+        if not any(stage == "prepare" for stage, _ in active.values()):
             slots = await self._inbox_slots(advance=False)
             chosen = None
             for slot in slots:
@@ -310,29 +306,39 @@ class CohortEndpointWorker:
                 archive = await run_owned_thread(
                     self.schedule.journal.get, "endpoint_replay_archive", slot
                 )
-                if selected is not None and (terminal is None or archive is not None):
-                    continue
+                if selected is not None:
+                    if archive is not None:
+                        continue
+                    if terminal is None and await run_owned_thread(
+                        self.schedule.has_pending_cases, slot
+                    ):
+                        continue
+                    # A crash after the last case commit can precede the
+                    # aggregate commit. No pending case will revisit it; resume
+                    # native aggregate/archive construction through discovery.
                 chosen = slot
                 start("prepare", slot, lambda slot=slot: self._prepare(slot))
-                self._prepare_turn = False
                 break
             if chosen is not None or slots:
                 # Do not skip a whole inbox page when only one operation was
                 # admitted. A crash keeps the inbox and exact requests intact.
                 await run_owned_thread(self.schedule.advance_inbox, chosen or slots[-1])
 
-        if len(active) < self.concurrency:
+        lanes = ("dispatch", "recovery", "certification")
+        counts = {lane: sum(stage == lane for stage, _ in active.values()) for lane in lanes}
+        if any(counts[lane] < self.concurrency for lane in lanes):
             # Only admitted operations may move durable case cursors. A whole
             # page advances cases that were never started and can starve peers.
             rows = await run_owned_thread(
                 lambda: self.schedule.pending(
-                    min(self.batch_size, self.concurrency - len(active)),
+                    self.batch_size,
                     exclude=tuple(active),
+                    advance=False,
                 )
             )
             for row in rows:
                 slot = row[1]
-                if len(active) >= self.concurrency:
+                if all(counts[lane] >= self.concurrency for lane in lanes):
                     break
                 if slot in active:
                     continue
@@ -340,10 +346,14 @@ class CohortEndpointWorker:
                     self.schedule.journal.get, "endpoint_recovery_selection", slot
                 )
                 if selected is not None:
-                    start("case", slot, lambda row=row: self._case(row))
-                    self._prepare_turn = True
-            if not active:
-                self._prepare_turn = True
+                    lane = await run_owned_thread(self.attempts.phase, slot, row[2])
+                    if counts[lane] >= self.concurrency:
+                        continue
+                    await run_owned_thread(self.schedule.admit_case, row)
+                    start(lane, slot, lambda row=row: self._case(row, one_stage=True))
+                    counts[lane] += 1
+            if rows:
+                await run_owned_thread(self.schedule.advance_case_scan, rows[-1][1])
 
         last = retries[-1] if retries else ("", "", "", [])
         return {
@@ -355,12 +365,17 @@ class CohortEndpointWorker:
             "assignments_complete": sum(
                 stage == "prepare" and status == "completed" for stage, status, _ in results
             ),
-            "cases_considered": sum(stage == "case" for stage, _, _ in results),
+            "cases_considered": sum(stage in lanes for stage, _, _ in results),
             "cases_completed": sum(
-                stage == "case" and status == "completed" for stage, status, _ in results
+                stage in lanes and status == "completed" for stage, status, _ in results
             ),
             "batch_pending": sum(status == "pending" for _, status, _ in results),
             "in_flight_operations": len(active),
+            "phase_capacity": self.concurrency,
+            "in_flight_phase_counts": {
+                lane: sum(stage == lane for stage, _ in active.values())
+                for lane in ("prepare", *lanes)
+            },
             "retry_count": len(retries),
             "last_retry_stage": last[0],
             "last_retry_slot": last[1],

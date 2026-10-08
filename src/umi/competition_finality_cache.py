@@ -8,6 +8,7 @@ status poll cannot occupy or queue the proof collector ahead of an admission.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import time
@@ -25,6 +26,7 @@ from .competition_chain import (
 from .competition_submission_checkpoint import SubmissionCheckpointError
 from .concurrency import await_owned_task
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
+from .private_files import PrivateStateBusyError
 from .protocol import canonical_json_bytes
 from .validator_chain import ValidatorChainError
 
@@ -106,6 +108,7 @@ _CHAIN_REFRESH_REASONS = frozenset(
     }
 )
 _REFRESH_FAILURE_CLASSES = {
+    PrivateStateBusyError: ("PrivateStateBusyError", "retention_mutex_busy"),
     OwnedFinalityStale: ("OwnedFinalityStale", "owned_finality_stale"),
     RegistrationCacheFull: ("RegistrationCacheFull", "registration_cache_capacity"),
     RegistrationProviderTimeout: (
@@ -135,6 +138,31 @@ def _refresh_failure(error: Exception) -> tuple[str, str]:
     # Exact classes prevent untrusted subclasses from supplying a property or
     # dynamic class name as a purported diagnostic. All output is fixed text.
     return _REFRESH_FAILURE_CLASSES.get(type(error), ("Exception", "unclassified_refresh_failure"))
+
+
+def _refresh_source_frames(error: Exception) -> list[dict]:
+    """Identify native failure locations without formatting a provider exception.
+
+    Read the builtin traceback descriptor, not an untrusted subclass property.
+    Only fixed module names and line numbers leave this private boundary; no
+    messages, paths, function names, locals, dynamic types or causes are emitted.
+    """
+    modules = {
+        "umi.competition_finality_cache",
+        "umi.competition_chain",
+        "umi.validator_chain",
+        "umi.grandpa_finality_supervisor",
+    }
+    frames = []
+    tb = BaseException.__traceback__.__get__(error)
+    for _ in range(256):
+        if tb is None:
+            break
+        module = tb.tb_frame.f_globals.get("__name__")
+        if type(module) is str and module in modules:
+            frames.append({"module": module, "line": tb.tb_lineno})
+        tb = tb.tb_next
+    return frames[-8:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +440,11 @@ class VerifiedRegistrationCache:
                     _LOGGER.warning(
                         "registration_refresh_failed error_type=%s reason_code=%s", *failure
                     )
+                    if failure[0] == "Exception":
+                        _LOGGER.warning(
+                            "registration_refresh_boundary native_frames=%s",
+                            json.dumps(_refresh_source_frames(error), separators=(",", ":")),
+                        )
                     last_failure = failure
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._refresh_interval)

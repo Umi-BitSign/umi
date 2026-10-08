@@ -4,6 +4,7 @@ Finality, peer transport, DNS and inference are fixtures. Proof bytes are retain
 but the fixture finality verifier is not a production chain qualification.
 """
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -363,15 +364,8 @@ async def test_dispatch_interrupted_commit_recovers_without_duplicate_inference(
     result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
         p.retire_slot, case
     )
-    if stage == "intent_after":
-        assert result["status"] == "pending"
-        assert p.model.calls == 0
-        expire_child(p, p.grant, monkeypatch)
-        decision = (await coordinator(signing.d).advance(p.retire_slot, case)).certificate
-        assert decision.decision.disposition == "retry_required"
-    else:
-        assert result["status"] == "recovered", result
-        assert p.model.calls == 1
+    assert result["status"] == "recovered", result
+    assert p.model.calls == 1
 
 
 async def test_dispatch_lost_response_ack_fetches_sealed_reply(signing):
@@ -396,6 +390,165 @@ async def test_dispatch_lost_response_ack_fetches_sealed_reply(signing):
     assert (await worker.dispatch(p.retire_slot, case))["status"] == "recovered"
     assert p.model.calls == 1
     assert sum(path == TRANSLATE_PATH for path, *_ in p.transmissions) == 1
+
+
+async def reject_first_translate(p):
+    import httpx
+
+    original = p.delivery_recovery.transport
+    seen = []
+
+    class RejectFirst(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            if req.url.path == TRANSLATE_PATH:
+                seen.append((req.content, dict(req.headers)))
+                if len(seen) == 1:
+                    return httpx.Response(503, content=b"temporary admission unavailable")
+            return await original.handle_async_request(req)
+
+    p.delivery_recovery.transport = RejectFirst()
+    worker = CohortEndpointDispatcher(p.delivery_recovery, p.finality)
+    assert (await worker.dispatch(p.retire_slot, p.case_id))["status"] == "pending"
+    assert p.model.calls == 0
+    return worker, seen
+
+
+async def test_transient_admission_retries_same_request_with_fresh_auth(signing):
+    from umi.competition_cohort_endpoint_selection import case_record_key
+
+    p = signing.p
+    worker, seen = await reject_first_translate(p)
+    selected, *_ = p.delivery_recovery.selection(p.retire_slot)
+    key = case_record_key(selected, p.case_id)
+    db = p.delivery_recovery.journal.journal
+    original = {
+        kind: canonical_json_bytes(db.get(kind, key))
+        for kind in ("endpoint_dispatch_intent", "endpoint_dispatch_receipt")
+    }
+    result = await worker.dispatch(p.retire_slot, p.case_id)
+    assert result["status"] == "recovered", result
+    assert len(seen) == 2 and seen[0][0] == seen[1][0]
+    assert seen[0][1] != seen[1][1]
+    assert p.model.calls == 1
+    for kind, raw in original.items():
+        assert canonical_json_bytes(db.get(kind, key)) == raw
+    result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        p.retire_slot, p.case_id
+    )
+    assert result["status"] == "recovered" and len(seen) == 2 and p.model.calls == 1
+    decision = (await coordinator(signing.d).advance(p.retire_slot, p.case_id)).certificate
+    assert decision.decision.disposition == "retain_response"
+
+
+@pytest.mark.parametrize(
+    "stage", ["intent_before", "intent_after", "receipt_before", "receipt_after"]
+)
+async def test_dispatch_retry_commit_interruption_never_sends_third(signing, monkeypatch, stage):
+    p = signing.p
+    worker, seen = await reject_first_translate(p)
+    db = p.delivery_recovery.journal.journal
+    real = db.put
+
+    def put(kind, key, value):
+        wanted = (
+            "endpoint_dispatch_retry_intent"
+            if stage.startswith("intent")
+            else "endpoint_dispatch_retry_receipt"
+        )
+        if kind == wanted:
+            if stage.endswith("after"):
+                real(kind, key, value)
+            raise OSError("retry commit interrupted")
+        return real(kind, key, value)
+
+    with monkeypatch.context() as m:
+        m.setattr(db, "put", put)
+        with pytest.raises(OSError, match="retry commit interrupted"):
+            await worker.dispatch(p.retire_slot, p.case_id)
+    result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        p.retire_slot, p.case_id
+    )
+    if stage == "intent_after":
+        assert result["status"] == "pending" and len(seen) == 1 and p.model.calls == 0
+    else:
+        assert result["status"] == "recovered", result
+        assert len(seen) == 2 and p.model.calls == 1
+    before = len(seen)
+    await worker.dispatch(p.retire_slot, p.case_id)
+    assert len(seen) == before
+
+
+async def test_dispatch_retry_does_not_repeat_inference_when_response_lookup_fails(signing):
+    import httpx
+
+    from umi.endpoint_protocol import RESPONSE_RECOVERY_PATH
+
+    p = signing.p
+    original = p.delivery_recovery.transport
+    seen = []
+
+    class Lost(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            if req.url.path == RESPONSE_RECOVERY_PATH:
+                return httpx.Response(503)
+            response = await original.handle_async_request(req)
+            if req.url.path == TRANSLATE_PATH:
+                seen.append(req.content)
+                if len(seen) == 1:
+                    assert response.status_code == 200
+                    raise httpx.ReadTimeout("original acknowledgement lost")
+            return response
+
+    p.delivery_recovery.transport = Lost()
+    worker = CohortEndpointDispatcher(p.delivery_recovery, p.finality)
+    assert (await worker.dispatch(p.retire_slot, p.case_id))["status"] == "pending"
+    assert (await worker.dispatch(p.retire_slot, p.case_id))["status"] == "recovered"
+    assert len(seen) == 2 and seen[0] == seen[1] and p.model.calls == 1
+
+
+async def test_dispatch_retry_expiry_keeps_original_and_consumes_no_new_intent(
+    signing, monkeypatch
+):
+    from umi.competition_cohort_endpoint_selection import case_record_key
+
+    p = signing.p
+    worker, seen = await reject_first_translate(p)
+    expire_child(p, p.grant, monkeypatch)
+    result = await worker.dispatch(p.retire_slot, p.case_id)
+    assert result["status"] == "pending"
+    assert len(seen) == 1 and p.model.calls == 0
+    selected, *_ = p.delivery_recovery.selection(p.retire_slot)
+    assert (
+        p.delivery_recovery.journal.journal.get(
+            "endpoint_dispatch_retry_intent", case_record_key(selected, p.case_id)
+        )
+        is None
+    )
+
+
+async def test_dispatch_retry_unknown_second_outcome_exhausts_budget(signing):
+    import httpx
+
+    p = signing.p
+    worker, seen = await reject_first_translate(p)
+    original = p.delivery_recovery.transport
+
+    class LostAgain(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, req):
+            if req.url.path == TRANSLATE_PATH:
+                seen.append((req.content, dict(req.headers)))
+                raise httpx.ConnectTimeout("retry outcome unknown")
+            return await original.handle_async_request(req)
+
+    p.delivery_recovery.transport = LostAgain()
+    assert (await worker.dispatch(p.retire_slot, p.case_id))["status"] == "pending"
+    for _ in range(2):
+        assert (
+            await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+                p.retire_slot, p.case_id
+            )
+        )["status"] == "pending"
+    assert len(seen) == 2 and p.model.calls == 0
 
 
 async def test_dispatch_no_send_after_window_expiry(signing, monkeypatch):
@@ -620,3 +773,33 @@ async def test_fresh_replacement_works_inside_legacy_blackout(
     assert result["status"] == "recovered"
     assert p.model.calls == 1 and len(p.transmissions) == transmissions
     assert canonical_json_bytes(p.grant) == parent_bytes
+
+
+@pytest.mark.parametrize("dependency", ["history", "collect"])
+async def test_request_proof_wait_does_not_block_another_vote(signing, monkeypatch, dependency):
+    s, entered, release = signing, asyncio.Event(), asyncio.Event()
+    signer = s.signer()
+    owner = signer if dependency == "history" else signer.provider
+    original = getattr(owner, dependency)
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(owner, dependency, delayed)
+    first = asyncio.create_task(signer.attest(s.plan))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        with signer.journal.journal.locked():
+            pass
+        vote = await asyncio.wait_for(signer.attest(s.plan), 30)
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, 30)
+    assert result == vote
+    assert len(s.calls) == 1

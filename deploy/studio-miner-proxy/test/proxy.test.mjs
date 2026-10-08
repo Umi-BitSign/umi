@@ -153,3 +153,31 @@ test('client abort cancels body read before forwarding', async () => {
   assert.equal((await pending).status, 504);
   assert.equal(cancelled, true);
 });
+
+test('native cohort execution can exceed the old proxy deadline', async t => {
+  const timers = new Map();
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const id = Symbol('timer');
+    timers.set(id, { callback, delay });
+    return id;
+  });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  let started;
+  const entered = new Promise(resolve => { started = resolve; });
+  let finish;
+  const work = new Promise(resolve => { finish = resolve; });
+  const pending = run('/v1/translate', { method: 'POST', body: '{}' }, async request => {
+    started();
+    await work;
+    assert.equal(request.signal.aborted, false);
+    return new Response('retained-response');
+  });
+  await entered;
+  for (const timer of timers.values()) {
+    if (timer.delay <= 2_400_000) timer.callback();
+  }
+  finish();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'retained-response');
+});

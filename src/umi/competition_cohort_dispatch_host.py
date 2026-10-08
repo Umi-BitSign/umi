@@ -84,6 +84,8 @@ class ServiceDispatchHost:
         key,
         sign: Callable[[object], Awaitable[Signature]],
         clips: Callable[[str], Awaitable[Video]],
+        *,
+        windows=None,
     ):
         self.service, self.lifecycle, self.origins = service, lifecycle, origins
         self.config = ServiceDispatchConfig.model_validate_json(
@@ -91,6 +93,7 @@ class ServiceDispatchHost:
         )
         self.client, self.credentials = client, credentials
         self.key, self.sign, self.clips = key, sign, clips
+        self.windows = windows
         if origins.policy != service.intake.policy:
             raise ValueError("service dispatch origin policy differs from its admission")
         self.workers, self.last_reports, self.tasks = {}, {}, {}
@@ -178,6 +181,7 @@ class ServiceDispatchHost:
             blocks,
             authority.origin,
             timeout_seconds=self.config.operation_timeout_seconds,
+            windows=self.windows,
         )
         worker = await run_owned_thread(
             lambda: ServiceWorkWorker(
@@ -242,7 +246,7 @@ class ServiceDispatchHost:
 
 
 async def start_service_dispatch(
-    service, lifecycle, resources, client, credentials, key, sign, token
+    service, lifecycle, resources, client, credentials, key, sign, token, *, windows=None
 ):
     config = service.config.dispatch
     if (
@@ -262,4 +266,5 @@ async def start_service_dispatch(
         key,
         sign,
         CohortClipDelivery(config.clips, client, token),
+        windows=windows,
     )

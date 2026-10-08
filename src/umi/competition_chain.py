@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing_extensions import Self
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_resources import CompetitionChainResources
+from .competition_historical_blocks import HistoricalRequestBlocks
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
 from .concurrency import await_owned_task, run_owned_thread
@@ -46,6 +48,7 @@ from .open_competition import (
     digest,
 )
 from .policy import FinalityVerifierPin, LiveChainObservationPin
+from .private_files import PrivateStateBusyError
 from .proof_rpc_cache import BlockPinnedRpcCache
 from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
@@ -419,7 +422,21 @@ class _PrefetchRpc:
 
     def __init__(self, rpc: Any):
         self.rpc = rpc
-        self.values: dict[tuple[str, str], Any] = {}
+        self._values: ContextVar[dict[tuple[str, str], Any] | None] = ContextVar(
+            "registration_prefetch_values", default=None
+        )
+
+    @property
+    def values(self) -> dict[tuple[str, str], Any]:
+        values = self._values.get()
+        if values is None:
+            values = {}
+            self._values.set(values)
+        return values
+
+    @values.setter
+    def values(self, value: dict[tuple[str, str], Any]) -> None:
+        self._values.set(value)
 
     async def request(self, method: str, params: Sequence[Any]) -> Any:
         if method == "state_getStorageAt" and tuple(params) in self.values:
@@ -427,7 +444,9 @@ class _PrefetchRpc:
         return await self.rpc.request(method, params)
 
     async def prefetch(self, block_hash: str, keys: Sequence[bytes]) -> None:
-        self.values.clear()
+        # Each concurrent proof collection owns its prefetched immutable block
+        # claims. Finishing one request cannot clear another request's inputs.
+        self.values = {}
         if getattr(self.rpc, "bulk_storage_reads", False):
             self.values = await self.rpc.storage_values(block_hash, keys)
             return
@@ -584,6 +603,7 @@ class FinalizedRegistrationProvider:
             )
         self._finality = finality
         self._proofs = proofs
+        self._historical_request_blocks = HistoricalRequestBlocks(self)
 
     def _load_storage_codec(self):
         value = self.resources.storage_codec_metadata_path
@@ -1307,8 +1327,23 @@ class FinalizedRegistrationProvider:
                 # Pruning and insertion commit together; a failed save rolls
                 # back every deletion. observed_head remains the rollback guard.
                 retained = frozenset()
+                conservative_retention = False
                 if self._retained_capture_blocks is not None:
-                    retained = self._retained_capture_blocks()
+                    conservative_retention = False
+                    try:
+                        retained = self._retained_capture_blocks()
+                    except PrivateStateBusyError as error:
+                        if type(error) is not PrivateStateBusyError:
+                            raise
+                        # Pin projection is unavailable, not invalid. Preserve
+                        # every existing capture and defer only garbage collection.
+                        # No callback lock is needed to keep the already verified
+                        # fresh proof. Unknown pins get no archive-budget exemption.
+                        conservative_retention = True
+                        retained = frozenset(
+                            row[0] for row in connection.execute("SELECT block FROM captures")
+                        )
+                        _LOGGER.warning("registration_retention_pruning_deferred")
                     if cancelled is not None and cancelled.is_set():
                         raise ValueError("registration persistence cancelled")
                     if not isinstance(retained, frozenset) or any(
@@ -1326,8 +1361,14 @@ class FinalizedRegistrationProvider:
                 sizes = connection.execute(
                     "SELECT block, length(evidence) FROM captures"
                 ).fetchall()
-                archived = sum(size for block, size in sizes if block in retained)
-                total = sum(size for block, size in sizes if block not in retained)
+                archived = (
+                    0
+                    if conservative_retention
+                    else sum(size for block, size in sizes if block in retained)
+                )
+                total = sum(
+                    size for block, size in sizes if conservative_retention or block not in retained
+                )
                 total += connection.execute(
                     "SELECT COALESCE(SUM(length(body)), 0) FROM artifacts"
                 ).fetchone()[0]
@@ -1335,10 +1376,19 @@ class FinalizedRegistrationProvider:
                 # Receipt-bound evidence is a durable archive, not disposable
                 # cache. Its growth is governed by the admission ledger's
                 # record/byte limits and disk capacity, not the polling budget.
-                added_evidence = 0 if snapshot.block in retained else len(evidence)
+                added_evidence = (
+                    0
+                    if not conservative_retention and snapshot.block in retained
+                    else len(evidence)
+                )
                 capacity = (
                     total + added_evidence + added_metadata,
-                    archived + (len(evidence) if snapshot.block in retained else 0),
+                    archived
+                    + (
+                        len(evidence)
+                        if not conservative_retention and snapshot.block in retained
+                        else 0
+                    ),
                 )
                 if capacity[0] > self.config.maximum_cache_bytes:
                     self._report_capacity(*capacity)

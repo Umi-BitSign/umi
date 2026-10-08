@@ -16,9 +16,14 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
+from .config import resolve_inference_timeout
 from .file_identity import private_file_identity as _stat_identity
+
+if TYPE_CHECKING:
+    from .open_competition import CompetitionPolicy
+
 
 MODEL_SIDECAR_PROTOCOL = "umi-model-sidecar/1"
 MODEL_SIDECAR_CAPACITY_SCHEMA = "umi-model-sidecar-capacity/1"
@@ -100,7 +105,8 @@ async def start_model_sidecar(
     maximum_video_bytes: int = 16 * 1024 * 1024,
     maximum_response_bytes: int = 4 * 1024,
     maximum_concurrency: int = 1,
-    maximum_inference_seconds: float = 120.0,
+    maximum_inference_seconds: float | None = None,
+    competition_policy: CompetitionPolicy | None = None,
     scoring_policy_sha256: str | None = None,
     validator_slot_count: int = 1,
 ) -> ModelSidecarServer:
@@ -131,6 +137,9 @@ async def start_model_sidecar(
         raise ValueError("maximum_response_bytes exceeds the U32 frame limit")
     if maximum_concurrency < validator_slot_count:
         raise ValueError("maximum_concurrency must reserve one slot per validator")
+    maximum_inference_seconds = resolve_inference_timeout(
+        competition_policy, requested_seconds=maximum_inference_seconds
+    )
     maximum_inference_milliseconds = _inference_milliseconds(maximum_inference_seconds)
     if scoring_policy_sha256 is not None and _HEX_32_RE.fullmatch(scoring_policy_sha256) is None:
         raise ValueError("scoring_policy_sha256 must be a lowercase SHA-256 digest")
@@ -226,6 +235,7 @@ def validate_model_sidecar_capacity(
     expected_scoring_policy_sha256: str,
     required_validator_slots: int,
     maximum_inference_seconds: float = 120.0,
+    minimum_inference_seconds: float | None = None,
 ) -> int:
     """Validate the private descriptor bound to one live sidecar socket."""
 
@@ -239,6 +249,13 @@ def validate_model_sidecar_capacity(
         raise ValueError("required validator slots must be a positive integer")
     _revision_bytes(expected_model_revision)
     maximum_inference_milliseconds = _inference_milliseconds(maximum_inference_seconds)
+    minimum_inference_milliseconds = (
+        1
+        if minimum_inference_seconds is None
+        else _inference_milliseconds(minimum_inference_seconds)
+    )
+    if minimum_inference_milliseconds > maximum_inference_milliseconds:
+        raise ValueError("minimum sidecar inference budget exceeds maximum")
     socket = Path(socket_path)
     validate_private_socket_parent(socket)
     socket_metadata = socket.lstat()
@@ -317,7 +334,7 @@ def validate_model_sidecar_capacity(
         or process_id <= 0
         or isinstance(declared_inference_milliseconds, bool)
         or not isinstance(declared_inference_milliseconds, int)
-        or declared_inference_milliseconds <= 0
+        or declared_inference_milliseconds < minimum_inference_milliseconds
         or declared_inference_milliseconds > maximum_inference_milliseconds
         or not isinstance(document.get("startup_nonce"), str)
         or _HEX_32_RE.fullmatch(document["startup_nonce"]) is None

@@ -85,47 +85,65 @@ def request_for(scenario, *, sequence=1, block=200, name="Alice"):
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
 
 
-def test_authority_history_advances_ahead_of_queued_background_transaction(
-    intake, scenario, monkeypatch
-):
+def test_retained_history_read_does_not_wait_for_an_unrelated_sqlite_reader(intake, scenario):
     cohort = digest(scenario["intake_history"].plan)
-    order = []
-    gate = intake._process_lock
-    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+    database = Path(intake.directory) / "intake.sqlite3"
+    # A retained read transaction (for example, a backup reader) must not make
+    # a native read-only history lookup require SQLite's exclusive write lock.
+    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as reader:
+        reader.execute("BEGIN")
+        original_binding = reader.execute("SELECT body FROM intake_binding").fetchall()
+        assert intake.history(cohort) == scenario["intake_history"]
+        assert reader.execute("SELECT body FROM intake_binding").fetchall() == original_binding
+        reader.rollback()
 
-    published_history = CohortRecoveryStore.published_history
 
-    def retained_history(store, current):
-        result = published_history(store, current)
-        order.append("history")
-        return result
+def test_authority_history_does_not_wait_for_intake_writer(intake, scenario):
+    cohort = digest(scenario["intake_history"].plan)
+    # A real native owner and an uncommitted SQLite write must not prevent
+    # either an internal or a fresh exporter lookup of committed history.
+    with ThreadPoolExecutor(max_workers=2) as pool, intake._connection() as (db, _):
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            calls = [pool.submit(intake.history, cohort) for _ in range(2)]
+            assert [f.result(timeout=60) for f in calls] == [scenario["intake_history"]] * 2
+        finally:
+            db.rollback()
 
-    monkeypatch.setattr(CohortRecoveryStore, "published_history", retained_history)
 
-    def background():
-        with intake._connection():
-            order.append("background")
+def test_authority_history_snapshot_rejects_mutation(intake, scenario):
+    cohort = digest(scenario["intake_history"].plan)
+    with intake._connection(prefer_history=True) as (db, store):
+        assert store.published_history(cohort) == scenario["intake_history"]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            db.execute("DELETE FROM cohort_consents")
+        with pytest.raises(ValueError, match="own atomic transaction"):
+            store.retain_source(cohort, scenario["intake_history"].genesis)
+        assert store.published_history(cohort) == scenario["intake_history"]
+    assert intake.history(cohort) == scenario["intake_history"]
 
-    def history():
-        return intake.history(cohort)
 
-    # Enqueue the actual history reader after a background transaction while
-    # retaining the current owner. Both still use the native private connection.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        with gate.hold():
-            writer = pool.submit(background)
-            with gate._condition:
-                assert gate._condition.wait_for(lambda: len(gate._normal) == 1, timeout=120)
-            reader = pool.submit(history)
-            with gate._condition:
-                assert gate._condition.wait_for(
-                    lambda: len(gate._normal) + len(gate._preferred) == 2, timeout=120
-                )
-        observed = reader.result(timeout=120)
-        writer.result(timeout=120)
-    assert observed == scenario["intake_history"]
-    assert order == ["history", "background"]
-    assert not gate._normal and not gate._preferred and gate._owner is None
+@pytest.mark.parametrize("fault", ["binding", "replacement"])
+def test_authority_history_snapshot_rejects_changed_owner(intake, scenario, fault):
+    import shutil
+
+    cohort = digest(scenario["intake_history"].plan)
+    path = intake.directory / "intake.sqlite3"
+    if fault == "binding":
+        with intake._connection() as (db, _):
+            db.execute("UPDATE intake_binding SET body=?", (b"{}",))
+        with pytest.raises(ValueError, match="another configuration"):
+            intake.history(cohort)
+    else:
+        with (
+            pytest.raises(ValueError, match="file changed"),
+            intake._connection(prefer_history=True) as (_, store),
+        ):
+            assert store.published_history(cohort) == scenario["intake_history"]
+            replacement = path.with_suffix(".replacement")
+            shutil.copyfile(path, replacement)
+            replacement.chmod(0o600)
+            replacement.replace(path)
 
 
 def seal_and_close(intake, scenario, *, block=300):
@@ -437,7 +455,7 @@ def test_local_intake_callers_queue_before_external_lock_timeout(intake, scenari
 
     def queued_call():
         local.accelerated = True
-        return intake.history(digest(scenario["intake_history"].plan))
+        return intake.retain(request_for(scenario), capture_at(210))
 
     monkeypatch.setattr(module.time, "monotonic", monotonic)
     first = threading.Thread(target=holding_call)
@@ -458,7 +476,7 @@ def test_local_intake_callers_queue_before_external_lock_timeout(intake, scenari
         first.join(2)
         second.join(2)
     assert not first.is_alive() and not second.is_alive()
-    assert second_result == [scenario["intake_history"]]
+    assert second_result == [intake.retain(request_for(scenario), capture_at(210))]
 
 
 async def test_native_publisher_drains_commit_before_cancellation(intake, scenario, monkeypatch):

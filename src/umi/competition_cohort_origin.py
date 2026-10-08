@@ -6,6 +6,9 @@ finality must be checked again before use; cached proofs are not delivery grants
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_executor import CohortExecutionAuthority
@@ -21,6 +24,7 @@ from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest
 from .protocol import canonical_json_bytes
+from .validator_chain import FinalizedSnapshotRef
 
 
 class CohortEndpointFinalityProvider(FinalizedEndpointProvider):
@@ -95,12 +99,21 @@ class CohortEndpointOrigin:
             await run_owned_thread(
                 journal.journal.put, "endpoint_origin_scope", digest(scope), scope
             )
+            # The independently owned observer may lag the authority observer.
+            # Align their heights before spending RPC on a capture that cannot
+            # fit between the original start and finish observations.
+            await self._wait_origin_head(started.block)
             capture = await self.provider._collect_origin_locked(
                 job.submission,
                 public_https_origin(job.submission.submission.endpoint_url),
                 recovery=scope,
             )
-            finished = await self._confirm(assignment, source, minimum_block=capture.block)
+            finished = await self._confirm(
+                assignment,
+                source,
+                minimum_block=capture.block,
+                capture_timestamp_ms=capture.timestamp_ms,
+            )
             if not started.block <= capture.block <= finished.block or any(
                 boundary.block == capture.block
                 and (boundary.block_hash, boundary.state_root)
@@ -111,12 +124,33 @@ class CohortEndpointOrigin:
             self.provider._fresh(capture.timestamp_ms)
             return capture
 
+    async def _wait_origin_head(self, minimum_block: int) -> None:
+        deadline = time.monotonic() + self.authority.journal.config.read_timeout_seconds
+        while True:
+            if self.provider._closed:
+                raise ValueError("endpoint provider is closed")
+            if self.provider._owned and (self.provider._task is None or self.provider._task.done()):
+                raise ValueError("owned finality observer is not running")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OSError("owned origin observer precedes execution start")
+            ref = await wait_for_owned(
+                self.provider._finality.verified_finalized_snapshot(), timeout=remaining
+            )
+            if not isinstance(ref, FinalizedSnapshotRef):
+                raise ValueError("endpoint finalized snapshot is invalid")
+            if ref.block_number >= minimum_block:
+                return
+            # This reads the owned observer only, without RPC/header collection.
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+
     async def _confirm(
         self,
         assignment: CohortExecutionAssignment,
         source: CohortOrderHistory,
         *,
         minimum_block: int,
+        capture_timestamp_ms: int,
     ) -> ExecutionBoundary:
         """Recheck unchanged authenticated authority without repeating slow replay."""
         authority = self.authority
@@ -140,24 +174,28 @@ class CohortEndpointOrigin:
                 if row != (digest(source),):
                     raise ValueError("retained endpoint authority changed during collection")
 
-        # The independent origin observer or another owned operation may advance
-        # while confirmation waits. Recollect once, retaining all authority and
-        # finality checks; a genuinely lagging provider still holds.
-        for attempt in range(2):
+        # A lagging owned observer does not invalidate the already collected
+        # proof. Wait within the operational read allowance while keeping its
+        # freshness and unchanged authority checks. Never substitute highwater
+        # or an RPC head for owned finality.
+        deadline = time.monotonic() + timeout
+        while True:
+            self.provider._fresh(capture_timestamp_ms)
             await unchanged()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OSError("owned confirmation precedes collected origin")
             boundary = execution_boundary(
-                await wait_for_owned(authority.provider.collect(), timeout=timeout)
+                await wait_for_owned(authority.provider.collect(), timeout=remaining)
             )
             await unchanged()
-            if boundary.block < minimum_block:
-                if attempt:
-                    raise OSError("owned confirmation precedes collected origin")
-                continue
-            try:
-                await run_owned_thread(retained, boundary)
-            except FinalizedHeadRegression:
-                if attempt:
-                    raise
-            else:
-                return boundary
-        raise AssertionError("origin confirmation exhausted without a result")
+            self.provider._fresh(capture_timestamp_ms)
+            if boundary.block >= minimum_block:
+                try:
+                    await run_owned_thread(retained, boundary)
+                except FinalizedHeadRegression:
+                    if time.monotonic() >= deadline:
+                        raise
+                else:
+                    return boundary
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))

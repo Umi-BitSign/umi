@@ -200,7 +200,14 @@ async def test_rolling_reports_native_wait_stage_without_private_work(
 
     monkeypatch.setattr(owner, name, held)
     active = {}
-    await worker._rolling_poll(active)
+
+    # Native stage boundaries persist before the next stage is scheduled.
+    async def reach_stage():
+        while not entered.is_set():
+            await worker._rolling_poll(active)
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(reach_stage(), 120)
     try:
         await asyncio.wait_for(entered.wait(), 120)
         report = await worker._rolling_poll(active)
@@ -238,6 +245,75 @@ async def test_native_service_work_completes_and_restarts_offline(loop):
     worker, value, _ = await finish(s)
     assert canonical_json_bytes(value) == original and tuple(s.paths) == paths
     assert s.signs == 1
+
+
+async def test_each_service_phase_resumes_after_restart_without_repeating_work(loop):
+    s = loop
+    reasons = []
+    for _ in range(8):
+        worker = s.worker()
+        status, reason = await worker._advance(s.c.assignment.admission, one_stage=True)
+        reasons.append(reason)
+        if status == "completed":
+            break
+    assert reasons == [
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+        "terminal_retained",
+    ]
+    value = worker.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert s.p.model.calls == s.p.fetcher.calls == 1
+    assert s.inputs == 1 and s.votes == 2 and s.signs == 1
+    s.offline = True
+    assert await s.worker()._advance(s.c.assignment.admission, one_stage=True) == (
+        "completed",
+        "original_terminal_retained",
+    )
+
+
+async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monkeypatch):
+    worker = loop.worker(concurrency=1)
+    rows = [
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=SimpleNamespace(claim=SimpleNamespace(hotkey=wallet(name).hotkey.ss58_address)),
+        )
+        for i, name in enumerate(("Alice", "Bob", "Charlie"), 1)
+    ]
+    entered, dispatched, release = (asyncio.Event() for _ in range(3))
+    started = []
+    monkeypatch.setattr(worker, "_batch", lambda **kwargs: rows)
+    monkeypatch.setattr(worker, "_advance_cursor", lambda _: None)
+    monkeypatch.setattr(
+        worker, "_ready_stage", lambda r: "dispatch" if r.ordinal == 3 else "preparation"
+    )
+
+    async def advance(row, **kwargs):
+        started.append(row.ordinal)
+        if row.ordinal == 3:
+            dispatched.set()
+            return "pending", "response_retained"
+        entered.set()
+        await release.wait()
+        return "pending", "request_prepared"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 30)
+        await asyncio.wait_for(dispatched.wait(), 30)
+        assert started == [1, 3]
+        assert report["in_flight_phase_counts"] == {"preparation": 1, "dispatch": 1}
+        assert not release.is_set()
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
 
 
 async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):
@@ -293,20 +369,17 @@ async def test_service_owner_commit_loss_recovers_original(loop, monkeypatch, ki
         report = await worker.poll_once()
     assert report["work_pending"] == 1 and len(saved) == 1
     restart_miner(s.c)
-    if kind == "service_dispatch_intent":
-        # A crash immediately before send cannot prove remote absence. Its
-        # original attempt stays pending until expiry, retirement and quorum.
-        await s.worker().poll_once()
-        assert s.paths.count(TRANSLATE_PATH) == 0
-        assert s.p.model.calls == 0
-        return
     if kind in {"service_terminal_intent", "service_terminal"}:
         s.offline = True
     restarted, value, _ = await finish(s)
     slot = service_grant_slot(
         restarted.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
     )
-    key = slot if kind == "service_response" else value.terminal.work_sha256
+    key = (
+        slot
+        if kind in {"service_response", "service_dispatch_intent"}
+        else value.terminal.work_sha256
+    )
     assert canonical_json_bytes(restarted.journal.get(kind, key)) == saved[0]
     assert s.paths.count(TRANSLATE_PATH) == 1
     assert s.p.model.calls == 1
@@ -456,6 +529,29 @@ async def test_expired_service_attempt_waits_for_certified_replacement_then_fini
     assert s.paths.count(TRANSLATE_PATH) == 1 and p.model.calls == 1
 
 
+async def test_expired_unsent_service_reaches_retirement_lane(loop, monkeypatch):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    original = canonical_json_bytes(body)
+    p.finality.head = body.request.deadline_block + 3000
+    monkeypatch.setattr(
+        bt.timelock, "current_round", lambda: body.request.response_close_round + 500
+    )
+    assert s.worker()._ready_stage(s.c.assignment.admission) == "recovery"
+    assert await s.worker()._advance(s.c.assignment.admission, one_stage=True) == (
+        "pending",
+        "retirement_retained",
+    )
+    assert s.worker()._ready_stage(s.c.assignment.admission) == "certification"
+    assert s.paths.count(TRANSLATE_PATH) == 0 and p.model.calls == 0
+    assert (
+        canonical_json_bytes(worker.requests.latest(s.c.claim, p.validator.hotkey.ss58_address))
+        == original
+    )
+
+
 async def test_queue_rotation_survives_restart_and_unavailable_first_miner_work(loop):
     s, c, p = loop, loop.c, loop.p
     claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
@@ -562,9 +658,20 @@ async def test_cancelled_native_send_drains_transport_before_releasing_worker(lo
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 5)
     s.before_request = None
-    report = await s.worker().poll_once()
-    assert report["work_pending"] == 1
-    assert s.paths.count(TRANSLATE_PATH) == 1 and s.p.model.calls == 0
+    grant = worker.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
+    slot = service_grant_slot(grant)
+    intent = canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot))
+    restarted = s.worker()
+    await restarted.poll_once()
+    value = restarted.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, restarted.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert canonical_json_bytes(restarted.journal.get("service_dispatch_intent", slot)) == intent
+    assert restarted.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address) == grant
+    assert s.paths.count(TRANSLATE_PATH) == 2 and s.p.model.calls == s.p.fetcher.calls == 1
+    s.offline = True
+    await s.worker().poll_once()
+    assert s.paths.count(TRANSLATE_PATH) == 2 and s.p.model.calls == 1
 
 
 async def test_missing_original_selection_cannot_be_replaced_by_fresh_work(loop):
@@ -697,3 +804,87 @@ async def test_service_certificate_waits_for_quorum_not_redundant_reviewer(
         release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def service_reject_first(s):
+    seen = []
+    worker = s.worker()
+    original = worker.transport.transport
+
+    class RejectFirst(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == TRANSLATE_PATH:
+                seen.append((request.content, dict(request.headers)))
+                if len(seen) == 1:
+                    return httpx.Response(503, content=b"temporary admission unavailable")
+            return await original.handle_async_request(request)
+
+    worker.transport.transport = RejectFirst()
+    first = await worker.poll_once()
+    assert first["work_pending"] == 1 and s.p.model.calls == 0
+    grant = worker.requests.latest(s.c.claim, s.p.validator.hotkey.ss58_address)
+    return worker, service_grant_slot(grant), seen
+
+
+async def test_service_admission_retries_original_without_replacing_grant(loop):
+    s = loop
+    worker, slot, seen = await service_reject_first(s)
+    original = canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot))
+    await worker.poll_once()
+    value = worker.terminals.read(s.c.assignment)
+    assert value is not None
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert len(seen) == 2 and seen[0][0] == seen[1][0] and seen[0][1] != seen[1][1]
+    assert s.p.model.calls == s.p.fetcher.calls == 1
+    assert canonical_json_bytes(worker.journal.get("service_dispatch_intent", slot)) == original
+    s.offline = True
+    await s.worker().poll_once()
+    assert s.p.model.calls == 1
+
+
+@pytest.mark.parametrize("after", [False, True])
+async def test_service_retry_intent_crash_consumes_at_most_two_sends(loop, monkeypatch, after):
+    s = loop
+    worker, _slot, seen = await service_reject_first(s)
+    put = worker.journal.put
+
+    def interrupted(kind, key, value):
+        if kind == "service_dispatch_retry_intent":
+            if after:
+                put(kind, key, value)
+            raise OSError("retry intent acknowledgement lost")
+        return put(kind, key, value)
+
+    with monkeypatch.context() as m:
+        m.setattr(worker.journal, "put", interrupted)
+        assert (await worker.poll_once())["work_pending"] == 1
+    await worker.poll_once()
+    if after:
+        assert len(seen) == 1 and s.p.model.calls == 0
+        assert worker.terminals.read(s.c.assignment) is None
+    else:
+        assert len(seen) == 2 and s.p.model.calls == 1
+        assert worker.terminals.read(s.c.assignment) is not None
+    before = len(seen)
+    await worker.poll_once()
+    assert len(seen) == before
+
+
+async def test_service_unknown_second_send_cannot_repeat_after_restart(loop):
+    s = loop
+    worker, slot, seen = await service_reject_first(s)
+    original = worker.transport.transport
+
+    class LostAgain(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == TRANSLATE_PATH:
+                seen.append((request.content, dict(request.headers)))
+                raise httpx.ReadTimeout("second outcome unknown")
+            return await original.handle_async_request(request)
+
+    worker.transport.transport = LostAgain()
+    assert (await worker.poll_once())["work_pending"] == 1
+    for _ in range(2):
+        assert (await s.worker().poll_once())["work_pending"] == 1
+    assert len(seen) == 2 and s.p.model.calls == 0
+    assert worker.journal.get("service_dispatch_retry_intent", slot) is not None

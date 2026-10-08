@@ -1177,3 +1177,36 @@ async def test_bulk_prefetch_rejects_invalid_keys_before_network(chain_config, m
     monkeypatch.setattr(rpc, "request", request)
     with pytest.raises(ValueError):
         await rpc.storage_values(_hash(1), keys)
+
+
+async def test_parallel_prefetch_retains_each_proofs_own_block_claims():
+    first_ready, second_ready, first_cleared = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Rpc:
+        bulk_storage_reads = True
+
+        async def storage_values(self, block, keys):
+            return {("0x" + key.hex(), block): "0xab" for key in keys}
+
+        async def request(self, method, params):
+            raise AssertionError("prefetched storage unexpectedly reached RPC")
+
+    rpc = _PrefetchRpc(Rpc())
+
+    async def first():
+        await rpc.prefetch(_hash(1), (b"a",))
+        first_ready.set()
+        await second_ready.wait()
+        assert await rpc.request("state_getStorageAt", ("0x61", _hash(1))) == "0xab"
+        rpc.values.clear()
+        first_cleared.set()
+
+    async def second():
+        await first_ready.wait()
+        await rpc.prefetch(_hash(2), (b"b",))
+        second_ready.set()
+        await first_cleared.wait()
+        assert await rpc.request("state_getStorageAt", ("0x62", _hash(2))) == "0xab"
+        rpc.values.clear()
+
+    await asyncio.wait_for(asyncio.gather(first(), second()), 30)

@@ -18,6 +18,8 @@ from umi.competition_cohort_admission_http import (
 )
 from umi.competition_cohort_preparation_owner import CohortPreparation
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
+from umi.competition_cohort_window_http import WINDOW_PATH
+from umi.competition_cohort_window_owner import WindowOwnerConfig
 from umi.competition_store import CompetitionStore
 from umi.open_competition import identity
 from umi.protocol import canonical_json_bytes
@@ -40,6 +42,7 @@ from .test_competition_cohort_admission_http import (  # noqa: F401
     wallet,
 )
 from .test_competition_cohort_admission_http import relay as relay
+from .test_competition_cohort_cadence import transport
 
 
 @pytest.fixture
@@ -212,6 +215,32 @@ async def test_slow_first_reviewer_does_not_starve_second(owned):
     await until(certified)
     stop.set()
     await asyncio.wait_for(task, timeout=10)
+
+
+async def test_configured_window_owner_boot_preserves_pending_bootstrap_and_private_auth(owned):
+    o = owned
+    configuration = o.config.model_copy(
+        update={
+            "windows": WindowOwnerConfig(
+                directory=str(Path(o.config.directory).with_name("shared-windows")),
+                transports=(transport(),),
+                bootstrap_sources=("original-dispatchers",),
+            )
+        }
+    )
+    for _ in range(2):
+        async with boot.admission_owner_app(
+            configuration, o.preparation, o.h.archive.reviewer
+        ) as app:
+            assert app.state.windows.owner.store.sources == {"original-dispatchers"}
+            with app.state.windows.owner.store.journal.read_transaction() as db:
+                assert db.execute(
+                    "SELECT COUNT(*) FROM records WHERE kind='window_bootstrap'"
+                ).fetchone() == (0,)
+            async with o.client_type(transport=httpx.ASGITransport(app=app)) as client:
+                assert (
+                    await client.post("https://owner.example" + WINDOW_PATH, json={})
+                ).status_code == 401
 
 
 async def test_service_owner_shares_its_capture_with_every_reviewer(owned):

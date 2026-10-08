@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from umi.competition_api import PublicIntakeDeployment, PublicRoundSchedule
 from umi.competition_artifacts import preserve_bundle
 from umi.competition_chain import RegistrationCapture
+from umi.competition_launch import IntakeRuntimeSource
 from umi.competition_service import (
     CompetitionServiceConfig,
     RetainedIntakeState,
@@ -728,6 +729,52 @@ def test_deployment_manifest_must_match_running_source(config, policy):
     )
     with pytest.raises(ValueError, match="does not match the running UMI source tree"):
         create_intake_app(mismatched, policy)
+
+
+def test_intake_maintenance_preserves_deployment_launch_and_retained_admissions(
+    config, policy, monkeypatch
+):
+    original, _ = app_for(config, policy)
+    before = original.state.competition_store.submissions()
+    source = IntakeRuntimeSource(
+        schema="umi-competition-intake-runtime/1",
+        deployment_sha256=digest(config.public_deployment),
+        umi_git_revision="ab" * 20,
+        umi_source_tree_sha256="cd" * 32,
+    )
+    monkeypatch.setattr("umi.competition_service.umi_source_tree_sha256", lambda: "cd" * 32)
+    updated = config.model_copy(update={"runtime_source": source})
+    app, _ = app_for(updated, policy)
+    assert app.state.competition_store.submissions() == before
+    assert (
+        app.state.competition_store.public_launch_id
+        == original.state.competition_store.public_launch_id
+    )
+    with TestClient(app) as client:
+        status = client.get("/v1/competition/status").json()
+    assert status["deployment"] == config.public_deployment.model_dump(mode="json", by_alias=True)
+    assert status["runtime"] == source.model_dump(mode="json", by_alias=True)
+    assert status["policy_sha256"] == digest(policy)
+
+
+@pytest.mark.parametrize("damage", ["deployment", "source"])
+def test_intake_maintenance_does_not_bypass_source_or_deployment_binding(config, policy, damage):
+    source = IntakeRuntimeSource(
+        schema="umi-competition-intake-runtime/1",
+        deployment_sha256="ef" * 32 if damage == "deployment" else digest(config.public_deployment),
+        umi_git_revision="ab" * 20,
+        umi_source_tree_sha256="cd" * 32,
+    )
+    before = (Path(config.state_directory) / "competition.sqlite3").read_bytes()
+    with pytest.raises(ValueError, match=r"deployment|running UMI source"):
+        create_intake_app(config.model_copy(update={"runtime_source": source}), policy)
+    assert (Path(config.state_directory) / "competition.sqlite3").read_bytes() == before
+
+
+def test_legacy_intake_config_omits_absent_runtime_selection(config):
+    raw = canonical_json_bytes(config)
+    assert b'"runtime_source"' not in raw
+    assert canonical_json_bytes(CompetitionServiceConfig.model_validate_json(raw)) == raw
 
 
 def test_service_refuses_a_new_or_mistyped_ledger_path(config, policy, tmp_path):

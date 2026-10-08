@@ -1051,16 +1051,24 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
         assert app.state.benchmark.sandbox.artifacts.config.r2_bucket == "umi-model-artifacts"
 
 
+@pytest.mark.parametrize("shared_windows", [False, True])
 async def test_endpoint_boot_owns_origin_provider_and_native_workers(
-    selected, providers, monkeypatch
+    selected, providers, monkeypatch, shared_windows
 ):
     c = with_endpoint(selected.config)
+    c = c.model_copy(
+        update={"endpoint": c.endpoint.model_copy(update={"shared_miner_windows": shared_windows})}
+    )
     endpoint_credentials(c)
     monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
     async with boot.phase_review_app(c) as app:
         assert app.state.endpoint is not None
         assert app.state.benchmark.workers["endpoints"] is app.state.endpoint.worker
         assert app.state.endpoint.recovery.journal is app.state.benchmark.execution
+        windows = app.state.endpoint.recovery.windows
+        assert (windows is not None) == shared_windows
+        if shared_windows:
+            assert windows.exchange.url == c.owner_origin + "/internal/cohorts/miner-windows"
         assert app.state.benchmark.worker.defer_endpoint_until_terminal is True
         assert providers.events.count("started") == 2
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:

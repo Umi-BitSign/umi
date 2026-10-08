@@ -322,6 +322,30 @@ def test_signed_observation_outside_request_phases_cannot_score(endpoint, block)
         replay(endpoint, root, objects)
 
 
+def test_completed_retired_responses_do_not_wait_for_unused_deadline(endpoint):
+    root, objects, terminal = archive(endpoint, observed_block=1501)
+    retained = dict(objects)
+    cases = tuple(
+        endpoint_archive_cases(
+            root, objects.__getitem__, endpoint["policy"], request_interval=(1499, 1501)
+        )
+    )
+    assert len(cases) == len(terminal.cases) == 3
+    assert all(case.retirement.observed_block == 1501 for case in cases)
+    assert objects == retained
+
+
+@pytest.mark.parametrize("interval", [(1500, 1501), (1499, 1500)])
+def test_completed_response_still_requires_issuance_and_retirement_in_phase(endpoint, interval):
+    root, objects, _ = archive(endpoint, observed_block=1501)
+    with pytest.raises(ValueError, match="outside certified request phases"):
+        tuple(
+            endpoint_archive_cases(
+                root, objects.__getitem__, endpoint["policy"], request_interval=interval
+            )
+        )
+
+
 def test_missing_decryption_implementation_is_not_a_miner_zero(endpoint, monkeypatch):
     root, objects, _ = archive(endpoint)
     monkeypatch.setattr("bittensor_core.decrypt_with_signature", None)

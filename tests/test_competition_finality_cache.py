@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import weakref
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -17,13 +18,20 @@ from umi.competition_finality_cache import (
     VerifiedCaptureUnavailable,
     VerifiedRegistrationCache,
     _refresh_failure,
+    _refresh_source_frames,
 )
 from umi.competition_submission_checkpoint import SubmissionCheckpointError
+from umi.private_files import PrivateStateBusyError
 from umi.validator_chain import ValidatorChainError
 
 from .test_open_competition import policy as policy
 
 _PRIVATE_URL = "wss://private-provider.invalid/token/should-never-be-logged"
+
+
+def test_retention_mutex_failure_has_fixed_private_safe_classification():
+    error = PrivateStateBusyError("round_journal_lock", "ab" * 32, 11)
+    assert _refresh_failure(error) == ("PrivateStateBusyError", "retention_mutex_busy")
 
 
 class ControlledProvider:
@@ -370,6 +378,50 @@ def test_unknown_exception_does_not_expose_dynamic_type_or_inspect_attributes():
 
     Untrusted.__name__ = _PRIVATE_URL
     assert _refresh_failure(Untrusted()) == ("Exception", "unclassified_refresh_failure")
+
+
+def test_unknown_refresh_boundary_never_reads_private_exception_properties():
+    class PrivateError(Exception):
+        @property
+        def __traceback__(self):
+            raise AssertionError("must use the builtin descriptor")
+
+        def __str__(self):
+            raise AssertionError("must not format provider exceptions")
+
+    failure = PrivateError(_PRIVATE_URL)
+    try:
+        raise failure
+    except PrivateError as caught:
+        assert _refresh_source_frames(caught) == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_refresh_logs_native_line_without_provider_message(policy, caplog):
+    provider = ControlledProvider(Exception(_PRIVATE_URL))
+    provider.release.set()
+    cache = cache_for(provider, policy)
+    cache._refresh_interval = 0.001
+    # The existing native cache collector raises through its real await boundary.
+    original = cache._collect_background
+
+    async def once():
+        cache._stop.set()
+        return await original()
+
+    cache._collect_background = once
+    with caplog.at_level("WARNING", logger="umi.competition_finality_cache"):
+        await cache._run()
+    boundary = next(
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("registration_refresh_boundary native_frames=")
+    )
+    frames = json.loads(boundary.split("=", 1)[1])
+    assert frames and all(set(f) == {"module", "line"} for f in frames)
+    assert all(f["module"] == "umi.competition_finality_cache" for f in frames)
+    assert _PRIVATE_URL not in caplog.text
+    assert all(r.exc_info is None and r.stack_info is None for r in caplog.records)
 
 
 @pytest.mark.asyncio

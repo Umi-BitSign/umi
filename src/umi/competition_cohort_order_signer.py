@@ -14,6 +14,8 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -134,6 +136,10 @@ def review_order(
     )
 
 
+_order_history_verification_reuse = AssignmentVerificationReuse()
+
+
+@canonical_json_reuse()
 def remember_order_history(
     journal: RoundJournal,
     cohorts: dict[str, str],
@@ -147,10 +153,20 @@ def remember_order_history(
     cohort = digest(history.plan)
     if cohorts.get(cohort) != digest(history.authority.authority):
         raise ValueError("order signer has no configured cohort authority")
-    verify_cohort_history(
-        history, policy, expected_tip_sha256=history_tip(history), current_block=block
-    )
-    replay_cohort_decisions(history, policy, source.inputs().__getitem__)
+    # Exact successful historical verification is immutable. Current owner
+    # transport, finalized height, monotonic journal heads and conflict holds
+    # remain independent checks on every call, including a cache hit.
+    proof_key = (digest(source), digest(policy))
+    minimum_block = _order_history_verification_reuse.lookup(cohort, proof_key)
+    if minimum_block is None:
+        view = verify_cohort_history(
+            history, policy, expected_tip_sha256=history_tip(history), current_block=block
+        )
+        replay_cohort_decisions(history, policy, source.inputs().__getitem__)
+        minimum_block = view.state.observed_at_block
+        _order_history_verification_reuse.remember(cohort, proof_key, minimum_block)
+    elif type(block) is not int or not minimum_block <= block <= 2**53 - 1:
+        raise ValueError("recovery history is ahead of the owned finalized observation")
 
     def index(db):
         row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
@@ -171,6 +187,21 @@ def remember_order_history(
 
     journal.observe(block)
     journal.put_many((("order_history", digest(source), source),), index=index)
+
+
+def require_retained_order_history(journal: RoundJournal, source: CohortOrderHistory) -> None:
+    """Fence a prepared vote against authority advanced by another operation.
+
+    Call under the journal's process mutex immediately before signing. The
+    network confirmation happens outside that mutex; a concurrent closer must
+    not be overwritten by its older prepared history.
+    """
+    with journal.transaction() as db:
+        row = db.execute(
+            "SELECT history FROM order_heads WHERE cohort=?", (digest(source.history.plan),)
+        ).fetchone()
+        if row is None or row[0] != digest(source):
+            raise OSError("order authority advanced during preparation; retry retained selection")
 
 
 class CohortOrderJournal:
@@ -299,39 +330,48 @@ class CohortOrderSigner:
         slot = order_slot(order)
         async with self.serial:
             with self.journal.journal.locked():
-                saved = await run_owned_thread(self.journal.load, slot)
-                if saved is not None:
-                    if saved[0].order != order or saved[0].participant != participant:
-                        raise ValueError(
-                            "order slot already reserved for different original inputs"
-                        )
-                    if saved[1] is not None:
-                        return saved[1]
-                source = await self.history(order.round.cohort_sha256)
-                capture = await self.provider.collect()
-                boundary = execution_boundary(capture)
+                saved = await run_owned_thread(self._selection, slot, order, participant)
+                if saved is not None and saved[1] is not None:
+                    return saved[1]
+
+        # Unrelated selections can proceed while this one waits for authority
+        # or finality. Only durable selection and signing own the global lease.
+        source = await self.history(order.round.cohort_sha256)
+        capture = await self.provider.collect()
+        boundary = execution_boundary(capture)
+        async with self.serial:
+            with self.journal.journal.locked():
+                saved = await run_owned_thread(self._selection, slot, order, participant)
+                if saved is not None and saved[1] is not None:
+                    return saved[1]
                 await run_owned_thread(self.journal.remember, source, boundary.block)
                 await run_owned_thread(
                     review_order, order, participant, source, self.journal.policy, boundary.block
                 )
                 if saved is None:
-                    intent = CohortOrderIntent(
-                        schema="umi-cohort-order-intent/1",
-                        order=order,
-                        participant=participant,
-                        source=source,
-                        observation=boundary,
-                    )
-                    await run_owned_thread(self.journal.reserve, intent)
-                current = await self.history(order.round.cohort_sha256)
-                if current != source:
-                    # Remember newer closure/revocation even though signing is
-                    # deferred. A stale source cannot roll it back on restart.
-                    capture = await self.provider.collect()
                     await run_owned_thread(
-                        self.journal.remember, current, execution_boundary(capture).block
+                        self.journal.reserve,
+                        CohortOrderIntent(
+                            schema="umi-cohort-order-intent/1",
+                            order=order,
+                            participant=participant,
+                            source=source,
+                            observation=boundary,
+                        ),
                     )
+        current = await self.history(order.round.cohort_sha256)
+        changed_boundary = (
+            execution_boundary(await self.provider.collect()) if current != source else None
+        )
+        async with self.serial:
+            with self.journal.journal.locked():
+                saved = await run_owned_thread(self._selection, slot, order, participant)
+                if saved is not None and saved[1] is not None:
+                    return saved[1]
+                if changed_boundary is not None:
+                    await run_owned_thread(self.journal.remember, current, changed_boundary.block)
                     raise OSError("order history changed during review; retry retained selection")
+                await run_owned_thread(require_retained_order_history, self.journal.journal, source)
 
                 async def sign_and_commit() -> CohortOrderVote:
                     signature = await self.sign(order)
@@ -341,6 +381,12 @@ class CohortOrderSigner:
                 return await wait_for_owned(
                     sign_and_commit(), timeout=self.journal.config.signing_timeout_seconds
                 )
+
+    def _selection(self, slot, order, participant):
+        saved = self.journal.load(slot)
+        if saved is not None and (saved[0].order != order or saved[0].participant != participant):
+            raise ValueError("order slot already reserved for different original inputs")
+        return saved
 
 
 def certify_order_votes(

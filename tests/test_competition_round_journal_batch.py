@@ -90,6 +90,43 @@ def test_batch_commits_canonical_records_and_caller_index_together(journal):
     assert journal.get("intent", "a") == {"a": 2, "z": 1}
 
 
+def test_reads_do_not_wait_for_uncommitted_writer_and_observe_committed_hold(journal):
+    journal.put("intent", "a", {"original": True})
+    db = sqlite3.connect(journal.path, isolation_level=None, timeout=0)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO holds VALUES ('a')")
+        # A writer has reserved the database, but its hold is not committed.
+        # These reads previously attempted a second BEGIN IMMEDIATE and failed.
+        assert journal.get("intent", "a") == {"original": True}
+        assert journal.keys("intent") == ["a"]
+        db.commit()
+        with pytest.raises(ValueError, match="conflict held"):
+            journal.get("intent", "a")
+    finally:
+        db.close()
+
+
+def test_read_transaction_cannot_write_or_ignore_generation(journal):
+    with (
+        journal.read_transaction() as db,
+        pytest.raises(sqlite3.OperationalError, match="readonly"),
+    ):
+        db.execute("INSERT INTO holds VALUES ('a')")
+    with sqlite3.connect(journal.path) as db:
+        db.execute("PRAGMA user_version=17")
+    with pytest.raises(ValueError, match="unsupported round journal capability"):
+        journal.get("intent", "a")
+
+
+def test_read_transaction_preserves_reservation_fence_checks(journal):
+    journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
+    with sqlite3.connect(journal.path) as db:
+        db.execute('DROP TRIGGER "round_generation_records_insert"')
+    with pytest.raises(ValueError, match="capability fence missing"):
+        journal.get("intent", "a")
+
+
 def test_full_cohort_sized_intent_survives_restart_and_exact_retry(journal):
     value = {"evidence": "a" * (33 * 1024**2)}
     journal.put("intent", "large-settlement", value)

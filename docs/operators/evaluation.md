@@ -297,6 +297,50 @@ this command alone is not an open-mining launch.
 
 <a id="open-competition-native-evaluator"></a>
 
+## Recoverable cohort scheduling
+
+Remote endpoint concurrency is separate from local inference concurrency. The
+reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
+the existing16-connection control budget for history, votes and exports. Slow
+remote translates therefore cannot occupy the entire configured pool. A
+model-only host retains its existing16-connection budget. This changes neither
+signed request limits nor per-miner assignment and retirement fences.
+
+Order-history persistence reuses successful native decision/signature replay for
+exact history, decision inputs and policy bytes. Fresh owner responses, current
+finalized height, the journal's high-water mark, rollback ancestry and conflict
+holds are still checked on every observation. Changed inputs miss the bounded
+process-local cache. If another paid-service operation persists a newer finalized
+head while an observation waits, the worker recollects history and a strictly
+newer capture once; a persistently lagging provider remains held.
+
+The recoverable cohort worker retains each completed case separately. For new
+endpoint comparator jobs with identical preparation, round, evaluator, model,
+runtime and input clips, it reserves one source before inference and preserves
+that source's observations when other jobs reuse them. Existing per-job attempts
+keep their original recovery path. The worker gives the unfinished fixed source
+one priority slot so its next case does not wait behind the entire roster. Other
+jobs retain capacity; a single-slot worker alternates priority with ordinary
+work. An unavailable source remains pending and cannot authorize a different
+source or fabricate a result.
+
+Registration persistence distinguishes a temporarily busy retention mutex from
+invalid retention data. If the trusted mutex is busy, it preserves every existing
+capture and defers pruning while retaining the fresh verified proof. All captures
+with unknown pin status count against the working-cache budget; no archive-budget
+exemption or new authority is invented. Cancellation still drains owned persistence
+and rolls back. Corruption, conflicting records, stale proofs and untrusted error
+subclasses continue to hold collection. Routine pruning resumes on a successful
+pin projection.
+
+Before endpoint proof collection, the origin observer waits to reach the owned
+execution start height. After collection, a lagging authority observer may catch
+up within the configured operational read allowance. The retained capture is
+reused during this wait; its freshness, unchanged authority and journal rollback
+checks remain mandatory. A stopped observer, conflicting head or changed authority
+cannot grant delivery. Cancellation releases the assignment fence after owned
+operations drain. This coordination does not change signed request windows.
+
 ## Native Mac Studio evaluator
 
 The opt-in `umi-offline-mps-runtime/1` backend runs preserved Python model

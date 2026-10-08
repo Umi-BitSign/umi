@@ -709,3 +709,53 @@ async def test_capture_refuses_missing_or_different_connection(dns_chain):
         replace(dns, connection_origin="https://127.0.0.1:443").transport_resolver()
     with pytest.raises(ValueError, match="literal endpoint"):
         replace(dns, origin="https://1.1.1.1:443").transport_resolver()
+
+
+@pytest.mark.parametrize("dependency", ["finalized_snapshot", "_bind_origin"])
+async def test_slow_origin_network_allows_other_captures(origin_chain, monkeypatch, dependency):
+    provider = origin_chain.origin_provider
+    owner = provider if dependency == "_bind_origin" else provider._proofs
+    original = getattr(owner, dependency)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(owner, dependency, delayed)
+    first = asyncio.create_task(provider.collect_origin(origin_chain.signed))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        assert not provider._lock.locked()
+        second = await asyncio.wait_for(provider.collect_origin(origin_chain.signed), 30)
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, 30)
+        await provider.aclose()
+    assert result == second
+    with sqlite3.connect(provider._path) as db:
+        assert db.execute("SELECT COUNT(*) FROM origins").fetchone() == (1,)
+
+
+async def test_close_drains_origin_network_before_resources(origin_chain, monkeypatch):
+    provider = origin_chain.origin_provider
+    entered = asyncio.Event()
+
+    async def stalled():
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(provider._proofs, "finalized_snapshot", stalled)
+    first = asyncio.create_task(provider.collect_origin(origin_chain.signed))
+    await asyncio.wait_for(entered.wait(), 30)
+    await asyncio.wait_for(provider.aclose(), 30)
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert not provider._origin_tasks
+    with sqlite3.connect(provider._path) as db:
+        assert db.execute("SELECT COUNT(*) FROM origins").fetchone() == (0,)

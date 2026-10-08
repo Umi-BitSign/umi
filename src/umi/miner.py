@@ -1167,6 +1167,25 @@ def create_app(
             if isinstance(runtime.competition_authority, CohortMinerAuthorizationAuthority):
                 result["cohort_request_window_versions"] = [1, 2]
                 result["cohort_retirement_receipt_versions"] = [1, 2]
+                result["effective_limits"] = {
+                    "inference_timeout_seconds": runtime.limits.inference_timeout_seconds,
+                    "policy_inference_seconds": (
+                        runtime.competition_authority.policy.maximum_inference_ms / 1000
+                    ),
+                    "maximum_inference_concurrency": runtime.limits.maximum_inference_concurrency,
+                    "maximum_active_windows": runtime.limits.maximum_active_windows,
+                    "video_fetch_timeout_seconds": runtime.limits.video_fetch_timeout_seconds,
+                    "request_body_timeout_seconds": runtime.limits.request_body_timeout_seconds,
+                    "inference_admission_timeout_seconds": (
+                        runtime.limits.inference_admission_timeout_seconds
+                    ),
+                    "backend_lifecycle_timeout_seconds": (
+                        runtime.limits.backend_lifecycle_timeout_seconds
+                    ),
+                    "authority_read_timeout_seconds": (
+                        runtime.competition_authority.config.read_timeout_seconds
+                    ),
+                }
             if isinstance(runtime.competition_authority, FeedEndpointAuthorizationAuthority):
                 result["assignment_discovery"] = runtime.competition_authority.status()
         return result
@@ -1530,21 +1549,34 @@ def build_runtime(args: argparse.Namespace) -> MinerRuntime:
     limits = Limits.from_policy(
         policy,
         inference_timeout_seconds=args.inference_timeout,
+        competition_policy=competition_policy,
         backend_lifecycle_timeout_seconds=args.backend_lifecycle_timeout,
         inference_admission_timeout_seconds=args.inference_admission_timeout,
         maximum_inference_concurrency=inference_concurrency,
         request_body_timeout_seconds=args.request_body_timeout,
     )
     if competition_policy is not None:
-        from dataclasses import replace
-
-        limits = replace(
-            limits,
-            inference_timeout_seconds=min(
-                limits.inference_timeout_seconds, competition_policy.maximum_inference_ms / 1000
-            ),
-            maximum_hypothesis_utf8_bytes=min(
-                limits.maximum_hypothesis_utf8_bytes, competition_policy.maximum_output_bytes
+        LOGGER.info(
+            "cohort_runtime_limits %s",
+            json.dumps(
+                {
+                    "policy_sha256": competition_digest(competition_policy),
+                    "transport_policy_sha256": policy_hash,
+                    "inference_timeout_seconds": limits.inference_timeout_seconds,
+                    "inference_timeout_override_seconds": args.inference_timeout,
+                    "backend_lifecycle_timeout_seconds": limits.backend_lifecycle_timeout_seconds,
+                    "backend_lifecycle_override_seconds": args.backend_lifecycle_timeout,
+                    "inference_admission_timeout_seconds": (
+                        limits.inference_admission_timeout_seconds
+                    ),
+                    "inference_admission_override_seconds": args.inference_admission_timeout,
+                    "request_body_timeout_seconds": limits.request_body_timeout_seconds,
+                    "request_body_override_seconds": args.request_body_timeout,
+                    "video_fetch_timeout_seconds": limits.video_fetch_timeout_seconds,
+                    "maximum_active_windows": limits.maximum_active_windows,
+                    "maximum_inference_concurrency": limits.maximum_inference_concurrency,
+                },
+                sort_keys=True,
             ),
         )
     fetcher = HttpVideoFetcher(
@@ -1687,6 +1719,7 @@ def _build_translator(
             expected_scoring_policy_sha256=scoring_policy_sha256,
             required_validator_slots=validator_count,
             maximum_inference_seconds=limits.inference_timeout_seconds,
+            require_full_inference_budget=getattr(args, "competition_policy", None) is not None,
         )
 
     backend = load_translator(
@@ -1893,10 +1926,15 @@ def _parser() -> argparse.ArgumentParser:
         help="exact allowed HTTPS origin; repeat as needed",
     )
     parser.add_argument("--model-revision")
-    parser.add_argument("--request-body-timeout", type=float, default=5.0)
-    parser.add_argument("--backend-lifecycle-timeout", type=float, default=60.0)
-    parser.add_argument("--inference-admission-timeout", type=float, default=10.0)
-    parser.add_argument("--inference-timeout", type=float, default=120.0)
+    parser.add_argument("--request-body-timeout", type=float, default=None)
+    parser.add_argument("--backend-lifecycle-timeout", type=float, default=None)
+    parser.add_argument("--inference-admission-timeout", type=float, default=None)
+    parser.add_argument(
+        "--inference-timeout",
+        type=float,
+        default=None,
+        help="explicit inference budget override; default is the cohort policy allowance",
+    )
     parser.add_argument(
         "--max-inference-concurrency",
         type=int,

@@ -39,6 +39,7 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
     remember_order_history,
+    require_retained_order_history,
     review_order,
 )
 from .competition_cohort_orders import recoverable_order_job
@@ -358,15 +359,6 @@ class EndpointRequestSigner:
         observation = execution_boundary(
             await wait_for_owned(self.provider.collect(), timeout=timeout)
         )
-        await run_owned_thread(self.journal.remember, source, observation.block)
-        await run_owned_thread(
-            review_order,
-            plan.assignment.certificate.order,
-            plan.assignment.participant,
-            source,
-            self.journal.policy,
-            observation.block,
-        )
         return source, observation
 
     async def attest(self, plan: EndpointRequestPlan):
@@ -374,42 +366,58 @@ class EndpointRequestSigner:
         slot, config = request_slot(plan.body), self.journal.config
         async with self.serial:
             with self.journal.journal.locked():
-                old = await run_owned_thread(self.journal.load, slot)
-                if old is not None:
-                    if old.plan != plan:
-                        raise ValueError("request slot already reserved for different inputs")
-                    vote = await run_owned_thread(self.journal.vote, slot, config.signer)
-                    if vote is not None:
-                        return vote
-                source, observation = await self._source(plan)
-                if old is None:
-                    windows = []
-                    for height in sorted({r.issued_block for r in plan.body.requests}):
-                        windows.append(
-                            await wait_for_owned(
-                                capture_plan_request_window(
-                                    plan, self.blocks_for(plan.transport), height
-                                ),
-                                timeout=config.read_timeout_seconds,
-                            )
-                        )
-                    old = EndpointRequestIntent(
-                        schema="umi-cohort-endpoint-request-intent/1",
-                        plan=plan,
-                        source=source,
-                        observation=observation,
-                        windows=tuple(windows),
+                old, vote = await run_owned_thread(self._selection, slot, plan)
+                if vote is not None:
+                    return vote
+        source, observation = await self._source(plan)
+        candidate = None
+        if old is None:
+            windows = []
+            for height in sorted({r.issued_block for r in plan.body.requests}):
+                windows.append(
+                    await wait_for_owned(
+                        capture_plan_request_window(plan, self.blocks_for(plan.transport), height),
+                        timeout=config.read_timeout_seconds,
                     )
-                    await run_owned_thread(self.journal.reserve, old)
-                # Current authority still gates unfinished votes, but historical
-                # transport proofs need no renewal or live window after a crash.
-                current = await wait_for_owned(
-                    self.history(plan.body.job.round.cohort_sha256),
-                    timeout=config.read_timeout_seconds,
                 )
-                if current != source:
-                    await self._source(plan)
+            candidate = EndpointRequestIntent(
+                schema="umi-cohort-endpoint-request-intent/1",
+                plan=plan,
+                source=source,
+                observation=observation,
+                windows=tuple(windows),
+            )
+        async with self.serial:
+            with self.journal.journal.locked():
+                old, vote = await run_owned_thread(self._selection, slot, plan)
+                if vote is not None:
+                    return vote
+                await run_owned_thread(self.journal.remember, source, observation.block)
+                await run_owned_thread(
+                    review_order,
+                    plan.assignment.certificate.order,
+                    plan.assignment.participant,
+                    source,
+                    self.journal.policy,
+                    observation.block,
+                )
+                if old is None:
+                    await run_owned_thread(self.journal.reserve, candidate)
+        # Historical proofs remain in the original intent. Current authority
+        # gates unfinished votes without holding other miners behind this read.
+        current = await wait_for_owned(
+            self.history(plan.body.job.round.cohort_sha256), timeout=config.read_timeout_seconds
+        )
+        changed = await self._source(plan) if current != source else None
+        async with self.serial:
+            with self.journal.journal.locked():
+                _, vote = await run_owned_thread(self._selection, slot, plan)
+                if vote is not None:
+                    return vote
+                if changed is not None:
+                    await run_owned_thread(self.journal.remember, changed[0], changed[1].block)
                     raise OSError("request authority changed during review")
+                await run_owned_thread(require_retained_order_history, self.journal.journal, source)
 
                 async def commit():
                     signature = await self.sign(plan.body)
@@ -418,6 +426,13 @@ class EndpointRequestSigner:
                     return await run_owned_thread(self.journal.collect, slot, signature)
 
                 return await wait_for_owned(commit(), timeout=config.signing_timeout_seconds)
+
+    def _selection(self, slot, plan):
+        old = self.journal.load(slot)
+        if old is not None and old.plan != plan:
+            raise ValueError("request slot already reserved for different inputs")
+        vote = None if old is None else self.journal.vote(slot, self.journal.config.signer)
+        return old, vote
 
     async def recover(self, slot):
         intent = await run_owned_thread(self.journal.load, slot)

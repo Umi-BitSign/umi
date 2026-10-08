@@ -727,55 +727,33 @@ async def test_cancelled_history_reader_drains_native_verification(remote, monke
     assert task.cancelled()
 
 
-def test_authenticated_history_read_advances_ahead_of_queued_background_intake(remote, monkeypatch):
-    import threading
+def test_authenticated_history_read_progresses_during_background_intake(remote):
     from concurrent.futures import ThreadPoolExecutor
-    from contextlib import contextmanager
-
-    from .test_thread_gate import queued
 
     h = remote
     cohort = digest(h.history.plan)
-    gate, order = h.intake._process_lock, []
     exporter = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, None)
-    current = threading.local()
-    connection = h.intake._exclusive_connection
-
-    @contextmanager
-    def observed_connection():
-        with connection() as value:
-            order.append(getattr(current, "role", "caller"))
-            yield value
-
-    monkeypatch.setattr(h.intake, "_exclusive_connection", observed_connection)
-
-    def background():
-        current.role = "background"
-        with h.intake._connection() as (_, store):
-            return store.published_history(cohort)
-
-    def history():
-        current.role = "history"
-        return exporter.read(cohort)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        with gate.hold():
-            normal = pool.submit(background)
-            queued(gate, normal=1, preferred=0)
-            preferred = pool.submit(history)
-            queued(gate, normal=1, preferred=1)
-        original, source = normal.result(timeout=60), preferred.result(timeout=60)
-    assert order == ["history", "background"]
-    assert source.history == original == h.intake.history(cohort)
-    assert source.inputs().keys() == {
+    with ThreadPoolExecutor(max_workers=2) as pool, h.intake._connection() as (db, store):
+        original = store.published_history(cohort)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            # Keep the real process and file write owners held. Export must
+            # still return one consistent history plus its transition inputs.
+            calls = [pool.submit(exporter.read, cohort) for _ in range(2)]
+            sources = [future.result(timeout=60) for future in calls]
+        finally:
+            db.rollback()
+    assert sources[0] == sources[1]
+    assert sources[0].history == original == h.intake.history(cohort)
+    assert sources[0].inputs().keys() == {
         t.transition.evidence_sha256
-        for t in source.history.transitions
+        for t in sources[0].history.transitions
         if t.transition.operation != "revoke"
     }
 
 
 async def test_bounded_private_history_four_replies_keep_fresh_signed_challenges(remote):
-    """Concurrent history callers reach the priority gate without unbounded export."""
+    """Concurrent history callers retain bounded export and fresh signed challenges."""
     h = remote
     owner = wallet("Charlie").hotkey.ss58_address
 

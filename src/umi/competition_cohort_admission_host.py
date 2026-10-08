@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 import httpx
 import uvicorn
 from fastapi import FastAPI
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_admission_http import (
     AdmissionHistoryExporter,
@@ -41,12 +41,17 @@ from .competition_cohort_request_review_http import request_review_routes
 from .competition_cohort_review_boot import _token
 from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_cohort_service_export import service_work_routes
+from .competition_cohort_window_http import LocalWindowClient, window_routes
+from .competition_cohort_window_owner import CohortWindowOwner, WindowOwnerConfig
+from .competition_cohort_window_store import CohortMinerWindowStore
 from .competition_reward_boot import _disjoint
 from .competition_reward_service import _stop_task
 from .competition_service_supervision import drain_server_requests
 from .concurrency import await_owned_task, run_owned_thread
+from .config import Limits
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
+from .policy import scoring_policy_hash
 from .private_files import Directory, ensure_private_directory, lock_private_file
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -69,6 +74,14 @@ class AdmissionOwnerConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
+    windows: WindowOwnerConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if self.windows is None:
+            value.pop("windows", None)
+        return value
 
     def stores(self):
         return tuple(
@@ -77,6 +90,7 @@ class AdmissionOwnerConfig(StrictProtocolModel):
                 self.directory,
                 self.owner_key_file,
                 self.export_token_file,
+                *((self.windows.directory,) if self.windows else ()),
                 *(p.token_file for p in self.reviewers),
             )
         )
@@ -201,6 +215,32 @@ async def admission_owner_app(
         app.state.dispatch = None
         app.state.orders = None
         app.state.request_readiness = None
+        app.state.windows = None
+        if c.windows is not None:
+
+            def open_windows():
+                store = CohortMinerWindowStore(
+                    Path(c.windows.directory),
+                    cohorts=tuple(binding.cohort_sha256 for binding in intake.config.cohorts),
+                    evaluators=tuple(e.hotkey for e in intake.policy.evaluators),
+                    transports={
+                        scoring_policy_hash(p): Limits.from_policy(p) for p in c.windows.transports
+                    },
+                    bootstrap_sources=c.windows.bootstrap_sources,
+                )
+                return CohortWindowOwner(
+                    store,
+                    intake.policy,
+                    c.windows.transports,
+                    {
+                        binding.cohort_sha256: binding.authority_sha256
+                        for binding in intake.config.cohorts
+                    },
+                )
+
+            owner = await run_owned_thread(open_windows)
+            app.state.windows = LocalWindowClient(owner, timeout_seconds=review_timeout_seconds)
+            app.include_router(window_routes(app.state.windows, token=token))
         if app.state.lifecycle is not None:
             app.include_router(request_review_routes(app.state.lifecycle, token=token))
             if service_host.config.dispatch is not None:
@@ -216,6 +256,7 @@ async def admission_owner_app(
                     key,
                     sign,
                     clip_token,
+                    windows=app.state.windows,
                 )
                 app.include_router(service_work_routes(app.state.dispatch, token=token))
             if service_host.config.orders is not None:

@@ -48,20 +48,25 @@ async def test_native_mutex_wait_preserves_work_and_listener(api_case, operation
     task = asyncio.create_task(ready(s) if operation == "readiness" else post(s))
     try:
         await asyncio.wait_for(entered.wait(), timeout=60)
-        # The real native flock refuses this descriptor. HTTP ownership remains
-        # held, while unrelated event-loop work still executes.
-        await asyncio.sleep(0.1)
-        assert not task.done()
-        assert s.api.serial[s.c.cfg.catalog_sha256].locked()
-        os.close(lease)
-        lease = None
-        reply = await asyncio.wait_for(task, timeout=60)
-        assert reply.status_code == 200, reply.text
         if operation == "readiness":
+            # Current capacity still requires the compound owner. It waits
+            # without blocking unrelated event-loop work.
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            assert s.api.serial[s.c.cfg.catalog_sha256].locked()
+            os.close(lease)
+            lease = None
+            reply = await asyncio.wait_for(task, timeout=60)
+            assert reply.status_code == 200, reply.text
             assert reply.json()["ready"] is True
             assert s.c.queue.entries() == ()
         else:
+            # Recovering an already committed admission is a read snapshot,
+            # including while another operation owns the compound writer.
+            reply = await asyncio.wait_for(task, timeout=60)
+            assert reply.status_code == 200, reply.text
             assert reply.json() == accepted
+            assert not s.api.serial[s.c.cfg.catalog_sha256].locked()
             assert s.calls == []
             assert len(s.c.queue.entries()) == 1
             assert s.c.queue.lookup(inputs(s.c)[0]) is not None

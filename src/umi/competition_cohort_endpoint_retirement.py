@@ -123,6 +123,10 @@ class CohortEndpointRetirement:
             request = recovery._case(selected, job, case_id)
             old = self.retained(slot, case_id)
             if old is not None:
+                if recovery.windows is not None:
+                    await recovery.windows.retire(
+                        selection_grant(selected, assignment), request, old.retirement
+                    )
                 return CohortRetirementOutcome("retained", "retained_endpoint_retirement", old)
             key = case_record_key(selected, case_id)
             await run_owned_thread(
@@ -261,4 +265,8 @@ class CohortEndpointRetirement:
             # Commit the receipt together with its original response, then ACK.
             # Failure or cancellation cannot authorize a replacement.
             await run_owned_thread(journal.journal.put_many, tuple(records))
+            if recovery.windows is not None:
+                await recovery.windows.retire(
+                    selection_grant(selected, assignment), request, receipt
+                )
             return CohortRetirementOutcome("retained", "endpoint_retirement_retained", value)

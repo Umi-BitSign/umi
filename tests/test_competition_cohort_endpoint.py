@@ -71,6 +71,11 @@ def endpoint(receipt_scenario, tmp_path, runtime, monkeypatch):
 
 def endpoint_scenario(receipt_scenario, tmp_path, runtime, monkeypatch):
     s = setup_scenario(receipt_scenario, tmp_path, runtime, mode="endpoint_incumbent")
+    return attach_endpoint_artifacts(s, monkeypatch)
+
+
+def attach_endpoint_artifacts(s, monkeypatch):
+    """Attach authentic endpoint transcripts to an existing signed scenario."""
     transport = dispatch_legacy_policy()
     registry = tuple(
         sorted(

@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from .competition_execution import execution_boundary
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import canonical_json_bytes
 
@@ -56,15 +55,18 @@ class CompetitionTransportFinality:
         self.policy_hash = scoring_policy_hash(self.transport)
 
     async def finalized_head_height(self):
-        # A current registration capture already enforces startup, observer and
-        # timestamp freshness. Historical windows are not fresh captures.
-        return execution_boundary(await self.provider.collect()).block
+        # Window capture needs fresh owned finality, not another complete subnet
+        # membership proof. Admission/review retains its separate collect() calls.
+        return await self.provider.current_finalized_block()
 
     async def verified_block_at(self, height):
         block = await self.provider._finality.verified_block_at(height)
         if block is None:
-            return None
-        self.provider._check_finality_context(block)
+            block = await self.provider._historical_request_blocks.recover(height)
+            if block is None:
+                return None
+        else:
+            self.provider._check_finality_context(block)
         if block.height != height:
             raise ValueError("transport observer returned another block")
         # The owned registration observer may advance to a newer compatible

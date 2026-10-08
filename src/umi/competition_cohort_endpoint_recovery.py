@@ -66,10 +66,17 @@ class CohortEndpointResponseRecovery:
         wallet: Any,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        windows=None,
     ):
         self.origin, self.wallet, self.transport = origin, wallet, transport
+        self.windows = windows
         self.journal = origin.authority.journal
-        self._selection_reuse = AssignmentVerificationReuse()
+        # Retained replacement ancestry stays in the working set until every
+        # case closes. Size this cache for cohort-scale histories rather than
+        # repeatedly evicting proofs while the scheduler rotates assignments.
+        self._selection_reuse = AssignmentVerificationReuse(
+            maximum_bytes=512 * 1024**2, maximum_entries=2048
+        )
         if identity(bt.resolve_signer(wallet, role="hotkey").ss58_address) != identity(
             self.journal.config.signer
         ):

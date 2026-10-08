@@ -434,3 +434,173 @@ def test_service_startup_rejects_unbound_or_overlapping_selection(
         CompetitionServiceConfig.model_validate_json(
             canonical_json_bytes(config.model_copy(update=updates))
         )
+
+
+@pytest.mark.parametrize("blocked", ["models", "direct_uploads", "legacy_uploads"])
+async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
+    lifecycle, tmp_path, blocked
+):
+    from threading import Event
+    from types import SimpleNamespace
+
+    h = lifecycle
+    cfg = host_config(h, tmp_path / "host")
+    host = ServiceAdmissionHost(
+        cfg, h.intake, h.owner.promotion, h.provider.collect, h.provider.retained_archive
+    )
+    key = digest(h.precommitted[0].catalog)
+    publish_private_model(
+        Path(cfg.inputs_directory) / "catalogs" / (key + ".json"), h.precommitted[0]
+    )
+    prepared = await prepare(h)
+    entered, release = asyncio.Event(), asyncio.Event()
+    thread_entered, thread_release = Event(), Event()
+    calls = {name: 0 for name in ("models", "direct_uploads", "legacy_uploads")}
+    active = {name: 0 for name in calls}
+    peak = {name: 0 for name in calls}
+
+    async def asynchronous(name):
+        calls[name] += 1
+        active[name] += 1
+        peak[name] = max(peak[name], active[name])
+        try:
+            if name == blocked:
+                entered.set()
+                await release.wait()
+            return {"status": name}
+        finally:
+            active[name] -= 1
+
+    def legacy():
+        name = "legacy_uploads"
+        calls[name] += 1
+        active[name] += 1
+        peak[name] = max(peak[name], active[name])
+        try:
+            if name == blocked:
+                thread_entered.set()
+                thread_release.wait()
+            return {"status": name}
+        finally:
+            active[name] -= 1
+
+    host.uploads = SimpleNamespace(poll_once=legacy)
+    host.direct_uploads = SimpleNamespace(poll_once=lambda: asynchronous("direct_uploads"))
+    host.models = SimpleNamespace(poll_once=lambda: asynchronous("models"))
+    stop = asyncio.Event()
+    polling = asyncio.create_task(host._poll(stop))
+    try:
+
+        async def independent_progress():
+            while (
+                not (thread_entered.is_set() if blocked == "legacy_uploads" else entered.is_set())
+                or host.queues[key].journal.get("service_catalog", key) is None
+                or any(calls[name] < 2 for name in calls if name != blocked)
+            ):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(independent_progress(), timeout=120)
+        assert calls[blocked] == 1
+        receipt = await host.api.admit(key, signed_claim(h, prepared))
+        assert receipt["status"] == "accepted"
+        assert host.queues[key].assignment(signed_claim(h, prepared)).round == prepared.roster.round
+        assert all(value == 1 for value in peak.values())
+    finally:
+        stop.set()
+        release.set()
+        thread_release.set()
+        await asyncio.wait_for(polling, timeout=120)
+    assert not any(active.values())
+
+
+async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle, tmp_path):
+    from threading import Event
+    from types import SimpleNamespace
+
+    h = lifecycle
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+    )
+    entered, release, finished = Event(), Event(), Event()
+    model_entered, model_closed = asyncio.Event(), asyncio.Event()
+
+    def upload():
+        entered.set()
+        try:
+            release.wait()
+            return {"status": "original_payload_preserved"}
+        finally:
+            finished.set()
+
+    async def model():
+        model_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            model_closed.set()
+
+    host.uploads = SimpleNamespace(poll_once=upload)
+    host.models = SimpleNamespace(poll_once=model)
+    task = asyncio.create_task(host._poll(asyncio.Event()))
+    try:
+
+        async def started():
+            while not entered.is_set() or not model_entered.is_set():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(started(), 120)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done() and not finished.is_set()
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done() and not finished.is_set()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 120)
+    assert finished.is_set() and model_closed.is_set()
+
+
+@pytest.mark.parametrize("failed", ["catalogs", "models", "legacy_uploads", "direct_uploads"])
+async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_path, failed):
+    from types import SimpleNamespace
+
+    h = lifecycle
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+    )
+    names = ("catalogs", "models", "legacy_uploads", "direct_uploads")
+    entered = {name: asyncio.Event() for name in names}
+    closed = {name: asyncio.Event() for name in names}
+
+    async def reconcile(name):
+        entered[name].set()
+        try:
+            for event in entered.values():
+                await event.wait()
+            if name == failed:
+                raise RuntimeError("reconciliation failed")
+            await asyncio.Event().wait()
+        finally:
+            closed[name].set()
+
+    host.models = host.uploads = host.direct_uploads = SimpleNamespace()
+    for name, method in (
+        ("catalogs", "_poll_catalogs"),
+        ("models", "_poll_models"),
+        ("legacy_uploads", "_poll_legacy_uploads"),
+        ("direct_uploads", "_poll_direct_uploads"),
+    ):
+        setattr(host, method, lambda name=name: reconcile(name))
+    with pytest.raises(RuntimeError, match="reconciliation failed"):
+        await asyncio.wait_for(host._poll(asyncio.Event()), 120)
+    assert all(event.is_set() for event in closed.values())

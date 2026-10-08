@@ -4,6 +4,25 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Intake runtime maintenance
+
+An intake runtime repair does not require a new public deployment, cohort,
+miner enrollment or public launch. Keep the existing `public_deployment` and
+accepted journals unchanged. The private intake configuration may select a
+`runtime_source` record with schema `umi-competition-intake-runtime/1`:
+`deployment_sha256` binds the canonical existing public deployment, while
+`umi_git_revision` and `umi_source_tree_sha256` identify the qualified replacement.
+Startup rejects a different deployment or a source tree that does not match.
+Without this record, the original deployment source check remains mandatory.
+
+Stage and qualify the complete replacement under the actual intake account,
+including this source binding and the retained launch identity, before selecting
+its service path. The public status keeps the original `deployment` for existing
+miner maintenance manifests and reports the effective code separately as
+`runtime`. Do not rewrite the public deployment merely to make a new executable
+start. Preserve generous cooperative stop budgets and verify application readiness
+and completed work after startup; `systemctl start` alone is insufficient.
+
 ## Supervisor maintenance for an installed successor
 
 A supervisor fix can retain the installed worker release, reward package,
@@ -865,6 +884,18 @@ its intent. A replacement review includes its exact parent grant. Retry votes
 require a signed no-response retirement receipt and independently observed
 request expiry; assemble them with `certify_service_retry`.
 
+If the owned observer skipped an original request block, transport review recovers
+its header from an owned finalized descendant and proves `Timestamp.Now` against
+that header's state root. Recovery progresses in bounded, durable batches without
+a cutoff on the age of the request. Concurrent pending requests retain separate
+progress; a completed historical proof is reused across transport views. This
+does not create an observer record, move a signed deadline, or replace the fresh
+current-authority check. Preserve the registration cache and finality history
+during recovery; a missing header is a retryable hold, not a miner failure.
+The window's current-head check uses the owned observer directly; it does not
+repeat subnet membership collection. Admission and service review still perform
+their required registration and authority checks.
+
 Preserve the review journal across restarts. It binds each work item to its
 original assignment and evaluator, reserves vote space before signing, and
 recovers completed votes without live sources. Unfinished signing uses retained
@@ -915,6 +946,20 @@ without repeating inference. Poll reports contain bounded counts and failure
 types. Independent request closure and quality replay still determine completion
 and service credit. Preserve the queue and its worker binding across restart;
 changing the evaluator requires an authorized migration, not a configuration edit.
+
+The endpoint cohort dispatcher and paid-service transport permit one durable
+retransmission of the same selected request when the signed policy allows at
+least two request transmissions and response bodies. Each checks for the sealed original response
+first, then rechecks current authority, origin and the original request window.
+Only HTTP authentication is refreshed; the request, clip capability, selection
+and original intent/receipt remain unchanged. A separate retry intent commits
+before the second network call, without changing existing reservation manifests.
+An intent without a receipt consumes that send,
+so restart can recover or retire it but cannot authorize a third transmission.
+Expired or retired requests cannot be retransmitted. A missing response or a
+proxy 503 is not proof that inference did not execute; miner assignment locking
+and sealed response reuse prevent a repeated request from repeating inference.
+Independent retirement, certification and complete archive replay still apply.
 
 `CohortLifecycleService.run` owns a separate sampling task, with a five-second
 default interval, so slow certification does not stop readiness observations.
@@ -1636,6 +1681,14 @@ changing a provider or retry policy. They do not authenticate finality or prove
 RPC throttling. Invalid evidence still holds, and persisted verified headers
 remain the recovery boundary.
 
+After the child closes and is reaped, record and startup timeouts, ended
+subscriptions, unavailable pinned timestamp storage and light-client RPC timeouts
+retry from the last committed header with bounded backoff. This keeps the owning
+reviewer running and preserves its static-proof caches. Unknown process failures,
+malformed evidence, rollback and store faults remain terminal. New observer runs
+still verify every record, expose restart gaps and reject stale or unavailable
+headers; recovery does not invent the missing timestamp or finalized history.
+
 The wrapper allows 30 seconds for normal process exit after the last verified
 record, and 30 seconds for cooperative termination before reaping a stalled
 observer. These are child-process cleanup allowances, not extensions of finality
@@ -1721,7 +1774,10 @@ Endpoint response recovery reads the assignment and its already verified job
 as one pair, including when validating retained replacement ancestry. Successful
 selection proofs are reused only for the exact selection and assignment bytes,
 policy, cohort configuration, private journal identity and current process. The
-bounded cache returns private copies; changes, failed proofs, restart or fork
+endpoint host keeps at most 2,048 successful selections within 512 MiB so that
+repeated sweeps can retain a cohort's working replacement ancestry. Eviction is
+still bounded and requires native verification on the next read. The cache
+returns private copies; changes, failed proofs, restart or fork
 require native verification again. Each replacement still reads and verifies its
 retained parent chain. Current execution and reward authority remain independently
 verified.
@@ -1798,28 +1854,81 @@ chain authority is still collected independently. Paid service owner exports
 likewise wait for genuine local journal contention within their operation budget
 rather than treating a busy assignment read as unavailable evidence.
 
-Paid service scheduling admits the next accepted job when a configured slot
-becomes free, without waiting for every miner in the previous page. Only one
-job per miner runs at a time; the total operational concurrency is unchanged.
+Recurring paid service scheduling gives preparation, dispatch, response recovery
+and retirement, and terminal certification separate bounded capacity. Each phase
+has up to the configured `concurrency` operations, for at most four times that
+many total operations. Endpoint scheduling similarly bounds dispatch, recovery
+and retirement, and certification separately, with one additional discovery
+operation. An operation yields at a retained phase boundary before entering the
+next phase; these counts are not counts of miners actively performing inference.
+Paid work still runs at most one job per miner within its queue. Miner-side
+concurrency and active-window limits remain unchanged.
+Discovery also resumes interrupted aggregate completion after the last endpoint
+case was retained. It authenticates the original case decisions and builds the
+missing archive without repeating inference or creating new signed requests.
 The existing private cursor advances only through considered admissions and
 survives restart. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
-include in-flight operation counts, aggregate native stages and the age of the
+include in-flight operation counts, phase capacity, aggregate native stages and the age of the
 oldest stage. Stage state is removed after completion, failure or cooperative
 cancellation and includes no miner identity or request content. Neither those
 counts nor selected grants establish completed service work or reward credit.
+
+The admission owner can coordinate the miner's active-window limit across paid
+work, endpoint benchmarks, evaluator processes and configured cohorts. Configure
+`admission_owner.windows` with a dedicated private `directory`, the pinned
+`transports`, and `bootstrap_sources` naming every existing dispatch journal.
+Enable `endpoint.shared_miner_windows` on each endpoint reviewer. They use the
+existing authenticated owner origin and token; the private route is
+`/internal/cohorts/miner-windows`. It is not a public intake route.
+
+Before enabling this on an existing installation, cooperatively stop every
+dispatch writer and preserve snapshots of its original journals. Import all
+original sends, uncertain sends and bound retirement receipts with
+`import_window_source`, then seal the complete configured source inventory.
+Keep the writers stopped until the owner and all dispatchers select the shared
+configuration. Missing source records or an incomplete bootstrap hold new
+dispatch. A fresh empty database must not imply that an existing miner is free.
+Retain the original snapshots and migration receipts. These migration steps
+remain necessary while an installation has sends made before shared reservation.
+If a cutover is rolled back to dispatchers without shared reservations, preserve
+the abandoned index and rebuild a new generation from current original journals
+before enabling it again. The old sealed inventory no longer covers intervening
+sends. Do not erase or reopen that sealed inventory.
+
+The owner reserves an exact request before transmission. Requests in the same
+window share its allowance; a different window waits until all reserved requests
+in the old window have verified retirement receipts. Unknown sends survive a
+restart. Response recovery and retirement remain available while new admission
+is held, and a saved local retirement is synchronized again after owner recovery.
+Reservations neither extend signed deadlines nor authorize scoring or rewards.
+Static grant checks are reused only for their exact retained inputs and bound
+policy; current execution authority remains the dispatcher's and miner's job.
+
+An issued request whose response opportunity expires before transmission enters
+the recovery lane even if it has no send intent. Expiry alone does not release a
+reservation or score a case: the original request still needs a native signed
+retirement and any replacement still needs its normal independent certificate.
+This applies to endpoint and paid work and preserves both legacy and current
+retirement semantics.
 
 Request-vote collection proceeds when verified retained signatures satisfy the
 configured independent-group quorum, without requiring a redundant reviewer's
 response. Every certificate still passes native policy verification; votes
 from the same group cannot replace a required independent group. Outstanding
 peer requests drain cooperatively, and already committed votes remain recoverable.
+Reading an already-retained paid-work certificate does not acquire the queue's
+writer lease. It still verifies the certificate and its original selected request;
+creating a certificate retains the exclusive lease and rechecks for an existing
+certificate before committing.
 
-Current authority-history reads use the intake owner's preferred queue. Reads
-remain exclusive and validate the same private database and configuration; they
-cannot interrupt the current owner. After at most eight preferred reads, queued
-background work gets a turn. Preference changes waiting order, not authority,
-retained request bytes or persistence rules.
+Current authority-history reads use a query-only SQLite snapshot, so admission
+or model-preservation work does not own their application lock. Each snapshot
+binds the published history and its supporting records, checks the original
+private file identity and configuration, and cannot write or repair state.
+Writers retain their exclusive transaction and generation checks. The owner
+still signs each fresh response; cached historical proofs do not grant current
+execution authority.
 
 Independent service-request review compares exact finalized block facts, policy
 pins, schedule and attempt context. Observer transcripts can differ for the same

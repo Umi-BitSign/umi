@@ -1002,8 +1002,18 @@ def test_subprocess_timeout_reaps_before_restart_and_shutdown_preserves_gap(
         thread.join(timeout=5)
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "record_timeout",
+        "timestamp_unavailable",
+        "rpc_timeout",
+        "subscription_ended",
+        "startup_timeout",
+    ],
+)
 def test_timeout_recovery_advances_persisted_head_without_inventing_gap_ancestry(
-    tmp_path, observer, chain_observation, monkeypatch, caplog
+    tmp_path, observer, chain_observation, monkeypatch, caplog, reason
 ):
     port = _port(tmp_path, observer, chain_observation)
     stop = threading.Event()
@@ -1020,7 +1030,7 @@ def test_timeout_recovery_advances_persisted_head_without_inventing_gap_ancestry
         try:
             yield _attestation(observer, binding, block=block, sequence=0, previous=None)
             if len(bindings) == 1:
-                raise GrandpaFinalityObserverError("record_timeout")
+                raise GrandpaFinalityObserverError(reason)
             stop.set()
         finally:
             finalized.append(binding.segment_index)
@@ -1033,14 +1043,24 @@ def test_timeout_recovery_advances_persisted_head_without_inventing_gap_ancestry
     assert finalized == [0, 1]
     head = port.persisted_head()
     assert head is not None and head.height == 12 and head.restart_gap_before
-    assert "finality_observer_record_timeout" in caplog.text
+    assert reason in caplog.text
     assert asyncio.run(port.verified_block_at(11)) is None
     assert asyncio.run(port.verified_scan_interval(11, 12)) is None
     port.audit()
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "record_timeout",
+        "timestamp_unavailable",
+        "rpc_timeout",
+        "subscription_ended",
+        "startup_timeout",
+    ],
+)
 def test_timeout_recovery_bounds_backoff_and_stop_interrupts_it(
-    tmp_path, observer, chain_observation, monkeypatch
+    tmp_path, observer, chain_observation, monkeypatch, reason
 ):
     port = _port(tmp_path, observer, chain_observation)
     stop = threading.Event()
@@ -1049,7 +1069,7 @@ def test_timeout_recovery_bounds_backoff_and_stop_interrupts_it(
 
     def attestations(**kwargs):
         attempts.append(kwargs["minimum_finalized_block"])
-        raise GrandpaFinalityObserverError("record_timeout")
+        raise GrandpaFinalityObserverError(reason)
         yield  # pragma: no cover - keep the test double an iterator
 
     def wait(seconds):

@@ -246,17 +246,7 @@ class RoundJournal:
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
                 db.execute("BEGIN IMMEDIATE")
-                version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 2):
-                    raise ValueError("unsupported round journal capability")
-                if (
-                    version == 0
-                    and db.execute(
-                        "SELECT 1 FROM sqlite_master WHERE name GLOB 'record_reservation*' "
-                        "OR name GLOB 'round_generation_*' LIMIT 1"
-                    ).fetchone()
-                ):
-                    raise ValueError("round reservation generation marker was downgraded")
+                version = self._version(db)
                 initial_tables = self._table_names(db)
                 if version == 2:
                     self._fence_tables(db)
@@ -267,6 +257,46 @@ class RoundJournal:
             except BaseException:
                 db.rollback()
                 raise
+            finally:
+                db.close()
+
+    @staticmethod
+    def _version(db):
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, 2):
+            raise ValueError("unsupported round journal capability")
+        if (
+            version == 0
+            and db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name GLOB 'record_reservation*' "
+                "OR name GLOB 'round_generation_*' LIMIT 1"
+            ).fetchone()
+        ):
+            raise ValueError("round reservation generation marker was downgraded")
+        return version
+
+    @contextmanager
+    def read_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Read one current snapshot without reserving SQLite's writer slot.
+
+        Authorization that reads and then mutates state must keep using
+        ``transaction``. This connection cannot write or repair schema fences.
+        Conflict holds and generation markers are read afresh on every call.
+        """
+        with self._transaction_lock:
+            self._check_files()
+            db = sqlite3.connect(
+                self.path.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                isolation_level=None,
+                timeout=5,
+            )
+            try:
+                db.execute("PRAGMA query_only=ON")
+                db.execute("BEGIN")
+                if self._version(db) == 2:
+                    self._fence_tables(db)
+                yield db
             finally:
                 db.close()
 
@@ -678,7 +708,7 @@ class RoundJournal:
         """Recheck durable obligations and return their bound native receipt."""
         if type(batch_id) is not str or not 1 <= len(batch_id.encode()) <= 128:
             raise ValueError("invalid round reservation batch identity")
-        with self.transaction() as db:
+        with self.read_transaction() as db:
             if db.execute("PRAGMA user_version").fetchone()[0] != 2:
                 return None
             return self._reservation(db, batch_id)
@@ -852,14 +882,14 @@ class RoundJournal:
     def get_raw(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> bytes | None:
         """Read bounded canonical bytes with the same fresh conflict fence."""
         if db is None:
-            with self.transaction() as db:
+            with self.read_transaction() as db:
                 return self.get_raw(kind, key, db=db)
         if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
             raise ValueError("round journal conflict held")
         return self._record(db, kind, key)
 
     def keys(self, kind: str) -> list[str]:
-        with self.transaction() as db:
+        with self.read_transaction() as db:
             rows = db.execute(
                 "SELECT id FROM records WHERE kind=? ORDER BY id LIMIT ?",
                 (kind, self.maximum_rounds + 1),
@@ -882,7 +912,7 @@ class RoundJournal:
 
     def due_plans(self, block: int) -> list[str]:
         """Return at most four unprepared suite identities due at this block."""
-        with self.transaction() as db:
+        with self.read_transaction() as db:
             rows = db.execute(
                 "SELECT suite FROM plan_index WHERE opens<=? AND closes>=? "
                 "AND suite NOT IN (SELECT suite FROM round_index) "
@@ -904,7 +934,7 @@ class RoundJournal:
 
         Cursor queries return at most four entries; an exact proposal is unique.
         """
-        with self.transaction() as db:
+        with self.read_transaction() as db:
             if proposal_id is not None:
                 rows = db.execute(
                     "SELECT sequence,suite,proposal,snapshot_block,signing_close "
@@ -931,7 +961,7 @@ class RoundJournal:
 
     def settlement_entries(self, block: int, after_sequence: int = 0) -> list[RoundProposal]:
         """Return at most four verified proposals inside their settlement window."""
-        with self.transaction() as db:
+        with self.read_transaction() as db:
             rows = db.execute(
                 "SELECT r.sequence,r.suite,s.cutoff,s.valid_through FROM round_index r "
                 "JOIN round_settlement_index s ON s.sequence=r.sequence "

@@ -376,6 +376,14 @@ async def test_execution_scan_survives_blocked_first_job_and_restart(execution):
     await r.worker().poll_once()
     slots = e.box.assignments()
     assert len(slots) == 2
+    if e.job.mode == "endpoint_incumbent":
+        # Qualify independent legacy work: an already retained invocation cannot
+        # be adopted as a shared source or borrow another job's execution.
+        legacy = e.box.assignment(slots[0])
+        executor = e.executor()
+        source, started = await executor.current(legacy)
+        job = executor.journal.retain(legacy, source, started.block)
+        executor.journal.begin(job, 0, source, started)
     blocked = e.box.assignment(slots[0]).certificate.order.submission
     invoke = e.port.invoke
 
@@ -411,6 +419,77 @@ async def test_service_stop_preserves_inflight_result_for_next_process(execution
     assert e.journal().result(e.job, attempt) is not None
     await e.executor().advance(e.assignment)
     assert len(e.calls) == 1
+
+
+async def test_slow_case_does_not_block_another_jobs_next_native_step(execution):
+    e = execution
+    r, b = e.r, e.r.h.batch
+    participant = b["roster"].participants[1]
+    second = signed_order(b["scenarios"][1]).order
+    r.queue().select(
+        second,
+        CohortOrderParticipant(
+            consent=participant.record.request.consent,
+            admission=participant.admission,
+            admission_snapshot=participant.record.snapshot,
+        ),
+        r.h.source,
+        await r.capture(),
+    )
+    await r.worker().poll_once()
+    slots = e.box.assignments()
+    assert len(slots) == 2
+    if e.job.mode == "endpoint_incumbent":
+        # Qualify independent legacy work: an already retained invocation cannot
+        # be adopted as a shared source or borrow another job's execution.
+        legacy = e.box.assignment(slots[0])
+        executor = e.executor()
+        source, started = await executor.current(legacy)
+        job = executor.journal.retain(legacy, source, started.block)
+        executor.journal.begin(job, 0, source, started)
+    slow_submission = e.box.assignment(slots[0]).certificate.order.submission
+    fast_slot = slots[1]
+    slow_entered, release_slow, fast_second_step = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    stop = asyncio.Event()
+    invoke = e.port.invoke
+    active, maximum_active = 0, 0
+    slow_calls = 0
+
+    async def selective(job, attempt):
+        nonlocal active, maximum_active, slow_calls
+        active += 1
+        maximum_active = max(maximum_active, active)
+        try:
+            if job.submission == slow_submission:
+                slow_calls += 1
+                slow_entered.set()
+                await release_slow.wait()
+            elif attempt.step_index == 1:
+                # The real executor must have committed step zero before this
+                # second sandbox invocation. No synthetic completion shortcut.
+                assert e.journal().step(job, 0) is not None
+                fast_second_step.set()
+            return await invoke(job, attempt)
+        finally:
+            active -= 1
+
+    e.port.invoke = selective
+    worker = e.worker(concurrency=2)
+    task = asyncio.create_task(worker.run(stop, poll_seconds=0.01))
+    try:
+        await asyncio.wait_for(slow_entered.wait(), 30)
+        await asyncio.wait_for(fast_second_step.wait(), 30)
+        assert not release_slow.is_set()
+        assert slow_calls == 1 and maximum_active <= 2
+        assert e.journal().journal.get("assignment", fast_slot) is not None
+    finally:
+        stop.set()
+        release_slow.set()
+        await asyncio.wait_for(task, 60)
 
 
 @pytest.mark.parametrize("damage", ["quorum", "delivery", "participant"])

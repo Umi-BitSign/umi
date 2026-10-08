@@ -29,6 +29,7 @@ from .competition_commands.common import load_json
 from .competition_finality_cache import VerifiedRegistrationCache
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_intake_archive import IntakeArchiveConfig, load_intake_archive
+from .competition_launch import IntakeRuntimeSource
 from .competition_policy_lineage import register_lineage
 from .competition_public_results import PublicResultsSource
 from .competition_public_results_directory import PublicResultsDirectory
@@ -68,6 +69,7 @@ class CompetitionServiceConfig(StrictProtocolModel):
     mode: Literal["intake_no_weight"]
     policy_sha256: Hex32
     public_deployment: PublicIntakeDeployment
+    runtime_source: IntakeRuntimeSource | None = None
     retained_state: RetainedIntakeState
     state_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     submission_head_checkpoint_directory: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -91,6 +93,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_config_without_dynamic_results(self, handler):
         value = handler(self)
+        if self.runtime_source is None:
+            value.pop("runtime_source", None)
         if self.public_results_directory is None:
             value.pop("public_results_directory", None)
         if self.recoverable_intake is None:
@@ -101,6 +105,10 @@ class CompetitionServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def validate_bindings(self) -> Self:
+        if self.runtime_source is not None and (
+            self.runtime_source.deployment_sha256 != digest(self.public_deployment)
+        ):
+            raise ValueError("intake maintenance runtime belongs to another public deployment")
         if (self.schema_ == "umi-competition-service-config/3") != (
             self.recoverable_service is not None
         ):
@@ -171,7 +179,12 @@ def create_intake_app(
         raise ValueError("service configuration does not bind the supplied policy")
     if digest(policy) == _FIRST_STAGED_POLICY_SHA256 and len(config.historical_archives) != 1:
         raise ValueError("the first staged policy requires its pinned predecessor archive")
-    if config.public_deployment.umi_source_tree_sha256 != umi_source_tree_sha256():
+    expected_source = (
+        config.public_deployment.umi_source_tree_sha256
+        if config.runtime_source is None
+        else config.runtime_source.umi_source_tree_sha256
+    )
+    if expected_source != umi_source_tree_sha256():
         raise ValueError("public deployment does not match the running UMI source tree")
     schedule = config.public_deployment.round_schedule
     if not (
@@ -370,6 +383,7 @@ def create_intake_app(
         registration_source="verifier_attested_finality",
         limits=config.api_limits,
         public_deployment=config.public_deployment,
+        runtime_source=config.runtime_source,
         historical_archives=historical_archives,
         public_results_sources=config.public_results_sources,
         public_results_directory=config.public_results_directory,

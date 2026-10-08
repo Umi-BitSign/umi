@@ -171,13 +171,23 @@ summary without exposing confidential or personal material.
 ### Automatic artifact review and holds
 
 Routine complete bundles enter artifact review automatically. For legacy
-delivery, the intake worker rehashes the retained files. For direct delivery,
+delivery, the intake worker verifies the completed retained files. Successful
+verification receipts are reused while their exact local file identities remain
+unchanged. For direct delivery,
 the owner and independent evaluators stream the owner-bound object from private
 R2. Both paths verify every declared file, read only bounded UTF-8 license and
 provenance records, apply the standing policy bound to the governing competition
 policy and retain the exact review inputs. Static review does not import or
 execute submitted model code. Independent evaluators still sign the artifact
 acceptance, and benchmark execution remains a separate offline step.
+
+Upload finalization, direct-object verification, service-catalog installation and
+model acceptance have separate recurring owners. A slow independent model review
+cannot delay the next legacy upload-finalization pass or service installation.
+Each owner reconciles its own work serially; model publication and its ordinal
+remain serialized. Shutdown drains owned file operations before releasing the
+client or storage lease. A preserved payload alone still does not certify
+admission, artifact rights, benchmark quality or rewards.
 
 Contributors do not need to contact Sam for this step. A missing, unreadable or
 out-of-bounds declared record leaves that exact bundle pending with a

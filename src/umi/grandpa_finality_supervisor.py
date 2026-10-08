@@ -46,6 +46,7 @@ from .grandpa_finality import (
     CARGO_LOCK_SHA256,
     EVIDENCE_CLASS,
     FIXTURE_SET_SHA256,
+    RECOVERABLE_OBSERVER_FAILURES,
     SOURCE_REVISION,
     SOURCE_TREE_SHA256,
     FinalityAttestation,
@@ -636,9 +637,9 @@ class DurableGrandpaFinalityPort:
         return self._commit(binding, attestation)
 
     def run_blocking(self, stop_event: threading.Event) -> None:
-        """Recover terminated record timeouts from the last committed header.
+        """Recover terminated unavailable observers from the last committed header.
 
-        The observer closes and reaps its process before raising a timeout.
+        The observer closes and reaps its process before reporting unavailability.
         A replacement receives a new transcript binding and must advance the
         persisted head. Invalid evidence and store faults remain terminal.
         Consumers still reject stale state while recovery is in progress.
@@ -664,9 +665,10 @@ class DurableGrandpaFinalityPort:
                         if stop_event.is_set():
                             break
                 except GrandpaFinalityObserverError as error:
-                    if error.reason_code == "record_timeout":
+                    if error.reason_code in RECOVERABLE_OBSERVER_FAILURES:
                         _LOGGER.warning(
-                            "finality_observer_record_timeout retry_seconds=%s segment_index=%s",
+                            "finality_observer_%s retry_seconds=%s segment_index=%s",
+                            error.reason_code,
                             retry_delay,
                             binding.segment_index,
                         )

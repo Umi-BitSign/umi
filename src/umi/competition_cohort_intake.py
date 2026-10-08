@@ -188,10 +188,13 @@ class CohortIntake:
         ):
             raise ValueError("cohort intake directory must be private and operator-owned")
 
-    def _file(self, name):
+    def _file(self, name, *, read_only=False):
         fd = os.open(
             self.directory / name,
-            os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_CREAT if self._initialize else 0),
+            (os.O_RDONLY if read_only else os.O_RDWR)
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
+            | (os.O_CREAT if self._initialize and not read_only else 0),
             0o600,
         )
         info = os.fstat(fd)
@@ -207,6 +210,10 @@ class CohortIntake:
 
     @contextmanager
     def _connection(self, *, prefer_history: bool = False):
+        if prefer_history:
+            with self._history_connection() as value:
+                yield value
+            return
         # Replaying a whole accepted roster repeats identical canonical inputs.
         # Reuse serialization only while this operation owns the current state;
         # every schema, signature and authority check still runs on each read.
@@ -216,6 +223,48 @@ class CohortIntake:
             self._exclusive_connection() as value,
         ):
             yield value
+
+    def _binding_bytes(self):
+        return canonical_json_bytes(
+            {
+                "policy_sha256": digest(self.policy),
+                "config": self.config.model_dump(mode="json", by_alias=True),
+                "tracks": list(self.tracks),
+            }
+        )
+
+    @contextmanager
+    def _history_connection(self):
+        # Owner-authenticated history must remain readable while admission,
+        # model preservation or another history caller owns the write gate.
+        # SQLite's snapshot keeps the selected history and its inputs together.
+        self._directory()
+        descriptor = self._file("intake.sqlite3", read_only=True)
+        path = self.directory / "intake.sqlite3"
+        try:
+            with (
+                canonical_json_reuse(),
+                closing(
+                    sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+                ) as db,
+            ):
+                current, held = path.lstat(), os.fstat(descriptor)
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    raise ValueError("cohort intake database changed while opening")
+                db.execute("PRAGMA query_only=ON")
+                store = CohortRecoveryStore(db)
+                with store.read_snapshot():
+                    if db.execute("SELECT id,body FROM intake_binding").fetchall() != [
+                        (1, self._binding_bytes())
+                    ]:
+                        raise ValueError("cohort intake state belongs to another configuration")
+                    yield db, store
+                    self._directory()
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                        raise ValueError("cohort intake file changed during the operation")
+        finally:
+            os.close(descriptor)
 
     @contextmanager
     def _exclusive_connection(self):
@@ -241,13 +290,7 @@ class CohortIntake:
                     held = os.fstat(descriptor)
                     if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                         raise ValueError("cohort intake database changed while opening")
-                    raw = canonical_json_bytes(
-                        {
-                            "policy_sha256": digest(self.policy),
-                            "config": self.config.model_dump(mode="json", by_alias=True),
-                            "tracks": list(self.tracks),
-                        }
-                    )
+                    raw = self._binding_bytes()
                     tables = {
                         row[0]
                         for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -267,7 +310,11 @@ class CohortIntake:
                         "CREATE TABLE IF NOT EXISTS intake_binding "
                         "(id INTEGER PRIMARY KEY, body BLOB NOT NULL)"
                     )
-                    db.execute("INSERT OR IGNORE INTO intake_binding VALUES (1,?)", (raw,))
+                    # A verified existing binding is immutable. Reissuing this
+                    # no-op INSERT turns every history/model read into a write
+                    # transaction that waits for unrelated SQLite readers.
+                    if not prior:
+                        db.execute("INSERT INTO intake_binding VALUES (1,?)", (raw,))
                     db.execute("""CREATE TABLE IF NOT EXISTS cohort_consents (
                         consent TEXT PRIMARY KEY, cohort TEXT NOT NULL, hotkey TEXT NOT NULL,
                         track TEXT NOT NULL, sequence INTEGER NOT NULL, observed INTEGER NOT NULL,

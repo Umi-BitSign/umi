@@ -19,12 +19,16 @@ from umi.competition_cohort_endpoint_archive import (
     JournalEndpointObjects,
     endpoint_archive_cases,
 )
+from umi.competition_cohort_endpoint_dispatch import CohortEndpointDispatcher
 from umi.competition_cohort_endpoint_recovery import CohortEndpointResponseRecovery
-from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
+from umi.competition_cohort_endpoint_retirement import (
+    CohortEndpointRetirement,
+    CohortRetirementOutcome,
+)
 from umi.competition_cohort_endpoint_selection import selected_request, selection_grant
 from umi.competition_cohort_endpoint_worker import CohortEndpointWorker
 from umi.competition_cohort_execution_journal import CohortExecutionJournal
-from umi.endpoint_protocol import COHORT_GRANT_PATH
+from umi.endpoint_protocol import COHORT_GRANT_PATH, COHORT_RETIRE_PATH, TRANSLATE_PATH
 from umi.miner import create_app
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
@@ -154,6 +158,67 @@ async def test_inbox_to_complete_terminal_selection_and_offline_restart(schedule
     reviews = tuple(endpoint_archive_cases(archive, objects.__getitem__, p.c.policy))
     assert [r.retirement.case_id for r in reviews] == [c.case_id for c in terminal.cases]
     assert all(r.recovered is not None for r in reviews)
+
+
+async def test_expired_unsent_endpoint_reaches_retirement_lane(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    selected, assignment, _ = p.delivery_recovery.selection(q.slot)
+    grant = selection_grant(selected, assignment)
+    original = canonical_json_bytes(grant)
+    case = p.e.job.cases[0].case_id
+    expire_child(p, grant, monkeypatch)
+    assert q.worker().attempts.phase(q.slot, case) == "recovery"
+    result = await q.worker().attempts.advance(q.slot, case, one_stage=True)
+    assert result["reason"] == "retirement_retained"
+    assert q.worker().attempts.phase(q.slot, case) == "certification"
+    assert TRANSLATE_PATH not in p.paths and p.model.calls == 0
+    assert (
+        canonical_json_bytes(selection_grant(*p.delivery_recovery.selection(q.slot)[:2]))
+        == original
+    )
+
+
+@pytest.mark.parametrize("retirement_held", [False, True])
+async def test_answered_peer_retires_before_next_case_without_repeating_inference(
+    scheduled, monkeypatch, retirement_held
+):
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    first, second = p.e.job.cases[:2]
+    sent = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+        q.slot, first.case_id
+    )
+    assert sent["status"] == "recovered" and p.model.calls == 1
+    original_response = canonical_json_bytes(p.delivery_recovery.retained(q.slot, first.case_id))
+    retirement = worker.attempts.decisions.retirement
+    native_retire = retirement.retire
+
+    async def held(slot, case_id):
+        if case_id == first.case_id:
+            return CohortRetirementOutcome("pending", "retirement_transport_unavailable")
+        return await native_retire(slot, case_id)
+
+    p.paths.clear()
+    if retirement_held:
+        monkeypatch.setattr(retirement, "retire", held)
+        result = await worker.attempts.advance(q.slot, second.case_id)
+        assert result["status"] == "pending"
+        assert result["reason"] == "answered_peer_retirement_pending"
+        assert p.model.calls == 1 and TRANSLATE_PATH not in p.paths
+        assert p.delivery_recovery.retained(q.slot, second.case_id) is None
+        monkeypatch.setattr(retirement, "retire", native_retire)
+    result = await worker.attempts.advance(q.slot, second.case_id)
+    assert result["status"] == "completed", result
+    assert p.paths.index(COHORT_RETIRE_PATH) < p.paths.index(TRANSLATE_PATH)
+    assert retirement.retained(q.slot, first.case_id) is not None
+    assert p.model.calls == 2
+    assert (
+        canonical_json_bytes(p.delivery_recovery.retained(q.slot, first.case_id))
+        == original_response
+    )
 
 
 async def test_media_failure_keeps_work_pending_without_secret_logs(scheduled):
@@ -559,7 +624,7 @@ async def test_running_scheduler_completes_peer_while_other_preparation_waits(
 ):
     q = scheduled
     other = await add_second_assignment(q)
-    worker = q.worker(concurrency=2)
+    worker = q.worker(concurrency=1)
     assert (await worker._prepare(q.slot))[0] == "prepared"
     entered, release, complete, stop = (asyncio.Event() for _ in range(4))
     original = worker._prepare
@@ -655,7 +720,8 @@ async def test_running_scheduler_discovers_work_beside_rejected_grants(scheduled
         return await original_prepare(slot)
 
     def observe(report):
-        assert report.get("in_flight_operations", 0) <= 1
+        assert report.get("in_flight_operations", 0) <= 4
+        assert all(n <= 1 for n in report.get("in_flight_phase_counts", {}).values())
         if report.get("last_pending_reason") == "miner_grant_http_422":
             rejected.set()
 
@@ -705,7 +771,7 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     observed, stop = asyncio.Event(), asyncio.Event()
     reports = []
 
-    async def failed_case(row):
+    async def failed_case(row, **kwargs):
         raise ValueError("PRIVATE_DISPATCH_EXCEPTION")
 
     def report(value):
@@ -718,7 +784,7 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     try:
         await asyncio.wait_for(observed.wait(), 180)
         value = next(r for r in reports if r.get("last_retry_slot") == q.slot)
-        assert value["last_retry_stage"] == "case"
+        assert value["last_retry_stage"] == "dispatch"
         assert value["last_retry_type"] == "ValueError"
         assert value["retry_examples"][0]["slot"] == q.slot
         assert "PRIVATE_DISPATCH_EXCEPTION" not in canonical_json_bytes(value).decode()
@@ -727,3 +793,51 @@ async def test_running_scheduler_retry_binds_selection_without_private_text(sche
     finally:
         stop.set()
         await asyncio.wait_for(task, 120)
+
+
+async def test_rolling_restart_finishes_interrupted_terminal_selection(scheduled, monkeypatch):
+    q, p = scheduled, scheduled.p
+    journal = p.delivery_recovery.journal.journal
+    original_put = journal.put
+    interrupted = False
+
+    def put(kind, key, value):
+        nonlocal interrupted
+        if kind == "endpoint_terminal_selection":
+            interrupted = True
+            raise OSError("interrupted before aggregate terminal commit")
+        return original_put(kind, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(journal, "put", put)
+        for _ in range(12):
+            await q.worker().poll_once()
+            if interrupted:
+                break
+    assert interrupted
+    assert journal.get("endpoint_terminal_selection", q.slot) is None
+    worker = q.worker()
+    assert worker.schedule.pending(16) == ()
+    calls = list(p.paths), len(q.s.calls), p.model.calls
+    p.c.finality.fail = True
+    p.finality.blocks.clear()
+    q.s.peers_offline = q.media_fail = q.policy_fail = True
+    active = {}
+    try:
+        await worker._rolling_poll(active)
+        assert q.slot in active, "completed cases must still reach aggregate recovery"
+        await asyncio.wait_for(asyncio.gather(*(task for _, task in active.values())), 180)
+        report = await worker._rolling_poll(active)
+        assert report["assignments_complete"] == 1
+        archive = EndpointReplayArchive.model_validate(
+            journal.get("endpoint_replay_archive", q.slot)
+        )
+        reviews = tuple(
+            endpoint_archive_cases(archive, JournalEndpointObjects(journal), p.c.policy)
+        )
+        assert len(reviews) == len(p.e.job.cases)
+        assert (list(p.paths), len(q.s.calls), p.model.calls) == calls
+    finally:
+        for _, task in active.values():
+            task.cancel()
+        await asyncio.gather(*(task for _, task in active.values()), return_exceptions=True)

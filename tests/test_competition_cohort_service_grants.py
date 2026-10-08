@@ -366,6 +366,44 @@ async def accept(c, grant=None):
     return await request(c.p, COHORT_GRANT_PATH, c.grant if grant is None else grant)
 
 
+async def test_retained_service_certificate_reads_through_another_writer(service):
+    c, p = service, service.p
+    producer = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    before = canonical_json_bytes(c.grant)
+    with producer.journal.locked():
+        retained = producer.certificate(slot)
+    assert canonical_json_bytes(retained) == before
+    assert p.model.calls == 0
+
+
+async def test_retained_service_certificate_still_checks_original_selection(service, monkeypatch):
+    c, p = service, service.p
+    producer = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    req = c.grant.body.request
+    changed = signed_grant(
+        c.grant.body.model_copy(
+            update={
+                "request": req.model_copy(
+                    update={"video": req.video.model_copy(update={"url": req.video.url + "?other"})}
+                )
+            }
+        )
+    )
+    verify_service_grant(changed, p.c.policy, p.transport_policy)
+    original = producer.journal.get
+
+    def conflicting(kind, key, **kwargs):
+        if kind == "service_grant" and key == slot:
+            return changed.model_dump(mode="json", by_alias=True)
+        return original(kind, key, **kwargs)
+
+    monkeypatch.setattr(producer.journal, "get", conflicting)
+    with producer.journal.locked(), pytest.raises(ValueError, match="selected request"):
+        producer.certificate(slot)
+
+
 async def test_service_grant_accepts_equivalent_serving_origin_spelling(service):
     c, p = service, service.p
     p.miner = p.rebuild(
@@ -1210,6 +1248,48 @@ async def test_service_terminal_replays_native_response_and_all_parents(
             )
         with pytest.raises(FileNotFoundError):
             read_service_terminal(terminal, owner.objects, p.c.policy, p.transport_policy)
+
+
+@pytest.mark.parametrize("replace_attempt", [False, True])
+async def test_completed_service_terminal_does_not_wait_for_unused_deadline(
+    service, monkeypatch, replace_attempt
+):
+    from umi.competition_cohort_service_terminal import read_service_terminal
+    from umi.competition_execution import execution_boundary
+
+    c, p = service, service.p
+    if replace_attempt:
+        c.grant, _, _ = await replacement(c, monkeypatch)
+    owner, response, retirement, source, _ = await terminal_response(c)
+    request = c.grant.body.request
+    observation = execution_boundary(capture(request.issued_block + 1))
+    assert observation.block < request.deadline_block
+    intent = owner.prepare(
+        service_grant_slot(c.grant.body), response, retirement, source, observation
+    )
+    terminal = owner.retain(intent, sign_object(intent, p.validator))
+    before = canonical_json_bytes(terminal)
+    assert (
+        read_service_terminal(
+            terminal,
+            owner.objects,
+            p.c.policy,
+            p.transport_policy,
+            request_interval=(390, observation.block),
+        )
+        == c.grant
+    )
+    for interval in [(request.issued_block, observation.block), (390, observation.block - 1)]:
+        with pytest.raises(ValueError, match="outside certified request phases"):
+            read_service_terminal(
+                terminal,
+                owner.objects,
+                p.c.policy,
+                p.transport_policy,
+                request_interval=interval,
+            )
+    assert canonical_json_bytes(owner.read(c.assignment)) == before
+    assert p.model.calls == 1
 
 
 @pytest.mark.parametrize("stage", ["service_terminal_intent", "service_terminal"])

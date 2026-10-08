@@ -217,6 +217,8 @@ def test_subprocess_adapter_accepts_canonical_attestation(
         (b"startup timed out", "startup_timeout"),
         (b"light client RPC timed out: secret-method", "rpc_timeout"),
         (b"light client failed: https://secret.example/token", "light_client_failed"),
+        (b"pinned timestamp storage unavailable", "timestamp_unavailable"),
+        (b"finality subscription ended", "subscription_ended"),
         (b"finality_rollback", "finality_rollback"),
         (b"secret-private-error", "unknown"),
     ],
@@ -245,8 +247,15 @@ def test_failed_observer_drains_large_stderr_without_logging_private_details(
         bootstrap_block_hash=observer.bootstrap_block_hash,
         record_timeout_seconds=10,
     )
-    with pytest.raises(GrandpaFinalityObserverError, match="observer_failed"):
+    reason = (
+        failure_class
+        if failure_class
+        in {"startup_timeout", "rpc_timeout", "timestamp_unavailable", "subscription_ended"}
+        else "observer_failed"
+    )
+    with pytest.raises(GrandpaFinalityObserverError) as caught:
         list(selected.attestations(minimum_finalized_block=10, maximum_records=2))
+    assert caught.value.reason_code == reason
     reports = [
         json.loads(record.message)
         for record in caplog.records

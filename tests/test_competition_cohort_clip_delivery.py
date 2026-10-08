@@ -147,3 +147,151 @@ async def test_cancelled_upload_keeps_original_intent(clips, monkeypatch):
     monkeypatch.setattr(uploader, "_verify", verify)
     assert await clips.open()(clips.sha) == await uploader(clips.sha)
     assert len(clips.uploads) == 1
+
+
+async def test_slow_clip_does_not_block_other_clips_or_duplicate_its_upload(tmp_path):
+    import asyncio
+
+    root = tmp_path / "videos"
+    ensure_private_directory(root)
+    bodies = [b"\0\0\0\x10ftyp" + bytes([n]) * 100 for n in range(2)]
+    videos = {hashlib.sha256(body).hexdigest(): body for body in bodies}
+    for sha, body in videos.items():
+        (root / (sha + ".mp4")).write_bytes(body)
+    slow, fast = videos
+    entered, release = asyncio.Event(), asyncio.Event()
+    objects, uploads = {}, []
+    active = peak = 0
+
+    async def route(request):
+        nonlocal active, peak
+        sha = request.url.path.rsplit("/", 1)[-1][:-4]
+        if request.method == "PUT":
+            assert request.content == videos[sha]
+            objects[str(request.url)] = request.content
+            uploads.append(sha)
+            return httpx.Response(201)
+        assert request.method == "GET"
+        if sha == slow:
+            active += 1
+            peak = max(peak, active)
+            entered.set()
+            try:
+                await release.wait()
+            finally:
+                active -= 1
+        if str(request.url) not in objects:
+            return httpx.Response(404)
+        body = objects[str(request.url)]
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "video/mp4", "content-length": str(len(body))},
+        )
+
+    cfg = delivery.ClipDeliveryConfig(
+        schema="umi-cohort-clip-delivery-config/1",
+        directory=str(tmp_path / "journal"),
+        videos_directory=str(root),
+        origin="https://clips.example",
+        upload_token_file=str(tmp_path / "credential"),
+        timeout_seconds=120,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(route)) as client:
+        publisher = delivery.CohortClipDelivery(cfg, client, "a" * 64)
+        first = asyncio.create_task(publisher(slow))
+        duplicate = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=120)
+            duplicate = asyncio.create_task(publisher(slow))
+            delivered = await asyncio.wait_for(publisher(fast), timeout=120)
+            assert delivered.sha256 == fast and not first.done() and not duplicate.done()
+            assert peak == 1
+            release.set()
+            original, repeated = await asyncio.wait_for(
+                asyncio.gather(first, duplicate), timeout=120
+            )
+            assert original == repeated and uploads.count(slow) == uploads.count(fast) == 1
+            assert peak == 1 and not publisher.clip_locks
+        finally:
+            release.set()
+            for task in (first, duplicate):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (first, duplicate) if task is not None), return_exceptions=True
+            )
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+async def test_clip_capacity_bounds_transfers_and_canceled_waiters_leave_no_owner(
+    tmp_path, concurrency
+):
+    import asyncio
+
+    root = tmp_path / "videos"
+    ensure_private_directory(root)
+    videos = {}
+    for n in range(3):
+        body = b"\0\0\0\x10ftyp" + bytes([n]) * 100
+        sha = hashlib.sha256(body).hexdigest()
+        videos[sha] = body
+        (root / (sha + ".mp4")).write_bytes(body)
+    started, release = asyncio.Event(), asyncio.Event()
+    objects = {}
+    active = peak = 0
+
+    async def route(request):
+        nonlocal active, peak
+        sha = request.url.path.rsplit("/", 1)[-1][:-4]
+        if request.method == "PUT":
+            assert request.content == videos[sha]
+            objects[str(request.url)] = request.content
+            return httpx.Response(201)
+        assert request.method == "GET"
+        active += 1
+        peak = max(peak, active)
+        if active == concurrency:
+            started.set()
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+        if str(request.url) not in objects:
+            return httpx.Response(404)
+        body = objects[str(request.url)]
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "video/mp4", "content-length": str(len(body))},
+        )
+
+    cfg = delivery.ClipDeliveryConfig(
+        schema="umi-cohort-clip-delivery-config/1",
+        directory=str(tmp_path / "journal"),
+        videos_directory=str(root),
+        origin="https://clips.example",
+        upload_token_file=str(tmp_path / "credential"),
+        timeout_seconds=120,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(route)) as client:
+        publisher = delivery.CohortClipDelivery(cfg, client, "a" * 64, concurrency=concurrency)
+        tasks = [asyncio.create_task(publisher(sha)) for sha in videos]
+        try:
+            await asyncio.wait_for(started.wait(), timeout=120)
+            assert active == peak == concurrency and not any(task.done() for task in tasks)
+            for task in tasks[concurrency:]:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert len(publisher.clip_locks) == concurrency
+            release.set()
+            completed = await asyncio.wait_for(asyncio.gather(*tasks[:concurrency]), timeout=120)
+            assert len(completed) == concurrency and peak == concurrency
+            assert not publisher.clip_locks
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

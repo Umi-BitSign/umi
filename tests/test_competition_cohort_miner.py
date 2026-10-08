@@ -722,7 +722,7 @@ async def test_hanging_grant_control_exchange_is_bounded_and_retryable(delivery)
 
     p = delivery
     journal = p.delivery_recovery.journal
-    assert control_exchange_timeout_seconds(journal.config) == 120
+    assert control_exchange_timeout_seconds(journal.config) == journal.config.read_timeout_seconds
     journal.config = journal.config.model_copy(update={"read_timeout_seconds": 1})
     inner = p.delivery_recovery.transport
 
@@ -835,3 +835,224 @@ async def test_local_grant_review_can_outlast_network_timeout(granted, monkeypat
     assert result.status_code == 200, result.text
     assert (await grant(p)).content == result.content
     assert p.model.calls == 0
+
+
+@pytest.mark.parametrize("waiting_on", ["history", "confirmation", "finality", "proof"])
+async def test_slow_admission_does_not_block_retirement_or_retained_receipt(
+    granted, monkeypatch, waiting_on
+):
+    p = granted
+    ack = await grant(p)
+    assert ack.status_code == 200
+    authority = p.miner.competition_authority
+    entered, release = asyncio.Event(), asyncio.Event()
+    history = authority.history
+    finality = p.finality.finalized_head_height
+    proof = authority.legacy.authorize
+    calls = 0
+
+    async def wait_here():
+        entered.set()
+        await release.wait()
+
+    async def delayed_history(*args):
+        nonlocal calls
+        calls += 1
+        if (waiting_on == "history" and calls == 1) or (
+            waiting_on == "confirmation" and calls == 2
+        ):
+            await wait_here()
+        return await history(*args)
+
+    async def delayed_finality(*args):
+        if waiting_on == "finality":
+            await wait_here()
+        return await finality(*args)
+
+    async def delayed_proof(*args):
+        if waiting_on == "proof":
+            await wait_here()
+        return await proof(*args)
+
+    monkeypatch.setattr(authority, "history", delayed_history)
+    monkeypatch.setattr(p.finality, "finalized_head_height", delayed_finality)
+    monkeypatch.setattr(authority.legacy, "authorize", delayed_proof)
+    task = asyncio.create_task(
+        authority.authorize(p.requests[0], validator_hotkey=p.validator.hotkey.ss58_address)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        retained = await asyncio.wait_for(
+            authority.retirement_grant(
+                p.requests[0], validator_hotkey=p.validator.hotkey.ss58_address
+            ),
+            10,
+        )
+        assert retained == p.grant
+        assert (await asyncio.wait_for(grant(p), 10)).content == ack.content
+        assert not task.done()
+    finally:
+        release.set()
+        await task
+    assert p.model.calls == p.fetcher.calls == 0
+
+
+async def test_concurrent_newer_finality_makes_old_admission_retryable(granted, monkeypatch):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    authority = p.miner.competition_authority
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = p.finality.finalized_head_height
+    calls = 0
+
+    async def reordered_head():
+        nonlocal calls
+        calls += 1
+        value = await original()
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(p.finality, "finalized_head_height", reordered_head)
+    task = asyncio.create_task(translate(p))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        p.finality.head += 1
+        await asyncio.wait_for(authority._current(p.grant), 10)
+    finally:
+        release.set()
+    result = await task
+    assert result.status_code == 503, result.text
+    assert result.json()["detail"] == "cohort_authority_unavailable"
+    assert p.model.calls == p.fetcher.calls == 0
+    assert (await translate(p)).status_code == 200
+
+
+async def test_concurrent_closure_fences_prepared_admission(granted, monkeypatch):
+    from umi.competition_cohort_order_signer import remember_order_history
+    from umi.concurrency import run_owned_thread
+
+    p = granted
+    assert (await grant(p)).status_code == 200
+    authority = p.miner.competition_authority
+    history = authority.history
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def delayed_confirmation(*args):
+        nonlocal calls
+        calls += 1
+        value = await history(*args)
+        if calls == 4:
+            entered.set()
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(authority, "history", delayed_confirmation)
+    task = asyncio.create_task(translate(p))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        closed = source_for(p.e.r.h.batch, p.e.r.h.batch["history"])
+        async with authority.serial:
+            with authority.journal.locked():
+                await run_owned_thread(
+                    remember_order_history,
+                    authority.journal,
+                    authority.cohorts,
+                    authority.policy,
+                    closed,
+                    p.finality.head,
+                )
+    finally:
+        release.set()
+    result = await task
+    assert result.status_code == 503, result.text
+    assert p.model.calls == p.fetcher.calls == 0
+    p.miner = p.rebuild()
+    assert (await translate(p)).status_code == 422
+
+
+async def test_concurrent_admissions_share_initial_history_but_confirm_independently(
+    granted, monkeypatch
+):
+    p = granted
+    authority = p.miner.competition_authority
+    history = authority.history
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def held(cohort):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await history(cohort)
+
+    monkeypatch.setattr(authority, "history", held)
+    first = asyncio.create_task(authority._current(p.grant))
+    second = asyncio.create_task(authority._current(p.grant))
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        await asyncio.sleep(0)
+        assert calls == 1
+        release.set()
+        left, right = await asyncio.wait_for(asyncio.gather(first, second), 60)
+        assert left == right and calls == 3
+        await authority._current(p.grant)
+        assert calls == 5  # Neither the initial nor confirmation result is cached.
+        assert not authority._history_reads and not authority._history_waiters
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.parametrize("cancel_all", [False, True])
+async def test_shared_history_cancellation_preserves_other_waiters_and_drains_last(
+    granted, monkeypatch, cancel_all
+):
+    p = granted
+    authority = p.miner.competition_authority
+    history = authority.history
+    entered, release, cleaning, finish, finished = (asyncio.Event() for _ in range(5))
+    cohort = p.grant.attempt.order.job.round.cohort_sha256
+
+    async def held(cohort):
+        try:
+            entered.set()
+            await release.wait()
+            return await history(cohort)
+        finally:
+            cleaning.set()
+            await finish.wait()
+            finished.set()
+
+    monkeypatch.setattr(authority, "history", held)
+    first = asyncio.create_task(authority._shared_history(cohort))
+    second = asyncio.create_task(authority._shared_history(cohort))
+    try:
+        await asyncio.wait_for(entered.wait(), 60)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 60)
+        assert not second.done() and not cleaning.is_set()
+        if cancel_all:
+            second.cancel()
+            await asyncio.wait_for(cleaning.wait(), 60)
+            second.cancel()
+            await asyncio.sleep(0)
+            assert not second.done() and not finished.is_set()
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(second, 60)
+        else:
+            release.set()
+            finish.set()
+            assert await asyncio.wait_for(second, 60) == await history(cohort)
+        assert finished.is_set()
+        assert not authority._history_reads and not authority._history_waiters
+    finally:
+        release.set()
+        finish.set()
+        await asyncio.gather(first, second, return_exceptions=True)

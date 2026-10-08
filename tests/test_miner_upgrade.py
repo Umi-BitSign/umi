@@ -43,7 +43,9 @@ def _status(manifest: dict) -> dict:
         "schema": "umi-competition-status/2",
         "policy_sha256": manifest["policy"]["value_sha256"],
         "deployment": {
-            "umi_git_revision": manifest["runtime"]["revision"],
+            "umi_git_revision": manifest["runtime"].get(
+                "deployment_revision", manifest["runtime"]["revision"]
+            ),
             "eligible_tracks": manifest["eligible_tracks"],
         },
     }
@@ -57,6 +59,7 @@ def test_current_manifest_accepts_either_c5_track() -> None:
 
 def test_matching_live_deployment_supersedes_a_stale_static_runtime_pointer() -> None:
     manifest = _manifest()
+    manifest["runtime"].pop("deployment_revision", None)
     status = _status(manifest)
     status["deployment"]["repository"] = "https://github.com/Umi-BitSign/umi"
     manifest["runtime"]["revision"] = "00" * 20
@@ -128,7 +131,7 @@ def test_miner_command_preserves_existing_cohort_state_paths(tmp_path: Path) -> 
     assert upgrade.option(result, "--finality-state") == "/old/finality.sqlite3"
     assert "--competition-feed" not in result
     assert "--competition-predecessor-policy" not in result
-    assert "--competition-chain-config" not in result
+    assert upgrade.option(result, "--competition-chain-config") == "/old/chain.json"
     assert current[0] == "/old/bin/python"
 
 
@@ -561,12 +564,25 @@ def test_activation_restores_previous_override_when_health_fails(
 
     def fake_run(*arguments: str, **_kwargs: object) -> subprocess.CompletedProcess:
         calls.append(arguments)
-        return subprocess.CompletedProcess(arguments, 0, "", "")
+        if "show" in arguments:
+            output = (
+                "ActiveState=active\nControlGroup=/test-miner\n"
+                if arguments[-1] == "--property=ActiveState,ControlGroup"
+                else "TimeoutStopUSec=infinity\nTimeoutStartUSec=infinity\nSendSIGKILL=no\n"
+                "KillMode=mixed\nKillSignal=15\nSendSIGHUP=no\n"
+            )
+        else:
+            output = ""
+        if "stop" in arguments or "start" in arguments:
+            assert _kwargs["timeout"] is None
+        return subprocess.CompletedProcess(arguments, 0, output, "")
 
-    def failed_health(*_args: object, **_kwargs: object) -> dict:
+    def failed_health(*_args: object, **kwargs: object) -> dict:
+        assert kwargs["seconds"] == 3600
         raise ValueError("simulated startup failure")
 
     monkeypatch.setattr(upgrade, "SYSTEMD_ROOT", systemd)
+    monkeypatch.setattr(upgrade, "SYSTEMD_RUNTIME_ROOT", tmp_path / "run")
     monkeypatch.setattr(upgrade, "LAUNCHER", tmp_path / "launcher")
     monkeypatch.setattr(upgrade, "run", fake_run)
     monkeypatch.setattr(upgrade, "wait_health", failed_health)
@@ -586,9 +602,65 @@ def test_activation_restores_previous_override_when_health_fails(
             policy="20" * 32,
             transport="30" * 32,
             model="40" * 32,
+            startup_seconds=3600,
         )
     assert prior.read_bytes() == b"old override\n"
     assert ("systemctl", "start", "umi-miner.service") in calls
+
+    assert not list((tmp_path / "run").rglob("*.conf"))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ([], {"inference_seconds": 600, "startup_seconds": 3600}),
+        (["--inference-timeout", "400"], {"inference_seconds": 400, "startup_seconds": 2400}),
+        (
+            ["--backend-lifecycle-timeout", "2100"],
+            {"inference_seconds": 600, "startup_seconds": 4200},
+        ),
+    ],
+)
+def test_updater_resolves_budgets_with_selected_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides, expected
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    for name, source in (
+        ("competition-policy.json", "C5_POLICY.json"),
+        ("transport-policy.json", "C5_TRANSPORT_POLICY.json"),
+    ):
+        (inputs / name).write_bytes((ROOT / "docs/competition" / source).read_bytes())
+    native_run = upgrade.run
+
+    def selected_run(*arguments: str, **kwargs):
+        assert arguments[:3] == (sys.executable, "-I", "-B")
+        # This fixture's checkout stands in for the selected installed runtime.
+        selected = list(arguments)
+        selected[4] = "import sys;sys.path.insert(0," + repr(str(ROOT / "src")) + ");" + selected[4]
+        return native_run(*selected, **kwargs)
+
+    monkeypatch.setattr(upgrade, "run", selected_run)
+    assert (
+        upgrade.runtime_limits([sys.executable, "-m", "umi.miner", *overrides], tmp_path)
+        == expected
+    )
+
+
+def test_health_readiness_can_exceed_the_old_ten_minute_ceiling(monkeypatch):
+    ticks = iter((0, 1, 1801))
+    health = {
+        "ok": True,
+        "competition_policy_sha256": "p",
+        "scoring_policy_sha256": "t",
+        "model_revision": "m",
+        "finality_service": "running",
+    }
+    replies = iter((b"{}", upgrade.canonical(health)))
+    monkeypatch.setattr(upgrade.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(upgrade.time, "sleep", lambda _: None)
+    monkeypatch.setattr(upgrade, "fetch", lambda *_args, **_kwargs: next(replies))
+    assert upgrade.wait_health(8091, "p", "t", "m", seconds=3600) == health
 
 
 @pytest.mark.parametrize("cohort", ["C6", "C7", "C10"])
@@ -793,6 +865,10 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     if layout == "manual_cohort":
         custom = tmp_path / "custom-state"
         custom.mkdir()
+        chain = custom / "chain.json"
+        protected[chain] = b"retained owned finality configuration"
+        chain.write_bytes(protected[chain])
+        arguments.extend(("--competition-chain-config", str(chain)))
         startup_bytes = upgrade.startup(
             manifest, custom, "miner-hotkey", "10" * 32, "https://miner.example"
         )
@@ -838,6 +914,11 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     )
     monkeypatch.setattr(upgrade, "prepare_sidecar", lambda command, *_args: (None, command, None))
     monkeypatch.setattr(
+        upgrade,
+        "runtime_limits",
+        lambda *_args: {"inference_seconds": 600, "startup_seconds": 3600},
+    )
+    monkeypatch.setattr(
         upgrade, "activate_services", lambda **kwargs: calls.append(kwargs) or {"ok": True}
     )
     monkeypatch.setattr(
@@ -853,8 +934,10 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     )
     assert len(calls) == (0 if prior_runtime == "current" else 2)
     if calls:
-        command = json.loads((inputs / "miner-command.json").read_bytes())["arguments"]
+        command = json.loads(calls[-1]["miner_command_path"].read_bytes())["arguments"]
         assert command[0] == str(target_python)
+        if layout == "manual_cohort":
+            assert upgrade.option(command, "--competition-chain-config") == str(chain)
         assert upgrade.option(command, "--model-revision") == "10" * 32
         nonce_path = (
             custom / "nonces.sqlite3"
@@ -1111,7 +1194,7 @@ def test_manual_relative_paths_use_running_service_working_directory(tmp_path):
 def test_maintenance_release_keeps_exact_target_and_existing_deployment_identity():
     manifest = _manifest()
     status = _status(manifest)
-    deployed_revision = manifest["runtime"]["revision"]
+    deployed_revision = status["deployment"]["umi_git_revision"]
     manifest["runtime"] = {
         "repository": "https://github.com/Umi-BitSign/umi.git",
         "revision": "ab" * 20,
@@ -1131,7 +1214,7 @@ def test_maintenance_release_keeps_exact_target_and_existing_deployment_identity
 def test_maintenance_release_refuses_an_unbound_deployment_or_profile(fault):
     manifest = _manifest()
     status = _status(manifest)
-    manifest["runtime"]["deployment_revision"] = manifest["runtime"]["revision"]
+    manifest["runtime"]["deployment_revision"] = status["deployment"]["umi_git_revision"]
     manifest["runtime"]["revision"] = "ab" * 20
     if fault == "deployment":
         status["deployment"]["umi_git_revision"] = "cd" * 20
@@ -1146,3 +1229,227 @@ def test_maintenance_release_refuses_an_unbound_deployment_or_profile(fault):
     selected = upgrade.deployed_manifest(manifest, status)
     with pytest.raises(ValueError):
         upgrade.validate_manifest(selected, status, "yes")
+
+
+@pytest.mark.parametrize("account_name", ["root", "miner"])
+@pytest.mark.parametrize("prior_budget", [120, 600])
+def test_sidecar_upgrade_uses_cohort_budget_without_rewriting_old_inputs(
+    tmp_path, monkeypatch, account_name, prior_budget
+):
+    state = tmp_path / "state"
+    (state / "inputs").mkdir(parents=True)
+    socket = str(tmp_path / "old.sock")
+    transport = "ab" * 32
+    Path(socket + ".capacity.json").write_bytes(
+        upgrade.canonical(
+            {
+                "process_id": 123,
+                "scoring_policy_sha256": transport,
+                "model_revision": "cd" * 32,
+                "maximum_inference_milliseconds": prior_budget * 1000,
+            }
+        )
+    )
+    config_path = state / "inputs/model-service.json"
+    original = upgrade.canonical(
+        {
+            "schema": "umi-community-model-service/1",
+            "socket_path": socket,
+            "scoring_policy_sha256": transport,
+            "validator_slot_count": 1,
+            "workers": [
+                {
+                    "inference_seconds": prior_budget,
+                    "model_revision": "cd" * 32,
+                    "command": ["/model/python", "/model/worker.py"],
+                    "scratch_directory": "/model/private-scratch",
+                }
+            ],
+        }
+    )
+    config_path.write_bytes(original)
+    arguments = ["/new/python", "-m", "umi.miner", "--translator-unix-socket", socket]
+    sidecar = upgrade.Service(
+        name="umi-model.service",
+        user=account_name,
+        pid=123,
+        arguments=[
+            "/model/python",
+            "--config",
+            str(config_path),
+            "--expected-config-sha256",
+            upgrade.sha256(original),
+        ],
+        working_directory=tmp_path,
+    )
+    account = SimpleNamespace(pw_name=account_name, pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(upgrade, "runtime_inference_seconds", lambda *_args: 600)
+    monkeypatch.setattr(upgrade, "unit_for_pid", lambda _: sidecar.name)
+    monkeypatch.setattr(upgrade, "service", lambda _: sidecar)
+    selected, command, new_socket = upgrade.prepare_sidecar(arguments, state, account, transport)
+    assert config_path.read_bytes() == original
+    if prior_budget == 600:
+        assert selected is None and command == arguments and str(new_socket) == socket
+    else:
+        new_config_path = Path(upgrade.option(selected.arguments, "--config"))
+        updated = json.loads(new_config_path.read_bytes())
+        assert new_config_path != config_path
+        assert updated["workers"][0]["inference_seconds"] == 600
+        assert updated["workers"][0]["command"] == ["/model/python", "/model/worker.py"]
+        assert updated["workers"][0]["scratch_directory"] == "/model/private-scratch"
+        assert upgrade.option(command, "--translator-unix-socket") == str(new_socket)
+        assert selected.name == sidecar.name and selected.user == account_name
+        assert sidecar.arguments[2] == str(config_path)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_cooperative_guard_is_installed_before_stop_and_retained_while_draining(
+    tmp_path, monkeypatch, interrupted
+):
+    root = tmp_path / "run"
+    monkeypatch.setattr(upgrade, "SYSTEMD_RUNTIME_ROOT", root)
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args: None)
+    miner = upgrade.Service("umi-manual.service", 100, "root", ["/bin/true"])
+    guard = root / f"{miner.name}.d/zz-umi-cohort-upgrade-drain.conf"
+    draining = False
+
+    def run(*arguments, **kwargs):
+        assert guard.exists() or arguments == ("systemctl", "daemon-reload")
+        if arguments[-1] == "--property=ActiveState,ControlGroup":
+            output = (
+                "ActiveState=deactivating\nControlGroup=/test-miner\n"
+                if draining
+                else "ActiveState=inactive\nControlGroup=\n"
+            )
+        elif "show" in arguments:
+            output = (
+                "TimeoutStopUSec=infinity\nTimeoutStartUSec=infinity\nSendSIGKILL=no\n"
+                "KillMode=mixed\nKillSignal=15\nSendSIGHUP=no\n"
+            )
+        else:
+            output = ""
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(upgrade, "run", run)
+    if interrupted:
+        with pytest.raises(KeyboardInterrupt), upgrade.cooperative_upgrade((miner,)):
+            draining = True
+            raise KeyboardInterrupt
+        assert "SendSIGKILL=no" in guard.read_text()
+        # A retry adopts the same guard and removes it only after drain settles.
+        draining = False
+    with upgrade.cooperative_upgrade((miner,)):
+        assert "TimeoutStopSec=infinity" in guard.read_text()
+    assert not guard.exists()
+
+
+def test_cooperative_guard_refuses_overriding_unit_policy_before_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(upgrade, "SYSTEMD_RUNTIME_ROOT", tmp_path / "run")
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args: None)
+    miner = upgrade.Service("umi-miner.service", 100, "miner", ["/bin/true"])
+    calls = []
+
+    def run(*arguments, **kwargs):
+        calls.append(arguments)
+        output = (
+            "ActiveState=active\nControlGroup=/test-miner\n"
+            if arguments[-1] == "--property=ActiveState,ControlGroup"
+            else "SendSIGKILL=yes\n"
+        )
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(upgrade, "run", run)
+    with (
+        pytest.raises(ValueError, match="does not support cooperative"),
+        upgrade.cooperative_upgrade((miner,)),
+    ):
+        pytest.fail("incompatible unit must fail before activation")
+    assert not any("stop" in call for call in calls)
+    assert not list((tmp_path / "run").rglob("*.conf"))
+
+
+def test_activation_drains_miner_before_sidecar_and_preserves_cooperative_policy(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(upgrade, "SYSTEMD_ROOT", tmp_path / "etc")
+    monkeypatch.setattr(upgrade, "SYSTEMD_RUNTIME_ROOT", tmp_path / "run")
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args: None)
+    miner = upgrade.Service("umi-root.service", 100, "root", ["/bin/true"])
+    sidecar = upgrade.Service("umi-model.service", 101, "miner", ["/bin/true"])
+    calls = []
+
+    def run(*arguments, **kwargs):
+        calls.append(arguments)
+        if "stop" in arguments or "start" in arguments:
+            assert kwargs["timeout"] is None
+        if arguments == ("systemctl", "stop", sidecar.name):
+            assert ("systemctl", "stop", miner.name) in calls[:-1]
+        if arguments[-1] == "--property=ActiveState,ControlGroup":
+            output = "ActiveState=active\nControlGroup=/test-miner\n"
+        elif "show" in arguments:
+            output = (
+                "TimeoutStopUSec=infinity\nTimeoutStartUSec=infinity\nSendSIGKILL=no\n"
+                "KillMode=mixed\nKillSignal=15\nSendSIGHUP=no\n"
+            )
+        else:
+            output = ""
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(upgrade, "run", run)
+    monkeypatch.setattr(upgrade, "wait_capacity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(upgrade, "wait_health", lambda *args, **kwargs: {"ok": True})
+    assert upgrade.activate_services(
+        miner=miner,
+        sidecar=sidecar,
+        miner_command_path=tmp_path / "miner.json",
+        miner_command_sha="10" * 32,
+        sidecar_command_path=tmp_path / "model.json",
+        sidecar_command_sha="20" * 32,
+        launcher_python=Path(sys.executable),
+        new_socket=tmp_path / "model.sock",
+        port=8091,
+        policy="30" * 32,
+        transport="40" * 32,
+        model="50" * 32,
+        startup_seconds=3600,
+    ) == {"ok": True}
+    for entry in (miner, sidecar):
+        raw = (tmp_path / "etc" / f"{entry.name}.d/90-umi-cohort-upgrade.conf").read_text()
+        assert "TimeoutStopSec=infinity\nSendSIGKILL=no\nKillMode=mixed" in raw
+        assert "TimeoutStartSec=3600s" in raw
+    assert not list((tmp_path / "run").rglob("*.conf"))
+
+
+def test_cooperative_guard_survives_failed_unit_with_remaining_children(tmp_path, monkeypatch):
+    root = tmp_path / "run"
+    monkeypatch.setattr(upgrade, "SYSTEMD_RUNTIME_ROOT", root)
+    monkeypatch.setattr(upgrade.os, "chown", lambda *_args: None)
+    miner = upgrade.Service("umi-miner.service", 100, "miner", ["/bin/true"])
+    guard = root / f"{miner.name}.d/zz-umi-cohort-upgrade-drain.conf"
+    populated = True
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == Path("/sys/fs/cgroup/test-miner/cgroup.events"):
+            return f"populated {int(populated)}\n"
+        return original_read(path, *args, **kwargs)
+
+    def run(*arguments, **kwargs):
+        if arguments[-1] == "--property=ActiveState,ControlGroup":
+            output = "ActiveState=failed\nControlGroup=/test-miner\n"
+        else:
+            output = (
+                "TimeoutStopUSec=infinity\nTimeoutStartUSec=infinity\nSendSIGKILL=no\n"
+                "KillMode=mixed\nKillSignal=15\nSendSIGHUP=no\n"
+            )
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(upgrade, "run", run)
+    with upgrade.cooperative_upgrade((miner,)):
+        pass
+    assert guard.exists()
+    populated = False
+    with upgrade.cooperative_upgrade((miner,)):
+        pass
+    assert not guard.exists()

@@ -245,7 +245,7 @@ class ServiceWorkQueue:
     def lookup(self, signed: SignedServiceWorkClaim) -> ServiceWorkAdmission | None:
         signed = verify_service_claim(signed)
         key = service_claim_key(signed.claim)
-        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
+        with canonical_json_reuse(), self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_claims WHERE claim_key=?", (key,)
             ).fetchone()
@@ -357,7 +357,7 @@ class ServiceWorkQueue:
             or not 1 <= limit <= 256
         ):
             raise ValueError("invalid service queue page")
-        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
+        with canonical_json_reuse(), self.journal.read_transaction() as db:
             rows = db.execute(
                 "SELECT ordinal FROM service_claims WHERE ordinal>? ORDER BY ordinal LIMIT ?",
                 (after_ordinal, limit),
@@ -371,7 +371,7 @@ class ServiceWorkQueue:
         this projection local to the queue; full history and signature review
         remains required by lookup, assignment, entries and sealing.
         """
-        with self.journal.locked(), canonical_json_reuse(), self.journal.transaction() as db:
+        with canonical_json_reuse(), self.journal.read_transaction() as db:
             rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
             bodies = db.execute(
                 "SELECT count(*) FROM records WHERE kind='service_admission'"
@@ -407,9 +407,14 @@ class ServiceWorkQueue:
             return frozenset(blocks)
 
     def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:
-        """Export the exact accepted record; never invent a benchmark assignment."""
+        """Export an immutable accepted record from one current read snapshot.
+
+        Do not take the queue's compound writer lease: receipt, transport and
+        certification workers need this historical assignment concurrently.
+        Record conflicts and journal generation fences still apply to reads.
+        """
         signed = verify_service_claim(signed)
-        with self.journal.locked(), self.journal.transaction() as db:
+        with canonical_json_reuse(), self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_claims WHERE claim_key=?",
                 (service_claim_key(signed.claim),),

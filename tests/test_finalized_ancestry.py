@@ -232,9 +232,10 @@ async def test_path_byte_budget_is_enforced(ancestry, monkeypatch):
 
 
 @pytest.fixture
-def recovery(chain):
+def recovery(chain, request):
     first = chain.config.minimum_finalized_block + 10
-    headers, by_height = make_headers(first, first + 4)
+    distance = 128 if "original_window" in request.node.name else 4
+    headers, by_height = make_headers(first, first + distance)
     anchor = replace(
         make_anchor(chain.config, chain.policy, headers, by_height),
         timestamp_ms=chain.clock.now - 1000,

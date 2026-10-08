@@ -175,8 +175,11 @@ async def recovery_case(endpoint, tmp_path):
         limits=Limits.from_policy(p.transport_policy),
     )
     initial.resource_ledger.close()
-    miner_wallet = wallet("Bob")
-    assert miner_wallet.hotkey.ss58_address == job.submission.submission.hotkey
+    miner_wallet = next(
+        wallet(name)
+        for name in ("Alice", "Bob")
+        if wallet(name).hotkey.ss58_address == job.submission.submission.hotkey
+    )
     ledger = SQLiteMinerResourceLedger(
         tmp_path / "miner.sqlite",
         miner_hotkey=miner_wallet.hotkey.ss58_address,
@@ -721,6 +724,20 @@ async def test_exact_selection_static_proof_is_reused(recovery_case, monkeypatch
     object.__setattr__(actual[0].transport_policy.limits, "maximum_response_body_bytes", 1)
     assert recovery._validate(p.selection, assignment) == expected
     assert canonical_reuse._ACTIVE.get() is None
+
+
+async def test_selection_reuse_keeps_cohort_scale_working_inventory(recovery_case):
+    p = recovery_case
+    recovery = p.consumer()
+    verified = recovery.selection(p.slot)
+    cache = recovery._selection_reuse
+
+    # A replacement history has more proof identities than original miners.
+    # Rotate the whole inventory before revisiting an earlier verified entry.
+    for index in range(600):
+        cache.remember(str(index), ("verified-working-inventory", index), verified)
+    for index in range(600):
+        assert cache.lookup(str(index), ("verified-working-inventory", index)) == verified
 
 
 async def test_exact_selection_rechecks_changed_signed_transport(recovery_case):

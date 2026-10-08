@@ -183,3 +183,45 @@ async def test_service_origin_confirms_newer_proof_despite_age_valid_cached_capt
     result = await owner.origin(c.assignment)
     assert result.block == old.snapshot.block + 1
     assert minima == [result.block]
+
+
+async def test_service_authority_recovers_concurrent_newer_journal_head(authority, monkeypatch):
+    c, owner = authority
+    original, attempts, minima = owner._remember, [], []
+    provider = owner.provider
+
+    class CurrentRegistration:
+        async def collect(self):
+            return await provider.collect()
+
+        async def collect_at_least(self, block):
+            minima.append(block)
+            capture = await provider.collect()
+            assert capture.snapshot.block >= block
+            return capture
+
+    owner.provider = CurrentRegistration()
+
+    def racing(assignment, source, block):
+        attempts.append(block)
+        if len(attempts) == 1:
+            c.queue.journal.observe(block + 1)
+            c.p.c.finality.ref = replace(
+                c.p.c.finality.ref, block_number=block + 1, block_hash="0x" + f"{block + 1:064x}"
+            )
+        return original(assignment, source, block)
+
+    monkeypatch.setattr(owner, "_remember", racing)
+    _, capture = await owner.observe(c.assignment)
+    assert attempts == [capture.snapshot.block - 1, capture.snapshot.block]
+    assert minima == [capture.snapshot.block]
+    assert c.queue.assignment(c.claim) == c.assignment
+
+
+async def test_service_authority_does_not_waive_persistent_head_regression(authority):
+    c, owner = authority
+    capture = await owner.provider.collect()
+    c.queue.journal.observe(capture.snapshot.block + 10)
+    with pytest.raises(OSError, match="precedes required origin"):
+        await owner.observe(c.assignment)
+    assert c.queue.assignment(c.claim) == c.assignment

@@ -23,6 +23,7 @@ from .competition_round_journal import RecordReservation
 from .concurrency import run_owned_thread
 from .endpoint_retirement import verify_retirement_receipt
 from .open_competition import Signature, digest, identity, verify_signature
+from .private_state_wait import run_private_state_operation
 from .protocol import canonical_json_bytes
 
 
@@ -36,8 +37,15 @@ class ServiceWorkPeerReviews:
             or any(p.policy != requests.policy for p in peers)
         ):
             raise ValueError("service peers must be distinct selected reviewers")
-        self.serial, self.writes = asyncio.Lock(), asyncio.Lock()
+        self.writes = asyncio.Lock()
+        self.timeout_seconds = max(p.retries.timeout_seconds for p in peers)
         self.reviewers = {p.signer: partial(self.request, p) for p in peers}
+
+    async def _write(self, function, *args):
+        # Only local idempotent mutations share ownership. A remote vote for
+        # one miner must not prevent another miner's certificate from recovering.
+        async with self.writes:
+            return await run_private_state_operation(function, *args, timeout=self.timeout_seconds)
 
     def _request(self, body):
         # Parallel reviewer reads must not compete for the owner's queue write
@@ -151,31 +159,24 @@ class ServiceWorkPeerReviews:
 
     async def retry(self, grant, retirement):
         review = ServiceRetryReview(grant=grant, retirement=retirement)
-        async with self.serial:
-            slot = await run_owned_thread(self._prepare, review)
-            # Completed certificates recover before contacting any reviewer.
-            if (
-                await run_owned_thread(self.journal.get, "service_retry_certificate", slot)
-                is not None
-            ):
-                return await run_owned_thread(self._certificate, review, slot)
+        slot = await self._write(self._prepare, review)
+        # Completed certificates recover before contacting any reviewer.
+        if await run_owned_thread(self.journal.get, "service_retry_certificate", slot) is not None:
+            return await self._write(self._certificate, review, slot)
 
-            async def collect(who, peer):
-                if who == identity(grant.body.assignment.admission.claim.claim.hotkey):
-                    return
-                raw = await run_owned_thread(
-                    self.journal.get, "service_retry_peer_vote", self._key(slot, who)
+        async def collect(who, peer):
+            if who == identity(grant.body.assignment.admission.claim.claim.hotkey):
+                return
+            raw = await run_owned_thread(
+                self.journal.get, "service_retry_peer_vote", self._key(slot, who)
+            )
+            try:
+                vote = (
+                    self._vote(review, who, raw) if raw is not None else await peer.attest(review)
                 )
-                try:
-                    vote = (
-                        self._vote(review, who, raw)
-                        if raw is not None
-                        else await peer.attest(review)
-                    )
-                    async with self.writes:
-                        await run_owned_thread(self._retain, review, slot, who, vote)
-                except _RETRY:
-                    return
+                await self._write(self._retain, review, slot, who, vote)
+            except _RETRY:
+                return
 
-            await ServiceWorkWorker._gather(collect(who, peer) for who, peer in self.peers.items())
-            return await run_owned_thread(self._certificate, review, slot)
+        await ServiceWorkWorker._gather(collect(who, peer) for who, peer in self.peers.items())
+        return await self._write(self._certificate, review, slot)

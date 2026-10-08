@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -39,6 +40,7 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import (
     CohortOrderHistory,
     remember_order_history,
+    require_retained_order_history,
     review_order,
 )
 from .competition_cohort_orders import recoverable_order_job
@@ -51,8 +53,8 @@ from .competition_cohort_service_grant import (
     verify_service_parent,
 )
 from .competition_origin import public_https_origin
-from .competition_round_journal import RoundJournal
-from .concurrency import run_owned_thread, wait_for_owned
+from .competition_round_journal import FinalizedHeadRegression, RoundJournal
+from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .miner_admission import MinerAdmissionError, ProofBackedMinerWindowAuthority
 from .open_competition import (
     CompetitionPolicy,
@@ -128,6 +130,7 @@ class CohortMinerAuthorizationAuthority:
         )
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
         self.serial = asyncio.Lock()
+        self._history_reads, self._history_waiters = {}, {}
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -272,6 +275,36 @@ class CohortMinerAuthorizationAuthority:
             current = parent
         return grant
 
+    async def _shared_history(self, cohort):
+        """Share only an unfinished initial read; never cache current authority.
+
+        Confirmation after local review still starts a separate fresh read. One
+        cancelled admission cannot cancel a read that another admission needs;
+        the last departing caller cancels and drains the bounded HTTP operation.
+        """
+        task = self._history_reads.get(cohort)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                wait_for_owned(self.history(cohort), timeout=self.config.read_timeout_seconds)
+            )
+            self._history_reads[cohort] = task
+        self._history_waiters[task] = self._history_waiters.get(task, 0) + 1
+        try:
+            await asyncio.wait((task,))
+            return task.result()
+        finally:
+            self._history_waiters[task] -= 1
+            if self._history_waiters[task] == 0:
+                del self._history_waiters[task]
+                if self._history_reads.get(cohort) is task:
+                    del self._history_reads[cohort]
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await await_owned_task(task)
+                elif not task.cancelled():
+                    task.exception()
+
     async def _current(self, grant):
         timeout = self.config.read_timeout_seconds
         cohort = (
@@ -280,7 +313,7 @@ class CohortMinerAuthorizationAuthority:
             else grant.attempt.order.job.round.cohort_sha256
         )
         try:
-            source = await wait_for_owned(self.history(cohort), timeout=timeout)
+            source = await self._shared_history(cohort)
             head = await wait_for_owned(
                 self.finalized_blocks.finalized_head_height(), timeout=timeout
             )
@@ -288,33 +321,51 @@ class CohortMinerAuthorizationAuthority:
             raise OSError("cohort miner authority source unavailable") from error
         if type(head) is not int or head < 0:
             raise ValueError("cohort miner finalized head is invalid")
-        await run_owned_thread(
-            remember_order_history, self.journal, self.cohorts, self.policy, source, head
-        )
-        if isinstance(grant, ServiceMinerGrant):
-            await run_owned_thread(
-                review_service_request_current, grant.body, self.policy, source, head
-            )
-        else:
-            await run_owned_thread(
-                review_order,
-                grant.assignment.certificate.order,
-                grant.assignment.participant,
-                source,
-                self.policy,
-                head,
-            )
+        async with self.serial:
+            with self.journal.locked():
+                await self._remember(source, head)
+                if isinstance(grant, ServiceMinerGrant):
+                    await run_owned_thread(
+                        review_service_request_current, grant.body, self.policy, source, head
+                    )
+                else:
+                    await run_owned_thread(
+                        review_order,
+                        grant.assignment.certificate.order,
+                        grant.assignment.participant,
+                        source,
+                        self.policy,
+                        head,
+                    )
         try:
             current = await wait_for_owned(self.history(cohort), timeout=timeout)
         except RuntimeError as error:
             raise OSError("cohort miner authority source unavailable") from error
-        if current != source:
-            # Persist a valid closure or revocation so a restart cannot forget it.
-            await run_owned_thread(
-                remember_order_history, self.journal, self.cohorts, self.policy, current, head
-            )
-            raise OSError("cohort authority changed during miner admission")
+        async with self.serial:
+            with self.journal.locked():
+                if current != source:
+                    # Persist a valid closure so a restart cannot forget it.
+                    await self._remember(current, head)
+                    raise OSError("cohort authority changed during miner admission")
+                await run_owned_thread(require_retained_order_history, self.journal, source)
         return source, head
+
+    async def _remember(self, source, head):
+        # The caller owns the journal. A slower concurrent observation can
+        # arrive after a newer one; retry without lowering the retained head.
+        try:
+            await run_owned_thread(
+                remember_order_history, self.journal, self.cohorts, self.policy, source, head
+            )
+        except FinalizedHeadRegression as error:
+            raise OSError("cohort finalized observation superseded; retry admission") from error
+
+    async def _fence(self, source, head):
+        await run_owned_thread(require_retained_order_history, self.journal, source)
+        try:
+            await run_owned_thread(self.journal.observe, head)
+        except FinalizedHeadRegression as error:
+            raise OSError("cohort finalized observation superseded; retry admission") from error
 
     def _receipt(self, grant):
         raw = self.journal.get("miner_grant_receipt", digest(grant))
@@ -340,73 +391,87 @@ class CohortMinerAuthorizationAuthority:
                 raise OSError("cohort miner capacity unavailable") from error
             raise
 
+    async def _recover_receipt(self, grant, wallet):
+        """Caller owns selection; retained storage receipts do not grant execution."""
+        key, slot = digest(grant), grant_slot(grant)
+        old = self.journal.get("miner_grant", slot)
+        if old is None:
+            return None
+        if canonical_json_bytes(old) != canonical_json_bytes(grant):
+            raise ValueError("cohort grant slot already has another request selection")
+        receipt = self._receipt(grant)
+        if receipt is not None:
+            return receipt
+        body = CohortMinerGrantReceipt.model_validate_json(
+            canonical_json_bytes(self.journal.get("miner_grant_receipt_intent", key))
+        )
+        return await self._sign_receipt(body, wallet)
+
+    async def _sign_receipt(self, body, wallet):
+        signature = await run_owned_thread(sign_object, body, wallet)
+        if identity(signature.hotkey) != identity(self.config.miner_hotkey):
+            raise ValueError("cohort grant receipt signer differs from miner")
+        verify_signature(body, signature)
+        result = SignedCohortMinerGrantReceipt(receipt=body, signature=signature)
+        await run_owned_thread(self.journal.put, "miner_grant_receipt", body.grant_sha256, result)
+        return result
+
     async def _accept(self, grant, *, validator_hotkey: str, wallet: Any):
         """Commit exact grant and acknowledgement intent before signing a receipt."""
         grant = await run_owned_thread(self._validate, grant, validator_hotkey)
         key, slot = digest(grant), grant_slot(grant)
         async with self.serial:
             with self.journal.locked():
-                old = self.journal.get("miner_grant", slot)
-                if old is not None:
-                    if canonical_json_bytes(old) != canonical_json_bytes(grant):
-                        raise ValueError("cohort grant slot already has another request selection")
-                    receipt = self._receipt(grant)
-                    if receipt is not None:
-                        return receipt
-                    body = CohortMinerGrantReceipt.model_validate_json(
-                        canonical_json_bytes(self.journal.get("miner_grant_receipt_intent", key))
+                receipt = await self._recover_receipt(grant, wallet)
+                if receipt is not None:
+                    return receipt
+
+        # Authority I/O must not block another request's retirement or an
+        # existing receipt. Recheck selection after these unowned waits.
+        source, block = await self._current(grant)
+        async with self.serial:
+            with self.journal.locked():
+                receipt = await self._recover_receipt(grant, wallet)
+                if receipt is not None:
+                    return receipt
+                await self._fence(source, block)
+                body = CohortMinerGrantReceipt(
+                    schema="umi-cohort-miner-grant-receipt/1",
+                    grant_sha256=key,
+                    miner_hotkey=self.config.miner_hotkey,
+                    observed_block=block,
+                )
+
+                def retain():
+                    def index(db):
+                        count = db.execute(
+                            "SELECT COUNT(*) FROM records WHERE kind='miner_grant'"
+                        ).fetchone()[0]
+                        if count > self.config.maximum_grants:
+                            raise ValueError("cohort miner grant capacity exhausted")
+                        for request in grant_requests(grant):
+                            request_key = self._request_key(request, validator_hotkey)
+                            old_key = db.execute(
+                                "SELECT grant_id FROM miner_grant_requests WHERE request_key=?",
+                                (request_key,),
+                            ).fetchone()
+                            if old_key is not None and old_key != (slot,):
+                                raise ValueError("cohort request is already bound to another grant")
+                            db.execute(
+                                "INSERT OR IGNORE INTO miner_grant_requests VALUES (?,?)",
+                                (request_key, slot),
+                            )
+
+                    self.journal.put_many(
+                        (
+                            ("miner_grant", slot, grant),
+                            ("miner_grant_receipt_intent", key, body),
+                        ),
+                        index=index,
                     )
-                else:
-                    _, block = await self._current(grant)
-                    body = CohortMinerGrantReceipt(
-                        schema="umi-cohort-miner-grant-receipt/1",
-                        grant_sha256=key,
-                        miner_hotkey=self.config.miner_hotkey,
-                        observed_block=block,
-                    )
 
-                    def retain():
-                        def index(db):
-                            count = db.execute(
-                                "SELECT COUNT(*) FROM records WHERE kind='miner_grant'"
-                            ).fetchone()[0]
-                            if count > self.config.maximum_grants:
-                                raise ValueError("cohort miner grant capacity exhausted")
-                            for request in grant_requests(grant):
-                                request_key = self._request_key(request, validator_hotkey)
-                                old_key = db.execute(
-                                    "SELECT grant_id FROM miner_grant_requests WHERE request_key=?",
-                                    (request_key,),
-                                ).fetchone()
-                                if old_key is not None and old_key != (slot,):
-                                    raise ValueError(
-                                        "cohort request is already bound to another grant"
-                                    )
-                                db.execute(
-                                    "INSERT OR IGNORE INTO miner_grant_requests VALUES (?,?)",
-                                    (request_key, slot),
-                                )
-
-                        self.journal.put_many(
-                            (
-                                ("miner_grant", slot, grant),
-                                ("miner_grant_receipt_intent", key, body),
-                            ),
-                            index=index,
-                        )
-
-                    await run_owned_thread(retain)
-
-                async def sign_and_commit():
-                    signature = await run_owned_thread(sign_object, body, wallet)
-                    if identity(signature.hotkey) != identity(self.config.miner_hotkey):
-                        raise ValueError("cohort grant receipt signer differs from miner")
-                    verify_signature(body, signature)
-                    result = SignedCohortMinerGrantReceipt(receipt=body, signature=signature)
-                    await run_owned_thread(self.journal.put, "miner_grant_receipt", key, result)
-                    return result
-
-                return await sign_and_commit()
+                await run_owned_thread(retain)
+                return await self._sign_receipt(body, wallet)
 
     @staticmethod
     def _request_key(request, validator_hotkey):
@@ -419,7 +484,7 @@ class CohortMinerAuthorizationAuthority:
         )
 
     def _lookup(self, request, validator_hotkey):
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT grant_id FROM miner_grant_requests WHERE request_key=?",
                 (self._request_key(request, validator_hotkey),),
@@ -445,28 +510,28 @@ class CohortMinerAuthorizationAuthority:
             async with self.serial:
                 with self.journal.locked():
                     grant = await run_owned_thread(self._lookup, request, validator_hotkey)
-                    before, _ = await self._current(grant)
-                    if isinstance(grant, ServiceMinerGrant):
-                        window_authority = CohortRequestWindowAuthority(
-                            policy=self.transport,
-                            finalized_blocks=self.finalized_blocks,
-                            legacy_authorize=self.legacy.authorize,
-                            job=grant.body.assignment,
-                            attempt_number=grant.body.attempt_number,
-                        )
-                    else:
-                        window_authority = CohortRequestWindowAuthority(
-                            policy=self.transport,
-                            finalized_blocks=self.finalized_blocks,
-                            legacy_authorize=self.legacy.authorize,
-                            job=grant.attempt.order.job,
-                            attempt_number=grant.attempt.order.attempt_number,
-                        )
-                    admission = await wait_for_owned(
-                        window_authority.authorize(request),
-                        timeout=self.config.read_timeout_seconds,
-                    )
-                    after, head = await self._current(grant)
+            before, _ = await self._current(grant)
+            if isinstance(grant, ServiceMinerGrant):
+                job, attempt_number = grant.body.assignment, grant.body.attempt_number
+            else:
+                job, attempt_number = grant.attempt.order.job, grant.attempt.order.attempt_number
+            window_authority = CohortRequestWindowAuthority(
+                policy=self.transport,
+                finalized_blocks=self.finalized_blocks,
+                legacy_authorize=self.legacy.authorize,
+                job=job,
+                attempt_number=attempt_number,
+            )
+            admission = await wait_for_owned(
+                window_authority.authorize(request), timeout=self.config.read_timeout_seconds
+            )
+            after, head = await self._current(grant)
+            async with self.serial:
+                with self.journal.locked():
+                    retained = await run_owned_thread(self._lookup, request, validator_hotkey)
+                    if retained != grant:
+                        raise ValueError("cohort request selection changed during admission")
+                    await self._fence(after, head)
                     if before != after:
                         raise OSError("cohort authority changed during request validation")
                     if head < admission.observed_finalized_height:

@@ -22,7 +22,7 @@ from .competition_cohort_api import CohortModelPayloads, cohort_routes
 from .competition_cohort_intake import CohortIntake
 from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
-from .competition_launch import PublicIntakeDeployment, PublicRoundSchedule
+from .competition_launch import IntakeRuntimeSource, PublicIntakeDeployment, PublicRoundSchedule
 from .competition_public_results import PublicResultsSource, public_results_page
 from .competition_public_results_directory import PublicResultsDirectory, resolve_source
 from .competition_round_discovery import MAXIMUM_ROUND_SEQUENCE, round_index
@@ -64,6 +64,7 @@ def create_app(
     ] = "rehearsal_snapshot",
     limits: CompetitionApiLimits | None = None,
     public_deployment: PublicIntakeDeployment | None = None,
+    runtime_source: IntakeRuntimeSource | None = None,
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
     public_results_sources: tuple[PublicResultsSource, ...] = (),
     public_results_directory: PublicResultsDirectory | None = None,
@@ -76,6 +77,14 @@ def create_app(
 ) -> FastAPI:
     if registration_source not in {"rehearsal_snapshot", "verifier_attested_finality"}:
         raise ValueError("unsupported registration source")
+    if runtime_source is not None:
+        runtime_source = IntakeRuntimeSource.model_validate_json(
+            canonical_json_bytes(runtime_source)
+        )
+        if public_deployment is None or runtime_source.deployment_sha256 != digest(
+            public_deployment
+        ):
+            raise ValueError("intake runtime differs from public deployment")
     if (
         type(registration_timeout_seconds) not in (int, float)
         or not 1 <= registration_timeout_seconds <= 3600
@@ -247,6 +256,8 @@ def create_app(
             "honored_policy_sha256s": list(store.lineage.admitted_policy_sha256s),
             "deal_sha256": store.lineage.deal_sha256,
         }
+        if runtime_source is not None:
+            result["runtime"] = runtime_source.model_dump(mode="json", by_alias=True)
         if public_deployment is not None:
             result.update(
                 {

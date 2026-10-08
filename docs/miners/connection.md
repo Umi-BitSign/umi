@@ -18,6 +18,13 @@ requests release their active-window resource slot only after a verified signed
 retirement receipt is committed. Their counters, response archive and execution
 fence remain retained; pending work continues to occupy its slot.
 
+The coordinator recovers saved responses and retires answered peer cases before
+dispatching another case from the same assignment. If that retirement cannot be
+acknowledged, further work remains pending. A retryable HTTP 429 or 503 without a
+valid signed response is an unresolved delivery attempt, not a zero-quality
+answer. Preserve the existing request and response state while recovery retries;
+do not raise the window limit or reset the miner to bypass a held retirement.
+
 The previous certified allocation remains effective until the active cohort
 produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance
@@ -35,7 +42,7 @@ curl -fsSLo /tmp/umi-miner-upgrade.py \
   && sudo python3 /tmp/umi-miner-upgrade.py --public-model-track no
 ```
 
-Use `yes` instead of `no` for public-model participation. The active signed
+Use `yes` instead of `no` for public-model participation. The published upgrade
 manifest decides which answers are allowed, and the updater stops before changing
 the service if the selected track is unavailable. When endpoint participation is
 allowed, the updater signs and retains the endpoint request with the running
@@ -52,7 +59,9 @@ For a runtime update under the same cohort authority, it retains the exact start
 bytes, grant directory, nonce database, assignment database and finality database
 in place, including custom paths. Relative paths keep the service's existing
 working directory. The updater does not copy a directory-bound grant journal or
-change accounts as part of an upgrade.
+change accounts as part of an upgrade. A same-authority cohort runtime update also
+retains an explicit `--competition-chain-config`, including its owned observer
+state and selected proof-provider budgets.
 The selected miner runs with isolated Python imports, so an old checkout in the
 working directory or an inherited `PYTHONPATH` or `PYTHONHOME` cannot silently
 select the previous source. The working directory still resolves existing data
@@ -89,6 +98,35 @@ starting the miner. It verifies exact policy, transport, model, finality and
 sidecar health. If any check fails, it restores the prior systemd commands and
 restarts the previous miner and sidecar. Rerunning the updater is idempotent.
 
+In cohort mode, omitting `--inference-timeout` selects the full inference allowance
+from the pinned competition policy. An explicit smaller override remains in force;
+the startup `cohort_runtime_limits` report and `/healthz` `effective_limits` show
+the selected values. The sidecar must advertise that same inference budget.
+The same resolver gives omitted cohort startup and queue-wait timeouts three and
+two inference budgets respectively, with minimums of 120 and 60 seconds. Body
+reads get 30 seconds; clip fetching gets at least 120 seconds. Explicit startup,
+queue and body overrides remain selected and appear in the startup report.
+These operational waits do not extend either signed response deadline or change
+authentication freshness, transmission counts, or the active-window limit.
+The updater adjusts supported community-model sidecars using the selected runtime's
+resolved inference allowance and preserves prior configuration and commands for rollback.
+Startup observation uses twice that runtime's effective
+backend lifecycle budget, allowing a complete startup plus observation headroom;
+it returns as soon as health is ready. Health confirms the observer is running,
+not that a fresh chain proof has already been collected. Existing signed clocks
+and proof freshness checks still apply to requests. The updater retains the
+resolved budgets in its receipt. Before stopping an installed miner, it verifies
+cooperative service shutdown settings and waits for the miner to drain before
+stopping its model service. There is no separate five-minute stop-command cutoff
+or systemd forced-kill timer. The selected service retains cooperative shutdown
+and the resolved startup allowance for subsequent boots. If interrupted during
+drain, the temporary protection stays in place until the service settles; rerun
+the updater to complete the upgrade. Existing grants, responses and state paths
+remain in place.
+An unsupported sidecar layout stops the upgrade before services change. Check any
+external proxy's request timeout as well: a healthy `/healthz` alone does not prove
+that the proxy can carry a full-length translation.
+
 The current runtime shares concurrent RPC reads for the same exact block hash
 and retains them in a bounded cache. Current-head reads remain fresh; cached
 storage still requires proof verification. A retryable authority rejection does
@@ -111,6 +149,12 @@ renewal. `endpoint_enrollment_and_service_claim_certified` confirms that the
 endpoint is admitted and has an assigned service-work slot. It does not promise a
 score or reward before the work is completed and the cohort settles.
 
+The coordinator recovers an unchanged accepted claim from its retained admission
+and complete proof archive without waiting behind new claims collecting chain
+evidence. An older admission missing its proof archive remains pending until the
+coordinator repairs that archive. Keep retrying the original claim; do not sign
+a replacement to work around a temporary hold.
+
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
 same installed file for later cohorts; the current manifest supplies the active
 cohort's inputs and allowed tracks:
@@ -119,10 +163,10 @@ cohort's inputs and allowed tracks:
 sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 ```
 
-If a signed manifest offers only public-model participation, the updater rejects
+If the published manifest offers only public-model participation, the updater rejects
 `no`, records model-track intent, and leaves the existing endpoint service
 unchanged as a recoverable prior deployment. The model submission still requires
-the operator's signed rights declaration and selected bundle. Signed manifests,
+the operator's signed rights declaration and selected bundle. Published manifests,
 rather than cohort numbers baked into the script, enforce the profile published
 before intake. No cohort-specific replacement script is needed.
 
@@ -148,6 +192,11 @@ a generic 64-KiB JSON limit is too small for grants. Translation, response
 recovery and retirement keep their selected transport-policy limits. An HTTP 413
 on grant delivery leaves the assignment pending. Check the receiving process and
 edge body limits before rebuilding the miner or creating new enrollment state.
+For nginx, set `client_max_body_size 16m;` in the existing assignment-route
+location, retaining its proxy settings. A smaller location-level value overrides
+a server-level allowance. Validate and reload with
+`sudo nginx -t && sudo systemctl reload nginx`; the miner and its state can stay
+in place.
 
 ## Check the running miner
 
