@@ -595,6 +595,75 @@ async def test_concurrent_duplicate_http_requests_consume_one_slot(api_case):
     assert len(s.c.queue.entries()) == 1
 
 
+async def test_accepted_claim_retry_does_not_wait_for_new_claim_history(api_case):
+    s = api_case
+    accepted = await post(s)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = s.api.history
+
+    async def held_history(cohort):
+        entered.set()
+        await release.wait()
+        return await original(cohort)
+
+    s.api.history = held_history
+    fresh = asyncio.create_task(post(s, inputs(s.c, "Bob")[0]))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        s.calls.clear()
+        retried = await asyncio.wait_for(post(s), 2)
+        assert retried.status_code == 200 and retried.json() == accepted.json()
+        assert not s.calls and not fresh.done()
+        assert len(s.c.queue.entries()) == 1
+    finally:
+        release.set()
+        assert (await fresh).status_code == 200
+
+
+async def test_unarchived_accepted_claim_still_waits_for_serial_repair(api_case):
+    s = api_case
+    prior_admission_without_archive(s)
+    catalog = s.c.cfg.catalog_sha256
+    await s.api.serial[catalog].acquire()
+    repair = asyncio.create_task(post(s))
+    try:
+        # Wait for the initial read-only lookup/archive check, not a wall-clock
+        # guess. Missing proof bytes cannot be acknowledged on the fast path.
+        original = s.api.archives[catalog].read
+        checked = asyncio.Event()
+
+        # Native local operations run off-thread; instrument the awaitable port.
+        local = s.api._local
+
+        async def tracked(function, *args):
+            try:
+                return await local(function, *args)
+            finally:
+                if function == original:
+                    checked.set()
+
+        s.api._local = tracked
+        await asyncio.wait_for(checked.wait(), 10)
+        assert not repair.done() and not s.calls
+    finally:
+        s.api.serial[catalog].release()
+        repaired = await repair
+    assert repaired.status_code == 200 and len(s.c.queue.entries()) == 1
+
+
+async def test_accepted_retry_still_rejects_changed_nonce_claim_while_serial_busy(api_case):
+    s = api_case
+    accepted = await post(s)
+    claim = inputs(s.c)[0].claim.model_copy(update={"submission_sha256": "ff" * 32})
+    changed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, wallet("Alice")))
+    async with s.api.serial[s.c.cfg.catalog_sha256]:
+        s.calls.clear()
+        rejected = await asyncio.wait_for(post(s, changed), 2)
+        assert rejected.status_code == 503 and not s.calls
+        assert (await asyncio.wait_for(post(s), 2)).json() == accepted.json()
+    assert len(s.c.queue.entries()) == 1
+
+
 async def test_native_preparation_adapter_only_reads_original_retained_round(api_case):
     s = api_case
     calls = []

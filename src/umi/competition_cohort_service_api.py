@@ -351,6 +351,18 @@ class ServiceWorkAdmissionAPI:
 
     async def admit(self, catalog: str, signed: SignedServiceWorkClaim):
         queue = self.selected(catalog)
+        # Exact accepted retries with their complete archive are read-only
+        # recovery. They must not wait behind fresh claims collecting slow owned
+        # inputs. Native lookup still verifies identity and journal conflicts;
+        # a missing archive takes the serialized repair path below.
+        admission = await self._local(queue.lookup, signed)
+        if admission is not None:
+            try:
+                await self._local(self.archives[catalog].read, admission)
+            except FileNotFoundError:
+                pass
+            else:
+                return self._accepted(catalog, admission)
         async with self.serial[catalog]:
             # Recovery must precede every live history, preparation and capture call.
             admission = await self._local(queue.lookup, signed)
@@ -400,17 +412,21 @@ class ServiceWorkAdmissionAPI:
             except FileNotFoundError:
                 raw, metadata = await self._call(self.archive(admission.observation))
                 await run_owned_thread(retained.attach, admission, raw, metadata)
-            return {
-                "schema": "umi-public-service-work-admission/1",
-                "status": "accepted",
-                "catalog_sha256": catalog,
-                "claim_sha256": service_claim_key(admission.claim.claim),
-                "admission_sha256": digest(admission),
-                "work_sha256": admission.work_sha256,
-                "ordinal": admission.ordinal,
-                "service_credit_authorized": False,
-                "chain_submission_authorized": False,
-            }
+            return self._accepted(catalog, admission)
+
+    @staticmethod
+    def _accepted(catalog, admission):
+        return {
+            "schema": "umi-public-service-work-admission/1",
+            "status": "accepted",
+            "catalog_sha256": catalog,
+            "claim_sha256": service_claim_key(admission.claim.claim),
+            "admission_sha256": digest(admission),
+            "work_sha256": admission.work_sha256,
+            "ordinal": admission.ordinal,
+            "service_credit_authorized": False,
+            "chain_submission_authorized": False,
+        }
 
     @staticmethod
     def _capacity(queue, archive_bytes=0):

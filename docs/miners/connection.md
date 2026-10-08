@@ -118,6 +118,12 @@ renewal. `endpoint_enrollment_and_service_claim_certified` confirms that the
 endpoint is admitted and has an assigned service-work slot. It does not promise a
 score or reward before the work is completed and the cohort settles.
 
+The coordinator recovers an unchanged accepted claim from its retained admission
+and complete proof archive without waiting behind new claims collecting chain
+evidence. An older admission missing its proof archive remains pending until the
+coordinator repairs that archive. Keep retrying the original claim; do not sign
+a replacement to work around a temporary hold.
+
 The updater installs itself at `/usr/local/libexec/umi-miner-upgrade`. Use that
 same installed file for later cohorts; the current manifest supplies the active
 cohort's inputs and allowed tracks:
