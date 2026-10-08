@@ -12,7 +12,7 @@ import logging
 import os
 import sqlite3
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -574,22 +574,31 @@ class ServiceAdmissionHost:
                 expected_tip_sha256=history_tip(source.history),
             )
 
+    async def _poll_legacy_uploads(self):
+        return await run_owned_thread(self.uploads.poll_once)
+
+    async def _poll_direct_uploads(self):
+        return await self.direct_uploads.poll_once()
+
+    async def _poll_models(self):
+        return await self.models.poll_once()
+
     async def poll_once(self) -> dict:
-        legacy_uploads = (
-            None if self.uploads is None else await run_owned_thread(self.uploads.poll_once)
-        )
-        direct_uploads = (
-            None if self.direct_uploads is None else await self.direct_uploads.poll_once()
-        )
-        if legacy_uploads is not None and direct_uploads is not None:
-            uploads = {
-                "status": "model_payloads_polled",
-                "legacy": legacy_uploads,
-                "direct": direct_uploads,
-            }
+        """One complete reconciliation for callers requesting a bounded cycle."""
+        legacy = None if self.uploads is None else await self._poll_legacy_uploads()
+        direct = None if self.direct_uploads is None else await self._poll_direct_uploads()
+        if legacy is not None and direct is not None:
+            uploads = {"status": "model_payloads_polled", "legacy": legacy, "direct": direct}
         else:
-            uploads = legacy_uploads if direct_uploads is None else direct_uploads
-        models = None if self.models is None else await self.models.poll_once()
+            uploads = legacy if direct is None else direct
+        models = None if self.models is None else await self._poll_models()
+        return {
+            **await self._poll_catalogs(),
+            "model_acceptance": models,
+            "model_delivery": uploads,
+        }
+
+    async def _poll_catalogs(self) -> dict:
         ready = pending = 0
         last_error = ""
         for key, queue in self.queues.items():
@@ -638,8 +647,6 @@ class ServiceAdmissionHost:
             "catalogs_installed": ready,
             "catalogs_pending": pending,
             "last_error_type": last_error,
-            "model_acceptance": models,
-            "model_delivery": uploads,
             "dispatch_authorized": False,
             "chain_submission_authorized": False,
         }
@@ -718,8 +725,33 @@ class ServiceAdmissionHost:
                 os.close(lease)
 
     async def _poll(self, stop: asyncio.Event) -> None:
+        # Each store has one serial reconciliation owner. Slow model reviews or
+        # direct-R2 verification cannot postpone legacy upload finalization or
+        # catalog installation. Cancel/drain every owner before closing clients,
+        # releasing the direct-upload lease, or returning to service shutdown.
+        callbacks = [("catalogs", self._poll_catalogs)]
+        if self.uploads is not None:
+            callbacks.append(("legacy_uploads", self._poll_legacy_uploads))
+        if self.direct_uploads is not None:
+            callbacks.append(("direct_uploads", self._poll_direct_uploads))
+        if self.models is not None:
+            callbacks.append(("models", self._poll_models))
+        async with AsyncExitStack() as owners:
+            tasks = []
+            for component, callback in callbacks:
+                task = asyncio.create_task(self._poll_component(stop, component, callback))
+                tasks.append(task)
+                owners.push_async_callback(_stop_task, task)
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in tasks:
+                if task.done():
+                    task.result()
+                    if not stop.is_set():
+                        raise RuntimeError("service reconciliation exited before shutdown")
+
+    async def _poll_component(self, stop, component, callback):
         while not stop.is_set():
-            report = await self.poll_once()
+            report = {**await callback(), "component": component}
             logger.info("cohort_service_admission %s", canonical_json_bytes(report).decode("ascii"))
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)

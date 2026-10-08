@@ -43,6 +43,7 @@ from umi.open_competition import digest, identity, sign_object
 from umi.policy import ScoringPolicy, ValidatorRegistryEntry, scoring_policy_hash
 from umi.private_files import publish_private_model
 from umi.protocol import Video, canonical_json_bytes
+from umi.validator_chain import FinalizedSnapshotRef
 from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
 
 from .test_competition_dispatch import dispatch_legacy_policy
@@ -130,12 +131,25 @@ class NativeService:
         class Origins:
             def __init__(self, config, policy):
                 self.config, self.policy = config, policy
+                self._closed, self._owned, self._task = False, False, None
+                # The external observer is a synthetic port; preserve the real
+                # origin admission's typed head-alignment and lifecycle checks.
+                self._finality = SimpleNamespace(verified_finalized_snapshot=self._observer_ref)
+
+            async def _observer_ref(self):
+                boundary = execution_boundary(owner.h.capture(owner.h.block))
+                return FinalizedSnapshotRef(
+                    block_number=boundary.block,
+                    block_hash=boundary.block_hash,
+                    parent_hash="0x" + "00" * 32,
+                    state_root=boundary.state_root,
+                )
 
             async def start(self):
-                pass
+                self._closed = False
 
             async def aclose(self):
-                pass
+                self._closed = True
 
             def _fresh(self, timestamp):
                 assert timestamp == owner.h.timestamp
