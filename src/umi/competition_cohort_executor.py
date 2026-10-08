@@ -163,6 +163,11 @@ class CohortExecutor(CohortExecutionAuthority):
                 return evidence
             source, started = await self.current(assignment)
             job = await run_owned_thread(self.journal.retain, assignment, source, started.block)
+            shared = await run_owned_thread(
+                self.journal.reuse_endpoint_incumbent, slot, job, started
+            )
+            if shared is not None:
+                return shared
             for index in range(step_count(job)):
                 if await run_owned_thread(self.journal.step, job, index) is None:
                     break

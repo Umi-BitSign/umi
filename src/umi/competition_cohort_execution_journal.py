@@ -69,6 +69,42 @@ class CohortExecutionAttempt(StrictProtocolModel):
     history_sha256: Hex32
 
 
+class CohortIncumbentSource(StrictProtocolModel):
+    """Choose a new source before inference; never select a favorable old run."""
+
+    schema_: Literal["umi-cohort-incumbent-source/1"] = Field(alias="schema")
+    scope_sha256: Hex32
+    source_slot: Hex32
+    source_job_sha256: Hex32
+    reserved_at: ExecutionBoundary
+
+
+class CohortIncumbentReuse(StrictProtocolModel):
+    """Local provenance for borrowing original observations, not fresh inference."""
+
+    schema_: Literal["umi-cohort-incumbent-reuse/1"] = Field(alias="schema")
+    consumer_job_sha256: Hex32
+    source_sha256: Hex32
+    source_evidence_sha256: Hex32
+    observed_at: ExecutionBoundary
+
+
+def incumbent_scope(job: RecoverableExecutionJob) -> str:
+    if job.mode != "endpoint_incumbent":
+        raise ValueError("only endpoint comparators can share observations")
+    return digest(
+        {
+            "schema": "umi-cohort-incumbent-scope/1",
+            "round": digest(job.round),
+            "preparation": job.preparation_closure_sha256,
+            "model": digest(job.incumbent),
+            "runtime": digest(job.runtime),
+            "evaluator": identity(job.evaluator_hotkey),
+            "cases": [case.model_dump(mode="json", by_alias=True) for case in job.cases],
+        }
+    )
+
+
 class CohortStoppedAttempt(StrictProtocolModel):
     schema_: Literal["umi-cohort-stopped-attempt/1"] = Field(alias="schema")
     attempt_sha256: Hex32
@@ -233,6 +269,103 @@ class CohortExecutionJournal:
         """Reuse exact retained static proofs; this grants no current authority."""
         return self._validated_assignment(slot)
 
+    def _execution_started(self, job: RecoverableExecutionJob) -> bool:
+        # An uncertain sandbox counts as started. It must finish its own original
+        # recovery path, even when another source is already complete.
+        with self.journal.transaction() as db:
+            for index in range(step_count(job)):
+                key = execution_step_key(job, index)
+                if (
+                    db.execute("SELECT 1 FROM execution_heads WHERE step=?", (key,)).fetchone()
+                    or self.journal.get_raw("step", key, db=db) is not None
+                ):
+                    return True
+        return False
+
+    def _incumbent_source(self, job: RecoverableExecutionJob) -> CohortIncumbentSource | None:
+        raw = self.journal.get("incumbent_source", incumbent_scope(job))
+        if raw is None:
+            return None
+        value = CohortIncumbentSource.model_validate_json(canonical_json_bytes(raw))
+        if value.scope_sha256 != incumbent_scope(job):
+            raise ValueError("shared incumbent source changed its scope")
+        return value
+
+    def _source_evidence(self, job, source):
+        _, original = self.assignment_and_job(source.source_slot)
+        if (
+            digest(original) != source.source_job_sha256
+            or incumbent_scope(original) != incumbent_scope(job)
+            or self.journal.get("incumbent_reuse", digest(original)) is not None
+        ):
+            raise ValueError("shared incumbent source assignment differs or forms a cycle")
+        evidence = self.evidence(source.source_slot)
+        if evidence is not None:
+            check_boundary(evidence.steps[0].started, source.reserved_at)
+        return evidence
+
+    def reuse_endpoint_incumbent(self, slot, job, observed):
+        """Reserve one future source, keeping legacy executions in place.
+
+        Existing attempts remain independent. Only an unstarted endpoint job may
+        borrow all original observations from the fixed new source. An unfinished
+        source holds its consumers; they cannot choose another completed result.
+        Wire evidence keeps its established schema and original observed times.
+        The private immutable journal retains explicit source/consumer provenance.
+        """
+        if job.mode != "endpoint_incumbent" or self._execution_started(job):
+            return None
+        _, retained_job = self.assignment_and_job(slot)
+        if retained_job != job:
+            raise ValueError("shared incumbent consumer is not its retained assignment")
+        source = self._incumbent_source(job)
+        if source is None:
+            source = CohortIncumbentSource(
+                schema="umi-cohort-incumbent-source/1",
+                scope_sha256=incumbent_scope(job),
+                source_slot=slot,
+                source_job_sha256=digest(job),
+                reserved_at=observed,
+            )
+            self.journal.put("incumbent_source", source.scope_sha256, source)
+            return None
+        if source.source_slot == slot:
+            if source.source_job_sha256 != digest(job):
+                raise ValueError("shared incumbent source changed its job")
+            return None
+        evidence = self._source_evidence(job, source)
+        if evidence is None:
+            raise OSError("shared incumbent source remains unfinished")
+        check_boundary(observed, evidence.steps[-1].finished)
+        receipt = CohortIncumbentReuse(
+            schema="umi-cohort-incumbent-reuse/1",
+            consumer_job_sha256=digest(job),
+            source_sha256=digest(source),
+            source_evidence_sha256=digest(evidence),
+            observed_at=observed,
+        )
+        self.journal.put("incumbent_reuse", digest(job), receipt)
+        return self.evidence(slot)
+
+    def _reused_incumbent(self, job, raw):
+        value = CohortIncumbentReuse.model_validate_json(canonical_json_bytes(raw))
+        source = self._incumbent_source(job)
+        if (
+            value.consumer_job_sha256 != digest(job)
+            or source is None
+            or value.source_sha256 != digest(source)
+            or source.source_job_sha256 == digest(job)
+            or self._execution_started(job)
+        ):
+            raise ValueError("shared incumbent consumer changed its binding or has attempts")
+        evidence = self._source_evidence(job, source)
+        if evidence is None or digest(evidence) != value.source_evidence_sha256:
+            raise ValueError("shared incumbent observations changed or disappeared")
+        check_boundary(value.observed_at, evidence.steps[-1].finished)
+        return RecoverableExecutionEvidence(
+            schema="umi-recoverable-execution-evidence/1", job=job, steps=evidence.steps
+        )
+
     def step(self, job: RecoverableExecutionJob, index: int) -> ExecutionStep | None:
         raw = self.journal.get("step", execution_step_key(job, index))
         if raw is None:
@@ -316,6 +449,8 @@ class CohortExecutionJournal:
         source: CohortOrderHistory,
         started: ExecutionBoundary,
     ):
+        if self.journal.get("incumbent_reuse", digest(job)) is not None:
+            raise ValueError("shared incumbent consumer cannot invoke a fresh sandbox")
         if self.step(job, index) is not None:
             raise ValueError("completed execution cannot be attempted again")
         previous = self.head(job, index)
@@ -414,6 +549,9 @@ class CohortExecutionJournal:
     @canonical_json_reuse()
     def evidence(self, slot: str) -> RecoverableExecutionEvidence | None:
         _, job = self._validated_assignment(slot)
+        shared = self.journal.get("incumbent_reuse", digest(job))
+        if shared is not None:
+            return self._reused_incumbent(job, shared)
         steps = []
         for index in range(step_count(job)):
             step = self.step(job, index)

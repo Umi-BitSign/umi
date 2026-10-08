@@ -376,6 +376,14 @@ async def test_execution_scan_survives_blocked_first_job_and_restart(execution):
     await r.worker().poll_once()
     slots = e.box.assignments()
     assert len(slots) == 2
+    if e.job.mode == "endpoint_incumbent":
+        # Qualify independent legacy work: an already retained invocation cannot
+        # be adopted as a shared source or borrow another job's execution.
+        legacy = e.box.assignment(slots[0])
+        executor = e.executor()
+        source, started = await executor.current(legacy)
+        job = executor.journal.retain(legacy, source, started.block)
+        executor.journal.begin(job, 0, source, started)
     blocked = e.box.assignment(slots[0]).certificate.order.submission
     invoke = e.port.invoke
 
@@ -431,6 +439,14 @@ async def test_slow_case_does_not_block_another_jobs_next_native_step(execution)
     await r.worker().poll_once()
     slots = e.box.assignments()
     assert len(slots) == 2
+    if e.job.mode == "endpoint_incumbent":
+        # Qualify independent legacy work: an already retained invocation cannot
+        # be adopted as a shared source or borrow another job's execution.
+        legacy = e.box.assignment(slots[0])
+        executor = e.executor()
+        source, started = await executor.current(legacy)
+        job = executor.journal.retain(legacy, source, started.block)
+        executor.journal.begin(job, 0, source, started)
     slow_submission = e.box.assignment(slots[0]).certificate.order.submission
     fast_slot = slots[1]
     slow_entered, release_slow, fast_second_step = (
