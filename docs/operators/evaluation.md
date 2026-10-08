@@ -306,6 +306,14 @@ remote translates therefore cannot occupy the entire configured pool. A
 model-only host retains its existing16-connection budget. This changes neither
 signed request limits nor per-miner assignment and retirement fences.
 
+Order-history persistence reuses successful native decision/signature replay for
+exact history, decision inputs and policy bytes. Fresh owner responses, current
+finalized height, the journal's high-water mark, rollback ancestry and conflict
+holds are still checked on every observation. Changed inputs miss the bounded
+process-local cache. If another paid-service operation persists a newer finalized
+head while an observation waits, the worker recollects history and a strictly
+newer capture once; a persistently lagging provider remains held.
+
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
 runtime and input clips, it reserves one source before inference and preserves

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_chain import FinalizedRegistrationProvider, RegistrationCapture
 from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
 from .competition_cohort_origin import CohortEndpointFinalityProvider
@@ -13,6 +14,7 @@ from .competition_cohort_service_queue import ServiceWorkQueue
 from .competition_cohort_service_work import ServiceWorkAssignment
 from .competition_execution import execution_boundary
 from .competition_origin import EndpointOriginCapture, public_https_origin
+from .competition_round_journal import FinalizedHeadRegression
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import digest
 from .private_files import PrivateStateBusyError
@@ -43,6 +45,7 @@ class ServiceWorkAuthority:
             raise ValueError("service authority changed its original accepted work")
         return assignment
 
+    @canonical_json_reuse()
     def _remember(self, assignment, source, block):
         catalog = assignment.catalog.catalog
         with self.queue.journal.locked():
@@ -70,6 +73,7 @@ class ServiceWorkAuthority:
         cohort = assignment.catalog.catalog.cohort_sha256
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout
+        regressed = False
         while True:
             source = await wait_for_owned(self.history(cohort), timeout=self.timeout)
             collect_at_least = getattr(self.provider, "collect_at_least", None)
@@ -86,6 +90,15 @@ class ServiceWorkAuthority:
                     self._remember, assignment, source, execution_boundary(capture).block
                 )
                 return source, capture
+            except FinalizedHeadRegression:
+                # Another operation can persist a newer owned observation while
+                # this one waits for its journal. Recollect history and require
+                # a genuinely newer capture once; never waive the high-water
+                # fence or loop indefinitely on a lagging provider.
+                if regressed or loop.time() >= deadline:
+                    raise
+                regressed = True
+                minimum_block = max(minimum_block or 0, execution_boundary(capture).block + 1)
             except PrivateStateBusyError:
                 remaining = deadline - loop.time()
                 if remaining <= 0:

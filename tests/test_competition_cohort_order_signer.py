@@ -428,3 +428,59 @@ async def test_wrong_policy_provider_cannot_be_used(harness):
     provider = SimpleNamespace(policy=worker.provider.policy.model_copy(update={"netuid": 1}))
     with pytest.raises(ValueError, match="finality belongs"):
         CohortOrderSigner(worker.journal, provider, worker.history, worker.sign)
+
+
+def test_exact_order_history_reuses_proof_but_keeps_current_head_and_conflict_fences(
+    harness, monkeypatch
+):
+    from umi import competition_cohort_order_signer as native
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+    from umi.competition_round_journal import FinalizedHeadRegression
+
+    h = harness
+    monkeypatch.setattr(native, "_order_history_verification_reuse", AssignmentVerificationReuse())
+    original, calls = native.replay_cohort_decisions, []
+
+    def counted(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(native, "replay_cohort_decisions", counted)
+    journal = h.worker().journal
+    journal.remember(h.source, h.block)
+    journal.remember(h.source, h.block + 1)
+    assert len(calls) == 1
+    with pytest.raises(FinalizedHeadRegression):
+        journal.remember(h.source, h.block)
+    with pytest.raises(ValueError, match="ahead"):
+        journal.remember(h.source, -1)
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        journal.journal.put("order_history", digest(h.source), {"changed": True})
+    with pytest.raises(ValueError, match="conflict"):
+        journal.remember(h.source, h.block + 2)
+
+
+@pytest.mark.parametrize("damage", ["decisions", "genesis", "policy"])
+def test_order_history_reuse_never_accepts_changed_native_inputs(harness, monkeypatch, damage):
+    from umi import competition_cohort_order_signer as native
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    h = harness
+    monkeypatch.setattr(native, "_order_history_verification_reuse", AssignmentVerificationReuse())
+    journal = h.worker().journal
+    journal.remember(h.source, h.block)
+    source, policy = h.source, journal.policy
+    if damage == "decisions":
+        source = source.model_copy(update={"decisions": source.decisions[:-1]})
+    elif damage == "genesis":
+        genesis = source.history.genesis.model_copy(
+            update={"admitted_at_block": source.history.genesis.admitted_at_block + 1}
+        )
+        source = source.model_copy(
+            update={"history": source.history.model_copy(update={"genesis": genesis})}
+        )
+    else:
+        policy = policy.model_copy(update={"netuid": policy.netuid + 1})
+    with pytest.raises(ValueError):
+        native.remember_order_history(journal.journal, journal.cohorts, policy, source, h.block + 1)

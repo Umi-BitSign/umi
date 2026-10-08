@@ -14,6 +14,8 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import Field
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -134,6 +136,10 @@ def review_order(
     )
 
 
+_order_history_verification_reuse = AssignmentVerificationReuse()
+
+
+@canonical_json_reuse()
 def remember_order_history(
     journal: RoundJournal,
     cohorts: dict[str, str],
@@ -147,10 +153,20 @@ def remember_order_history(
     cohort = digest(history.plan)
     if cohorts.get(cohort) != digest(history.authority.authority):
         raise ValueError("order signer has no configured cohort authority")
-    verify_cohort_history(
-        history, policy, expected_tip_sha256=history_tip(history), current_block=block
-    )
-    replay_cohort_decisions(history, policy, source.inputs().__getitem__)
+    # Exact successful historical verification is immutable. Current owner
+    # transport, finalized height, monotonic journal heads and conflict holds
+    # remain independent checks on every call, including a cache hit.
+    proof_key = (digest(source), digest(policy))
+    minimum_block = _order_history_verification_reuse.lookup(cohort, proof_key)
+    if minimum_block is None:
+        view = verify_cohort_history(
+            history, policy, expected_tip_sha256=history_tip(history), current_block=block
+        )
+        replay_cohort_decisions(history, policy, source.inputs().__getitem__)
+        minimum_block = view.state.observed_at_block
+        _order_history_verification_reuse.remember(cohort, proof_key, minimum_block)
+    elif type(block) is not int or not minimum_block <= block <= 2**53 - 1:
+        raise ValueError("recovery history is ahead of the owned finalized observation")
 
     def index(db):
         row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
