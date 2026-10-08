@@ -87,26 +87,39 @@ class CohortRecoveryStore:
         # The host owns WAL/DELETE choice and filesystem bounds. FULL is required
         # here because an acknowledged reservation must survive loss of power.
         self.db.execute("PRAGMA synchronous=FULL")
-        with self._transaction():
-            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_recovery_bindings (
-                cohort TEXT PRIMARY KEY, body BLOB NOT NULL)""")
-            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_recovery_decisions (
-                cohort TEXT NOT NULL, sequence INTEGER NOT NULL,
-                decision TEXT NOT NULL, body BLOB NOT NULL, certificate BLOB,
-                PRIMARY KEY(cohort,sequence), UNIQUE(cohort,decision))""")
-            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_recovery_sources (
-                cohort TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL,
-                PRIMARY KEY(cohort,digest))""")
-            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_published_genesis (
-                cohort TEXT PRIMARY KEY, body BLOB NOT NULL)""")
-            self.db.execute("""CREATE TABLE IF NOT EXISTS cohort_progress_intents (
-                cohort TEXT PRIMARY KEY, tip TEXT NOT NULL, body BLOB NOT NULL)""")
+        schema = {
+            "cohort_recovery_bindings": "cohort TEXT PRIMARY KEY, body BLOB NOT NULL",
+            "cohort_recovery_decisions": (
+                "cohort TEXT NOT NULL, sequence INTEGER NOT NULL, "
+                "decision TEXT NOT NULL, body BLOB NOT NULL, certificate BLOB, "
+                "PRIMARY KEY(cohort,sequence), UNIQUE(cohort,decision)"
+            ),
+            "cohort_recovery_sources": (
+                "cohort TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL, "
+                "PRIMARY KEY(cohort,digest)"
+            ),
+            "cohort_published_genesis": "cohort TEXT PRIMARY KEY, body BLOB NOT NULL",
+            "cohort_progress_intents": (
+                "cohort TEXT PRIMARY KEY, tip TEXT NOT NULL, body BLOB NOT NULL"
+            ),
+        }
+        existing = {
+            row[0]
+            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        # Existing recovery reads need no schema write transaction. Keep atomic
+        # initialization for new or incomplete layouts; all record validation,
+        # write transactions and FULL durability remain unchanged.
+        if not schema.keys() <= existing:
+            with self._transaction():
+                for name, columns in schema.items():
+                    self.db.execute(f"CREATE TABLE IF NOT EXISTS {name} ({columns})")
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
+    def _transaction(self, *, write: bool = True) -> Iterator[None]:
         if self.db.in_transaction:
             raise ValueError("cohort recovery requires its own atomic transaction")
-        self.db.execute("BEGIN IMMEDIATE")
+        self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
             yield
             self.db.commit()
@@ -288,7 +301,7 @@ class CohortRecoveryStore:
 
     def has_published_history(self, cohort: str) -> bool:
         """Check admission presence without hiding corrupt retained history."""
-        with self._transaction():
+        with self._transaction(write=False):
             return (
                 self.db.execute(
                     "SELECT 1 FROM cohort_published_genesis WHERE cohort=?", (cohort,)
@@ -297,7 +310,7 @@ class CohortRecoveryStore:
             )
 
     def published_history(self, cohort: str) -> CohortRecoveryHistory:
-        with self._transaction():
+        with self._transaction(write=False):
             row = self.db.execute(
                 "SELECT substr(body,1,65537) FROM cohort_published_genesis WHERE cohort=?",
                 (cohort,),
@@ -332,7 +345,7 @@ class CohortRecoveryStore:
 
     def progress_intent(self, cohort: str, tip: str, model: type[_Record]) -> _Record | None:
         """Recover an unfinished native observation before asking signers again."""
-        with self._transaction():
+        with self._transaction(write=False):
             _, state, _ = self._load(cohort)
             if state.tip_sha256 != tip:
                 raise ValueError("progress observation belongs to another current history")
@@ -379,7 +392,7 @@ class CohortRecoveryStore:
 
     def source(self, cohort: str, key: str, model: type[_Record]) -> _Record:
         """Read a content-bound input; it is not itself proof of phase completion."""
-        with self._transaction():
+        with self._transaction(write=False):
             row = self.db.execute(
                 "SELECT substr(body,1,262145) FROM cohort_recovery_sources "
                 "WHERE cohort=? AND digest=?",
@@ -404,7 +417,7 @@ class CohortRecoveryStore:
         the returned tip through its authenticated, monotonic publication path.
         A local pending signature reservation is never a committed extension.
         """
-        with self._transaction():
+        with self._transaction(write=False):
             return self.read_history(cohort, genesis_signatures=genesis_signatures)
 
     def read_history(

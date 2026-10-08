@@ -22,6 +22,7 @@ from .concurrency import run_owned_thread, wait_for_owned
 from .http_logging import install_http_log_redaction, video_fetch_logging
 from .open_competition import digest
 from .private_files import Directory
+from .private_state_wait import run_private_state_operation
 from .protocol import Hex32, StrictProtocolModel, Video, canonical_json_bytes
 
 
@@ -44,12 +45,17 @@ class ClipDeliveryIntent(StrictProtocolModel):
 
 
 class CohortClipDelivery:
-    def __init__(self, config: ClipDeliveryConfig, client: httpx.AsyncClient, token: str):
+    def __init__(
+        self, config: ClipDeliveryConfig, client: httpx.AsyncClient, token: str, *, concurrency=4
+    ):
         self.config = ClipDeliveryConfig.model_validate_json(canonical_json_bytes(config))
         if not re.fullmatch("[0-9a-f]{64}", token):
             raise ValueError("clip uploader requires its configured upload credential")
         self.client, self.token = client, token
-        self.serial = asyncio.Lock()
+        if type(concurrency) is not int or not 1 <= concurrency <= 32:
+            raise ValueError("clip delivery concurrency is outside bounds")
+        self.capacity = asyncio.Semaphore(concurrency)
+        self.clip_locks = {}
         install_http_log_redaction()
         self.journal = RoundJournal(
             Path(config.directory),
@@ -128,7 +134,9 @@ class CohortClipDelivery:
                 raise ValueError("selected clip delivery differs from retained digest")
 
     async def _publish(self, sha256: Hex32, now: int) -> Video:
-        slot, value, body = await run_owned_thread(self._select, sha256, now)
+        slot, value, body = await run_private_state_operation(
+            self._select, sha256, now, timeout=self.config.timeout_seconds
+        )
         # Even retained delivery is checked before a new signed request. If an
         # object was lost, republish the exact retained URL and bytes.
         try:
@@ -151,16 +159,28 @@ class CohortClipDelivery:
         return value.video
 
     async def __call__(self, sha256: Hex32) -> Video:
-        # Bounded single uploader avoids duplicate full-body transfers while
-        # workers issue concurrently. Waiting workers retain their own budgets.
-        async with self.serial:
-            with video_fetch_logging():
-                try:
-                    return await wait_for_owned(
-                        self._publish(sha256, int(time.time())), timeout=self.config.timeout_seconds
-                    )
-                except httpx.RequestError as error:
-                    # A failed read does not establish that the retained object
-                    # is missing. Let the scheduler retry its original intent;
-                    # do not republish or treat transport failure as corruption.
-                    raise OSError("selected clip transport is unavailable") from error
+        if not isinstance(sha256, str) or not re.fullmatch("[0-9a-f]{64}", sha256):
+            raise ValueError("clip delivery requires an exact content digest")
+        lock, users = self.clip_locks.get(sha256, (asyncio.Lock(), 0))
+        self.clip_locks[sha256] = (lock, users + 1)
+        try:
+            # Duplicate clips keep one publication owner. Unrelated clips share
+            # bounded capacity without waiting for a stalled peer's transfer.
+            async with lock, self.capacity:
+                with video_fetch_logging():
+                    try:
+                        return await wait_for_owned(
+                            self._publish(sha256, int(time.time())),
+                            timeout=self.config.timeout_seconds,
+                        )
+                    except httpx.RequestError as error:
+                        # Retry the original intent; a transport failure does not
+                        # establish missing bytes or authorize a new capability.
+                        raise OSError("selected clip transport is unavailable") from error
+        finally:
+            retained_lock, users = self.clip_locks[sha256]
+            assert retained_lock is lock
+            if users == 1:
+                del self.clip_locks[sha256]
+            else:
+                self.clip_locks[sha256] = (lock, users - 1)

@@ -602,7 +602,22 @@ operators. Settlement publication and reward activation remain on the
 
 ## Recoverable cohort admission
 
+Retained intake history reads use atomic SQLite read snapshots after checking the
+exact private database binding. An initialized binding and complete recovery
+schema do not require a write transaction merely to read existing history. New
+or incomplete schema setup remains atomic, and every actual admission, proposal
+reservation or certificate mutation retains immediate write ownership and FULL
+durability. An unrelated backup reader must not stall an authenticated history
+lookup; missing tables, changed bindings and corrupt records still fail safely.
+
 ### Service work admission
+
+Clip publication has bounded capacity and one owner per video digest. A slow
+transfer does not block unrelated clips, and duplicate calls preserve one original
+capability rather than uploading a second copy. Waiting callers and canceled
+operations drain their ownership before releasing capacity. Clip expiry,
+content verification, missing-object repair and request-window capture remain
+unchanged; this scheduling change does not authorize a new signed request.
 
 The opt-in service-work queue keeps paid work separate from benchmark quotas.
 An explicitly selected, quorum-signed catalog commits unique inputs before any

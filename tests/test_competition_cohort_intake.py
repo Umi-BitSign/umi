@@ -85,6 +85,19 @@ def request_for(scenario, *, sequence=1, block=200, name="Alice"):
     return CohortParticipationRequest(signed_submission=signed, consent=consent)
 
 
+def test_retained_history_read_does_not_wait_for_an_unrelated_sqlite_reader(intake, scenario):
+    cohort = digest(scenario["intake_history"].plan)
+    database = Path(intake.directory) / "intake.sqlite3"
+    # A retained read transaction (for example, a backup reader) must not make
+    # a native read-only history lookup require SQLite's exclusive write lock.
+    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as reader:
+        reader.execute("BEGIN")
+        original_binding = reader.execute("SELECT body FROM intake_binding").fetchall()
+        assert intake.history(cohort) == scenario["intake_history"]
+        assert reader.execute("SELECT body FROM intake_binding").fetchall() == original_binding
+        reader.rollback()
+
+
 def test_authority_history_advances_ahead_of_queued_background_transaction(
     intake, scenario, monkeypatch
 ):

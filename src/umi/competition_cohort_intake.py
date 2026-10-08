@@ -267,7 +267,11 @@ class CohortIntake:
                         "CREATE TABLE IF NOT EXISTS intake_binding "
                         "(id INTEGER PRIMARY KEY, body BLOB NOT NULL)"
                     )
-                    db.execute("INSERT OR IGNORE INTO intake_binding VALUES (1,?)", (raw,))
+                    # A verified existing binding is immutable. Reissuing this
+                    # no-op INSERT turns every history/model read into a write
+                    # transaction that waits for unrelated SQLite readers.
+                    if not prior:
+                        db.execute("INSERT INTO intake_binding VALUES (1,?)", (raw,))
                     db.execute("""CREATE TABLE IF NOT EXISTS cohort_consents (
                         consent TEXT PRIMARY KEY, cohort TEXT NOT NULL, hotkey TEXT NOT NULL,
                         track TEXT NOT NULL, sequence INTEGER NOT NULL, observed INTEGER NOT NULL,
