@@ -13,7 +13,10 @@ The [request-window recovery contract](../competition/transport-cadence.md)
 explains retained attempts and the new linked-deadline extension. That extension
 requires compatible selected coordinator and miner releases. Publishing its
 source alone does not enable new request windows. Do not delete grant, request,
-response or retirement state to upgrade or recover delayed work.
+response or retirement state to upgrade or recover delayed work. Completed
+requests release their active-window resource slot only after a verified signed
+retirement receipt is committed. Their counters, response archive and execution
+fence remain retained; pending work continues to occupy its slot.
 
 The previous certified allocation remains effective until the active cohort
 produces a certified successor row. Acceptance under an earlier policy does not
@@ -56,7 +59,11 @@ select the previous source. The working directory still resolves existing data
 and configuration paths.
 It fetches the current canonical manifest, checks its policy and profile against
 the public competition status, and selects that matching deployment's exact
-runtime revision. It selects the exact root-owned CPython patch version and
+runtime revision. A published maintenance release may name a different exact
+runtime revision and bind it to the existing deployment revision. This updates
+miner code without replacing the cohort's signed launch, policy, authority or
+state bindings; a different deployment or profile is refused before cutover.
+It selects the exact root-owned CPython patch version and
 scoring package versions required by the signed transport policy for this host.
 It checks the installed source, Python, package contents and scoring profile as
 the miner service user before switching services. A missing compatible Python or

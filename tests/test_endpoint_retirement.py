@@ -475,3 +475,110 @@ async def test_expired_opportunity_intent_resumes_offline_without_rule_change(
         assert p.model.calls == 0
     finally:
         restored.close()
+
+
+def bound_assignment(p):
+    request = p.requests[0]
+    authority = p.miner.competition_authority
+    return MinerAssignmentBinding.from_request(
+        request,
+        validator_hotkey=p.validator.hotkey.ss58_address,
+        window_index=max(
+            0,
+            (request.issued_block - authority.transport.activation_block)
+            // authority.transport.clock.window_stride_blocks,
+        ),
+    )
+
+
+def next_window_binding(p, *, old_window=False):
+    from .factories import challenge_request
+
+    prior = p.requests[0]
+    new = challenge_request(20, reveal_round=prior.reveal_round)
+    new = new.model_copy(
+        update={
+            "window_id": prior.window_id if old_window else "fa" * 32,
+            "response_close_round": prior.response_close_round,
+            "video": prior.video,
+        }
+    )
+    old_binding = bound_assignment(p)
+    return MinerAssignmentBinding.from_request(
+        new,
+        validator_hotkey=p.validator.hotkey.ss58_address,
+        window_index=old_binding.window_index,
+    )
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_sealed_retirement_releases_slot_preserving_counters_archive_and_fence(
+    granted, restart
+):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    original = await translate(p)
+    assert original.status_code == 200
+    ledger = p.miner.resource_ledger
+    old_binding = bound_assignment(p)
+    before = ledger.snapshot(old_binding)
+    next_binding = next_window_binding(p)
+    # The first window is still unexpired. A second job may not crowd it out.
+    with pytest.raises(MinerResourceError, match="active_window_limit"):
+        ledger.record_request(next_binding, observed_wire_bytes=1)
+    sealed = await retire(p)
+    verify(p, sealed)
+    assert ledger.snapshot(old_binding) == before
+    assert ledger.cached_video(old_binding) is None
+    if restart:
+        ledger = reopen(p)
+    try:
+        assert ledger.record_request(next_binding, observed_wire_bytes=1) is None
+        assert ledger.snapshot(old_binding) == before
+        assert (await retire(p)).content == sealed.content
+        recovered = await request(p, RESPONSE_RECOVERY_PATH, p.requests[0])
+        assert recovered.content == original.content
+        assert recovered.headers["x-umi-signature"] == original.headers["x-umi-signature"]
+        assert (await translate(p)).status_code == 409
+        assert p.model.calls == 1
+        # An old retained window does not bypass the active cap when reopened
+        # under a new assignment ID while another window occupies the slot.
+        with pytest.raises(MinerResourceError, match="active_window_limit"):
+            ledger.record_request(next_window_binding(p, old_window=True), observed_wire_bytes=1)
+    finally:
+        if restart:
+            ledger.close()
+
+
+async def test_retiring_one_shared_window_assignment_keeps_other_work_and_video(granted):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    assert (await translate(p)).status_code == 200
+    ledger = p.miner.resource_ledger
+    still_live = next_window_binding(p, old_window=True)
+    ledger.record_request(still_live, observed_wire_bytes=1)
+    verify(p, await retire(p))
+    assert ledger.cached_video(still_live) is not None
+    with pytest.raises(MinerResourceError, match="active_window_limit"):
+        ledger.record_request(next_window_binding(p), observed_wire_bytes=1)
+
+
+@pytest.mark.parametrize("fault", ["intent", "receipt"])
+async def test_uncommitted_retirement_does_not_release_live_slot(granted, monkeypatch, fault):
+    p = granted
+    assert (await grant(p)).status_code == 200
+    assert (await translate(p)).status_code == 200
+    ledger = p.miner.resource_ledger
+    name = "prepare_retirement" if fault == "intent" else "commit_retirement_receipt"
+
+    def interrupted(*args, **kwargs):
+        raise OSError("retirement interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, name, interrupted)
+        assert (await retire(p)).status_code == 503
+    with pytest.raises(MinerResourceError, match="active_window_limit"):
+        ledger.record_request(next_window_binding(p), observed_wire_bytes=1)
+    verify(p, await retire(p))
+    assert ledger.record_request(next_window_binding(p), observed_wire_bytes=1) is None
+    assert p.model.calls == 1

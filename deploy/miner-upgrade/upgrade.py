@@ -121,7 +121,9 @@ def deployed_manifest(manifest: dict, status: dict) -> dict:
 
     The static manifest cannot name the commit that changes its own runtime
     pointer. The public status is already required to match its policy and track
-    profile, so use that same deployment record for the runtime revision.
+    profile, so use that same deployment record for the runtime revision. A
+    published maintenance release may instead bind its exact runtime revision
+    to an existing deployment_revision, preserving that cohort's signed identity.
     """
     deployed = status.get("deployment") if isinstance(status, dict) else None
     policy = manifest.get("policy") if isinstance(manifest, dict) else None
@@ -136,7 +138,7 @@ def deployed_manifest(manifest: dict, status: dict) -> dict:
     ):
         selected = document(canonical(manifest), label="upgrade manifest")
         runtime = selected.get("runtime")
-        if isinstance(runtime, dict):
+        if isinstance(runtime, dict) and "deployment_revision" not in runtime:
             runtime["revision"] = deployed["umi_git_revision"]
         return selected
     return manifest
@@ -174,9 +176,17 @@ def validate_manifest(manifest: dict, status: dict, public_track: str) -> None:
     runtime = manifest.get("runtime")
     if (
         not isinstance(runtime, dict)
-        or set(runtime) != {"repository", "revision"}
+        or set(runtime)
+        not in (
+            {"repository", "revision"},
+            {"repository", "revision", "deployment_revision"},
+        )
         or runtime.get("repository") != "https://github.com/Umi-BitSign/umi.git"
         or GIT_REVISION.fullmatch(str(runtime.get("revision"))) is None
+        or (
+            "deployment_revision" in runtime
+            and GIT_REVISION.fullmatch(str(runtime["deployment_revision"])) is None
+        )
     ):
         raise ValueError("invalid runtime")
     tracks = manifest.get("eligible_tracks")
@@ -187,7 +197,8 @@ def validate_manifest(manifest: dict, status: dict, public_track: str) -> None:
         status.get("schema") != "umi-competition-status/2"
         or status.get("policy_sha256") != manifest["policy"]["value_sha256"]
         or not isinstance(deployed, dict)
-        or deployed.get("umi_git_revision") != runtime["revision"]
+        or deployed.get("umi_git_revision")
+        != runtime.get("deployment_revision", runtime["revision"])
         or deployed.get("eligible_tracks") != tracks
     ):
         raise ValueError("public status differs from upgrade manifest")

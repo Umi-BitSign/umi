@@ -218,6 +218,7 @@ class SQLiteMinerResourceLedger:
                 self._prune_closed_windows(connection, current_round)
                 if binding.response_close_round <= current_round:
                     raise MinerResourceError("response_window_closed")
+            self._prune_retired_video_cache(connection)
             row = self._get_or_create_assignment(connection, binding)
             self._reserve_response_recovery(connection, binding, row)
             sequence = int(row["request_transmissions"]) + 1
@@ -816,10 +817,16 @@ class SQLiteMinerResourceLedger:
             self._verify_retirement(proposed)
             if row["receipt"] is not None and row["receipt"] != encoded:
                 raise MinerResourceError("retirement_receipt_conflict")
+            if db.execute(
+                "SELECT 1 FROM operations WHERE assignment_id=? AND status='pending' LIMIT 1",
+                (binding.assignment_id,),
+            ).fetchone():
+                raise MinerResourceError("retirement_work_pending")
             db.execute(
                 "UPDATE request_retirements SET receipt=? WHERE assignment_id=?",
                 (encoded, binding.assignment_id),
             )
+            self._prune_retired_video_cache(db)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1061,10 +1068,7 @@ class SQLiteMinerResourceLedger:
             row["count"] > self._limits.maximum_assignments_per_validator_window for row in grouped
         ):
             raise MinerResourceError("resource_ledger_assignment_count_limit")
-        active_windows = self._connection.execute(
-            "SELECT COUNT(DISTINCT window_id) FROM assignments"
-        ).fetchone()[0]
-        if active_windows > self._limits.maximum_active_windows:
+        if len(self._active_window_ids(self._connection)) > self._limits.maximum_active_windows:
             raise MinerResourceError("resource_ledger_active_window_limit")
         window_bindings = self._connection.execute(
             "SELECT window_id, COUNT(DISTINCT window_index) AS indices, "
@@ -1177,10 +1181,11 @@ class SQLiteMinerResourceLedger:
             or window["response_close_round"] != binding.response_close_round
         ):
             raise MinerResourceError("window_binding_conflict")
-        active_windows = connection.execute(
-            "SELECT COUNT(DISTINCT window_id) FROM assignments"
-        ).fetchone()[0]
-        if window is None and active_windows >= self._limits.maximum_active_windows:
+        active_windows = self._active_window_ids(connection)
+        if (
+            binding.window_id not in active_windows
+            and len(active_windows) >= self._limits.maximum_active_windows
+        ):
             raise MinerResourceError("active_window_limit")
         count = connection.execute(
             "SELECT COUNT(*) FROM assignments WHERE validator_account_hex = ? AND window_id = ?",
@@ -1363,6 +1368,33 @@ class SQLiteMinerResourceLedger:
     def _validate_round(value: int) -> None:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("current round must be a non-negative integer")
+
+    @staticmethod
+    def _active_window_ids(connection: sqlite3.Connection) -> set[str]:
+        # A verified, committed retirement receipt seals the response archive
+        # and fences this assignment permanently. Keep its counters until expiry,
+        # but do not let completed work occupy a live execution slot.
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT assignment.window_id FROM assignments AS assignment "
+                "LEFT JOIN request_retirements AS retirement USING (assignment_id) "
+                "WHERE retirement.receipt IS NULL"
+            )
+        }
+
+    @staticmethod
+    def _prune_retired_video_cache(connection: sqlite3.Connection) -> int:
+        # Other assignments may still need the same video. A pending retirement
+        # intent is not sufficient to release it, or the window's execution slot.
+        return connection.execute(
+            "DELETE FROM videos WHERE NOT EXISTS ("
+            "SELECT 1 FROM assignments AS assignment "
+            "LEFT JOIN request_retirements AS retirement USING (assignment_id) "
+            "WHERE assignment.window_id=videos.window_id "
+            "AND assignment.video_sha256=videos.video_sha256 "
+            "AND retirement.receipt IS NULL)"
+        ).rowcount
 
     @staticmethod
     def _prune_closed_windows(connection: sqlite3.Connection, current_round: int) -> int:
