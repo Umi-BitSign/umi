@@ -14,6 +14,8 @@ import os
 import re
 import signal
 import subprocess
+import threading
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +94,9 @@ class RuntimeMetadataExecutor:
         self.binary_path = binary_path
         self.expected_sha256 = expected_sha256
         self.timeout_seconds = timeout_seconds
+        self._execution_lock = threading.Lock()
+        self._executed: OrderedDict[tuple[str, str], bytes] = OrderedDict()
+        self._executed_bytes = 0
 
     def execute(self, snapshot: FinalizedSnapshotRef, evidence: StorageEvidence):
         if (
@@ -104,7 +109,27 @@ class RuntimeMetadataExecutor:
             or not 0 < len(evidence.value) <= MAX_CODE_BYTES
         ):
             raise RuntimeMetadataError("runtime_code_evidence_invalid")
-        raw = self._invoke(evidence.value)
+        # Reuse only the deterministic helper output, never a snapshot, proof or
+        # mutable runtime codec. Each caller above supplies its own code proof.
+        # Serializing first execution also coalesces overlapping history reads.
+        key = (self.expected_sha256, hashlib.sha256(evidence.value).hexdigest())
+        with self._execution_lock:
+            raw = self._executed.get(key)
+            if raw is None:
+                raw = self._invoke(evidence.value)
+            result = self._decode_output(snapshot, evidence, raw)
+            if key not in self._executed:
+                while self._executed and (
+                    len(self._executed) >= 4 or self._executed_bytes + len(raw) > MAX_RESPONSE_BYTES
+                ):
+                    _, previous = self._executed.popitem(last=False)
+                    self._executed_bytes -= len(previous)
+                self._executed[key] = raw
+                self._executed_bytes += len(raw)
+            self._executed.move_to_end(key)
+            return result
+
+    def _decode_output(self, snapshot, evidence, raw):
         if (
             not raw
             or len(raw) > MAX_RESPONSE_BYTES

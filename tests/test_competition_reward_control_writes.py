@@ -160,6 +160,26 @@ async def block_case(historical, monkeypatch):
 
 
 @pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+async def test_runtime_hook_weight_event_does_not_hide_control_writes(block_case):
+    h = block_case
+    hook_event = event("SubtensorModule", "WeightsSet", [78, 7], extrinsic_index=None)
+    hook_event["phase"] = "Initialization"
+    h.events.insert(0, hook_event)
+    result = await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)
+    validate_control_writes(
+        result,
+        expected_control_hotkey=h.item.hotkey,
+        expected_chain_config_sha256=digest(h.item.config),
+    )
+    assert [(w.extrinsic_index, w.decision_sha256) for w in result.writes] == [
+        (0, "aa" * 32),
+        (1, "bb" * 32),
+    ]
+    assert not result.unresolved_extrinsics
+    assert json.loads(result.evidence)["events"]["value"] == h.event_bytes.hex()
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
 async def test_preserves_each_successful_write_in_block_order(block_case):
     h = block_case
     result = await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)

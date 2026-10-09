@@ -827,6 +827,11 @@ visible when another transaction overwrites them in the same block. Wrapped
 effects and unattributed slot changes remain unresolved. Consumers must not
 interpret an unresolved interval as permission to continue rewards.
 
+Runtime-hook `WeightsSet` events without an extrinsic are retained without an
+invented account attribution. They do not prevent scanning unrelated commitment
+calls, but an absence-of-weight assertion still rejects an unattributed weight
+event. The complete original event proof remains in the block archive.
+
 Each block's exact proof bytes commit before progress advances. Restart replays
 saved proofs against owned finality before fetching missing blocks. Interrupted
 reads, cancellation and capacity exhaustion preserve the prefix. Bounded work
@@ -835,6 +840,13 @@ shared runtime bytes using the existing lossless evidence recipe; the owning
 service must provision disk and RPC capacity for the complete interval. Slow
 proof verification and decoding drain in owned threads, keeping the event loop
 responsive without abandoning work during shutdown.
+
+The runtime executor reuses successful deterministic output for identical proven
+Wasm and helper digests. This process-local cache retains at most four outputs
+within one maximum-response byte budget. Every call still requires code evidence
+bound to its requested snapshot and builds a separate codec; cached output is not
+a proof for a later block. Changed code or helper identity executes again, and
+failed outputs are not cached.
 
 Historical recovery reuses header links already checked against the same owned
 anchor within the process, avoiding repeated disk walks for each block in an

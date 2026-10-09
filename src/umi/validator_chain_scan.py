@@ -1517,7 +1517,7 @@ def _weight_event_target(
     extrinsic_index: int | None,
     calls: tuple[FinalizedCallRecord, ...],
     limits: ScanLimits,
-) -> tuple[bytes, int, int]:
+) -> tuple[bytes | None, int, int]:
     named, positional = _attributes_positional_or_named(attributes)
     account: bytes | None = None
     if event in {
@@ -1585,6 +1585,19 @@ def _weight_event_target(
                 index=0,
             )
         )
+        if extrinsic_index is None:
+            # Runtime hooks can set weights without a current extrinsic. This
+            # event carries a neuron UID, not an account; a current registration
+            # lookup cannot establish its historical origin. Retain the proven
+            # event without inventing attribution. No-weight assertions reject
+            # an unattributed event, while unrelated commitment scans can use
+            # the complete block and its original events.
+            _uint(
+                _field(named, positional, aliases=("uid", "neuron_uid"), index=1),
+                "weight_event_uid_invalid",
+                maximum=_MAX_U16,
+            )
+            return None, target[0], target[1]
         account = _unique_weight_origin(calls, extrinsic_index)
     else:  # pragma: no cover - guarded by the closed event set
         raise ValidatorChainScanError("weight_event_unsupported")

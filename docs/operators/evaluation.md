@@ -355,6 +355,16 @@ neither completed results nor failures are cached. Cancelling one HTTP request
 drains its owned read without cancelling other readers. Registration and finality
 checks remain separate from this shared disk read.
 
+After its first full replay, a prepared round is reused independently for each
+cohort within a bounded process-local cache. Reads use a consistent read-only
+intake snapshot and do not acquire the admission writer's gate. Each read still
+checks current signed authority, finalized height, intake closure and the exact
+retained round bytes. New history tips replay their decision evidence and any
+preparation closure without reconstructing the unchanged participants. Revocation,
+changed round bytes or a mismatched closure remain errors. Restart or cache
+eviction replays the original retained round, preserving its observation and
+baseline rather than selecting new ones.
+
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
 runtime and input clips, it reserves one source before inference and preserves
