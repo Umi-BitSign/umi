@@ -659,6 +659,10 @@ on the selected port. Put it behind the deployment's private HTTPS proxy and
 configure the coordinator's `PhaseVotePeer` with the vote credential. Keep the
 owner export credential separate. The HTTP client verifies TLS, disables
 environment proxies and never follows redirects.
+Unavailable phase exports report `phase_owner_http_STATUS` in bounded failure
+details. Use the numeric HTTP status to distinguish authentication, validation,
+owner availability and proxy failures; response bodies, credentials and private
+URLs are excluded. The failure remains retryable and authorizes no phase change.
 
 Deliver these canonical private files under `inputs_directory`:
 
@@ -1081,6 +1085,14 @@ missing endpoint responses and busy execution locks stay pending. Retries reuse
 the original terminal signature, and the durable scan cursor revisits pending
 work without blocking other assignments. Export reports describe the current
 batch. They do not confirm remote delivery or successful reward submission.
+Successful local publication verification is retained in a bounded private
+`.publication-verification/` cache, so restarting an exporter does not replay
+unchanged exports. Reuse requires the same policy and capacity, a verification
+interval containing the original interval, and unchanged identities for every
+published object and index. Missing or changed files require native replay and
+repair; an unavailable cache never blocks publication. These receipts are local
+optimization metadata, not transferable evidence: replicate the original
+objects and indexes, and let the receiver perform its own native verification.
 Polling completed execution and waiting for missing endpoint evidence do not
 take the job writer lock. Creating execution steps and sealing terminals still
 require exclusive ownership. Export retries include a bounded `last_failure`
@@ -1851,7 +1863,7 @@ remain independently checked; the prefix does not certify phase completion.
 
 The intake owner also retains bounded private verified seals while it is running.
 Each lookup reads the exact seal, original consent rows and indexes, and selected
-model-acceptance bytes under the existing intake lock. Changed or missing inputs,
+model-acceptance bytes in a consistent intake snapshot. Changed or missing inputs,
 a different database inode, configuration, policy or history prefix require native
 reconstruction again. Restart begins without this process cache. Publication still
 checks the current registration observation, history adoption and closure evidence;
@@ -1938,6 +1950,10 @@ Current authority-history reads use a query-only SQLite snapshot, so admission
 or model-preservation work does not own their application lock. Each snapshot
 binds the published history and its supporting records, checks the original
 private file identity and configuration, and cannot write or repair state.
+Admission-status, reviewer-queue and intake-readiness reads use the same snapshot
+path. They can finish while a publisher owns the writer gate, and a later read
+sees newly committed certificates and intake fences. Certificate assembly and
+publication still reserve the writer and validate the current generation.
 Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.

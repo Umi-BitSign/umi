@@ -145,7 +145,15 @@ class RequestExportWorker:
             raise ValueError("retained terminal differs from its owned assignment")
         # Delivery reads immutable originals after releasing the signing lock.
         # Slow copies must not prevent settlement from reading this job.
-        if await run_owned_thread(self.files.current, digest(terminal)):
+        if await run_owned_thread(
+            partial(
+                self.files.current,
+                digest(terminal),
+                policy_sha256=digest(owner.policy),
+                opened_at_block=0,
+                completed_by_block=block,
+            )
+        ):
             return True
         await run_owned_thread(
             partial(

@@ -66,12 +66,12 @@ def intake_readiness(
     nonce: str,
     archive_available: bool,
 ) -> CohortIntakeReadiness:
-    """Inspect the native admission state under its publication/admission lock."""
+    """Inspect a consistent native admission snapshot without reserving its writer."""
     intake._allowed(cohort)
     observation = execution_boundary(capture)
     if type(archive_available) is not bool:
         raise ValueError("archive availability must be a boolean")
-    with intake._connection() as (db, store):
+    with intake._connection(prefer_history=True) as (db, store):
         history = store.published_history(cohort)
         state, _, _ = replay_cohort_decisions(
             history,

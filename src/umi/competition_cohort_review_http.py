@@ -30,6 +30,14 @@ RequestT = TypeVar("RequestT", bound=StrictProtocolModel, contravariant=True)
 logger = logging.getLogger(__name__)
 
 
+class PhaseReviewHTTPUnavailable(OSError):
+    """Retain the HTTP boundary without exposing a private response or URL."""
+
+    def __init__(self, status_code: int):
+        self.reason_code = f"phase_owner_http_{status_code}"
+        super().__init__("phase owner has not supplied a review export")
+
+
 class CohortReviewPeerConfig(StrictProtocolModel):
     signer: Hotkey
     origin: Annotated[str, Field(min_length=1, max_length=2048)]
@@ -183,7 +191,7 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
             timeout=self.timeout_seconds,
         ) as response:
             if response.status_code != 200:
-                raise OSError("phase owner has not supplied a review export")
+                raise PhaseReviewHTTPUnavailable(response.status_code)
             if (
                 response.headers.get("content-type", "").split(";", 1)[0].strip()
                 != "application/json"

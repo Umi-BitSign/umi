@@ -117,6 +117,40 @@ async def test_two_automatic_reviewers_publish_native_certificate_visible_to_min
     assert len(h.calls) == 2
 
 
+async def test_admission_reads_progress_during_writer_and_see_new_certificate(relay):
+    h = relay
+    await submit(h)
+
+    def views():
+        return (
+            h.queue.record(h.cohort, h.consent),
+            h.queue.history(h.cohort),
+            h.queue.evidence(h.cohort, h.consent),
+            h.queue.pending(h.cohort, wallet("Charlie").hotkey.ss58_address),
+            h.queue.certificate(h.cohort, h.consent),
+        )
+
+    for certified in (False, True):
+        if certified:
+            await h.reviewer("Charlie").poll_once()
+            await h.reviewer("Dave").poll_once()
+        expected = views()
+        assert (expected[-1] is not None) is certified
+        # Hold the real writer gate while separate native read threads execute.
+        # Release it before joining tasks even if this regression test fails.
+        with h.intake._connection():
+            tasks = (
+                asyncio.create_task(run_owned_thread(views)),
+                asyncio.create_task(status(h)),
+            )
+            _, pending = await asyncio.wait(tasks, timeout=60)
+        observed, public = await asyncio.gather(*tasks)
+        assert not pending, "admission reads waited for the intake writer"
+        assert observed == expected
+        assert public.status == ("admission_certified" if certified else "pending_attestation")
+    assert len(h.calls) == 2
+
+
 async def test_reviewer_uses_supplied_shared_capture(relay, monkeypatch):
     h = relay
     await submit(h)

@@ -229,6 +229,11 @@ async def test_unchanged_exports_reuse_work_and_repair_missing_original(exportin
     h = exporting
     await publish_all(h)
     calls = len(h.exports_signed)
+    # Only private durable publication receipts survive this process restart.
+    h.files = RequestCompletionFiles(h.files.root)
+    for worker in h.workers:
+        worker.files = h.files
+    h.connect()
     original = h.files.publish
     exported = []
 
@@ -255,3 +260,88 @@ async def test_unchanged_exports_reuse_work_and_repair_missing_original(exportin
     assert digest(terminal) in exported
     assert path.read_bytes() == before
     assert len(h.exports_signed) == calls
+    # The receiver still independently replays the complete signed originals.
+    h.source = h.reopen()
+    h.connect()
+    h.b["objects"].clear()
+    progress = h.window()
+    assert progress.completion == "complete"
+    assert h.source.read(progress).record.progress == progress
+
+
+async def test_restart_cache_never_accepts_changed_export_or_verification_context(
+    exporting, monkeypatch
+):
+    h = exporting
+    await publish_all(h)
+    order = next(h.files.orders(h.b["roster"]))
+    terminal = h.files.terminal(order, wallet("Charlie").hotkey.ss58_address)
+    policy = h.workers[0].executions[0].policy
+    args = dict(policy_sha256=digest(policy), opened_at_block=0, completed_by_block=h.block)
+    restarted = RequestCompletionFiles(h.files.root)
+    assert restarted.current(digest(terminal), **args)
+    assert not restarted.current(digest(terminal), **(args | {"policy_sha256": "f" * 64}))
+    assert not restarted.current(digest(terminal), **(args | {"opened_at_block": h.block}))
+    assert not restarted.current(digest(terminal), **(args | {"completed_by_block": 0}))
+    smaller = RequestCompletionFiles(h.files.root, maximum_bytes=h.files.maximum_bytes // 2)
+    assert not smaller.current(digest(terminal), **args)
+
+    path = h.files.objects._path(terminal.terminal.execution_archive_sha256)
+    before = path.read_bytes()
+    path.write_bytes(b"{}")
+    for worker in h.workers:
+        worker.files = restarted
+    reports = [await worker.poll_once() for worker in h.workers]
+    assert sum(report["retry_count"] for report in reports) > 0
+    assert all(report["request_closure_authorized"] is False for report in reports)
+    assert path.read_bytes() == b"{}"
+    # Restoring the exact original requires native replay before reuse resumes.
+    path.write_bytes(before)
+    assert not restarted.current(digest(terminal), **args)
+    await publish_all(h)
+    assert restarted.current(digest(terminal), **args)
+
+
+@pytest.mark.parametrize("failure", ["corrupt", "symlink", "write_unavailable"])
+async def test_disposable_publication_cache_failure_does_not_hold_exports(
+    exporting, monkeypatch, failure
+):
+    from umi import competition_cohort_request_reuse as reuse
+
+    h = exporting
+    if failure == "write_unavailable":
+
+        def unavailable(*args, **kwargs):
+            raise OSError("synthetic cache write unavailable")
+
+        monkeypatch.setattr(reuse, "publish_private_model", unavailable)
+    await publish_all(h)
+    count = len(h.exports_signed)
+    cache = h.files.root / ".publication-verification"
+    if failure == "corrupt":
+        for path in cache.glob("*.json"):
+            path.write_bytes(b"{broken")
+    elif failure == "symlink":
+        target = h.files.root / "invalid-cache-target"
+        target.write_bytes(b"must remain untouched")
+        for path in cache.glob("*.json"):
+            path.unlink()
+            path.symlink_to(target)
+
+    restarted = RequestCompletionFiles(h.files.root)
+    replayed = []
+    original = restarted.publish
+
+    def replay(*args, **kwargs):
+        replayed.append(digest(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(restarted, "publish", replay)
+    for worker in h.workers:
+        worker.files = restarted
+    await publish_all(h)
+    assert replayed
+    assert len(h.exports_signed) == count
+    assert h.window().completion == "complete"
+    if failure == "symlink":
+        assert target.read_bytes() == b"must remain untouched"
