@@ -44,6 +44,7 @@ class RequestCompletionFiles:
         self._published = OrderedDict()
         self._cached_paths = 0
         self._cache_lock = Lock()
+        self._publication_lock = Lock()
         self._pid = os.getpid()
 
     @staticmethod
@@ -152,21 +153,27 @@ class RequestCompletionFiles:
         collected.retain(order)
         collected.retain(signed)
         for key in sorted(collected.values):
-            self.objects.publish(key, collected.values.__getitem__)
+            # Native verification can run concurrently, but the private file
+            # publisher owns one nonblocking mutex per destination directory.
+            # Queue each small publication locally instead of turning our own
+            # concurrent exports into cross-process contention retries.
+            with self._publication_lock:
+                self.objects.publish(key, collected.values.__getitem__)
         order_path = self._order_path(
             digest(order.order.round), digest(order.order.submission.submission)
         )
         terminal_path = self._terminal_path(order, assignment.delivery.receipt.evaluator_hotkey)
-        publish_private_model(
-            order_path,
-            _Reference(sha256=digest(order)),
-            maximum_bytes=1024,
-        )
-        publish_private_model(
-            terminal_path,
-            _Reference(sha256=digest(signed)),
-            maximum_bytes=1024,
-        )
+        with self._publication_lock:
+            publish_private_model(
+                order_path,
+                _Reference(sha256=digest(order)),
+                maximum_bytes=1024,
+            )
+            publish_private_model(
+                terminal_path,
+                _Reference(sha256=digest(signed)),
+                maximum_bytes=1024,
+            )
         paths = (
             order_path,
             terminal_path,
