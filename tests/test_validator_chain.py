@@ -154,7 +154,7 @@ def _collector(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("many", [False, True, "proof"])
+@pytest.mark.parametrize("many", [False, True, "proof", "single_proof"])
 async def test_native_proof_verification_does_not_block_event_loop(many):
     owner = threading.get_ident()
     observed = []
@@ -172,18 +172,19 @@ async def test_native_proof_verification_does_not_block_event_loop(many):
 
     verify.read_many = read
     collector = _collector(_rpc(), verifier=verify)
+    collector._read_values_from_proof = many == "single_proof"
     snapshot = FakeFinality().snapshot
     if many == "proof":
         await collector.storage_evidence_many_from_proof(snapshot, (b"key",))
-    elif many:
+    elif many is True:
         await collector.storage_evidence_many(snapshot, (b"key",))
     else:
         await collector.storage_evidence(snapshot, b"key")
-    assert len(observed) == (2 if many == "proof" else 1)
+    assert len(observed) == (2 if many in ("proof", "single_proof") else 1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("many", [False, True, "proof"])
+@pytest.mark.parametrize("many", [False, True, "proof", "single_proof"])
 async def test_native_proof_cancellation_drains_worker_before_return(many):
     entered, release = threading.Event(), threading.Event()
 
@@ -200,10 +201,11 @@ async def test_native_proof_cancellation_drains_worker_before_return(many):
 
     verify.read_many = read
     collector = _collector(_rpc(), verifier=verify)
+    collector._read_values_from_proof = many == "single_proof"
     snapshot = FakeFinality().snapshot
     if many == "proof":
         pending = collector.storage_evidence_many_from_proof(snapshot, (b"key",))
-    elif many:
+    elif many is True:
         pending = collector.storage_evidence_many(snapshot, (b"key",))
     else:
         pending = collector.storage_evidence(snapshot, b"key")
@@ -223,6 +225,92 @@ async def test_native_proof_cancellation_drains_worker_before_return(many):
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [b"wasm", b"", None])
+async def test_single_proof_value_read_is_exact_cached_and_archive_replay_consumes_claim(value):
+    rpc = _rpc()
+    finality = FakeFinality()
+    snapshot = finality.snapshot
+    reads, checks = [], []
+
+    def verify(**kwargs):
+        checks.append(kwargs)
+        return (
+            kwargs["state_root"] == bytes.fromhex(snapshot.state_root[2:])
+            and kwargs["expected_value"] == value
+        )
+
+    def read(**kwargs):
+        reads.append(kwargs)
+        return ((b":code", value),)
+
+    verify.read_many = read
+    collector = FinalizedProofCollector(
+        rpc,
+        finality=finality,
+        verifier=verify,
+        maximum_cached_storage_evidence_bytes=1024,
+        read_values_from_proof=True,
+    )
+    first = await collector.storage_evidence(snapshot, b":code")
+    assert first.value == value and first.verified_state_root == snapshot.state_root
+    assert await collector.storage_evidence(snapshot, b":code") is first
+    assert [method for method, _ in rpc.calls] == ["state_getReadProof"]
+    assert len(reads) == len(checks) == 1
+    assert reads[0]["storage_keys"] == (b":code",)
+    assert reads[0]["maximum_value_bytes"] == collector._limits.maximum_storage_value_bytes
+    # An archive still supplies its claimed value, even if live collection
+    # already verified this exact block. Contradicting claims cannot be hidden.
+    archive = _rpc(value="0x626164")
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await collector.with_evidence_rpc(archive).storage_evidence(snapshot, b":code")
+    assert [method for method, _ in archive.calls] == ["state_getStorageAt", "state_getReadProof"]
+    assert len(reads) == 1
+    changed = replace(snapshot, state_root=_hash(7))
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await collector.storage_evidence(changed, b":code")
+    assert len(reads) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    ["unsupported", "wrong_key", "wrong_value", "oversized", "native_failure", "wrong_block"],
+)
+async def test_single_proof_value_read_never_falls_back_or_retains_failure(failure):
+    rpc = _rpc()
+    snapshot = FakeFinality().snapshot
+    returned = ((b":code", b"okay"),)
+
+    def verify(**kwargs):
+        return failure != "native_failure"
+
+    if failure != "unsupported":
+        if failure == "wrong_key":
+            returned = ((b"other", b"okay"),)
+        elif failure == "wrong_value":
+            returned = ((b":code", "not bytes"),)
+        elif failure == "oversized":
+            returned = ((b":code", b"123456789"),)
+        verify.read_many = lambda **kwargs: returned
+    if failure == "wrong_block":
+        rpc.responses["state_getReadProof"]["at"] = _hash(9)
+    collector = FinalizedProofCollector(
+        rpc,
+        finality=FakeFinality(),
+        verifier=verify,
+        limits=ProofCollectionLimits(maximum_storage_value_bytes=8),
+        maximum_cached_storage_evidence_bytes=1024,
+        read_values_from_proof=True,
+    )
+    for _ in range(2):
+        with pytest.raises(ValidatorChainError):
+            await collector.storage_evidence(snapshot, b":code")
+    assert not collector._storage_evidence
+    assert all(method == "state_getReadProof" for method, _ in rpc.calls)
+    assert len(rpc.calls) == (0 if failure == "unsupported" else 2)
 
 
 @pytest.mark.asyncio

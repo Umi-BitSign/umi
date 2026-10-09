@@ -562,6 +562,7 @@ class FinalizedProofCollector:
         verifier: StorageProofVerifier,
         limits: ProofCollectionLimits | None = None,
         maximum_cached_storage_evidence_bytes: int = 0,
+        read_values_from_proof: bool = False,
     ) -> None:
         if not callable(getattr(rpc, "request", None)):
             raise TypeError("rpc must implement RawJsonRpc")
@@ -569,6 +570,8 @@ class FinalizedProofCollector:
             raise TypeError("finality must implement VerifiedFinalizedSnapshotPort")
         if not callable(verifier):
             raise TypeError("verifier must be callable")
+        if type(read_values_from_proof) is not bool:
+            raise TypeError("proof value reader selection must be boolean")
         if (
             type(maximum_cached_storage_evidence_bytes) is not int
             or not 0 <= maximum_cached_storage_evidence_bytes <= 64 * 1024**2
@@ -577,6 +580,7 @@ class FinalizedProofCollector:
         self._rpc = rpc
         self._finality = finality
         self._verifier = verifier
+        self._read_values_from_proof = read_values_from_proof
         self._limits = limits or ProofCollectionLimits()
         self._checked_snapshots = OrderedDict()
         self._snapshot_lock = asyncio.Lock()
@@ -590,8 +594,9 @@ class FinalizedProofCollector:
         The source of bytes grants no finality authority. Replay callers must
         select the snapshot from their owned finality port before decoding or
         proving storage. No network fallback is added to the supplied port.
-        Replay never inherits online evidence reuse: supplied archive bytes
-        must still be consumed and checked, even for an already collected block.
+        Replay never inherits online evidence reuse or proof-only value reads:
+        supplied archive claims must still be consumed and checked, even for an
+        already collected block.
         """
         return FinalizedProofCollector(
             rpc, finality=self._finality, verifier=self._verifier, limits=self._limits
@@ -807,17 +812,56 @@ class FinalizedProofCollector:
         key_hex = "0x" + storage_key.hex()
 
         try:
-            raw_value = await self._rpc.request(
-                "state_getStorageAt",
-                (key_hex, snapshot.block_hash),
-            )
-            value = (
-                None if raw_value is None else _bytes_from_hex(raw_value, "storage_value_invalid")
-            )
+            if self._read_values_from_proof:
+                reader = getattr(self._verifier, "read_many", None)
+                if not callable(reader):
+                    raise ValidatorChainError("storage_proof_reader_unavailable")
+                nodes = await self._read_proof(snapshot, (key_hex,))
+
+                def read_value():
+                    values = reader(
+                        state_root=bytes.fromhex(snapshot.state_root[2:]),
+                        storage_keys=(storage_key,),
+                        proof=nodes,
+                        maximum_value_bytes=self._limits.maximum_storage_value_bytes,
+                        maximum_total_value_bytes=self._limits.maximum_storage_values_bytes,
+                    )
+                    if (
+                        type(values) is not tuple
+                        or len(values) != 1
+                        or type(values[0]) is not tuple
+                        or len(values[0]) != 2
+                        or values[0][0] != storage_key
+                        or (values[0][1] is not None and type(values[0][1]) is not bytes)
+                    ):
+                        raise ValueError("proof reader changed the selected key or value shape")
+                    return values[0][1]
+
+                try:
+                    value = await run_owned_thread(read_value)
+                except (TypeError, ValueError, RuntimeError) as error:
+                    raise ValidatorChainError("storage_proof_verification_failed") from error
+            else:
+                raw_value = await self._rpc.request(
+                    "state_getStorageAt",
+                    (key_hex, snapshot.block_hash),
+                )
+                value = (
+                    None
+                    if raw_value is None
+                    else _bytes_from_hex(raw_value, "storage_value_invalid")
+                )
+                nodes = None
             if value is not None and len(value) > self._limits.maximum_storage_value_bytes:
                 raise ValidatorChainError("storage_value_limit")
-
-            nodes = await self._read_proof(snapshot, (key_hex,))
+            if (
+                self._read_values_from_proof
+                and value is not None
+                and len(value) > self._limits.maximum_storage_values_bytes
+            ):
+                raise ValidatorChainError("storage_values_limit")
+            if nodes is None:
+                nodes = await self._read_proof(snapshot, (key_hex,))
 
             try:
                 evidence = await run_owned_thread(

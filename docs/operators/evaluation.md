@@ -360,6 +360,12 @@ proof verification. Finality selection and runtime codec construction remain
 independent checks. Account and weight collectors do not enable this cache, and
 archive replay always consumes and verifies the supplied archive bytes.
 
+Read-only recovery tools using a qualified proof reader may explicitly enable
+`runtime_proof_reads` on their weight provider. This extracts runtime code from
+its verified storage proof instead of downloading the same value separately.
+It defaults off for older helpers; unsupported readers or invalid proofs hold
+the read. Account/weight collection and archive claim verification are unchanged.
+
 Historical control capture also retains the runtime and storage proofs verified
 within that capture. Encoding their archive does not immediately replay those
 same proofs or rebuild the codec. The archive's size and format, current owned
