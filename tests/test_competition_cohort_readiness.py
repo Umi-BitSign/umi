@@ -58,6 +58,31 @@ def router(intake, block, *, archive=True):
     return app
 
 
+async def test_readiness_progresses_during_writer_and_observes_later_fence(phase, scenario):
+    cohort = digest(scenario["intake_history"].plan)
+    block = [210]
+    app = router(phase.intake, block)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="https://intake.example"
+    ) as client:
+        for fenced in (False, True):
+            if fenced:
+                healthy(phase, scenario)
+                block[0] = 300
+            with phase.intake._connection():
+                task = asyncio.create_task(
+                    client.get(f"/v1/competition/cohorts/{cohort}/readiness?nonce={'ab' * 16}")
+                )
+                _, pending = await asyncio.wait((task,), timeout=60)
+            response = await task
+            assert not pending, "readiness waited for the intake writer"
+            assert response.status_code == 200
+            result = response.json()
+            assert result["ready"] is (not fenced)
+            assert result["reason_code"] == ("fenced" if fenced else "accepting")
+            assert result["observation"]["block"] == block[0]
+
+
 async def test_native_api_probe_records_actual_serving_state(phase, scenario):
     block = [200]
     sampler = LiveIntakePhaseObserver(

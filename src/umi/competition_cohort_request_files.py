@@ -5,13 +5,21 @@ copied before either index becomes visible. Missing delivery stays pending;
 readers never open an evaluator's live database or infer a failed outcome.
 """
 
+import os
 from collections import OrderedDict
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from threading import Lock
 
 from .competition_cohort_endpoint_archive import EndpointObjectSource, read_endpoint_object
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
+from .competition_cohort_request_reuse import (
+    PublicationFileStamp,
+    PublicationVerificationReceipt,
+    load_publication_verification,
+    remember_publication_verification,
+)
 from .competition_cohort_request_terminal import SignedRequestTerminal, read_request_terminal
 from .competition_cohort_reward_package import DEFAULT_PACKAGE_BYTES, ReplayObjectCollector
 from .competition_cohort_roster import RecoverableRosterEvidence
@@ -36,6 +44,7 @@ class RequestCompletionFiles:
         self._published = OrderedDict()
         self._cached_paths = 0
         self._cache_lock = Lock()
+        self._pid = os.getpid()
 
     @staticmethod
     def _stamp(path):
@@ -52,37 +61,68 @@ class RequestCompletionFiles:
             info.st_ctime_ns,
         )
 
-    def current(self, terminal_sha: str) -> bool:
-        """Reuse an in-process publication only while every output is unchanged.
+    def current(
+        self,
+        terminal_sha: str,
+        *,
+        policy_sha256: str,
+        opened_at_block: int,
+        completed_by_block: int,
+    ) -> bool:
+        """Reuse a successful local publication while every output is unchanged.
 
-        Restart always replays native originals. A missing, replaced or changed
-        file invalidates reuse and the next export repairs or rejects it.
-        This optimization never supplies evidence to the closure reviewer.
+        A private receipt preserves this result after restart. A missing, changed
+        or replaced output, another policy, or a narrower verification interval
+        requires replay. Closure reviewers still verify their own evidence.
         """
+        if os.getpid() != self._pid:
+            return False
+        key = (terminal_sha, policy_sha256)
         with self._cache_lock:
-            record = self._published.get(terminal_sha)
+            record = self._published.get(key)
             if record is None:
+                record = load_publication_verification(self.root, terminal_sha, policy_sha256)
+            if record is None or (
+                record.maximum_bytes != self.maximum_bytes
+                or opened_at_block > record.opened_at_block
+                or completed_by_block < record.completed_by_block
+            ):
                 return False
             try:
-                unchanged = all(self._stamp(path) == stamp for path, stamp in record)
-            except OSError:
+                unchanged = all(
+                    tuple(
+                        str(v)
+                        for v in self._stamp(Path(private_path(str(self.root / f.relative_path))))
+                    )
+                    == f.stamp
+                    for f in record.files
+                )
+            except (OSError, ValueError):
                 unchanged = False
             if unchanged:
-                self._published.move_to_end(terminal_sha)
+                self._remember_cached(key, record)
             else:
-                self._cached_paths -= len(self._published.pop(terminal_sha))
+                old = self._published.pop(key, None)
+                if old is not None:
+                    self._cached_paths -= len(old.files)
             return unchanged
 
-    def _remember(self, terminal_sha, paths):
+    def _remember_cached(self, key, receipt):
+        old = self._published.pop(key, None)
+        if old is not None:
+            self._cached_paths -= len(old.files)
+        while self._published and self._cached_paths + len(receipt.files) > 65536:
+            _, old = self._published.popitem(last=False)
+            self._cached_paths -= len(old.files)
+        self._published[key] = receipt
+        self._cached_paths += len(receipt.files)
+
+    def _remember(self, receipt):
+        if os.getpid() != self._pid:
+            return
         with self._cache_lock:
-            self._cached_paths -= len(self._published.pop(terminal_sha, ()))
-            if len(paths) > 65536:
-                return
-            while self._published and self._cached_paths + len(paths) > 65536:
-                _, old = self._published.popitem(last=False)
-                self._cached_paths -= len(old)
-            self._published[terminal_sha] = tuple((p, self._stamp(p)) for p in paths)
-            self._cached_paths += len(paths)
+            self._remember_cached((receipt.terminal_sha256, receipt.policy_sha256), receipt)
+        remember_publication_verification(self.root, receipt)
 
     def _order_path(self, round_sha: str, submission: str) -> Path:
         # Both keys are derived from validated native objects by callers.
@@ -127,14 +167,33 @@ class RequestCompletionFiles:
             _Reference(sha256=digest(signed)),
             maximum_bytes=1024,
         )
-        self._remember(
-            digest(signed),
-            (
-                order_path,
-                terminal_path,
-                *(self.objects._path(key) for key in sorted(collected.values)),
-            ),
+        paths = (
+            order_path,
+            terminal_path,
+            *(self.objects._path(key) for key in sorted(collected.values)),
         )
+        # Cache bookkeeping cannot turn a durable successful publication into
+        # a failed export. A missing receipt simply requires native replay.
+        with suppress(OSError, ValueError):
+            if len(paths) > 65536:
+                return
+            self._remember(
+                PublicationVerificationReceipt(
+                    schema="umi-private-request-publication/1",
+                    terminal_sha256=digest(signed),
+                    policy_sha256=digest(policy),
+                    maximum_bytes=self.maximum_bytes,
+                    opened_at_block=opened_at_block,
+                    completed_by_block=completed_by_block,
+                    files=tuple(
+                        PublicationFileStamp(
+                            relative_path=str(path.relative_to(self.root)),
+                            stamp=tuple(str(v) for v in self._stamp(path)),
+                        )
+                        for path in paths
+                    ),
+                )
+            )
 
     def orders(
         self, roster: RecoverableRosterEvidence

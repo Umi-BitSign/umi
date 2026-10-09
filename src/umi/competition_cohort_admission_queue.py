@@ -84,12 +84,12 @@ class CohortAdmissionQueue:
         return row[0], record
 
     def record(self, cohort: str, consent: str) -> bytes:
-        with self._connection() as (db, store):
+        with self.intake._connection(prefer_history=True) as (db, store):
             return self._record(db, store, cohort, consent)[0]
 
     def history(self, cohort: str) -> AdmissionHistory:
         self.intake._allowed(cohort)
-        with self._connection() as (db, store):
+        with self.intake._connection(prefer_history=True) as (db, store):
             return self._history(db, store, cohort)
 
     def _history(self, db, store, cohort):
@@ -149,7 +149,7 @@ class CohortAdmissionQueue:
                 raise ValueError("retained admission artifact changed or exceeds its bound")
             return raw
 
-        with self._connection() as (db, store):
+        with self.intake._connection(prefer_history=True) as (db, store):
             raw, record = self._record(db, store, cohort, consent)
             evidence = artifact(db, record.observation.evidence_sha256, MAX_ARCHIVE_BYTES)
             metadata = artifact(
@@ -164,7 +164,7 @@ class CohortAdmissionQueue:
         author = identity(signer)
         if author not in self.groups or type(limit) is not int or not 1 <= limit <= 256:
             raise ValueError("admission queue requires an approved bounded reviewer")
-        with self._connection() as (db, _):
+        with self.intake._connection(prefer_history=True) as (db, _):
             return [
                 r[0]
                 for r in db.execute(
@@ -211,7 +211,7 @@ class CohortAdmissionQueue:
         return value
 
     def certificate(self, cohort: str, consent: str) -> AttestedCohortParticipantAdmission | None:
-        with self._connection() as (db, store):
+        with self.intake._connection(prefer_history=True) as (db, store):
             _, record = self._record(db, store, cohort, consent)
             return self._certificate(db, record)
 

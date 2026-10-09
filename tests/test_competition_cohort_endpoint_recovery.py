@@ -281,6 +281,32 @@ async def test_retained_selection_reuses_verified_assignment_job(recovery_case, 
     assert canonical_reuse._ACTIVE.get() is None
 
 
+async def test_retained_selection_avoids_reencoding_original_and_keeps_conflict_fence(
+    recovery_case, monkeypatch
+):
+    from umi import competition_cohort_endpoint_recovery as module
+
+    p = recovery_case
+    recovery = p.consumer()
+    expected = recovery.selection(p.slot)
+    original = module.canonical_json_bytes
+
+    def no_decoded_selection(value):
+        if isinstance(value, dict) and value.get("schema") in {
+            "umi-cohort-endpoint-recovery-selection/1",
+            "umi-cohort-endpoint-replacement-selection/1",
+        }:
+            raise AssertionError("retained selection bytes were needlessly reencoded")
+        return original(value)
+
+    monkeypatch.setattr(module, "canonical_json_bytes", no_decoded_selection)
+    assert recovery.selection(p.slot) == expected
+    with recovery.journal.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (p.slot,))
+    with pytest.raises(ValueError, match="conflict held"):
+        recovery.selection(p.slot)
+
+
 async def test_selection_decoder_reuses_exact_bytes_and_returns_private_objects(
     recovery_case, monkeypatch
 ):

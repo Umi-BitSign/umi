@@ -673,6 +673,30 @@ async def test_transport_failures_are_retryable_without_exposing_error_details(
     assert "private transport details" not in str(error.value)
 
 
+@pytest.mark.parametrize("status_code", [401, 422, 503, 524])
+async def test_http_failure_reports_status_without_private_response(selected, status_code):
+    from umi.competition_cohort_review_http import PhaseReviewHTTPClient
+    from umi.competition_progress import _failure_details
+
+    def unavailable(request):
+        return httpx.Response(status_code, text="private response details")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
+        transport = PhaseReviewHTTPClient(
+            client,
+            "https://private-owner.example",
+            token="private-token" * 4,
+            path="/internal/cohorts/intake-review",
+        )
+        with pytest.raises(OSError) as caught:
+            await transport(selected.config.signing.cohorts[0])
+    details = _failure_details(caught.value)
+    assert details[0]["reason_code"] == f"phase_owner_http_{status_code}"
+    for private in ("private response details", "private-owner.example", "private-token"):
+        assert private not in str(caught.value)
+        assert private not in str(details)
+
+
 @pytest.mark.parametrize("failure", ["stop", "cancel", "observer", "listener"])
 async def test_host_drains_listener_before_provider_and_lease(
     selected, providers, monkeypatch, failure

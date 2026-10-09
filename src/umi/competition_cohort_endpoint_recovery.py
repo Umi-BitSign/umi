@@ -141,15 +141,13 @@ class CohortEndpointResponseRecovery:
             # Replacement selection slots are their immutable grant slots.
             # The original whole-attempt selection keeps its historical key.
             parent_slot = key
-            raw = self.journal.journal.get("endpoint_recovery_selection", parent_slot)
+            raw = self.journal.journal.get_raw("endpoint_recovery_selection", parent_slot)
             if raw is None:
                 parent_slot = current.assignment_slot
-                raw = self.journal.journal.get("endpoint_recovery_selection", parent_slot)
+                raw = self.journal.journal.get_raw("endpoint_recovery_selection", parent_slot)
             if raw is None:
                 raise FileNotFoundError("endpoint replacement parent is not retained")
-            parent, parent_assignment, _ = self._validate_one(
-                parse_endpoint_selection(canonical_json_bytes(raw))
-            )
+            parent, parent_assignment, _ = self._validate_one(parse_endpoint_selection(raw))
             if selection_slot(parent) != parent_slot:
                 raise ValueError("endpoint parent selection changed its slot")
             verify_replacement_parent(current.grant, selection_grant(parent, parent_assignment))
@@ -158,12 +156,13 @@ class CohortEndpointResponseRecovery:
 
     @canonical_json_reuse()
     def selection(self, slot: str):
-        raw = self.journal.journal.get("endpoint_recovery_selection", slot)
+        # The journal already supplies bounded canonical bytes and checks the
+        # current conflict fence. Keep those exact bytes for the decoder instead
+        # of parsing and reserializing the whole retained selection first.
+        raw = self.journal.journal.get_raw("endpoint_recovery_selection", slot)
         if raw is None:
             raise FileNotFoundError("endpoint response selection is not retained")
-        selected, assignment, job = self._validate(
-            parse_endpoint_selection(canonical_json_bytes(raw))
-        )
+        selected, assignment, job = self._validate(parse_endpoint_selection(raw))
         if selection_slot(selected) != slot:
             raise ValueError("response recovery selection changed its slot")
         return selected, assignment, job
