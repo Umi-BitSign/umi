@@ -119,9 +119,9 @@ class CohortEndpointRetirement:
     async def retire(self, slot: str, case_id: str) -> CohortRetirementOutcome:
         recovery, journal = self.recovery, self.recovery.journal
         with journal.locked(recovery_slot(slot)):
-            selected, assignment, job = recovery.selection(slot)
+            selected, assignment, job = await run_owned_thread(recovery.selection, slot)
             request = recovery._case(selected, job, case_id)
-            old = self.retained(slot, case_id)
+            old = await run_owned_thread(self.retained, slot, case_id)
             if old is not None:
                 if recovery.windows is not None:
                     await recovery.windows.retire(

@@ -322,7 +322,7 @@ class CohortEndpointDispatcher:
 
     async def dispatch(self, slot, case_id):
         recovery, journal = self.recovery, self.recovery.journal
-        selected, assignment, job = recovery.selection(slot)
+        selected, assignment, job = await run_owned_thread(recovery.selection, slot)
         key = case_record_key(selected, case_id)
         # Separate from the response/retirement mutex; miner retirement owns the
         # remote execution fence. At most two durable intents consume the

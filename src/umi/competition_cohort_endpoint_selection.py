@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_endpoint import SignedRecoverableEndpointOrder, endpoint_obligation_sha256
 from .competition_cohort_miner_case import CohortCaseMinerGrant, grant_slot
 from .competition_cohort_miner_contracts import CohortMinerGrant
@@ -53,12 +55,25 @@ EndpointSelection = Annotated[
     Field(discriminator="schema_"),
 ]
 _SELECTION = TypeAdapter(EndpointSelection)
+_selection_decode_reuse = AssignmentVerificationReuse(256 * 1024**2, 2048)
 
 
 def parse_endpoint_selection(raw):
     if len(raw) > 16 * 1024**2:
         raise ValueError("endpoint selection exceeds its byte bound")
-    return _SELECTION.validate_json(raw)
+    # Reuse decoding only, not a signature or authority decision. Retained
+    # selections embed many protocol objects whose validators serialize their
+    # complete children. Repeating that parse defeats later static-proof reuse.
+    # Preserve the parser's other accepted input types without memoizing them.
+    if type(raw) is not bytes:
+        return _SELECTION.validate_json(raw)
+    key = hashlib.sha256(raw).digest()
+    cached = _selection_decode_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
+    selected = _SELECTION.validate_json(raw)
+    _selection_decode_reuse.remember(key, key, selected)
+    return selected
 
 
 def selection_slot(selected: EndpointSelection) -> str:

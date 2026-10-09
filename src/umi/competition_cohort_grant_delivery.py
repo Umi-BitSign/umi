@@ -61,7 +61,7 @@ class CohortEndpointGrantDelivery:
     async def deliver(self, slot: str) -> CohortGrantDeliveryOutcome:
         recovery, journal = self.recovery, self.recovery.journal
         with journal.locked(recovery_slot(slot)):
-            selected, assignment, job = recovery.selection(slot)
+            selected, assignment, job = await run_owned_thread(recovery.selection, slot)
             grant = selection_grant(selected, assignment)
             key = digest(grant)
 
@@ -80,7 +80,7 @@ class CohortEndpointGrantDelivery:
                 )
                 return CohortGrantDeliveryOutcome("pending", reason)
 
-            old = journal.journal.get("miner_grant_delivery", key)
+            old = await run_owned_thread(journal.journal.get, "miner_grant_delivery", key)
             if old is not None:
                 return CohortGrantDeliveryOutcome(
                     "retained", "retained_miner_grant_receipt", verify_grant_receipt(old, grant)

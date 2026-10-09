@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -79,6 +80,25 @@ def signed_claim(h, prepared, nonce=1):
         nonce=f"{nonce:064x}",
     )
     return SignedServiceWorkClaim(claim=body, signature=sign_object(body, wallet("Alice")))
+
+
+async def test_service_history_does_not_wait_for_intake_writer(lifecycle, tmp_path):
+    h = lifecycle
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+    )
+    expected = host._history(h.cohort)
+    with ThreadPoolExecutor(max_workers=1) as pool, h.intake._connection() as (db, _):
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            read = pool.submit(host._history, h.cohort)
+            assert read.result(timeout=10) == expected
+        finally:
+            db.rollback()
 
 
 async def test_host_waits_for_certified_preparation_then_recovers_original_queue(

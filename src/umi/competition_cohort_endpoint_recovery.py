@@ -199,13 +199,20 @@ class CohortEndpointResponseRecovery:
         return await self._prepare(selected, grant.assignment)
 
     async def _prepare(self, selected: EndpointSelection, assignment):
-        selected, retained_assignment, _ = self._validate(selected, assignment)
+        selected, retained_assignment, _ = await run_owned_thread(
+            self._validate, selected, assignment
+        )
         if assignment != retained_assignment:
             raise ValueError("endpoint selection assignment changed")
         slot = selection_slot(selected)
         with self.journal.locked(recovery_slot(slot)):
-            if self.journal.journal.get("endpoint_recovery_selection", slot) is not None:
-                previous, old_assignment, _ = self.selection(slot)
+            if (
+                await run_owned_thread(
+                    self.journal.journal.get, "endpoint_recovery_selection", slot
+                )
+                is not None
+            ):
+                previous, old_assignment, _ = await run_owned_thread(self.selection, slot)
                 if previous != selected or old_assignment != assignment:
                     raise ValueError("endpoint attempt selection is already retained")
                 return previous
@@ -216,7 +223,9 @@ class CohortEndpointResponseRecovery:
                 await run_owned_thread(self.journal.retain, assignment, source, boundary.block)
             # Preserve complete bytes, not just a reservation hash. A crash or
             # capacity error after this commit is resumable from the queue alone.
-            prior_intent = self.journal.journal.get("endpoint_recovery_intent", slot)
+            prior_intent = await run_owned_thread(
+                self.journal.journal.get, "endpoint_recovery_intent", slot
+            )
             if prior_intent is not None and canonical_json_bytes(
                 prior_intent
             ) != canonical_json_bytes(selected):
@@ -298,7 +307,7 @@ class CohortEndpointResponseRecovery:
         selected, _, job = self.selection(slot)
         return self._retained(selected, job, case_id)
 
-    async def recover(self, slot: str, case_id: str) -> EndpointRecoveryOutcome:
+    def _unfinished_intent(self, slot: str, case_id: str):
         if self.journal.journal.get("endpoint_recovery_selection", slot) is None:
             raw = self.journal.journal.get("endpoint_recovery_intent", slot)
             if raw is None:
@@ -309,11 +318,17 @@ class CohortEndpointResponseRecovery:
             if selection_slot(selected) != slot:
                 raise ValueError("response recovery intent changed its slot")
             self._case(selected, job, case_id)
-            await self._prepare(selected, assignment)
+            return selected, assignment
+        return None
+
+    async def recover(self, slot: str, case_id: str) -> EndpointRecoveryOutcome:
+        intent = await run_owned_thread(self._unfinished_intent, slot, case_id)
+        if intent is not None:
+            await self._prepare(*intent)
         with self.journal.locked(recovery_slot(slot)):
-            selected, assignment, job = self.selection(slot)
+            selected, assignment, job = await run_owned_thread(self.selection, slot)
             request = self._case(selected, job, case_id)
-            prior = self._retained(selected, job, case_id)
+            prior = await run_owned_thread(self._retained, selected, job, case_id)
             if prior is not None:
                 return EndpointRecoveryOutcome(
                     "recovered", "retained_original_response", response=prior.response

@@ -245,22 +245,26 @@ class CohortExecutionJournal:
         return job
 
     def _validated_assignment(self, slot: str):
-        with self.journal.transaction() as db:
+        # Read exact bytes and current conflict holds in one short snapshot.
+        # Static proof verification must not reserve the journal writer or keep
+        # unrelated reads waiting on its process lock. This read grants no
+        # current authority; dispatch still checks its owned fresh capture.
+        with self.journal.read_transaction() as db:
             raw = self.journal.get_raw("assignment", slot, db=db)
             if raw is None:
                 raise FileNotFoundError("execution assignment has not been retained")
-            key = assignment_reuse_key(
-                self.journal, slot, (raw,), self.config, self.policy, self.cohorts
-            )
-            cached = self._assignment_reuse.lookup(slot, key)
-            if cached is not None:
-                return cached
-            saved = CohortExecutionAssignment.model_validate_json(raw)
-            job = self.validate_assignment(saved)
-            if order_slot(saved.certificate.order) != slot:
-                raise ValueError("retained execution assignment changed its slot")
-            self._assignment_reuse.remember(slot, key, (saved, job))
-            return saved, job
+        key = assignment_reuse_key(
+            self.journal, slot, (raw,), self.config, self.policy, self.cohorts
+        )
+        cached = self._assignment_reuse.lookup(slot, key)
+        if cached is not None:
+            return cached
+        saved = CohortExecutionAssignment.model_validate_json(raw)
+        job = self.validate_assignment(saved)
+        if order_slot(saved.certificate.order) != slot:
+            raise ValueError("retained execution assignment changed its slot")
+        self._assignment_reuse.remember(slot, key, (saved, job))
+        return saved, job
 
     @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:

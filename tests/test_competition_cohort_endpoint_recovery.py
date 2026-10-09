@@ -281,6 +281,55 @@ async def test_retained_selection_reuses_verified_assignment_job(recovery_case, 
     assert canonical_reuse._ACTIVE.get() is None
 
 
+async def test_selection_decoder_reuses_exact_bytes_and_returns_private_objects(
+    recovery_case, monkeypatch
+):
+    from umi import competition_cohort_endpoint_selection as module
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    monkeypatch.setattr(module, "_selection_decode_reuse", AssignmentVerificationReuse())
+    raw = canonical_json_bytes(recovery_case.selection)
+    expected = module.parse_endpoint_selection(raw)
+
+    def unexpected_decode(*args, **kwargs):
+        raise AssertionError("unchanged endpoint selection was decoded again")
+
+    monkeypatch.setattr(module._SELECTION, "validate_json", unexpected_decode)
+    changed = module.parse_endpoint_selection(raw)
+    object.__setattr__(changed.order, "signatures", ())
+    assert module.parse_endpoint_selection(raw) == expected
+    # A different byte representation cannot borrow even a decoding receipt.
+    with pytest.raises(AssertionError, match="decoded again"):
+        module.parse_endpoint_selection(b" " + raw)
+
+
+async def test_selection_decoder_rejects_changed_bytes_and_rechecks_fork(
+    recovery_case, monkeypatch
+):
+    from umi import competition_cohort_endpoint_selection as module
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    cache = AssignmentVerificationReuse()
+    monkeypatch.setattr(module, "_selection_decode_reuse", cache)
+    raw = canonical_json_bytes(recovery_case.selection)
+    expected = module.parse_endpoint_selection(raw)
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            module.parse_endpoint_selection(b"{}")
+    original = module._SELECTION.validate_json
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module._SELECTION, "validate_json", counted)
+    cache._pid = -1
+    assert module.parse_endpoint_selection(raw) == expected
+    assert module.parse_endpoint_selection(raw) == expected
+    assert calls == [1, 1]
+
+
 @pytest.mark.parametrize("failure", [False, True])
 async def test_recover_original_after_lost_reply_restart_and_expiry(
     recovery_case, monkeypatch, failure

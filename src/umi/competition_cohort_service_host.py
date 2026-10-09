@@ -544,7 +544,7 @@ class ServiceAdmissionHost:
 
     def _history(self, cohort: str) -> CohortOrderHistory:
         self.intake._allowed(cohort)
-        with self.intake._connection() as (_, store):
+        with self.intake._connection(prefer_history=True) as (_, store):
             history = store.published_history(cohort)
             keys = sorted(
                 {
