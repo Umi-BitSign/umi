@@ -9,6 +9,7 @@ import json
 import threading
 from contextlib import ExitStack
 from functools import partial
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -100,6 +101,59 @@ async def publish_all(h):
         report = await worker.poll_once()
         assert report["retry_count"] == 0, report
         assert report["assignments_exported"] == len(worker.executions), report
+
+
+async def test_exports_use_owned_finality_without_fresh_membership(exporting, monkeypatch):
+    h = exporting
+    current = AsyncMock(return_value=h.block)
+    collect = AsyncMock(side_effect=OSError("membership RPC unavailable"))
+    monkeypatch.setattr(h.provider, "current_finalized_block", current, raising=False)
+    monkeypatch.setattr(h.provider, "collect", collect)
+    await publish_all(h)
+    assert current.await_count == len(h.workers)
+    collect.assert_not_awaited()
+    assert h.window().completion == "complete"
+
+
+async def test_export_finality_failure_does_not_fall_back_to_membership(exporting, monkeypatch):
+    h = exporting
+    current = AsyncMock(side_effect=OSError("owned finality unavailable"))
+    collect = AsyncMock()
+    monkeypatch.setattr(h.provider, "current_finalized_block", current, raising=False)
+    monkeypatch.setattr(h.provider, "collect", collect)
+    with pytest.raises(OSError, match="owned finality unavailable"):
+        await h.workers[0].poll_once()
+    collect.assert_not_awaited()
+    assert not h.exports_signed
+    assert list(h.files.orders(h.b["roster"])) == []
+
+
+@pytest.mark.parametrize("block", [True, -1, 2**53, "100", None])
+async def test_export_rejects_invalid_finalized_height(exporting, monkeypatch, block):
+    h = exporting
+    monkeypatch.setattr(
+        h.provider, "current_finalized_block", AsyncMock(return_value=block), raising=False
+    )
+    with pytest.raises(ValueError, match="finalized block is invalid"):
+        await h.workers[0].poll_once()
+    assert not h.exports_signed
+
+
+async def test_exports_still_wait_for_finality_to_cover_completed_work(exporting, monkeypatch):
+    h = exporting
+    current = AsyncMock(return_value=0)
+    monkeypatch.setattr(h.provider, "current_finalized_block", current, raising=False)
+    report = await h.workers[0].poll_once()
+    assert report["assignments_exported"] == 0
+    assert report["retry_count"] == len(h.workers[0].executions)
+    assert list(h.files.orders(h.b["roster"])) == []
+    count = len(h.exports_signed)
+    current.return_value = h.block
+    report = await h.workers[0].poll_once()
+    assert report["assignments_exported"] == len(h.workers[0].executions)
+    assert len(h.exports_signed) == count
+    await publish_all(h)
+    assert h.window().completion == "complete"
 
 
 async def test_export_page_reads_while_execution_writer_is_busy(exporting):

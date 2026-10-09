@@ -179,7 +179,18 @@ class RequestExportWorker:
 
     async def poll_once(self):
         async with self.serial:
-            capture = await self.provider.collect()
+            # Export needs an owned finalized ceiling, not fresh membership.
+            # The production provider checks its live verifier, freshness and
+            # rollback guard here without waiting for a subnet-wide RPC proof.
+            # Older injected providers retain their complete-capture boundary.
+            current = getattr(self.provider, "current_finalized_block", None)
+            block = (
+                (await self.provider.collect()).snapshot.block
+                if current is None
+                else await current()
+            )
+            if type(block) is not int or not 0 <= block < 2**53:
+                raise ValueError("request export finalized block is invalid")
             considered = complete = pending = retries = 0
             last_error = ""
             last_failure = None
@@ -204,7 +215,7 @@ class RequestExportWorker:
                 for owner, slot in work:
                     considered += 1
                     try:
-                        if await self._export(owner, slot, capture.snapshot.block):
+                        if await self._export(owner, slot, block):
                             complete += 1
                         else:
                             pending += 1

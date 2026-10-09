@@ -1119,6 +1119,11 @@ missing endpoint responses and busy execution locks stay pending. Retries reuse
 the original terminal signature, and the durable scan cursor revisits pending
 work without blocking other assignments. Export reports describe the current
 batch. They do not confirm remote delivery or successful reward submission.
+Export uses the live owned finality provider's verified block height without
+collecting a new subnet membership proof. Its observer, freshness and rollback
+checks still apply, and work beyond that finalized height stays pending. The
+closure reviewer separately checks membership, authority and the certified
+request interval; export does not replace any of those checks.
 Successful local publication verification is retained in a bounded private
 `.publication-verification/` cache, so restarting an exporter does not replay
 unchanged exports. Reuse requires the same policy and capacity, a verification
