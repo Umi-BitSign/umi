@@ -25,12 +25,27 @@ The same binary verifies the ordered extrinsics trie root from a finalized
 header. This request is independent of storage-proof verification:
 
 ```json
-{"schema":"umi-substrate-extrinsics-root/1","request_id":"opaque","state_version":1,"expected_root":"0x...","extrinsics":["0x..."]}
+{"schema":"umi-substrate-extrinsics-root/1","request_id":"opaque","state_version":0,"expected_root":"0x...","extrinsics":["0x..."]}
 ```
+
+Here `state_version` specifies the **extrinsics trie layout**, independently of
+the storage trie. Layouts 0 and 1 are supported explicitly; the verifier never
+tries another layout after a mismatch. The supported runtime system version 1
+uses LayoutV1 storage proofs but LayoutV0 extrinsics roots, following
+`RuntimeVersion::extrinsics_root_state_version` in the pinned SDK. The scanner
+derives that distinction from its authenticated runtime pin. Previously staged
+binaries supporting only extrinsics layout 1 must be rebuilt and re-pinned
+before using the corrected scanner.
+
+`finney-9178000-body.json` retains the public header and exact 17 extrinsics of
+Finney block 9,178,000. This regression fixture is diagnostic evidence, not a
+finality certificate. Its header root verifies with LayoutV0 and fails with
+LayoutV1, reordered, omitted or modified extrinsics. Storage-proof tests retain
+their existing LayoutV1 behavior.
 
 Use `null` for `value` to prove non-membership. Items must be unique and ordered by
 their decoded key bytes. Hex is lowercase and `0x`-prefixed. The verifier rejects
-unknown JSON fields, duplicate proof nodes, state versions other than 1, oversized
+unknown JSON fields, duplicate proof nodes, unsupported trie versions, oversized
 inputs, invalid proofs, and mismatched ordered extrinsics roots. It writes no
 diagnostic material to stdout.
 

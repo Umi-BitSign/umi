@@ -593,6 +593,30 @@ async def test_missing_body_and_block_identity_mismatch_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_v1_storage_uses_v0_extrinsics_root() -> None:
+    port = FakePort()
+    item = identity(58)
+    add_block(port, item, [call("Timestamp", "set", [arg("now", 1)])], [success()])
+    checked = []
+
+    def verify_body(**values):
+        checked.append(values)
+        return values["state_version"] == 0
+
+    scan = FinalizedBlockScanner(
+        port,
+        extrinsics_root_verifier=verify_body,
+        event_proof_verifier=lambda **_values: True,
+        supported_runtime_pins=(PIN,),
+    )
+    await scan.decode_block(item)
+    assert len(checked) == 1
+    assert checked[0]["expected_root"] == bytes.fromhex(item.extrinsics_root[2:])
+    assert checked[0]["extrinsics"] == port.bodies[58].extrinsics
+    assert PIN.state_version == 1
+
+
+@pytest.mark.asyncio
 async def test_extrinsic_hash_and_root_mismatch_fail_closed() -> None:
     port = FakePort()
     item = identity(58)

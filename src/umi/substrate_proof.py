@@ -547,15 +547,15 @@ class SubprocessStorageProofVerifier:
         extrinsics: tuple[bytes, ...],
         state_version: int,
     ) -> bool:
-        """Verify one ordered block body against its finalized header root."""
+        """Verify a body with its explicit extrinsics trie layout, not storage layout."""
 
         expected_root = self._require_bytes(expected_root, field="expected_root")
         if len(expected_root) != 32:
             raise ValueError("expected_root must contain exactly 32 bytes")
         if isinstance(state_version, bool) or not isinstance(state_version, int):
             raise TypeError("state_version must be an integer")
-        if state_version != STATE_VERSION:
-            raise ValueError(f"state_version must equal {STATE_VERSION}")
+        if state_version not in (0, 1):
+            raise ValueError("extrinsics state_version must equal 0 or 1")
         if not isinstance(extrinsics, tuple):
             raise TypeError("extrinsics must be a tuple of exact bytes")
         if len(extrinsics) > self._limits.maximum_extrinsics:

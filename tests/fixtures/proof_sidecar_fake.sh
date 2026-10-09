@@ -13,7 +13,7 @@ if [ ${#request_id} -ne 64 ]; then
 fi
 
 case "$request" in
-    *'"expected_root":"0x2222222222222222222222222222222222222222222222222222222222222222"'*'"extrinsics":["0x6669727374","0x7365636f6e64"]'*'"schema":"umi-substrate-extrinsics-root/1"'*'"state_version":1'*)
+    *'"expected_root":"0x2222222222222222222222222222222222222222222222222222222222222222"'*'"extrinsics":["0x6669727374","0x7365636f6e64"]'*'"schema":"umi-substrate-extrinsics-root/1"'*'"state_version":'[01]*)
         printf '{"schema":"umi-substrate-proof-result/1","request_id":"%s","ok":true}\n' "$request_id"
         ;;
     *'"extrinsics":["0x696e76616c69642d726f6f74"]'*'"schema":"umi-substrate-extrinsics-root/1"'*)
