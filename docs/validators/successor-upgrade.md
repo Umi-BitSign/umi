@@ -1777,6 +1777,11 @@ reads, so a slow proof cannot block the main event loop. Cancellation drains
 that read before releasing its existing operation lock. Paid-service history
 reads use the same read-only intake snapshot as public history exports and do
 not acquire the intake writer gate.
+Endpoint selection decoding reuses private schema-validated objects for exact
+input bytes, within 256 MiB and 2,048 entries. This skips only repeated decoding;
+selection signatures, ancestry, current authority and journal conflicts remain
+separate checks. Changed bytes or a different process cannot borrow a decoding
+receipt.
 Endpoint response recovery reads the assignment and its already verified job
 as one pair, including when validating retained replacement ancestry. Successful
 selection proofs are reused only for the exact selection and assignment bytes,
