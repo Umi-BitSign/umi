@@ -437,7 +437,11 @@ receipt.
 The explicit, disjoint `proof_export_directory` receives original proof objects
 and frames automatically during history replay and interval collection. An
 interrupted write retries the same bytes before advancing the local cursor or
-crediting an interval. Objects are published before their frame. The separate
+crediting an interval. Objects are published before their frame. Within one exporter process, successful
+object publications reuse up to 4,096 metadata receipts while the exact content
+identity, private parent and file identity/metadata remain unchanged. Changed or
+missing files require ordinary publication again; failed writes are never cached.
+Readers still validate original objects and proofs independently. The separate
 `proof_import_directory` accepts transferred frames; native readers verify every
 proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.

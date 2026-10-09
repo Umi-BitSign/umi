@@ -9,7 +9,12 @@ is needed to deliver the files to another host.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
+from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue
@@ -24,11 +29,17 @@ from .competition_evidence_codec import (
     encode_evidence,
 )
 from .open_competition import digest, identity
-from .private_files import private_path, publish_private_model, read_private_model
+from .private_files import (
+    ensure_private_directory,
+    private_path,
+    publish_private_model,
+    read_private_model,
+)
 from .protocol import Hex32, StrictProtocolModel
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
+_MAX_PUBLISHED_OBJECTS = 4096
 Kind = Literal["history", "endpoint", "interval", "registration"]
 
 
@@ -66,6 +77,39 @@ class RewardProofArchive:
 
     def __init__(self, root: Path):
         self.root = Path(private_path(str(root)))
+        self._published = OrderedDict()
+        self._publication_lock = Lock()
+        self._pid = os.getpid()
+
+    @staticmethod
+    def _object_stamp(path):
+        private_path(str(path))
+        ensure_private_directory(path.parent)
+        parent, info = path.parent.lstat(), path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("reward archive object is not an owned private regular file")
+        return (
+            str(path),
+            parent.st_dev,
+            parent.st_ino,
+            parent.st_uid,
+            parent.st_gid,
+            parent.st_mode,
+            info.st_dev,
+            info.st_ino,
+            info.st_uid,
+            info.st_gid,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
 
     def _path(self, kind: Kind, key: str) -> Path:
         if kind not in ("history", "endpoint", "interval", "registration"):
@@ -75,16 +119,39 @@ class RewardProofArchive:
     def _retain_bytes(self, raw: bytes) -> str:
         checked_size(len(raw), MAX_EVIDENCE_BYTES)
         sha = hashlib.sha256(raw).hexdigest()
+        path = self.root / "objects" / (sha + ".json")
+        if os.getpid() != self._pid:
+            # Do not acquire a possibly inherited thread lock after fork.
+            self._publish_bytes(path, raw)
+            return sha
+        with self._publication_lock:
+            prior = self._published.pop(sha, None)
+            if prior is not None:
+                with suppress(OSError, ValueError):
+                    if self._object_stamp(path) == prior:
+                        self._published[sha] = prior
+                        return sha
+            self._publish_bytes(path, raw)
+            # Only a completed durable publication creates a reusable receipt.
+            # Retain bounded metadata, never object payloads or proof authority.
+            with suppress(OSError, ValueError):
+                stamp = self._object_stamp(path)
+                self._published[sha] = stamp
+                while len(self._published) > _MAX_PUBLISHED_OBJECTS:
+                    self._published.popitem(last=False)
+        return sha
+
+    @staticmethod
+    def _publish_bytes(path, raw):
         # Model validation and publication serialize the same hex object. Reuse
         # those exact canonical bytes within this call only; the current file,
         # publication lock, schema and durability checks still run on every retry.
         with canonical_json_reuse(maximum_bytes=32 * 1024**2):
             publish_private_model(
-                self.root / "objects" / (sha + ".json"),
+                path,
                 _Bytes(hex=raw.hex()),
                 maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
             )
-        return sha
 
     def _bytes(self, sha: str, maximum: int) -> bytes:
         value = read_private_model(

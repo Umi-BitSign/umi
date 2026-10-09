@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import rfc8785
@@ -10,9 +12,7 @@ from umi.competition_reward_proof_archive import RewardProofArchive, history_arc
 from umi.protocol import canonical_json_bytes
 
 
-def test_large_object_publication_reuses_serialization_but_rereads_current_file(
-    tmp_path, monkeypatch
-):
+def test_large_object_publication_reuses_success_with_unchanged_metadata(tmp_path, monkeypatch):
     archive = RewardProofArchive(tmp_path / "export")
     raw = bytes(range(256)) * 8192
     serialize = rfc8785.dumps
@@ -27,11 +27,121 @@ def test_large_object_publication_reuses_serialization_but_rereads_current_file(
     path = archive.root / "objects" / (sha + ".json")
     before = path.stat()
     assert archive._retain_bytes(raw) == sha
-    assert len(calls) == 2  # One canonical serialization per operation.
+    assert len(calls) == 1  # A successful unchanged publication is reused.
     assert path.stat().st_ino == before.st_ino
     path.write_bytes(b'{"hex":"00"}')
     with pytest.raises(ValueError, match="different bytes"):
         archive._retain_bytes(raw)
+
+
+@pytest.mark.parametrize("change", ["replace", "delete", "parent", "mode", "link", "symlink"])
+def test_publication_cache_invalidates_changed_objects(tmp_path, monkeypatch, change):
+    archive = RewardProofArchive(tmp_path / "export")
+    original, calls = archive._publish_bytes, []
+
+    def publish(path, raw):
+        calls.append(path)
+        return original(path, raw)
+
+    monkeypatch.setattr(archive, "_publish_bytes", publish)
+    sha = archive._retain_bytes(b"original")
+    path = archive.root / "objects" / (sha + ".json")
+    if change == "replace":
+        replacement = path.with_suffix(".new")
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(path)
+    elif change == "delete":
+        path.unlink()
+    elif change == "parent":
+        previous = archive.root / "previous"
+        path.parent.rename(previous)
+        path.parent.mkdir(mode=0o700)
+        (previous / path.name).rename(path)
+    elif change == "mode":
+        path.chmod(0o644)
+    elif change == "link":
+        os.link(path, path.with_suffix(".alias"))
+    else:
+        previous = path.with_suffix(".previous")
+        path.rename(previous)
+        path.symlink_to(previous)
+    if change in {"mode", "link", "symlink"}:
+        with pytest.raises(ValueError):
+            archive._retain_bytes(b"original")
+        assert sha not in archive._published
+    else:
+        assert archive._retain_bytes(b"original") == sha
+    assert len(calls) == 2
+
+
+def test_failed_publication_sync_does_not_create_reuse_receipt(tmp_path, monkeypatch):
+    archive = RewardProofArchive(tmp_path / "export")
+    original, calls = archive._publish_bytes, []
+
+    def publish(path, raw):
+        calls.append(path)
+        original(path, raw)
+        if len(calls) == 1:
+            raise OSError("directory sync failed")
+
+    monkeypatch.setattr(archive, "_publish_bytes", publish)
+    with pytest.raises(OSError, match="sync failed"):
+        archive._retain_bytes(b"original")
+    assert not archive._published
+    sha = archive._retain_bytes(b"original")
+    assert archive._retain_bytes(b"original") == sha
+    assert len(calls) == 2
+
+
+def test_same_size_corruption_with_restored_mtime_cannot_reuse_publication(tmp_path):
+    archive = RewardProofArchive(tmp_path / "export")
+    sha = archive._retain_bytes(b"original")
+    path = archive.root / "objects" / (sha + ".json")
+    original = path.stat()
+    path.write_bytes(canonical_json_bytes({"hex": b"modified".hex()}))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert path.stat().st_size == original.st_size
+    assert path.stat().st_mtime_ns == original.st_mtime_ns
+    with pytest.raises(ValueError, match="different bytes"):
+        archive._retain_bytes(b"original")
+    assert sha not in archive._published
+
+
+def test_publication_cache_is_bounded_and_process_local(tmp_path, monkeypatch):
+    import umi.competition_reward_proof_archive as module
+
+    monkeypatch.setattr(module, "_MAX_PUBLISHED_OBJECTS", 2)
+    archive = RewardProofArchive(tmp_path / "export")
+    original, calls = archive._publish_bytes, []
+
+    def publish(path, raw):
+        calls.append(raw)
+        return original(path, raw)
+
+    monkeypatch.setattr(archive, "_publish_bytes", publish)
+    for raw in (b"a", b"b", b"a", b"c", b"a", b"b"):
+        archive._retain_bytes(raw)
+    assert calls == [b"a", b"b", b"c", b"b"]
+    assert len(archive._published) == 2
+    monkeypatch.setattr(module.os, "getpid", lambda: archive._pid + 1)
+    with archive._publication_lock:
+        archive._retain_bytes(b"b")
+    assert calls[-2:] == [b"b", b"b"]
+
+
+def test_concurrent_exact_publications_share_one_completed_write(tmp_path, monkeypatch):
+    archive = RewardProofArchive(tmp_path / "export")
+    original, calls = archive._publish_bytes, []
+
+    def publish(path, raw):
+        calls.append(path)
+        return original(path, raw)
+
+    monkeypatch.setattr(archive, "_publish_bytes", publish)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        values = tuple(executor.map(archive._retain_bytes, [b"original"] * 16))
+    assert len(set(values)) == len(calls) == 1
 
 
 def test_archive_preserves_original_bytes_and_idempotent_frames(tmp_path):
