@@ -7,6 +7,7 @@ exchange.  It performs no RPC, signing, composition, or chain mutation.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -354,24 +355,33 @@ class SubprocessStorageProofVerifier:
     ) -> dict:
 
         process: subprocess.Popen[bytes]
-        try:
-            process = subprocess.Popen(
-                [os.fspath(executable)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True,
-                env={"LANG": "C", "LC_ALL": "C"},
-            )
-        except OSError as error:
-            raise SubstrateProofVerifierError("sidecar_start_failed") from error
+        deadline = time.monotonic() + self._timeout_seconds
+        while True:
+            try:
+                process = subprocess.Popen(
+                    [os.fspath(executable)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                    env={"LANG": "C", "LC_ALL": "C"},
+                )
+                break
+            except OSError as error:
+                remaining = deadline - time.monotonic()
+                # A concurrent fork can briefly retain the staging write fd
+                # until exec closes it. Retry this exact verified copy only;
+                # no child ran and no proof response has been accepted.
+                if error.errno != errno.ETXTBSY or remaining <= 0:
+                    raise SubstrateProofVerifierError("sidecar_start_failed") from error
+                time.sleep(min(0.01, remaining))
         try:
             stdout = _communicate_bounded(
                 process,
                 request_bytes + b"\n",
                 maximum_response_bytes=maximum_response_bytes,
-                timeout_seconds=self._timeout_seconds,
+                timeout_seconds=max(0, deadline - time.monotonic()),
             )
         except subprocess.TimeoutExpired as error:
             raise SubstrateProofVerifierError("sidecar_timeout") from error

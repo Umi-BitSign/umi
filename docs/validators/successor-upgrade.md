@@ -457,6 +457,11 @@ For each verified historical block, body and event collection overlap after
 selecting its parent runtime. Both remain bound to the same finalized identity;
 failure or cancellation drains both operations before releasing the provider.
 
+The storage-proof helper retries a Linux `ETXTBSY` launch failure against the
+same verified private executable within its original total execution budget.
+This covers a staging write descriptor temporarily retained by another process.
+Other launch errors and rejected or malformed proof responses still fail.
+
 A collector configured for proof-only runtime reads and bounded evidence reuse
 can combine its retained parent code nodes with a small `:heappages` proof from
 the next block. It verifies the new auxiliary proof first, then proves the same

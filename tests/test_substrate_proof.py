@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from umi import pinned_artifact, substrate_proof
 from umi.substrate_proof import (
     SubprocessStorageProofVerifier,
     SubstrateProofLimits,
@@ -207,6 +211,103 @@ def test_execution_uses_private_copy_of_the_descriptor_that_was_hashed(
     assert len(invoked) == 1
     assert invoked[0] != path
     assert invoked[0].parent != path.parent
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux executable write-descriptor exclusion")
+@pytest.mark.parametrize("reject_proof", [False, True])
+def test_busy_staged_executable_retries_same_verified_copy(tmp_path, monkeypatch, reject_proof):
+    path, digest = executable(tmp_path, "busy-copy")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    original_write = pinned_artifact._write_all
+    original_popen = subprocess.Popen
+    held = []
+    attempts = []
+    errors = []
+
+    def retain_write_descriptor(fd, data):
+        original_write(fd, data)
+        if not held:
+            held.append(os.dup(fd))
+
+    def launch(command, **kwargs):
+        staged = Path(command[0])
+        attempts.append(
+            (staged, staged.stat().st_ino, hashlib.sha256(staged.read_bytes()).hexdigest())
+        )
+        try:
+            return original_popen(command, **kwargs)
+        except OSError as error:
+            errors.append(error.errno)
+            assert error.errno == errno.ETXTBSY
+            os.close(held.pop())
+            raise
+
+    monkeypatch.setattr(pinned_artifact, "_write_all", retain_write_descriptor)
+    monkeypatch.setattr(substrate_proof.subprocess, "Popen", launch)
+    try:
+
+        def verify():
+            return verifier(
+                state_root=b"r" * 32,
+                storage_key=b"key",
+                expected_value=b"value",
+                proof=(b"error-invalid_proof" if reject_proof else b"proof",),
+            )
+
+        if reject_proof:
+            with pytest.raises(SubstrateProofVerifierError, match="invalid_proof"):
+                verify()
+        else:
+            assert verify()
+        assert errors == [errno.ETXTBSY]
+        assert len(attempts) == 2 and attempts[0] == attempts[1]
+        assert attempts[0][2] == digest
+        assert not attempts[0][0].exists()
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.ENOENT, errno.EAGAIN, errno.ENOMEM])
+def test_other_sidecar_start_errors_are_not_retried(tmp_path, monkeypatch, code):
+    path, digest = executable(tmp_path, "launch-error")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    attempts = []
+
+    def launch(*args, **kwargs):
+        attempts.append(args)
+        raise OSError(code, "private-path")
+
+    monkeypatch.setattr(substrate_proof.subprocess, "Popen", launch)
+    with pytest.raises(SubstrateProofVerifierError, match="sidecar_start_failed") as error:
+        verifier(state_root=b"r" * 32, storage_key=b"key", expected_value=None, proof=(b"proof",))
+    assert len(attempts) == 1
+    assert error.value.__cause__.errno == code
+    assert "private-path" not in str(error.value)
+
+
+def test_busy_sidecar_start_obeys_original_total_budget(tmp_path, monkeypatch):
+    path, digest = executable(tmp_path, "busy-budget")
+    verifier = SubprocessStorageProofVerifier(
+        binary_path=path, expected_sha256=digest, timeout_seconds=0.05
+    )
+    clock = [0.0]
+    sleeps = []
+
+    def launch(*args, **kwargs):
+        raise OSError(errno.ETXTBSY, "busy")
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(substrate_proof.subprocess, "Popen", launch)
+    monkeypatch.setattr(substrate_proof.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(substrate_proof.time, "sleep", sleep)
+    with pytest.raises(SubstrateProofVerifierError, match="sidecar_start_failed") as error:
+        verifier(state_root=b"r" * 32, storage_key=b"key", expected_value=None, proof=(b"proof",))
+    assert error.value.__cause__.errno == errno.ETXTBSY
+    assert sum(sleeps) == pytest.approx(0.05)
 
 
 def test_python_preflight_enforces_shape_uniqueness_and_limits(tmp_path: Path) -> None:
