@@ -428,11 +428,30 @@ def test_boot_rejects_wrong_installation_and_unsafe_files(inputs, mutation, tmp_
         boot.load_standing_boot(i.path, i.anchor)
 
 
+def test_proof_read_selection_preserves_existing_boot_bytes(inputs):
+    i = inputs
+    original = canonical_json_bytes(i.value)
+    assert b'"runtime_proof_reads"' not in original
+    assert not boot.load_standing_boot(i.path, i.anchor).runtime_proof_reads
+    selected = i.value.model_copy(update={"runtime_proof_reads": True})
+    i.save(i.path, canonical_json_bytes(selected))
+    assert boot.load_standing_boot(i.path, i.anchor).runtime_proof_reads
+    assert (
+        canonical_json_bytes(selected.model_copy(update={"runtime_proof_reads": False})) == original
+    )
+    with pytest.raises(ValueError):
+        boot.StandingRewardBootConfig.model_validate(
+            i.value.model_dump(by_alias=True) | {"runtime_proof_reads": "true"}
+        )
+
+
+@pytest.mark.parametrize("proof_reads", [False, True])
 @pytest.mark.parametrize("failure", [None, "constructor", "service", "cancel"])
 async def test_native_assembly_preserves_configuration_and_closes_owned_providers(
-    inputs, monkeypatch, failure
+    inputs, monkeypatch, failure, proof_reads
 ):
     i = inputs
+    selected = i.value.model_copy(update={"runtime_proof_reads": proof_reads})
     events, providers = [], []
 
     class Provider:
@@ -449,6 +468,8 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         events.append("service")
         assert "first" not in kwargs  # initial package must be reconstructed natively
         assert kwargs["provider"] is providers[0]
+        assert providers[0].kwargs["runtime_proof_reads"] is proof_reads
+        assert providers[1].kwargs["runtime_proof_reads"] is False
         old = i.value.legacy_chains[0]
         assert kwargs["legacy_providers"] == {digest(old.chain): providers[1]}
         assert providers[1].kwargs["resources"] == old.resources
@@ -477,9 +498,9 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
     monkeypatch.setattr(boot, "run_standing_reward_service", run)
     if failure:
         with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
-            await boot.run_installed_standing_rewards(runtime, i.value, asyncio.Event())
+            await boot.run_installed_standing_rewards(runtime, selected, asyncio.Event())
     else:
-        await boot.run_installed_standing_rewards(runtime, i.value, asyncio.Event())
+        await boot.run_installed_standing_rewards(runtime, selected, asyncio.Event())
     assert events[0] == "lease"
     assert events[-len(providers) :] == [("closed", digest(p.config)) for p in reversed(providers)]
 

@@ -360,11 +360,26 @@ proof verification. Finality selection and runtime codec construction remain
 independent checks. Account and weight collectors do not enable this cache, and
 archive replay always consumes and verifies the supplied archive bytes.
 
-Read-only recovery tools using a qualified proof reader may explicitly enable
-`runtime_proof_reads` on their weight provider. This extracts runtime code from
-its verified storage proof instead of downloading the same value separately.
-It defaults off for older helpers; unsupported readers or invalid proofs hold
-the read. Account/weight collection and archive claim verification are unchanged.
+With a qualified proof reader, the root-owned reward coordinator/reviewer and
+installed reward boot configurations may select `runtime_proof_reads: true`.
+This extracts runtime code and historical event values from their verified
+storage proofs instead of downloading the same values separately. The option
+defaults off and is omitted from existing canonical configuration bytes, so
+older helper installations remain compatible. It applies only to the current
+chain provider; legacy handoff providers retain their original read protocol.
+Unsupported readers or invalid proofs hold the read. Account/weight collection
+and archive claim verification are unchanged. Read-only recovery tools can
+select the same option on their weight provider.
+
+Start the ordinary reward coordinator and peer reviewer services when preparing
+the series. Both roles capture native history and reward opportunity evidence
+while evaluation continues, so peer review does not wait to begin its history
+scan until the first vote request. The reviewer never loads the control
+transaction key. A separate history preparation process must release its service
+lock before the ordinary service starts; restart still requires native replay
+of retained proof bytes. Completing a separate full scan first does not remove
+that replay cost. History preparation alone cannot certify an allocation or
+activate reward weights.
 
 Historical control capture also retains the runtime and storage proofs verified
 within that capture. Encoding their archive does not immediately replay those

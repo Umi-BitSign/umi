@@ -106,6 +106,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
@@ -124,6 +125,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if not self.runtime_proof_reads:
+            value.pop("runtime_proof_reads", None)
         return value
 
     @model_validator(mode="after")
@@ -347,6 +350,8 @@ async def run_installed_standing_rewards(
                 chain,
                 policy,
                 resources=locations,
+                # Legacy recovery retains the original helper and read protocol.
+                runtime_proof_reads=config.runtime_proof_reads and sha == digest(config.chain),
                 historical_header_directory=root / "headers" / sha,
                 historical_header_maximum_bytes=config.maximum_header_bytes,
                 historical_header_database_maximum_bytes=config.maximum_header_database_bytes,
