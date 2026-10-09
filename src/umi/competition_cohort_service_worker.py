@@ -315,7 +315,7 @@ class ServiceWorkWorker:
         return "completed", "terminal_retained"
 
     def _batch(self, *, advance=True):
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_worker_cursor WHERE singleton=1"
             ).fetchone()

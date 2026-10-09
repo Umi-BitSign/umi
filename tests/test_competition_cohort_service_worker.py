@@ -165,6 +165,34 @@ def loop(service_owner):
     return s
 
 
+async def test_batch_discovery_reads_while_an_unrelated_writer_is_busy(loop):
+    import threading
+
+    worker = loop.worker()
+    expected = worker._batch(advance=False)
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with worker.journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('unrelated-pending-hold')")
+            entered.set()
+            assert release.wait(60)
+
+    pending = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        rows = await asyncio.wait_for(asyncio.to_thread(worker._batch, advance=False), 10)
+        assert rows == expected
+    finally:
+        release.set()
+        await pending
+    assert worker._batch() == expected
+    with worker.journal.read_transaction() as db:
+        assert db.execute("SELECT ordinal FROM service_worker_cursor").fetchone() == (
+            expected[-1].ordinal,
+        )
+
+
 async def finish(s):
     reports = []
     for _ in range(4):

@@ -1972,6 +1972,9 @@ publication still reserve the writer and validate the current generation.
 Request-export paging and execution-start inspection also use read-only snapshots
 of the execution journal. They can inspect committed results while another case
 is being retained; updating the export cursor still uses its separate writer.
+Paid-service discovery and endpoint recovery polling also read their cursors and
+queues through read-only snapshots. Their later cursor updates and response
+retention continue to use writer transactions.
 The cohort and standing-reward systemd templates signal the main process first
 (`KillMode=mixed`, `SendSIGKILL=no`, `TimeoutStopSec=infinity`), allowing its
 cooperative shutdown to finish an owned proof operation before closing children.

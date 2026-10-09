@@ -24,7 +24,7 @@ class CohortEndpointRecoveryWorker:
         with journal.locked(poll_slot):
 
             def pending():
-                with journal.journal.transaction() as db:
+                with journal.journal.read_transaction() as db:
                     row = db.execute(
                         "SELECT obligation FROM endpoint_recovery_cursor WHERE id=1"
                     ).fetchone()
