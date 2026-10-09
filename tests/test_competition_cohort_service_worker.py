@@ -354,6 +354,60 @@ async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, mon
     assert body.assignment == s.c.assignment
 
 
+async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(loop, monkeypatch):
+    s = loop
+    worker = s.worker()
+    for expected in (
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+    ):
+        assert await worker._advance(s.c.assignment.admission, one_stage=True) == (
+            "pending",
+            expected,
+        )
+    paths = tuple(s.paths)
+    original = worker.terminals.prepare
+    attempts = []
+
+    def contended(*args):
+        attempts.append(args)
+        if len(attempts) == 1:
+            s.p.finality.head += 1
+            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+        return original(*args)
+
+    monkeypatch.setattr(worker.terminals, "prepare", contended)
+    assert await worker._advance(s.c.assignment.admission, one_stage=True) == (
+        "completed",
+        "terminal_retained",
+    )
+    assert len(attempts) == 2
+    assert attempts[1][-1].block == attempts[0][-1].block + 1
+    assert attempts[1][:3] == attempts[0][:3]
+    value = worker.terminals.read(s.c.assignment)
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert value.terminal.observation == attempts[1][-1]
+    assert tuple(s.paths) == paths
+    assert s.p.model.calls == s.p.fetcher.calls == s.inputs == s.signs == 1
+
+
+@pytest.mark.parametrize("failure", [ValueError("invalid proof"), OSError("storage unavailable")])
+async def test_terminal_retry_does_not_hide_other_failures(loop, monkeypatch, failure):
+    worker = loop.worker()
+    calls = []
+
+    def fail(*args):
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(worker.terminals, "prepare", fail)
+    with pytest.raises(type(failure), match=str(failure)):
+        await worker._prepare_terminal(loop.c.assignment, "fixture-slot", None, None)
+    assert len(calls) == 1 and loop.signs == 0 and loop.p.model.calls == 0
+
+
 @pytest.mark.parametrize("path", [COHORT_GRANT_PATH, TRANSLATE_PATH, COHORT_RETIRE_PATH])
 async def test_service_lost_acknowledgements_recover_without_duplicate_inference(loop, path):
     s = loop

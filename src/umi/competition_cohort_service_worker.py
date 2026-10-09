@@ -195,6 +195,31 @@ class ServiceWorkWorker:
         if work in self._operation_stages:
             self._operation_stages[work] = (name, asyncio.get_running_loop().time())
 
+    async def _prepare_terminal(self, assignment, slot, response, retirement):
+        work = assignment.admission.work_sha256
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.transport.timeout
+        while True:
+            self._stage(work, "terminal_observation")
+            source, capture = await self._call(self.observation(assignment))
+            self._stage(work, "terminal_preparation")
+            try:
+                return await run_owned_thread(
+                    self.terminals.prepare,
+                    slot,
+                    response,
+                    retirement,
+                    source,
+                    execution_boundary(capture),
+                )
+            except PrivateStateBusyError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # Recollect mutable authority after contention; never reissue
+                # miner work or extend an old observation while waiting.
+                await asyncio.sleep(min(1.0, remaining))
+
     def _ready_stage(self, admission):
         """Scheduling hints only; each stage still authenticates its native inputs."""
         work = admission.work_sha256
@@ -280,16 +305,8 @@ class ServiceWorkWorker:
                     assignment, parent=grant, decision=certificate, retirement=result.retirement
                 )
                 return "pending", "replacement_selected"
-            self._stage(work, "terminal_observation")
-            source, capture = await self._call(self.observation(assignment))
-            self._stage(work, "terminal_preparation")
-            terminal = await run_owned_thread(
-                self.terminals.prepare,
-                slot,
-                result.response,
-                result.retirement,
-                source,
-                execution_boundary(capture),
+            terminal = await self._prepare_terminal(
+                assignment, slot, result.response, result.retirement
             )
         self._stage(work, "terminal_signing")
         signature = await self._call(self.sign(terminal))
