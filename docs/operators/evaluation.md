@@ -340,6 +340,15 @@ parent bindings, current phase and quorum signatures remain separate checks.
 Model acceptance uses the already decoded indexed intake record without decoding
 it a second time; its native participation and certificate review remain required.
 
+Paid workers check for a retained terminal before reconstructing it; unfinished
+work still authenticates its accepted assignment before advancing. A retained
+terminal always passes native verification and interrupted-export recovery.
+Request-readiness roster reuse is scoped to each cohort's original selection
+and intent bytes, including the history embedded in those intents. Appending a
+new current history or delivery receipt does not replay every original order.
+Changed selection bytes and conflict holds invalidate reuse, while current
+history, finality, running workers and evaluator readiness remain fresh checks.
+
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
 runtime and input clips, it reserves one source before inference and preserves

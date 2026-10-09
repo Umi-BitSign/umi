@@ -247,11 +247,16 @@ async def test_native_service_work_completes_and_restarts_offline(loop):
     assert s.signs == 1
 
 
-async def test_each_service_phase_resumes_after_restart_without_repeating_work(loop):
+async def test_each_service_phase_resumes_after_restart_without_repeating_work(loop, monkeypatch):
     s = loop
     reasons = []
     for _ in range(8):
         worker = s.worker()
+        # No terminal exists until the final phase. Each unfinished pass still
+        # reads the accepted assignment once, then advances native state.
+        monkeypatch.setattr(
+            worker.terminals, "read", lambda _: pytest.fail("absent terminal replay")
+        )
         status, reason = await worker._advance(s.c.assignment.admission, one_stage=True)
         reasons.append(reason)
         if status == "completed":
@@ -263,6 +268,7 @@ async def test_each_service_phase_resumes_after_restart_without_repeating_work(l
         "retirement_retained",
         "terminal_retained",
     ]
+    worker = s.worker()
     value = worker.terminals.read(s.c.assignment)
     assert value is not None
     read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
@@ -273,6 +279,20 @@ async def test_each_service_phase_resumes_after_restart_without_repeating_work(l
         "completed",
         "original_terminal_retained",
     )
+
+
+async def test_terminal_hint_uses_owned_assignment_identity(loop):
+    s = loop
+    worker, value, _ = await finish(s)
+    calls = s.p.model.calls, s.inputs, s.signs
+    # A caller-supplied work label cannot hide the terminal of its real claim.
+    changed = s.c.assignment.admission.model_copy(update={"work_sha256": "ff" * 32})
+    assert await worker._advance(changed, one_stage=True) == (
+        "completed",
+        "original_terminal_retained",
+    )
+    assert (s.p.model.calls, s.inputs, s.signs) == calls
+    assert worker.terminals.read(s.c.assignment) == value
 
 
 async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monkeypatch):
