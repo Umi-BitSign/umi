@@ -127,14 +127,21 @@ class CohortEndpointAttemptWorker:
             if phase == "certification"
             else await dispatcher.dispatch(slot, case_id)
         )
-        if sent["status"] == "pending" and sent["reason"].startswith(
-            ("miner_grant_", "miner_window_")
+        if (
+            sent["status"] == "pending"
+            and sent["reason"].startswith(("miner_grant_", "miner_window_"))
+            and bt.timelock.current_round()
+            < selected_request(selected, case_id).response_close_round
         ):
             return {
                 "status": "pending",
                 "reason": sent["reason"],
                 "selection_slot": slot,
             }
+        # A miner can retain a grant even when its acknowledgment was lost.
+        # After expiry, a failed grant retry must not prevent asking that miner
+        # for the original request's signed retirement. Unknown grants remain
+        # pending: neither the clock nor the failed delivery proves absence.
         if one_stage and phase != "certification":
             if phase == "dispatch":
                 return {"status": "pending", "reason": sent["reason"], "selection_slot": slot}

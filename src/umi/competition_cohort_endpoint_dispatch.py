@@ -342,6 +342,10 @@ class CohortEndpointDispatcher:
                 return {"status": "pending", "reason": delivery.reason}
             verify_grant_receipt(delivery.receipt, selection_grant(selected, assignment))
             request = selected_request(selected, case_id)
+            # Expiry can select native retirement without a new dispatch
+            # authority lookup. It cannot prove absence or authorize a send.
+            if bt.timelock.current_round() >= request.response_close_round:
+                return {"status": "pending", "reason": "request_response_window_elapsed"}
             timeout = journal.config.read_timeout_seconds
             # Each side independently checks the live transport window.
             authority = CohortRequestWindowAuthority(

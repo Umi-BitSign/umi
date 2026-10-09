@@ -299,6 +299,19 @@ this command alone is not an open-mining launch.
 
 ## Recoverable cohort scheduling
 
+Expired endpoint requests still require a miner-signed retirement before a
+certified replacement. A failed grant retry cannot block that retirement attempt:
+the miner may have saved the original grant even when its acknowledgment was
+lost. If the miner never accepted the grant, retirement remains pending until
+its original authority is available. Expiry alone does not release a window or
+establish a missing response.
+
+Read-only journal snapshots use independent SQLite connections so they can read
+committed records while unrelated local writer work is in progress. Writes and
+read-then-write decisions retain the writer transaction. Every snapshot checks
+current conflict holds, journal generation and reservation fences; this is not a
+cache of mutable authorization state.
+
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
 the existing16-connection control budget for history, votes and exports. Slow

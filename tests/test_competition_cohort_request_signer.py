@@ -555,10 +555,15 @@ async def test_dispatch_no_send_after_window_expiry(signing, monkeypatch):
     p = signing.p
     expire_child(p, p.grant, monkeypatch)
     count = len(p.transmissions)
-    result = await CohortEndpointDispatcher(p.delivery_recovery, p.finality).dispatch(
+
+    class NoDispatchAuthority:
+        async def finalized_head_height(self):
+            pytest.fail("expired unsent request does not need fresh dispatch authority")
+
+    result = await CohortEndpointDispatcher(p.delivery_recovery, NoDispatchAuthority()).dispatch(
         p.retire_slot, p.case_id
     )
-    assert result["status"] == "pending" and "deadline" in result["reason"]
+    assert result == {"status": "pending", "reason": "request_response_window_elapsed"}
     assert p.model.calls == 0 and len(p.transmissions) == count
 
 

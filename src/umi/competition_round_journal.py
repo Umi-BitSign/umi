@@ -75,9 +75,8 @@ class RoundJournal:
         # Read/write envelope only. Existing reservation allowances, manifests,
         # bindings and total journal capacity are never enlarged by this value.
         self.maximum_record_bytes = maximum_record_bytes
-        # SQLite may create and remove rollback sidecars while a transaction is
-        # active. Keep this instance's file validation and connection lifetime
-        # together so another local caller cannot inspect a transitional file.
+        # Serialize this instance's writers. Read-only snapshots own separate
+        # connections and must not queue behind unrelated writer work.
         self._transaction_lock = threading.RLock()
         _private(root)
         self.path = root / "rounds.sqlite3"
@@ -195,16 +194,21 @@ class RoundJournal:
         paths = [Path(str(self.path) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
         paths.append(self.lock_path)
         for p in paths:
-            if p.is_symlink():
+            try:
+                s = p.lstat()
+            except FileNotFoundError:
+                # SQLite can remove a rollback sidecar as another connection
+                # commits. Inspect present paths with one non-following stat,
+                # rather than racing exists/is_symlink against a later stat.
+                continue
+            if stat.S_ISLNK(s.st_mode):
                 raise ValueError("round journal symlink")
-            if p.exists():
-                s = p.stat()
-                if (
-                    not stat.S_ISREG(s.st_mode)
-                    or s.st_nlink != 1
-                    or (s.st_uid != os.getuid() or s.st_mode & 0o077)
-                ):
-                    raise ValueError("round journal must be private and owned")
+            if (
+                not stat.S_ISREG(s.st_mode)
+                or s.st_nlink != 1
+                or (s.st_uid != os.getuid() or s.st_mode & 0o077)
+            ):
+                raise ValueError("round journal must be private and owned")
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -283,22 +287,21 @@ class RoundJournal:
         ``transaction``. This connection cannot write or repair schema fences.
         Conflict holds and generation markers are read afresh on every call.
         """
-        with self._transaction_lock:
-            self._check_files()
-            db = sqlite3.connect(
-                self.path.resolve().as_uri() + "?mode=ro",
-                uri=True,
-                isolation_level=None,
-                timeout=5,
-            )
-            try:
-                db.execute("PRAGMA query_only=ON")
-                db.execute("BEGIN")
-                if self._version(db) == 2:
-                    self._fence_tables(db)
-                yield db
-            finally:
-                db.close()
+        self._check_files()
+        db = sqlite3.connect(
+            self.path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            isolation_level=None,
+            timeout=5,
+        )
+        try:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            if self._version(db) == 2:
+                self._fence_tables(db)
+            yield db
+        finally:
+            db.close()
 
     @staticmethod
     def _identifier(name):

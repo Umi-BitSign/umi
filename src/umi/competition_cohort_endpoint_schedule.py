@@ -122,7 +122,7 @@ class CohortEndpointSchedule:
     def cursor(self, name: str) -> str:
         if name not in {"inbox", "cases"}:
             raise ValueError("unknown endpoint schedule cursor")
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT position FROM endpoint_schedule_cursor WHERE name=?", (name,)
             ).fetchone()
@@ -170,7 +170,8 @@ class CohortEndpointSchedule:
         exclusions = (
             " AND q.slot NOT IN (" + ",".join("?" for _ in exclude) + ")" if exclude else ""
         )
-        with self.journal.transaction() as db:
+        transaction = self.journal.transaction if advance else self.journal.read_transaction
+        with transaction() as db:
             row = db.execute(
                 "SELECT position FROM endpoint_schedule_cursor WHERE name='cases'"
             ).fetchone()
