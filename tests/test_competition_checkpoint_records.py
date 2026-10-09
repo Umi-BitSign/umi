@@ -205,3 +205,40 @@ def test_streamed_checkpoint_still_rejects_retained_mutations(
     with pytest.raises(SubmissionCheckpointError, match="checkpoint is ahead of or differs"):
         store.retained_submission_head()
     assert store._submission_checkpoint.path.read_bytes() == before
+
+
+def test_unrelated_writes_do_not_rehash_admission_payloads(policy, tmp_path, monkeypatch):
+    scenario, _launch, _checkpoint = _checkpointed_open_scenario(policy, tmp_path)
+    store = scenario.store
+    expected = store.durable_admission_status()
+    monkeypatch.setattr(
+        store,
+        "_submission_checkpoint_records",
+        lambda _connection: pytest.fail("unrelated write rehashed admissions"),
+    )
+    for i in range(8):
+        with store._connection() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata VALUES ('unrelated-progress', ?)", (str(i),)
+            )
+        assert store.durable_admission_status() == expected
+
+
+@pytest.mark.parametrize("fault", ["missing_trigger", "changed_trigger", "missing_counter"])
+def test_checkpoint_reuse_rejects_broken_change_tracking(policy, tmp_path, fault):
+    scenario, _launch, _checkpoint = _checkpointed_open_scenario(policy, tmp_path)
+    store = scenario.store
+    before = store.retained_submission_head()
+    with store._connection() as connection:
+        if fault == "missing_counter":
+            connection.execute("DELETE FROM submission_checkpoint_generation")
+        else:
+            connection.execute("DROP TRIGGER submission_checkpoint_generation_update")
+            if fault == "changed_trigger":
+                connection.execute(
+                    "CREATE TRIGGER submission_checkpoint_generation_update "
+                    "AFTER UPDATE ON submissions BEGIN SELECT 1; END"
+                )
+    with pytest.raises(SubmissionCheckpointError, match="change tracking"):
+        store.durable_admission_status()
+    assert store._submission_checkpoint.status(store._submission_checkpoint.load()) == before

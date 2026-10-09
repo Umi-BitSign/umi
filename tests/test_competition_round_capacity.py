@@ -613,3 +613,57 @@ def test_obligation_projection_does_not_load_oversized_columns(
             else:
                 journal._capacity(db)
     assert max(returned_sizes, default=0) <= 8192
+
+
+def test_highwater_progress_uses_reserved_capacity_without_rescanning(journal, monkeypatch):
+    journal.reserve_records("batch", (spec(value={"answer": 1}),))
+    before = usage(journal)
+    journal.maximum_bytes = before[1]
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            journal, "_capacity", lambda _db: pytest.fail("observation rescanned records")
+        )
+        for block in (0, 1, 1, 9_242_900, 2**53 - 1):
+            journal.observe(block)
+    assert usage(journal) == before
+    from umi.competition_round_journal import FinalizedHeadRegression
+
+    with pytest.raises(FinalizedHeadRegression):
+        journal.observe(1)
+
+
+def test_duplicate_head_does_not_wait_for_unrelated_writer(journal):
+    from threading import Event
+
+    journal.reserve_records("batch", (spec(),))
+    journal.observe(100)
+    held, release, completed = Event(), Event(), Event()
+
+    def writer():
+        with journal.transaction():
+            held.set()
+            assert release.wait(30)
+
+    def reader():
+        journal.observe(100)
+        completed.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(writer)
+        assert held.wait(30)
+        reading = pool.submit(reader)
+        try:
+            assert completed.wait(10), "duplicate observation waited for unrelated writer"
+        finally:
+            release.set()
+        writing.result(timeout=30)
+        reading.result(timeout=30)
+
+
+@pytest.mark.parametrize("bad", [True, -1, 2**53, "100", 1.5])
+def test_highwater_rejects_invalid_observation_without_changing_state(journal, bad):
+    journal.observe(100)
+    before = state(journal)
+    with pytest.raises(ValueError):
+        journal.observe(bad)
+    assert state(journal) == before

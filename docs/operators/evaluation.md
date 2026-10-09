@@ -337,6 +337,12 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
+Repeated observation of the journal's current finalized block uses a read-only
+snapshot. A newer block rechecks the previous value while owning the writer
+transaction, and a regression remains an error. The high-water field has a fixed
+reserved capacity, so advancing it does not rescan every record and reservation.
+Record and reservation mutations retain their ordinary capacity checks.
+
 Registration persistence distinguishes a temporarily busy retention mutex from
 invalid retention data. If the trusted mutex is busy, it preserves every existing
 capture and defers pruning while retaining the fresh verified proof. All captures
