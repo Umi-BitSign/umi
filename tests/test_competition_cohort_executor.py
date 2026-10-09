@@ -131,6 +131,20 @@ async def test_unfinished_execution_still_requires_the_job_writer_lock(execution
     assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
 
 
+async def test_retained_attempt_head_does_not_wait_for_unrelated_writer(execution):
+    from concurrent.futures import ThreadPoolExecutor
+
+    e = execution
+    executor = e.executor()
+    source, started = await executor.current(e.assignment)
+    journal = executor.journal
+    job = journal.retain(e.assignment, source, started.block)
+    attempt = journal.begin(job, 0, source, started)
+    with ThreadPoolExecutor(max_workers=1) as pool, journal.journal.transaction():
+        read = pool.submit(journal.head, job, 0)
+        assert read.result(timeout=5) == attempt
+
+
 async def test_endpoint_worker_can_defer_incumbent_until_miner_terminal(execution):
     e = execution
     worker = e.worker(defer_endpoint_until_terminal=True)

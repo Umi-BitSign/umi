@@ -409,7 +409,7 @@ class CohortExecutionJournal:
         return record
 
     def head(self, job: RecoverableExecutionJob, index: int) -> CohortExecutionAttempt | None:
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT attempt FROM execution_heads WHERE step=?",
                 (execution_step_key(job, index),),

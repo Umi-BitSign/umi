@@ -34,7 +34,7 @@ from .rpc_transport import websocket_connect
 
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_HEX_RE = re.compile(r"^0x(?:[0-9a-f]{2})*$")
+_HEX_RE = re.compile(r"^0x[0-9a-f]*$")
 _MAX_BLOCK_NUMBER = (1 << 64) - 1
 _MIB = 1024 * 1024
 _MAXIMUM_RPC_REQUEST_BYTES = 2 * _MIB
@@ -281,7 +281,9 @@ def _block_number(value: Any) -> int:
 
 
 def _bytes_from_hex(value: Any, reason_code: str) -> bytes:
-    if not isinstance(value, str) or _HEX_RE.fullmatch(value) is None:
+    # Check byte alignment separately: a repeated two-character regex group
+    # keeps a backtracking entry for every byte of large runtime proofs.
+    if not isinstance(value, str) or len(value) % 2 or _HEX_RE.fullmatch(value) is None:
         raise ValidatorChainError(reason_code)
     return bytes.fromhex(value[2:])
 

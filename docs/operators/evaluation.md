@@ -318,6 +318,10 @@ New records and conflicting bytes still use the native writer transaction;
 conflicts remain durable holds. Batches with index callbacks always retain their
 writer transaction, including exact retries. This lets repeated archive exports
 confirm retained objects without competing with new signing or retirement work.
+Confirming the exact current order history and reading a retained execution
+attempt also use fresh read-only snapshots. New order-history heads keep their
+atomic monotonic update, and signing rechecks its selected history immediately
+before use. These reads do not rescan capacity or occupy the writer slot.
 
 Historical reward scans reuse at most three verified runtime-code storage records,
 bounded to 51 MiB, for the exact block snapshot and storage key. The next block
@@ -325,6 +329,13 @@ can therefore reuse its parent's code proof without another RPC request or
 proof verification. Finality selection and runtime codec construction remain
 independent checks. Account and weight collectors do not enable this cache, and
 archive replay always consumes and verifies the supplied archive bytes.
+
+Historical control capture also retains the runtime and storage proofs verified
+within that capture. Encoding their archive does not immediately replay those
+same proofs or rebuild the codec. The archive's size and format, current owned
+ancestry and timestamp bounds remain checked before issuing a historical result.
+Reading an archive later or receiving one from another process still requires
+the complete native replay; this reuse cannot authorize a current weight write.
 
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps

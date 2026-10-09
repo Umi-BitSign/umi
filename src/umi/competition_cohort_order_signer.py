@@ -186,6 +186,23 @@ def remember_order_history(
         )
 
     journal.observe(block)
+    # Reconfirm the exact current head from a fresh snapshot. Repeating an
+    # already retained history must not acquire the writer or rescan capacity.
+    # A changed head still takes the atomic monotonic update below, and signing
+    # independently fences its prepared history immediately before use.
+    retained = False
+    with journal.read_transaction() as db:
+        row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
+        if row == (proof_key[0],):
+            raw = journal.get("order_history", row[0], db=db)
+            if raw is None or canonical_json_bytes(raw) != canonical_json_bytes(source):
+                raise ValueError("retained order history changed or disappeared")
+            retained = True
+    if retained:
+        # Use the journal's existing exact-retry path for current reservation
+        # checks, without replaying the index callback or its capacity scan.
+        journal.put("order_history", proof_key[0], source)
+        return
     journal.put_many((("order_history", digest(source), source),), index=index)
 
 
