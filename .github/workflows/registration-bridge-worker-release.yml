@@ -149,7 +149,7 @@ jobs:
           BittensorRegistrationBridgeChain()
           artifacts = read_image_artifacts()
           tools = _tools()
-          assert tools["verifier"].verify_extrinsics_root(expected_root=hashlib.blake2b(b"\0", digest_size=32).digest(), extrinsics=(), state_version=1)
+          assert tools["verifier"].verify_extrinsics_root(expected_root=hashlib.blake2b(b"\0", digest_size=32).digest(), extrinsics=(), state_version=0)
           fixture = json.load(sys.stdin)
           decode = lambda value: bytes.fromhex(value.removeprefix("0x"))
           proof = dict(state_root=decode(fixture["state_root"]), items=tuple((decode(item["key"]), decode(item["value"])) for item in fixture["items"]), proof=tuple(decode(node) for node in fixture["proof"]))

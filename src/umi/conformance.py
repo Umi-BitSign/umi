@@ -1298,7 +1298,7 @@ def _execute_storage(
         verifier.verify_extrinsics_root(
             expected_root=empty_root,
             extrinsics=(),
-            state_version=1,
+            state_version=0,
         )
         is not True
     ):
