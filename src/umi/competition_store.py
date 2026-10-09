@@ -864,6 +864,23 @@ class CompetitionStore(VoidEvidenceRetention):
     def _install_submission_checkpoint_fence(connection: sqlite3.Connection) -> None:
         """Keep an already running uncheckpointed writer from bypassing the head."""
 
+        # Track changes to admission rows separately from unrelated evaluation
+        # and bookkeeping writes in the same SQLite database. This is a cache
+        # invalidator, never a substitute for the independent checkpoint.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS submission_checkpoint_generation "
+            "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+            "generation INTEGER NOT NULL CHECK(generation BETWEEN 0 AND 9007199254740991))"
+        )
+        connection.execute("INSERT OR IGNORE INTO submission_checkpoint_generation VALUES (1,0)")
+        for name, sql in CompetitionStore._submission_generation_triggers().items():
+            present = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+            ).fetchone()
+            if present is None:
+                connection.execute(sql)
+            elif present != (sql,):
+                raise SubmissionCheckpointError("submission change tracking trigger differs")
         for operation in ("INSERT", "UPDATE", "DELETE"):
             trigger = f"submission_checkpoint_{operation.lower()}_submissions"
             connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
@@ -1499,26 +1516,54 @@ class CompetitionStore(VoidEvidenceRetention):
             rows.close()
         return tuple(submission_ids), tuple(record_ids)
 
-    def _submission_state_fingerprint(self) -> tuple:
-        """Identify SQLite content files without opening or trusting their rows."""
+    @staticmethod
+    def _submission_generation_triggers() -> dict[str, str]:
+        return {
+            f"submission_checkpoint_generation_{operation.lower()}": (
+                f"CREATE TRIGGER submission_checkpoint_generation_{operation.lower()} "
+                f"AFTER {operation} ON submissions BEGIN "
+                "UPDATE submission_checkpoint_generation SET generation=generation+1 "
+                "WHERE singleton=1; "
+                "SELECT CASE WHEN changes()!=1 THEN "
+                "RAISE(ABORT,'submission change tracking is missing') END; END"
+            )
+            for operation in ("INSERT", "UPDATE", "DELETE")
+        }
 
-        values = []
-        for path in (self.path, Path(f"{self.path}-wal")):
-            try:
-                info = path.stat()
-            except FileNotFoundError:
-                values.append(None)
-            else:
-                values.append(
-                    (
-                        info.st_dev,
-                        info.st_ino,
-                        info.st_size,
-                        info.st_mtime_ns,
-                        info.st_ctime_ns,
-                    )
-                )
-        return tuple(values)
+    def _submission_state_fingerprint(self) -> tuple:
+        """Bound reuse to admission mutations, schema, identity and authority.
+
+        Startup still authenticates every record. SQL changes to any submission
+        invalidate that proof even when its digest or byte length is unchanged.
+        Reads and unrelated table writes cannot trigger another full body scan.
+        """
+        info = self.path.stat()
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            for name, sql in self._submission_generation_triggers().items():
+                if connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+                ).fetchone() != (sql,):
+                    raise SubmissionCheckpointError("submission change tracking trigger differs")
+            generation = connection.execute(
+                "SELECT singleton,generation FROM submission_checkpoint_generation LIMIT 2"
+            ).fetchall()
+            if (
+                len(generation) != 1
+                or generation[0][0] != 1
+                or type(generation[0][1]) is not int
+                or not 0 <= generation[0][1] <= 2**53 - 1
+            ):
+                raise SubmissionCheckpointError("submission change tracking is invalid")
+            schema = connection.execute("PRAGMA schema_version").fetchone()[0]
+            bindings = connection.execute(
+                "SELECT key,value FROM metadata WHERE key IN "
+                "('policy','public_launch_identity','retained_submission_head',"
+                "'submission_head_checkpoint_binding','submission_head_checkpoint_required') "
+                "ORDER BY key"
+            ).fetchall()
+            count = connection.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
+        return (info.st_dev, info.st_ino, schema, generation[0][1], count, tuple(bindings))
 
     def _synchronize_submission_checkpoint_locked(
         self,

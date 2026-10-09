@@ -901,17 +901,34 @@ class RoundJournal:
             raise ValueError("round journal record limit")
         return [row[0] for row in rows]
 
+    @staticmethod
+    def _observed_head(db, block):
+        old = db.execute("SELECT block FROM highwater LIMIT 2").fetchall()
+        if len(old) > 1 or (
+            old and (type(old[0][0]) is not int or not 0 <= old[0][0] <= 2**53 - 1)
+        ):
+            raise ValueError("round finalized head is invalid")
+        if old and old[0][0] > block:
+            raise FinalizedHeadRegression("round finalized head regressed")
+        return None if not old else old[0][0]
+
     def observe(self, block: int) -> None:
+        if type(block) is not int or not 0 <= block <= 2**53 - 1:
+            raise ValueError("round finalized head regressed")
+        # An already retained head is a read. Repeating it must not queue behind
+        # unrelated record writers or scan every reservation and payload table.
+        with self.read_transaction() as db:
+            if self._observed_head(db, block) == block:
+                return
         with self.transaction() as db:
-            old = db.execute("SELECT block FROM highwater LIMIT 2").fetchall()
-            if type(block) is not int or not 0 <= block <= 2**53 - 1 or (old and len(old) != 1):
-                raise ValueError("round finalized head regressed")
-            if old and old[0][0] > block:
-                raise FinalizedHeadRegression("round finalized head regressed")
+            # Another observer can advance while this caller waits for ownership.
+            if self._observed_head(db, block) == block:
+                return
             db.execute("DELETE FROM highwater")
             db.execute("INSERT INTO highwater VALUES (?)", (block,))
-            if db.execute("PRAGMA user_version").fetchone()[0] == 2:
-                self._check_capacity(db)
+            # _capacity always reserves one 16-byte highwater row, including when
+            # empty. This bounded update cannot consume record or byte credit.
+            # Growth checks remain on record/reservation/index mutations.
 
     def due_plans(self, block: int) -> list[str]:
         """Return at most four unprepared suite identities due at this block."""

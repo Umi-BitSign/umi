@@ -568,6 +568,15 @@ baseline or a ledger missing any anchored submission. The required
 `submission_head_checkpoint_directory` is a pre-existing, private external
 journal disjoint from intake and finality state.
 
+Opening the store authenticates the retained admission records against that
+checkpoint. Subsequent reads reuse this result while a SQLite change counter,
+its exact mutation triggers, the database identity, schema and authority bindings
+remain unchanged. Inserting, changing or deleting an admission advances the
+counter in the same transaction; unrelated evaluation writes do not force status
+requests to hash every admission payload again. Missing or altered tracking
+state is held. This bookkeeping is installed when opening a compatible store;
+keep the existing database and external checkpoint in place.
+
 If readiness returns `503` with `verified registration unavailable`, inspect
 the intake service's private `registration_refresh_failed` log.
 
