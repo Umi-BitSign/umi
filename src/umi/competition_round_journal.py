@@ -717,6 +717,27 @@ class RoundJournal:
             return self._reservation(db, batch_id)
 
     def put(self, kind: str, key: str, value: object) -> None:
+        # Exact immutable retries need only the current committed snapshot.
+        # Retaking the writer slot for every retained archive object can hold
+        # up unrelated signing and retirement. Missing or different bytes still
+        # use the native writer, which retains conflicts atomically.
+        with self.read_transaction() as db:
+            prior = self.get_raw(kind, key, db=db)
+            if prior is not None:
+                raw = canonical_json_bytes(value)
+                if len(raw) > self.maximum_record_bytes:
+                    raise ValueError("round journal object exceeds its byte bound")
+                if prior == raw:
+                    doc = self._obligation(db, kind, key) if self._version(db) == 2 else None
+                    if doc is not None and (
+                        len(raw) > doc["maximum_bytes"]
+                        or (
+                            doc["value_sha256"] is not None
+                            and sha256_hex(raw) != doc["value_sha256"]
+                        )
+                    ):
+                        raise ValueError("retained round record differs from reservation")
+                    return
         self.put_many(((kind, key, value),))
 
     def put_many(

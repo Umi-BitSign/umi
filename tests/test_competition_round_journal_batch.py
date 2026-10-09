@@ -10,7 +10,7 @@ import pytest
 
 import umi.competition_round_journal as rounds
 from umi.open_competition import digest
-from umi.protocol import canonical_json_bytes
+from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_round_preparation import setup as preparation_fixture
 from .test_open_competition import policy as policy
@@ -158,6 +158,56 @@ def test_read_transaction_preserves_reservation_fence_checks(journal):
         journal.get("intent", "a")
 
 
+@pytest.mark.parametrize("reserved", [False, True])
+@pytest.mark.parametrize("value", [None, {"original": True}])
+def test_exact_put_does_not_queue_for_writer_and_keeps_fresh_holds(journal, reserved, value):
+    if reserved:
+        journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
+    journal.put("intent", "a", value)
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('a')")
+            entered.set()
+            assert release.wait(60)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(30)
+            # The unchanged retry sees the valid committed record; it neither
+            # waits for nor changes the other writer's uncommitted conflict.
+            assert pool.submit(journal.put, "intent", "a", value).result(timeout=5) is None
+        finally:
+            release.set()
+        pending.result(timeout=30)
+    with pytest.raises(ValueError, match="conflict held"):
+        journal.put("intent", "a", value)
+
+
+def test_exact_put_retains_reservation_and_generation_checks(journal):
+    value = {"original": True}
+    journal.reserve_records(
+        "batch",
+        (rounds.RecordReservation("intent", "a", 1024, sha256_hex(canonical_json_bytes(value))),),
+    )
+    journal.put("intent", "a", value)
+    changed = {"original": False}
+    with sqlite3.connect(journal.path) as db:
+        db.create_function("umi_round_writer_generation", 0, lambda: 2)
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='intent' AND id='a'",
+            (canonical_json_bytes(changed),),
+        )
+    with pytest.raises(ValueError, match="differs from reservation"):
+        journal.put("intent", "a", changed)
+    with sqlite3.connect(journal.path) as db:
+        db.execute('DROP TRIGGER "round_generation_records_insert"')
+    with pytest.raises(ValueError, match="capability fence missing"):
+        journal.put("intent", "a", changed)
+
+
 @pytest.mark.parametrize("damage", ["symlink", "dangling", "hardlink", "public"])
 def test_concurrent_read_path_still_rejects_unsafe_sqlite_sidecars(journal, tmp_path, damage):
     journal.put("intent", "a", {"original": True})
@@ -252,7 +302,7 @@ def test_exact_batch_retry_repairs_index_without_ledger_accounting_scan(journal,
     assert retained(journal)["caller_index"] == [("a", 1)]
 
 
-def test_single_put_delegates_without_a_second_transaction(journal, monkeypatch):
+def test_new_single_put_uses_the_native_batch_writer(journal, monkeypatch):
     calls = []
     original = journal.put_many
 

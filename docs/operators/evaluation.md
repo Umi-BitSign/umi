@@ -312,6 +312,13 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
+An exact single-record retention retry also uses that read-only snapshot: the
+same canonical bytes must already be committed and satisfy their reservation.
+New records and conflicting bytes still use the native writer transaction;
+conflicts remain durable holds. Batches with index callbacks always retain their
+writer transaction, including exact retries. This lets repeated archive exports
+confirm retained objects without competing with new signing or retirement work.
+
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
 the existing 16-connection control budget for history, votes and exports. Slow
