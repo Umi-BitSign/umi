@@ -188,7 +188,9 @@ async def test_replays_every_write_after_restart_without_old_rpc(archived):
     )
     assert result == h.captured
     assert [w.decision_sha256 for w in result.writes] == ["aa" * 32, "bb" * 32]
-    assert h.replay_rpc and all(m.startswith("chain_") for m, _ in h.replay_rpc)
+    # Capture retained the authenticated headers. Reopening must reuse them
+    # while replaying native commitments, without asking RPC for those bytes.
+    assert h.replay_rpc == []
     assert not json.loads(result.evidence)["chain_submission_authorized"]
     if h.executed:
         assert h.executions == [b"child-code", b"parent-code"]

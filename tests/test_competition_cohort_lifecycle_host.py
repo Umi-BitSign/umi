@@ -250,7 +250,9 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
             lambda p: "a" * 64 if p == dispatch.clips.upload_token_file else old_token(p),
         )
 
-        async def start(service, lifecycle, resources, client, credentials, key, sign, token):
+        async def start(
+            service, lifecycle, resources, client, credentials, key, sign, token, *, windows=None
+        ):
             assert token == "a" * 64
             # Network finality and media are explicit fixtures. Native dispatch
             # still waits for this cohort's original prepared inputs and drains.
@@ -263,6 +265,7 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
                 key,
                 sign,
                 None,
+                windows=windows,
             )
 
         monkeypatch.setattr(boot, "start_service_dispatch", start)
@@ -325,6 +328,7 @@ async def test_owner_service_starts_and_drains_configured_lifecycle(
             assert o.service.request_readiness.running()
         if dispatch_enabled:
             worker_host = apps[0].state.dispatch
+            assert worker_host.windows is apps[0].state.windows
             assert worker_host.tasks
             assert all(not t.done() for t in worker_host.tasks.values())
             async with httpx.AsyncClient(
