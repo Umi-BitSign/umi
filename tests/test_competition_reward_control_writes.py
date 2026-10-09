@@ -400,3 +400,58 @@ async def test_slow_block_work_keeps_loop_responsive_and_drains_on_close(
         if closing is not None:
             await asyncio.wait_for(closing, 3)
     assert not h.item.provider._lock.locked()
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+@pytest.mark.parametrize("failure", [None, "reader", "proof"])
+async def test_proof_read_capture_recovers_events_without_storage_rpc(
+    block_case, monkeypatch, failure
+):
+    h = block_case
+    h.item.provider._runtime_proof_reads = True
+    original_request = h.capture_request
+    event_calls = []
+
+    async def request(method, params):
+        if method == "state_getStorageAt" and params[0] == "0x" + b"system-events-key".hex():
+            raise AssertionError("event value must come from its authenticated proof")
+        if method == "state_getReadProof" and params[0] == ["0x" + b"system-events-key".hex()]:
+            event_calls.append(params)
+        return await original_request(method, params)
+
+    monkeypatch.setattr(h.item.proofs._rpc, "request", request)
+    original_read = h.item.verifier.read_many
+
+    def read_many(*, state_root, storage_keys, proof, **limits):
+        if storage_keys != (b"system-events-key",):
+            return original_read(
+                state_root=state_root, storage_keys=storage_keys, proof=proof, **limits
+            )
+        assert state_root == bytes.fromhex(h.source.w.original.state_root[2:])
+        assert proof == (b"event-proof",)
+        assert limits["maximum_value_bytes"] == ScanLimits().maximum_event_storage_bytes
+        if failure == "reader":
+            raise ValueError("invalid event proof")
+        return ((b"system-events-key", h.event_bytes),)
+
+    monkeypatch.setattr(h.item.verifier, "read_many", read_many)
+    if failure == "proof":
+        h.fault = "events"
+    if failure:
+        from umi.validator_chain_scan import ValidatorChainScanError
+
+        with pytest.raises(ValidatorChainScanError):
+            await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)
+    else:
+        result = await capture_control_writes(h.item.provider, h.item.hotkey, h.old.height)
+        validate_control_writes(
+            result,
+            expected_control_hotkey=h.item.hotkey,
+            expected_chain_config_sha256=digest(h.item.config),
+        )
+        assert json.loads(result.evidence)["events"]["value"] == h.event_bytes.hex()
+        assert [(w.extrinsic_index, w.decision_sha256) for w in result.writes] == [
+            (0, "aa" * 32),
+            (1, "bb" * 32),
+        ]
+    assert len(event_calls) == 1

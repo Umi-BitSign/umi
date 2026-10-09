@@ -31,6 +31,7 @@ from .chain_evidence import FinalizedSnapshotRef, StorageEvidence, StorageProofV
 from .concurrency import run_owned_thread
 from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
+from .substrate_proof import SubstrateProofVerifierError
 
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -819,34 +820,15 @@ class FinalizedProofCollector:
 
         try:
             if self._read_values_from_proof:
-                reader = getattr(self._verifier, "read_many", None)
-                if not callable(reader):
+                if not callable(getattr(self._verifier, "read_many", None)):
                     raise ValidatorChainError("storage_proof_reader_unavailable")
+                if storage_key == b":code":
+                    reused = await self._reuse_runtime_code_evidence(snapshot)
+                    if reused is not None:
+                        self._retain_storage_evidence(reused)
+                        return reused
                 nodes = await self._read_proof(snapshot, (key_hex,))
-
-                def read_value():
-                    values = reader(
-                        state_root=bytes.fromhex(snapshot.state_root[2:]),
-                        storage_keys=(storage_key,),
-                        proof=nodes,
-                        maximum_value_bytes=self._limits.maximum_storage_value_bytes,
-                        maximum_total_value_bytes=self._limits.maximum_storage_values_bytes,
-                    )
-                    if (
-                        type(values) is not tuple
-                        or len(values) != 1
-                        or type(values[0]) is not tuple
-                        or len(values[0]) != 2
-                        or values[0][0] != storage_key
-                        or (values[0][1] is not None and type(values[0][1]) is not bytes)
-                    ):
-                        raise ValueError("proof reader changed the selected key or value shape")
-                    return values[0][1]
-
-                try:
-                    value = await run_owned_thread(read_value)
-                except (TypeError, ValueError, RuntimeError) as error:
-                    raise ValidatorChainError("storage_proof_verification_failed") from error
+                value = await self._value_from_proof(snapshot, storage_key, nodes)
             else:
                 raw_value = await self._rpc.request(
                     "state_getStorageAt",
@@ -888,6 +870,92 @@ class FinalizedProofCollector:
             raise
         except Exception as error:
             raise ValidatorChainError("storage_proof_rpc_failed") from error
+
+    async def _value_from_proof(
+        self, snapshot: FinalizedSnapshotRef, storage_key: bytes, nodes: tuple[bytes, ...]
+    ) -> bytes | None:
+        reader = self._verifier.read_many
+
+        def read_value():
+            values = reader(
+                state_root=bytes.fromhex(snapshot.state_root[2:]),
+                storage_keys=(storage_key,),
+                proof=nodes,
+                maximum_value_bytes=self._limits.maximum_storage_value_bytes,
+                maximum_total_value_bytes=self._limits.maximum_storage_values_bytes,
+            )
+            if (
+                type(values) is not tuple
+                or len(values) != 1
+                or type(values[0]) is not tuple
+                or len(values[0]) != 2
+                or values[0][0] != storage_key
+                or (values[0][1] is not None and type(values[0][1]) is not bytes)
+            ):
+                raise ValueError("proof reader changed the selected key or value shape")
+            value = values[0][1]
+            if value is not None and (
+                len(value) > self._limits.maximum_storage_value_bytes
+                or len(value) > self._limits.maximum_storage_values_bytes
+            ):
+                raise ValueError("proof reader exceeded the value bounds")
+            return value
+
+        try:
+            return await run_owned_thread(read_value)
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ValidatorChainError("storage_proof_verification_failed") from error
+
+    async def _reuse_runtime_code_evidence(
+        self, snapshot: FinalizedSnapshotRef
+    ) -> StorageEvidence | None:
+        # A parent proof is only a source of immutable trie nodes. The new root
+        # must independently authenticate the code, including across runtime upgrades.
+        parent = next(
+            (
+                evidence
+                for evidence, _ in reversed(self._storage_evidence.values())
+                if evidence.storage_key == b":code"
+                and evidence.value
+                and evidence.snapshot.block_hash == snapshot.parent_hash
+                and evidence.snapshot.block_number + 1 == snapshot.block_number
+            ),
+            None,
+        )
+        if parent is None:
+            return None
+        auxiliary_key = b":heappages"
+        nodes = await self._read_proof(snapshot, ("0x" + auxiliary_key.hex(),))
+        # An invalid fresh proof is never interpreted as a cache miss. An absence
+        # proof for this neighbouring key is sufficient and remains root-bound.
+        await self._value_from_proof(snapshot, auxiliary_key, nodes)
+        combined = tuple(dict.fromkeys((*nodes, *parent.proof)))
+        if (
+            len(combined) > self._limits.maximum_proof_nodes
+            or sum(map(len, combined)) > self._limits.maximum_proof_bytes
+        ):
+            return None
+        try:
+            return await run_owned_thread(
+                partial(
+                    StorageEvidence,
+                    snapshot=snapshot,
+                    storage_key=b":code",
+                    value=parent.value,
+                    proof=combined,
+                    verifier=self._verifier,
+                )
+            )
+        except ValueError as error:
+            cause = error.__cause__
+            if (
+                isinstance(cause, SubstrateProofVerifierError)
+                and cause.reason_code == "invalid_proof"
+            ):
+                # A valid new root may require different code or branch nodes.
+                # Fetch the ordinary full proof at the same exact block.
+                return None
+            raise ValidatorChainError("storage_proof_verification_failed") from error
 
     def _retain_storage_evidence(self, evidence: StorageEvidence) -> None:
         # Historical runtime collection revisits the preceding block as the

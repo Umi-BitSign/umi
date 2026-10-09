@@ -457,6 +457,19 @@ For each verified historical block, body and event collection overlap after
 selecting its parent runtime. Both remain bound to the same finalized identity;
 failure or cancellation drains both operations before releasing the provider.
 
+A collector configured for proof-only runtime reads and bounded evidence reuse
+can combine its retained parent code nodes with a small `:heappages` proof from
+the next block. It verifies the new auxiliary proof first, then proves the same
+code against the new block's state root. A runtime change, missing code branch
+or combined-proof size limit triggers the ordinary full code proof at that exact
+block. Invalid auxiliary proofs and verifier failures remain errors. Node and
+byte limits also bound accumulated proof nodes; replaying an external archive
+always consumes and verifies that archive's own value claim. The same selected
+native reader recovers each historical block's event bytes directly from its
+proof, avoiding a separate event-value RPC while preserving the event limits
+and downstream native check. Reuse supplies no finality or current authority
+and is discarded on restart.
+
 Within a running provider, identical proof-backed runtime code reuses the already
 validated immutable metadata from the pinned executor. This bounded reuse avoids
 decoding the same helper response for every block. Every caller still supplies
