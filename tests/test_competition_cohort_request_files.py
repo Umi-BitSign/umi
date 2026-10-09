@@ -102,6 +102,29 @@ async def publish_all(h):
         assert report["assignments_exported"] == len(worker.executions), report
 
 
+async def test_export_page_reads_while_execution_writer_is_busy(exporting):
+    worker = exporting.workers[0]
+    owner = worker.executions[0]
+    expected = tuple(owner.journal.keys("assignment")[:worker.batch_size])
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with owner.journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('unrelated-uncommitted-hold')")
+            entered.set()
+            assert release.wait(60)
+
+    pending = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        assert await asyncio.wait_for(asyncio.to_thread(worker._page, owner), 10) == expected
+    finally:
+        release.set()
+        await pending
+    # Paging survives reopening its own cursor; no execution state was changed.
+    assert worker._page(owner) == expected
+
+
 async def test_late_evaluator_exports_close_original_work_after_restart(exporting):
     h = exporting
     assert list(h.files.orders(h.b["roster"])) == []

@@ -14,7 +14,9 @@ Restart=on-failure
 RestartSec=15
 TimeoutStopSec=infinity
 KillSignal=SIGTERM
-KillMode=control-group
+# Signal the owner first so it can finish its current proof and drain children.
+KillMode=mixed
+SendSIGKILL=no
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

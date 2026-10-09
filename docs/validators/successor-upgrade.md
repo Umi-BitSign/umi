@@ -1962,6 +1962,13 @@ Admission-status, reviewer-queue and intake-readiness reads use the same snapsho
 path. They can finish while a publisher owns the writer gate, and a later read
 sees newly committed certificates and intake fences. Certificate assembly and
 publication still reserve the writer and validate the current generation.
+Request-export paging and execution-start inspection also use read-only snapshots
+of the execution journal. They can inspect committed results while another case
+is being retained; updating the export cursor still uses its separate writer.
+The cohort and standing-reward systemd templates signal the main process first
+(`KillMode=mixed`, `SendSIGKILL=no`, `TimeoutStopSec=infinity`), allowing its
+cooperative shutdown to finish an owned proof operation before closing children.
+Existing installed units need these settings retained during service upgrades.
 Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.

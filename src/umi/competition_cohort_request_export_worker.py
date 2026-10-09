@@ -75,14 +75,17 @@ class RequestExportWorker:
 
     def _page(self, owner):
         key = digest(str(owner.journal.root))
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT slot FROM request_export_cursor WHERE owner=?", (key,)
             ).fetchone()
         after = "" if row is None else row[0]
         if after and (len(after) != 64 or any(c not in "0123456789abcdef" for c in after)):
             raise ValueError("request export cursor is invalid")
-        with owner.journal.transaction() as db:
+        # Execution may still be retaining another case. Discover committed
+        # assignments without reserving its writer; the export cursor below
+        # belongs to this worker's separate journal.
+        with owner.journal.read_transaction() as db:
             rows = db.execute(
                 "SELECT id FROM records WHERE kind='assignment' AND id>? ORDER BY id LIMIT ?",
                 (after, self.batch_size),

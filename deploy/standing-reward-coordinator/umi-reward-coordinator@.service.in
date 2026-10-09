@@ -15,7 +15,8 @@ RestartSec=15
 # The owner drains signing, persistence and finality children on SIGTERM.
 TimeoutStopSec=infinity
 KillSignal=SIGTERM
-KillMode=control-group
+KillMode=mixed
+SendSIGKILL=no
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

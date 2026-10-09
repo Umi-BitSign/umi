@@ -280,7 +280,7 @@ class CohortExecutionJournal:
     def _execution_started(self, job: RecoverableExecutionJob) -> bool:
         # An uncertain sandbox counts as started. It must finish its own original
         # recovery path, even when another source is already complete.
-        with self.journal.transaction() as db:
+        with self.journal.read_transaction() as db:
             for index in range(step_count(job)):
                 key = execution_step_key(job, index)
                 if (
