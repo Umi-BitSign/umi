@@ -12,6 +12,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_authorization import validate_transport_cohort
 from .competition_cohort_endpoint import validate_endpoint_request
 from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
@@ -121,12 +123,22 @@ def review_service_request_current(body, policy, source: CohortOrderHistory, blo
         raise ValueError("service request authority predates admission or issuance")
 
 
+_historical_service_body_reuse = AssignmentVerificationReuse()
+
+
+@canonical_json_reuse()
 def validate_service_body(
     body: ServiceRequestBody, policy: CompetitionPolicy, transport: ScoringPolicy
 ):
     raw = canonical_json_bytes(body)
     if len(raw) > MAX_SERVICE_GRANT_BYTES - 32 * 1024:
         raise ValueError("service request exceeds its byte bound")
+    # Exact static grant validation can be reused. Current authority, owner
+    # assignment/parent reads and quorum signatures remain caller checks.
+    key = (hashlib.sha256(raw).digest(), digest(policy), digest(transport))
+    cached = _historical_service_body_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
     body = ServiceRequestBody.model_validate_json(raw)
     assignment = review_service_assignment(body.assignment, policy)
     validate_transport_cohort(policy, transport)
@@ -172,6 +184,7 @@ def validate_service_body(
             or retirement.receipt.response_sha256 is not None
         ):
             raise ValueError("service replacement lacks certified unresolved work")
+    _historical_service_body_reuse.remember(key, key, body)
     return body
 
 

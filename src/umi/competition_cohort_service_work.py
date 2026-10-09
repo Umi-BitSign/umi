@@ -7,6 +7,7 @@ registration proof sources before invoking these reviewers.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -139,8 +140,19 @@ class ServiceWorkAssignment(StrictProtocolModel):
     source: CohortOrderHistory
 
 
+_historical_service_assignment_reuse = AssignmentVerificationReuse()
+
+
+@canonical_json_reuse()
 def review_service_assignment(value: ServiceWorkAssignment, policy: CompetitionPolicy):
-    value = ServiceWorkAssignment.model_validate_json(canonical_json_bytes(value))
+    # This proves historical inputs only. Owners still read current journal
+    # selections/conflicts, and dispatch separately checks current authority.
+    raw = canonical_json_bytes(value)
+    key = (hashlib.sha256(raw).digest(), digest(policy))
+    cached = _historical_service_assignment_reuse.lookup(key, key)
+    if cached is not None:
+        return cached
+    value = ServiceWorkAssignment.model_validate_json(raw)
     review_service_admission(
         value.admission,
         value.catalog,
@@ -149,6 +161,7 @@ def review_service_assignment(value: ServiceWorkAssignment, policy: CompetitionP
         policy,
         previous=value.previous,
     )
+    _historical_service_assignment_reuse.remember(key, key, value)
     return value
 
 

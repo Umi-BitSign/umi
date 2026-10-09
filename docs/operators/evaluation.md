@@ -314,9 +314,9 @@ cache of mutable authorization state.
 
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
-the existing16-connection control budget for history, votes and exports. Slow
+the existing 16-connection control budget for history, votes and exports. Slow
 remote translates therefore cannot occupy the entire configured pool. A
-model-only host retains its existing16-connection budget. This changes neither
+model-only host retains its existing 16-connection budget. This changes neither
 signed request limits nor per-miner assignment and retirement fences.
 
 Order-history persistence reuses successful native decision/signature replay for
@@ -326,6 +326,19 @@ holds are still checked on every observation. Changed inputs miss the bounded
 process-local cache. If another paid-service operation persists a newer finalized
 head while an observation waits, the worker recollects history and a strictly
 newer capture once; a persistently lagging provider remains held.
+
+Service queues retain bounded private copies of decoded catalog, round, admission
+and history records. Each lookup first rereads the exact retained bytes and its
+current conflict fence. Changed bytes miss the cache; owner indices, configuration
+bindings and policy checks still run. Restarts discard this decoding cache.
+
+Historical service-assignment and request-body validation also reuse successful
+checks for exact retained bytes, policy and transport. Returned objects are
+private copies; caller mutations cannot change the cached result. This does not
+cache current authority or grant new work: owner journal selections, conflicts,
+parent bindings, current phase and quorum signatures remain separate checks.
+Model acceptance uses the already decoded indexed intake record without decoding
+it a second time; its native participation and certificate review remain required.
 
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,

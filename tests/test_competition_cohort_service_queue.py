@@ -738,3 +738,76 @@ def test_read_assignment_still_observes_new_conflict_hold(queue_case):
         c.queue.journal.put("service_admission", admitted.work_sha256, changed)
     with pytest.raises(ValueError, match="conflict"):
         c.queue.assignment(signed)
+
+
+def test_static_assignment_reuse_preserves_mutation_and_policy_checks(queue_case, monkeypatch):
+    from umi import competition_cohort_service_work as work
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    c = queue_case
+    admitted = admit(c)
+    assignment = c.queue.assignment(admitted.claim)
+    monkeypatch.setattr(work, "_historical_service_assignment_reuse", AssignmentVerificationReuse())
+    replay = Mock(wraps=work.review_service_admission)
+    monkeypatch.setattr(work, "review_service_admission", replay)
+    first = work.review_service_assignment(assignment, c.queue.policy)
+    second = work.review_service_assignment(assignment, c.queue.policy)
+    assert first == second == assignment and first is not second
+    assert replay.call_count == 1
+    object.__setattr__(second.admission, "ordinal", 999)
+    assert work.review_service_assignment(assignment, c.queue.policy) == assignment
+    changed = assignment.model_copy(update={"admission": second.admission})
+    with pytest.raises(ValueError):
+        work.review_service_assignment(changed, c.queue.policy)
+    assert replay.call_count == 2
+    changed_policy = c.queue.policy.model_copy(
+        update={
+            "minimum_submission_interval_blocks": c.queue.policy.minimum_submission_interval_blocks
+            + 1
+        }
+    )
+    with pytest.raises(ValueError):
+        work.review_service_assignment(assignment, changed_policy)
+    assert replay.call_count == 3
+
+
+def test_retained_record_decode_reuse_checks_current_bytes_and_index(queue_case, monkeypatch):
+    from umi.competition_cohort_service_work import ServiceWorkAdmission
+
+    c = queue_case
+    accepted = admit(c)
+    original = ServiceWorkAdmission.model_validate_json
+    decoded = Mock(wraps=original)
+    monkeypatch.setattr(ServiceWorkAdmission, "model_validate_json", decoded)
+    with c.queue.journal.read_transaction() as db:
+        first = c.queue._raw_admission(accepted.ordinal, db)
+        second = c.queue._raw_admission(accepted.ordinal, db)
+    assert first == second == accepted and first is not second
+    assert decoded.call_count == 1
+    object.__setattr__(second, "ordinal", 999)
+    with c.queue.journal.read_transaction() as db:
+        assert c.queue._raw_admission(accepted.ordinal, db) == accepted
+    assert decoded.call_count == 1
+    # An external same-slot byte change must miss, even without a conflict hold.
+    changed = accepted.model_copy(update={"ordinal": accepted.ordinal + 1})
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_admission' AND id=?",
+            (canonical_json_bytes(changed), accepted.work_sha256),
+        )
+    with c.queue.journal.read_transaction() as db, pytest.raises(ValueError, match="index differs"):
+        c.queue._raw_admission(accepted.ordinal, db)
+    assert decoded.call_count == 2
+
+
+def test_retained_record_reuse_does_not_cache_claim_index(queue_case):
+    c = queue_case
+    accepted = admit(c)
+    with c.queue.journal.read_transaction() as db:
+        assert c.queue._raw_admission(accepted.ordinal, db) == accepted
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE service_claims SET admission=? WHERE ordinal=?", ("ff" * 32, accepted.ordinal)
+        )
+    with c.queue.journal.read_transaction() as db, pytest.raises(ValueError, match="index differs"):
+        c.queue._raw_admission(accepted.ordinal, db)
