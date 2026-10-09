@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -77,6 +78,48 @@ async def test_export_uses_the_verified_frame_without_reloading_it(
         )
         assert context == h.reader._archive_context(height)
         assert received == saved
+
+
+async def test_retained_frame_load_uses_one_read_snapshot_during_unrelated_writer(
+    history_case, monkeypatch
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    expected = h.reader._load(h.end)
+    journal = h.reader.journal
+    read = journal.read_transaction
+    snapshots = []
+
+    @contextmanager
+    def counted():
+        with read() as db:
+            assert db.execute("PRAGMA query_only").fetchone() == (1,)
+            snapshots.append(db)
+            yield db
+
+    monkeypatch.setattr(journal, "read_transaction", counted)
+    with journal.transaction():
+        assert h.reader._load(h.end) == expected
+    assert len(snapshots) == 1
+    assert h.reader._load(h.end + 1) is None
+    assert len(snapshots) == 2
+
+
+@pytest.mark.parametrize(
+    "kind", ["control_history_block", "control_history_chunk", "control_history_object"]
+)
+async def test_retained_frame_load_observes_new_conflict_on_next_read(history_case, kind):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    assert h.reader._load(h.end) is not None
+    journal = h.reader.journal
+    # Every frame has its own key; select the last frame and all its actual
+    # chunk/object keys so this tests its complete newly committed fence.
+    keys = [str(h.end)] if kind == "control_history_block" else journal.keys(kind)
+    with pytest.raises(ValueError, match="conflict"):
+        journal.put_many((kind, key, {"different": True}) for key in keys)
+    with pytest.raises(ValueError, match="conflict held"):
+        h.reader._load(h.end)
 
 
 @pytest.fixture

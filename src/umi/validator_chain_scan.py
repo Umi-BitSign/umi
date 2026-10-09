@@ -13,9 +13,11 @@ this module.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from functools import partial
 from itertools import pairwise
@@ -35,7 +37,7 @@ from .chain_evidence import (
     StorageProofVerifier,
     assert_shadow_no_weight_interval,
 )
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
 
@@ -558,10 +560,26 @@ class FinalizedBlockScanner:
         if not isinstance(identity, VerifiedFinalizedBlockIdentity):
             raise TypeError("identity must be a VerifiedFinalizedBlockIdentity")
         runtime = await self._required_runtime(identity)
-        body = await self._required_body(
-            identity, state_version=runtime.pin.extrinsics_root_state_version
+        # Body and event proofs are independent once the parent runtime and
+        # finalized child identity are selected. Keep both owned through errors
+        # and cancellation before the caller can close their shared provider.
+        tasks = (
+            asyncio.create_task(
+                self._required_body(
+                    identity, state_version=runtime.pin.extrinsics_root_state_version
+                )
+            ),
+            asyncio.create_task(self._required_events(identity, runtime)),
         )
-        events_raw = await self._required_events(identity, runtime)
+        try:
+            body, events_raw = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError, Exception):
+                    await await_owned_task(task)
+            raise
 
         # Runtime decoding and proof tools can take seconds. Keep the loop
         # responsive, but drain each owned thread before releasing its caller's

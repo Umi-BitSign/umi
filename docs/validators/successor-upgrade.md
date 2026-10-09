@@ -447,6 +447,16 @@ proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
 Restart requires native replay even when all archive files are already present.
 
+Each retained history frame reads its chunk references and proof objects through
+one native query-only database snapshot. It does not reserve the writer slot or
+open a connection per object. The next frame load takes a fresh snapshot and
+observes newly committed conflict holds; byte bounds, content identities and
+native proof verification are unchanged.
+
+For each verified historical block, body and event collection overlap after
+selecting its parent runtime. Both remain bound to the same finalized identity;
+failure or cancellation drains both operations before releasing the provider.
+
 Within a running provider, identical proof-backed runtime code reuses the already
 validated immutable metadata from the pinned executor. This bounded reuse avoids
 decoding the same helper response for every block. Every caller still supplies

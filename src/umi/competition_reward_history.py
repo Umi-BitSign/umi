@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sqlite3
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -260,8 +261,8 @@ class RewardControlHistoryReader:
         # acknowledgement is an exact immutable retry, never another decision.
         self.journal.put_many(records)
 
-    def _object(self, sha: str, size: int) -> bytes:
-        value = self.journal.get("control_history_object", sha)
+    def _object(self, sha: str, size: int, *, db: sqlite3.Connection) -> bytes:
+        value = self.journal.get("control_history_object", sha, db=db)
         if (
             type(value) is not dict
             or set(value) != {"hex"}
@@ -275,7 +276,13 @@ class RewardControlHistoryReader:
         return raw
 
     def _load(self, height: int) -> dict[str, bytes] | None:
-        frame = self.journal.get("control_history_block", str(height))
+        # A frame and all its chunks commit together. Read that same snapshot
+        # without opening another database connection for every proof object.
+        with self.journal.read_transaction() as db:
+            return self._load_frame(height, db=db)
+
+    def _load_frame(self, height: int, *, db: sqlite3.Connection) -> dict[str, bytes] | None:
+        frame = self.journal.get("control_history_block", str(height), db=db)
         if frame is None:
             return None
         if type(frame) is not dict or set(frame) != set(_FIELDS):
@@ -292,7 +299,7 @@ class RewardControlHistoryReader:
             total = 0
             for sha in refs:
                 checked_digest(sha)
-                chunk = self.journal.get("control_history_chunk", sha)
+                chunk = self.journal.get("control_history_chunk", sha, db=db)
                 if type(chunk) is not dict or set(chunk) != {"length", "recipe_hex"}:
                     raise ValueError("control history chunk is missing or malformed")
                 if (
@@ -315,7 +322,7 @@ class RewardControlHistoryReader:
                         sha256=sha,
                         expanded_bytes=chunk["length"],
                         kind="proof",
-                        resolve=self._object,
+                        resolve=partial(self._object, db=db),
                     )
                 )
             result[name] = b"".join(parts)
