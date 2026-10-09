@@ -424,7 +424,7 @@ def create_intake_app(
     @app.get("/v1/competition/readiness")
     async def readiness():
         try:
-            durable = await asyncio.to_thread(store.durable_admission_status)
+            durable = await app.state.durable_admission_status()
             admission = durable["admission_capacity"]
             submission_head = durable["retained_submission_head"]
             capture = await finality_cache.cached()
