@@ -27,7 +27,12 @@ from .protocol import BlockHash, StrictProtocolModel
 from .runtime_metadata import MAX_CODE_BYTES, RuntimeMetadataExecutor, collect_executed_runtime
 from .signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES, exact_signed_extrinsic
 from .substrate_proof import SubprocessStorageProofVerifier
-from .validator_chain import FinalizedProofCollector, ProofCollectionLimits, RawJsonRpc
+from .validator_chain import (
+    SUPPORTED_EXTRINSICS_ROOT_STATE_VERSION,
+    FinalizedProofCollector,
+    ProofCollectionLimits,
+    RawJsonRpc,
+)
 from .validator_chain_scan import _extrinsic_statuses
 
 _HEX = re.compile(r"0x(?:[0-9a-f]{2})+")
@@ -308,7 +313,10 @@ class MortalReceiptReader:
                     self._verifier.verify_extrinsics_root,
                     expected_root=bytes.fromhex(header.extrinsics_root[2:]),
                     extrinsics=body,
-                    state_version=1,
+                    # A mismatch never authorizes another layout. Matching
+                    # transactions additionally require the proved supported
+                    # parent runtime before any outcome is accepted.
+                    state_version=SUPPORTED_EXTRINSICS_ROOT_STATE_VERSION,
                 )
             )
             is True,

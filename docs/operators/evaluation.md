@@ -349,6 +349,12 @@ new current history or delivery receipt does not replay every original order.
 Changed selection bytes and conflict holds invalidate reuse, while current
 history, finality, running workers and evaluator readiness remain fresh checks.
 
+Overlapping public status and readiness requests share one in-flight native
+admission checkpoint/capacity read. A later request reads current state again;
+neither completed results nor failures are cached. Cancelling one HTTP request
+drains its owned read without cancelling other readers. Registration and finality
+checks remain separate from this shared disk read.
+
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
 runtime and input clips, it reserves one source before inference and preserves

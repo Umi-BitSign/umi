@@ -250,6 +250,7 @@ class _ProofVerifier:
         self.accepted = accepted
 
     def verify_extrinsics_root(self, **_kwargs) -> bool:
+        assert _kwargs["state_version"] == 0
         return self.accepted
 
     def __call__(self, **_kwargs) -> bool:

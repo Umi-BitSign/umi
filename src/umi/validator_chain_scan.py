@@ -558,7 +558,9 @@ class FinalizedBlockScanner:
         if not isinstance(identity, VerifiedFinalizedBlockIdentity):
             raise TypeError("identity must be a VerifiedFinalizedBlockIdentity")
         runtime = await self._required_runtime(identity)
-        body = await self._required_body(identity, state_version=runtime.pin.state_version)
+        body = await self._required_body(
+            identity, state_version=runtime.pin.extrinsics_root_state_version
+        )
         events_raw = await self._required_events(identity, runtime)
 
         # Runtime decoding and proof tools can take seconds. Keep the loop

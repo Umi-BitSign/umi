@@ -62,14 +62,17 @@ def test_single_item_callback_wraps_verify_many(tmp_path: Path) -> None:
     )
 
 
-def test_extrinsics_root_callback_uses_the_same_pinned_sidecar(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state_version", [0, 1])
+def test_extrinsics_root_callback_uses_the_same_pinned_sidecar(
+    tmp_path: Path, state_version: int
+) -> None:
     path, digest = executable(tmp_path, "extrinsics-root")
     verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
     assert (
         verifier.verify_extrinsics_root(
             expected_root=b"\x22" * 32,
             extrinsics=(b"first", b"second"),
-            state_version=1,
+            state_version=state_version,
         )
         is True
     )
@@ -78,7 +81,7 @@ def test_extrinsics_root_callback_uses_the_same_pinned_sidecar(tmp_path: Path) -
         verifier.verify_extrinsics_root(
             expected_root=b"\x22" * 32,
             extrinsics=(b"invalid-root",),
-            state_version=1,
+            state_version=state_version,
         )
     assert mismatch.value.reason_code == "invalid_extrinsics_root"
 
@@ -299,7 +302,7 @@ def test_extrinsics_root_preflight_enforces_body_shape_and_limits(tmp_path: Path
         verifier.verify_extrinsics_root(
             expected_root=b"r" * 32,
             extrinsics=(),
-            state_version=0,
+            state_version=2,
         )
 
 

@@ -292,6 +292,10 @@ def _strict_uint(value: Any, reason_code: str, *, maximum: int = _MAX_BLOCK_NUMB
     return value
 
 
+# The only admitted RuntimeVersion byte is 1: V1 storage, V0 extrinsics.
+SUPPORTED_EXTRINSICS_ROOT_STATE_VERSION = 0
+
+
 @dataclass(frozen=True, slots=True)
 class FinalizedRuntimePin:
     """Runtime metadata identity accepted for storage key construction and decode."""
@@ -320,6 +324,16 @@ class FinalizedRuntimePin:
             raise ValueError("UMI proof verification requires Substrate state version 1")
         if self.ss58_prefix != 42:
             raise ValueError("UMI version 0.1 requires the Bittensor SS58 prefix")
+
+    @property
+    def extrinsics_root_state_version(self) -> int:
+        """The supported runtime version 1 uses V1 storage and V0 block bodies.
+
+        Match the pinned SDK's RuntimeVersion::extrinsics_root_state_version;
+        the storage trie layout is not the ordered extrinsics trie layout.
+        Runtime version 2 is not admitted by this pin.
+        """
+        return SUPPORTED_EXTRINSICS_ROOT_STATE_VERSION
 
 
 @dataclass(frozen=True, slots=True)

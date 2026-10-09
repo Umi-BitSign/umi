@@ -177,7 +177,7 @@ def history(tx, monkeypatch, request):
             item.verified.append(("body", extrinsics, expected_root))
             return (
                 not item.rejected_body
-                and state_version == 1
+                and state_version == 0
                 and hashlib.sha256(b"".join(extrinsics)).digest() == expected_root
             )
 

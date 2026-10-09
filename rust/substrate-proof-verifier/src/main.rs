@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use serde::{Deserialize, Serialize};
 use sp_core::{Blake2Hasher, H256};
-use sp_trie::{LayoutV1, StorageProof, Trie, TrieConfiguration, TrieDBBuilder};
+use sp_trie::{LayoutV0, LayoutV1, StorageProof, Trie, TrieConfiguration, TrieDBBuilder};
 
 const REQUEST_SCHEMA: &str = "umi-substrate-proof/1";
 const EXTRINSICS_ROOT_REQUEST_SCHEMA: &str = "umi-substrate-extrinsics-root/1";
@@ -308,7 +308,7 @@ fn verify_extrinsics_root(request: &ExtrinsicsRootRequest) -> Result<(), Verific
         return Err(VerificationError::InvalidInput);
     }
     validate_request_id(&request.request_id)?;
-    if request.state_version != 1 {
+    if request.state_version > 1 {
         return Err(VerificationError::UnsupportedStateVersion);
     }
     let expected_bytes = decode_hex(&request.expected_root, 32, false)?;
@@ -327,7 +327,13 @@ fn verify_extrinsics_root(request: &ExtrinsicsRootRequest) -> Result<(), Verific
         }
         extrinsics.push(extrinsic);
     }
-    let actual = LayoutV1::<Blake2Hasher>::ordered_trie_root(extrinsics.iter());
+    // This is the block body's explicit trie layout. Runtime system version 1
+    // uses LayoutV0 here while retaining LayoutV1 for state/storage proofs.
+    let actual = match request.state_version {
+        0 => LayoutV0::<Blake2Hasher>::ordered_trie_root(extrinsics.iter()),
+        1 => LayoutV1::<Blake2Hasher>::ordered_trie_root(extrinsics.iter()),
+        _ => return Err(VerificationError::UnsupportedStateVersion),
+    };
     if actual.as_bytes() != expected_bytes.as_slice() {
         return Err(VerificationError::InvalidExtrinsicsRoot);
     }
@@ -885,6 +891,56 @@ mod tests {
         assert_eq!(verify_extrinsics_root(&request), Ok(()));
 
         request.expected_root = format!("0x{}", "00".repeat(32));
+        assert_eq!(
+            verify_extrinsics_root(&request),
+            Err(VerificationError::InvalidExtrinsicsRoot)
+        );
+    }
+
+    #[test]
+    fn verifies_real_finney_body_with_v0_and_rejects_wrong_layout_or_body() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/finney-9178000-body.json")).unwrap();
+        let mut request = ExtrinsicsRootRequest {
+            schema: EXTRINSICS_ROOT_REQUEST_SCHEMA.to_owned(),
+            request_id: "finney-9178000".to_owned(),
+            state_version: 0,
+            expected_root: fixture["header"]["extrinsicsRoot"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            extrinsics: fixture["extrinsics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect(),
+        };
+        assert_eq!(verify_extrinsics_root(&request), Ok(()));
+        request.state_version = 1;
+        assert_eq!(
+            verify_extrinsics_root(&request),
+            Err(VerificationError::InvalidExtrinsicsRoot)
+        );
+        request.state_version = 2;
+        assert_eq!(
+            verify_extrinsics_root(&request),
+            Err(VerificationError::UnsupportedStateVersion)
+        );
+        request.state_version = 0;
+        request.extrinsics.swap(0, 1);
+        assert_eq!(
+            verify_extrinsics_root(&request),
+            Err(VerificationError::InvalidExtrinsicsRoot)
+        );
+        request.extrinsics.swap(0, 1);
+        let last = request.extrinsics.pop().unwrap();
+        assert_eq!(
+            verify_extrinsics_root(&request),
+            Err(VerificationError::InvalidExtrinsicsRoot)
+        );
+        request.extrinsics.push(last);
+        request.extrinsics[0].push_str("00");
         assert_eq!(
             verify_extrinsics_root(&request),
             Err(VerificationError::InvalidExtrinsicsRoot)

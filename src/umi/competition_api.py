@@ -32,6 +32,7 @@ from .competition_store import (
     HistoricalIntakeArchiveBinding,
 )
 from .competition_submission_checkpoint import SubmissionCheckpointError
+from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import RegistrationSnapshot, SignedSubmission, StrictProtocolModel, digest
 from .protocol import canonical_json_bytes
 
@@ -124,6 +125,18 @@ def create_app(
     )
     app = FastAPI(title=title, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.competition_store = store
+    durable_read: asyncio.Task | None = None
+
+    async def durable_admission_status():
+        nonlocal durable_read
+        # Share only an in-flight native read. Later requests must read the
+        # current checkpoint and capacity again; no success or failure is cached.
+        # Cancellation drains the shared operation without cancelling its peers.
+        if durable_read is None or durable_read.done():
+            durable_read = asyncio.create_task(run_owned_thread(store.durable_admission_status))
+        return await await_owned_task(durable_read)
+
+    app.state.durable_admission_status = durable_admission_status
     if cohort_intake is not None:
         if registration_source != "verifier_attested_finality" or cohort_capture_provider is None:
             raise ValueError("recoverable intake requires its owned finality capture provider")
@@ -205,7 +218,7 @@ def create_app(
     @app.get("/v1/competition/status")
     async def status():
         try:
-            durable = await run_in_threadpool(store.durable_admission_status)
+            durable = await app.state.durable_admission_status()
         except SubmissionCheckpointError as error:
             raise HTTPException(503, "durable admission state unavailable") from error
         admission = durable["admission_capacity"]

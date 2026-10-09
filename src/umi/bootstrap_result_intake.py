@@ -821,7 +821,7 @@ def _replay_and_store_blocks(
             ports.proof_verifier.verify_extrinsics_root(
                 expected_root=bytes.fromhex(block.header.extrinsics_root[2:]),
                 extrinsics=extrinsics,
-                state_version=block.runtime.pin.state_version,
+                state_version=block.runtime.pin.to_evidence().extrinsics_root_state_version,
             )
             is not True
         ):

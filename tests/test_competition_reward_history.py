@@ -274,7 +274,7 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
         h.item.verifier,
         "verify_extrinsics_root",
         lambda **kw: (
-            kw["state_version"] == 1 and kw["extrinsics"] == root_bodies[kw["expected_root"]]
+            kw["state_version"] == 0 and kw["extrinsics"] == root_bodies[kw["expected_root"]]
         ),
         raising=False,
     )

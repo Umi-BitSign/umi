@@ -427,6 +427,109 @@ def test_concurrent_checkpoint_reads_queue_before_the_cross_process_timeout(
     assert scans == 1
 
 
+@pytest.mark.asyncio
+async def test_overlapping_status_and_readiness_share_only_the_inflight_native_read(
+    config, policy, monkeypatch
+):
+    import asyncio
+
+    app, _ = app_for(config, policy)
+    store = app.state.competition_store
+    original = store.durable_admission_status
+    release = threading.Event()
+    readers_entered = asyncio.Event()
+    calls = 0
+    waiting = 0
+
+    def blocked_read():
+        nonlocal calls
+        calls += 1
+        assert release.wait(timeout=60)
+        return original()
+
+    monkeypatch.setattr(store, "durable_admission_status", blocked_read)
+    shared = app.state.durable_admission_status
+
+    async def observe_reader():
+        nonlocal waiting
+        waiting += 1
+        if waiting == 8:
+            readers_entered.set()
+        return await shared()
+
+    app.state.durable_admission_status = observe_reader
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        await app.state.registration_snapshot_cache.collect_fresh()
+        paths = ["/v1/competition/status"] * 6 + ["/v1/competition/readiness"] * 2
+        tasks = [asyncio.create_task(client.get(path)) for path in paths]
+        try:
+            await asyncio.wait_for(readers_entered.wait(), timeout=30)
+        finally:
+            release.set()
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=60)
+        assert calls == 1
+        assert all(response.status_code == 200 for response in responses)
+        heads = [response.json()["retained_submission_head"] for response in responses]
+        assert all(head == heads[0] for head in heads)
+
+        signed = submission(policy)
+        await asyncio.to_thread(store.admit, signed, snapshot(), 110)
+        response = await client.get("/v1/competition/status")
+        assert response.status_code == 200
+        assert calls == 2
+        assert response.json()["retained_submission_head"]["record_count"] == (
+            heads[0]["record_count"] + 1
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_shared_native_status_read_drains_cancellation_and_retries_failure(
+    config, policy, monkeypatch, failure
+):
+    import asyncio
+
+    app, _ = app_for(config, policy)
+    store = app.state.competition_store
+    original = store.durable_admission_status
+    entered, release = threading.Event(), threading.Event()
+    calls = 0
+
+    def blocked_read():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=60)
+        if failure and calls == 1:
+            raise SubmissionCheckpointError("checkpoint temporarily unavailable")
+        return original()
+
+    monkeypatch.setattr(store, "durable_admission_status", blocked_read)
+    first = asyncio.create_task(app.state.durable_admission_status())
+    second = asyncio.create_task(app.state.durable_admission_status())
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        first.cancel()
+        await asyncio.sleep(0)
+        assert not first.done() and not second.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    if failure:
+        with pytest.raises(SubmissionCheckpointError):
+            await second
+    else:
+        assert (await second)["retained_submission_head"]["record_count"] == 1
+    assert calls == 1
+    fresh = await app.state.durable_admission_status()
+    assert fresh["retained_submission_head"]["record_count"] == 1
+    assert calls == 2
+
+
 def test_readiness_flags_are_deployment_bound(config, policy):
     deployment = PublicIntakeDeployment.model_validate(
         {

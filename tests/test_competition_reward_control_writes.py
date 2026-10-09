@@ -139,7 +139,7 @@ async def block_case(historical, monkeypatch):
 
     def verify_body(**kw):
         assert kw["expected_root"] == bytes.fromhex(block_header["extrinsicsRoot"][2:])
-        assert kw["extrinsics"] == raw and kw["state_version"] == 1
+        assert kw["extrinsics"] == raw and kw["state_version"] == 0
         return h.fault != "body"
 
     monkeypatch.setattr(h.item.verifier, "verify_extrinsics_root", verify_body, raising=False)
