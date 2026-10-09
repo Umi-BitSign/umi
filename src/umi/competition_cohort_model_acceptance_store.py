@@ -159,8 +159,7 @@ class CohortModelAcceptances:
         # Certificates and reserved intents already bind the recipient. Use the
         # existing ledger index to avoid replaying unrelated miners under its
         # shared lock; the original selected record is still fully verified.
-        for _, raw in self.intake._records(db, history, track="model", hotkey=hotkey):
-            record = read_participation(raw)
+        for _, _, record in self.intake._parsed_records(db, history, track="model", hotkey=hotkey):
             if digest(record.request.signed_submission.submission) == submission:
                 replay_participation(record, history, self.intake.policy)
                 return record

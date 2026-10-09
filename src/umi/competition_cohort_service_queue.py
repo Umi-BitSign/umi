@@ -7,6 +7,7 @@ The host must authenticate its phase/proof sources and serialize its lifecycle.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_evaluation import RecoverableEvaluationRound
@@ -72,6 +74,7 @@ class ServiceWorkQueue:
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if self.config.policy_sha256 != digest(self.policy):
             raise ValueError("service queue policy binding differs")
+        self._parsed_records = AssignmentVerificationReuse(maximum_entries=1024)
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -92,12 +95,26 @@ class ServiceWorkQueue:
                 "admission TEXT UNIQUE NOT NULL)"
             )
 
+    def _decoded_record(self, kind, key, model, db=None):
+        # The native read checks current conflicts, bounds and canonical bytes.
+        # Only decoding is reusable; owner indices and semantic bindings remain
+        # fresh caller checks. Never share a mutable object with another caller.
+        raw = self.journal.get_raw(kind, key, db=db)
+        if raw is None:
+            return None
+        fingerprint = (model, hashlib.sha256(raw).digest())
+        cached = self._parsed_records.lookup((kind, key), fingerprint)
+        if cached is not None:
+            return cached
+        value = model.model_validate_json(raw)
+        self._parsed_records.remember((kind, key), fingerprint, value)
+        return value
+
     def _catalog(self, db=None):
         key = self.config.catalog_sha256
-        raw = self.journal.get("service_catalog", key, db=db)
-        if raw is None:
+        signed = self._decoded_record("service_catalog", key, SignedServiceWorkCatalog, db)
+        if signed is None:
             raise FileNotFoundError("service catalog has not been installed")
-        signed = SignedServiceWorkCatalog.model_validate_json(canonical_json_bytes(raw))
         if (
             digest(signed.catalog) != key
             or signed.catalog.service_terms_sha256 != self.config.service_terms_sha256
@@ -109,9 +126,9 @@ class ServiceWorkQueue:
             round_key = self.journal.get("service_catalog_round", key, db=db)
             if not isinstance(round_key, str):
                 raise FileNotFoundError("service catalog lacks its original prepared round")
-        round_ = RecoverableEvaluationRound.model_validate_json(
-            canonical_json_bytes(self.journal.get("service_round", round_key, db=db))
-        )
+        round_ = self._decoded_record("service_round", round_key, RecoverableEvaluationRound, db)
+        if round_ is None:
+            raise ValueError("service round is missing")
         if digest(round_) != round_key or round_.cohort_sha256 != signed.catalog.cohort_sha256:
             raise ValueError("service round changed its content identity")
         return signed, round_
@@ -216,10 +233,9 @@ class ServiceWorkQueue:
         if catalog is None:
             catalog = self._catalog(db)[0].catalog
         work = service_work_key(catalog, ordinal)
-        raw = self.journal.get("service_admission", work, db=db)
-        if raw is None:
+        value = self._decoded_record("service_admission", work, ServiceWorkAdmission, db)
+        if value is None:
             raise FileNotFoundError("accepted service admission is missing")
-        value = ServiceWorkAdmission.model_validate_json(canonical_json_bytes(raw))
         if (
             value.ordinal != ordinal
             or value.work_sha256 != work
@@ -232,9 +248,9 @@ class ServiceWorkQueue:
     def _read(self, ordinal: int, db) -> ServiceWorkAdmission:
         value = self._raw_admission(ordinal, db)
         previous = None if ordinal == 1 else self._raw_admission(ordinal - 1, db)
-        source = CohortOrderHistory.model_validate_json(
-            canonical_json_bytes(self.journal.get("order_history", value.history_sha256, db=db))
-        )
+        source = self._decoded_record("order_history", value.history_sha256, CohortOrderHistory, db)
+        if source is None:
+            raise ValueError("service admission history is missing")
         if digest(source) != value.history_sha256:
             raise ValueError("service admission history changed its content identity")
         catalog, round_ = self._catalog(db)
@@ -433,8 +449,8 @@ class ServiceWorkQueue:
             round=round_,
             admission=value,
             previous=None if value.ordinal == 1 else self._raw_admission(value.ordinal - 1, db),
-            source=CohortOrderHistory.model_validate_json(
-                canonical_json_bytes(self.journal.get("order_history", value.history_sha256, db=db))
+            source=self._decoded_record(
+                "order_history", value.history_sha256, CohortOrderHistory, db
             ),
         )
 

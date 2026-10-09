@@ -2471,3 +2471,48 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
     )
     assert path.read_bytes() == original_bytes
     assert b["service_case"].p.model.calls == 1
+
+
+def test_static_service_body_reuse_keeps_current_and_quorum_checks(service_owner, monkeypatch):
+    from unittest.mock import Mock
+
+    from umi import competition_cohort_service_grant as grants
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    c, p = service_owner, service_owner.p
+    grant = produce_grant(p, c, c.window)
+    monkeypatch.setattr(grants, "_historical_service_body_reuse", AssignmentVerificationReuse())
+    replay = Mock(wraps=grants.review_service_assignment)
+    monkeypatch.setattr(grants, "review_service_assignment", replay)
+    first = grants.validate_service_body(grant.body, p.c.policy, p.transport_policy)
+    second = grants.validate_service_body(grant.body, p.c.policy, p.transport_policy)
+    assert first == second == grant.body and first is not second
+    assert replay.call_count == 1
+    object.__setattr__(second.request, "issued_block", 1)
+    assert grants.validate_service_body(grant.body, p.c.policy, p.transport_policy) == grant.body
+    with pytest.raises(ValueError):
+        grants.validate_service_body(second, p.c.policy, p.transport_policy)
+    assert replay.call_count == 2
+    invalid = grant.model_copy(update={"signatures": ()})
+    with pytest.raises(ValueError):
+        grants.verify_service_grant(invalid, p.c.policy, p.transport_policy)
+    with pytest.raises(ValueError):
+        grants.review_service_request_current(grant.body, p.c.policy, c.assignment.source, 0)
+
+
+def test_static_service_body_reuse_binds_transport(service_owner, monkeypatch):
+    from unittest.mock import Mock
+
+    from umi import competition_cohort_service_grant as grants
+    from umi.competition_assignment_reuse import AssignmentVerificationReuse
+
+    c, p = service_owner, service_owner.p
+    grant = produce_grant(p, c, c.window)
+    monkeypatch.setattr(grants, "_historical_service_body_reuse", AssignmentVerificationReuse())
+    replay = Mock(wraps=grants.review_service_assignment)
+    monkeypatch.setattr(grants, "review_service_assignment", replay)
+    grants.validate_service_body(grant.body, p.c.policy, p.transport_policy)
+    changed = p.transport_policy.model_copy(update={"validator_registry": ()})
+    with pytest.raises(ValueError):
+        grants.validate_service_body(grant.body, p.c.policy, changed)
+    assert replay.call_count == 2

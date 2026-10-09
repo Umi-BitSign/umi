@@ -26,7 +26,7 @@ from .competition_cohort_service_grant import (
     verify_service_parent,
 )
 from .competition_cohort_service_requests import ServiceWorkRequests
-from .competition_cohort_service_work import ServiceWorkAssignment
+from .competition_cohort_service_work import ServiceWorkAssignment, review_service_assignment
 from .competition_execution import ExecutionBoundary
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse, verify_recovered_response
@@ -155,7 +155,7 @@ class ServiceWorkTerminals:
 
     def read(self, assignment: ServiceWorkAssignment) -> SignedServiceTerminal | None:
         """Recover the original terminal and any interrupted immutable export."""
-        assignment = ServiceWorkAssignment.model_validate_json(canonical_json_bytes(assignment))
+        assignment = review_service_assignment(assignment, self.policy)
         owned = self.requests.queue.assignment(assignment.admission.claim)
         if owned != assignment:
             raise ValueError("service terminal lookup changed its accepted assignment")
