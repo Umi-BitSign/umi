@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -119,12 +122,84 @@ def test_read_transaction_cannot_write_or_ignore_generation(journal):
         journal.get("intent", "a")
 
 
+@pytest.mark.parametrize("reserved", [False, True])
+def test_same_instance_reader_observes_snapshot_while_writer_is_busy(journal, reserved):
+    if reserved:
+        journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
+    journal.put("intent", "a", {"original": True})
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('a')")
+            entered.set()
+            assert release.wait(60), "test did not release its writer"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(30)
+            # The same RoundJournal instance must permit SQLite's committed
+            # read snapshot while the writer holds an uncommitted conflict.
+            reader = pool.submit(journal.get, "intent", "a")
+            assert reader.result(timeout=5) == {"original": True}
+        finally:
+            release.set()
+        pending.result(timeout=30)
+    with pytest.raises(ValueError, match="conflict held"):
+        journal.get("intent", "a")
+
+
 def test_read_transaction_preserves_reservation_fence_checks(journal):
     journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
     with sqlite3.connect(journal.path) as db:
         db.execute('DROP TRIGGER "round_generation_records_insert"')
     with pytest.raises(ValueError, match="capability fence missing"):
         journal.get("intent", "a")
+
+
+@pytest.mark.parametrize("damage", ["symlink", "dangling", "hardlink", "public"])
+def test_concurrent_read_path_still_rejects_unsafe_sqlite_sidecars(journal, tmp_path, damage):
+    journal.put("intent", "a", {"original": True})
+    target = tmp_path / "unsafe-target"
+    target.write_bytes(b"private data")
+    target.chmod(0o600)
+    sidecar = Path(str(journal.path) + "-journal")
+    if damage in {"symlink", "dangling"}:
+        sidecar.symlink_to(target if damage == "symlink" else tmp_path / "missing")
+    elif damage == "hardlink":
+        sidecar.hardlink_to(target)
+    else:
+        sidecar.write_bytes(b"")
+        sidecar.chmod(0o644)
+    try:
+        with pytest.raises(ValueError, match=r"round journal (symlink|must be private)"):
+            journal.get("intent", "a")
+    finally:
+        sidecar.unlink()
+    assert journal.get("intent", "a") == {"original": True}
+    assert target.read_bytes() == b"private data"
+
+
+def test_concurrent_readers_and_writers_preserve_exact_records(tmp_path):
+    journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "concurrent"}, maximum_rounds=32)
+    journal.reserve_records(
+        "concurrent",
+        tuple(rounds.RecordReservation("case", str(n), 1024) for n in range(20)),
+    )
+
+    def cycle(n):
+        body = {"case": n}
+        journal.put("case", str(n), body)
+        for _ in range(3):
+            assert journal.get("case", str(n)) == body
+        journal.put("case", str(n), body)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(cycle, n) for n in range(20)]
+        for future in futures:
+            future.result(timeout=60)
+    assert sorted(journal.keys("case"), key=int) == [str(n) for n in range(20)]
 
 
 def test_full_cohort_sized_intent_survives_restart_and_exact_retry(journal):

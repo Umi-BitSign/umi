@@ -7,6 +7,8 @@ retirement certificates are exercised. No installed service or reward is claimed
 import asyncio
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import pairwise
 from types import SimpleNamespace
 
@@ -177,6 +179,95 @@ async def test_expired_unsent_endpoint_reaches_retirement_lane(scheduled, monkey
     assert (
         canonical_json_bytes(selection_grant(*p.delivery_recovery.selection(q.slot)[:2]))
         == original
+    )
+
+
+async def test_scheduling_hints_read_committed_state_without_waiting_for_writer(scheduled):
+    q = scheduled
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    schedule = worker.schedule
+    before = schedule.pending(2, advance=False)
+    position = schedule.cursor("cases")
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with schedule.journal.transaction() as db:
+            db.execute(
+                "INSERT INTO endpoint_schedule_cursor VALUES ('cases',?) "
+                "ON CONFLICT(name) DO UPDATE SET position=excluded.position",
+                (q.slot,),
+            )
+            entered.set()
+            assert release.wait(60)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(30)
+            assert pool.submit(schedule.cursor, "cases").result(timeout=5) == position
+            assert pool.submit(schedule.pending, 2, advance=False).result(timeout=5) == before
+        finally:
+            release.set()
+        pending.result(timeout=30)
+    assert schedule.cursor("cases") == q.slot
+    assert schedule.pending(2, advance=False) == before
+
+
+@pytest.mark.parametrize("grant_reached_miner", [False, True])
+async def test_expired_grant_retry_cannot_block_native_retirement(
+    scheduled, monkeypatch, grant_reached_miner
+):
+    from umi.competition_cohort_grant_delivery import CohortEndpointGrantDelivery
+
+    q, p = scheduled, scheduled.p
+    worker = q.worker()
+    assert (await worker._prepare(q.slot))[0] == "prepared"
+    selected, assignment, _ = p.delivery_recovery.selection(q.slot)
+    grant = selection_grant(selected, assignment)
+    case = p.e.job.cases[0].case_id
+    original = p.delivery_recovery.transport
+    calls = []
+
+    class LostGrantAcknowledgment(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            calls.append(request.url.path)
+            if request.url.path == COHORT_GRANT_PATH:
+                if grant_reached_miner:
+                    response = await original.handle_async_request(request)
+                    assert response.status_code == 200
+                raise httpx.ReadError("grant acknowledgment lost")
+            return await original.handle_async_request(request)
+
+    p.delivery_recovery.transport = LostGrantAcknowledgment()
+    assert (await CohortEndpointGrantDelivery(p.delivery_recovery).deliver(q.slot)).receipt is None
+    expire_child(p, grant, monkeypatch)
+
+    class RejectGrantRetry(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            calls.append(request.url.path)
+            if request.url.path == COHORT_GRANT_PATH:
+                return httpx.Response(422)
+            return await original.handle_async_request(request)
+
+    p.delivery_recovery.transport = RejectGrantRetry()
+    result = await worker.attempts.advance(q.slot, case, one_stage=True)
+    assert COHORT_RETIRE_PATH in calls
+    if grant_reached_miner:
+        assert result["reason"] == "retirement_retained"
+        assert worker.attempts.phase(q.slot, case) == "certification"
+    else:
+        # A local deadline is not evidence that the miner accepted or retired it.
+        assert result["reason"] == "retirement_not_acknowledged"
+        assert worker.attempts.decisions.retirement.retained(q.slot, case) is None
+        assert worker.attempts.phase(q.slot, case) == "recovery"
+        p.delivery_recovery.transport = original
+        assert (await worker.attempts.advance(q.slot, case, one_stage=True))["reason"] == (
+            "retirement_retained"
+        )
+    assert TRANSLATE_PATH not in calls and p.model.calls == 0
+    assert canonical_json_bytes(selection_grant(*p.delivery_recovery.selection(q.slot)[:2])) == (
+        canonical_json_bytes(grant)
     )
 
 
