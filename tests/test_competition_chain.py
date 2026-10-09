@@ -957,7 +957,9 @@ async def test_wait_ready_propagates_owned_observer_failure(chain, monkeypatch):
 
 @pytest.fixture
 def pooled_sockets(monkeypatch):
-    state = SimpleNamespace(connections=[], requests=0, blocked=False, invalid_next=False)
+    state = SimpleNamespace(
+        connections=[], requests=0, blocked=False, invalid_next=False, started_after=8
+    )
     started = asyncio.Event()
 
     class Socket:
@@ -969,7 +971,7 @@ def pooled_sockets(monkeypatch):
             assert json.loads(request)["id"] == 1
             self.busy = True
             state.requests += 1
-            if state.requests >= 8:
+            if state.requests >= state.started_after:
                 started.set()
 
         async def recv(self):
@@ -1104,6 +1106,7 @@ async def test_persistent_block_read_cancellation_drains_socket(chain_config, po
     state, started = pooled_sockets
     transport = _RegistrationRpc(chain_config, persistent=True)
     state.blocked = True
+    state.started_after = 1
     task = asyncio.create_task(transport.request("chain_getBlock", (_hash(1),)))
     try:
         await asyncio.wait_for(started.wait(), 30)
