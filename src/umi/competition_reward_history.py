@@ -26,8 +26,8 @@ from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     checked_digest,
     decode_evidence,
-    encode_evidence,
 )
+from .competition_evidence_reuse import EvidenceEncodingReuse
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
@@ -148,6 +148,7 @@ class RewardControlHistoryReader:
         self.first_block = first_block
         self.archive = archive
         self.export_archive = export_archive
+        self._encoding = EvidenceEncodingReuse()
         binding = {
             "schema": "umi-reward-control-history/1",
             "control_hotkey": self.hotkey,
@@ -240,7 +241,9 @@ class RewardControlHistoryReader:
         ):
             refs[name] = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
+                encoded = self._encoding.encode(
+                    raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof"
+                )
                 records.extend(
                     ("control_history_object", sha, {"hex": value.hex()})
                     for sha, value in encoded.objects.items()

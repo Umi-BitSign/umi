@@ -441,6 +441,11 @@ crediting an interval. Objects are published before their frame. Within one expo
 object publications reuse up to 4,096 metadata receipts while the exact content
 identity, private parent and file identity/metadata remain unchanged. Changed or
 missing files require ordinary publication again; failed writes are never cached.
+On Linux, a reuse receipt requires successful verification after the inode's
+coarse timestamp tick. Publication during the creation tick cannot qualify a
+later shortcut, even if time has since passed. Platforms without this qualified
+clock use ordinary publication. This avoids trusting a same-size rewrite that
+restored the original mtime within the same ctime tick.
 Readers still validate original objects and proofs independently. The separate
 `proof_import_directory` accepts transferred frames; native readers verify every
 proof before populating a recovery journal or crediting time. An imported block
@@ -452,6 +457,12 @@ one native query-only database snapshot. It does not reserve the writer slot or
 open a connection per object. The next frame load takes a fresh snapshot and
 observes newly committed conflict holds; byte bounds, content identities and
 native proof verification are unchanged.
+
+History retention and proof exporters reuse lossless encodings of identical
+metadata and proof bytes. Each instance retains at most 64 entries and 64 MiB
+of input, output and digest bytes. This is a byte-conversion optimization;
+original hashes, native proof checks, journal conflicts and durable archive
+publication remain unchanged. Restart starts with an empty encoding cache.
 
 For each verified historical block, body and event collection overlap after
 selecting its parent runtime. Both remain bound to the same finalized identity;

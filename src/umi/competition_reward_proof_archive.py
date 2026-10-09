@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import sys
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
@@ -26,8 +28,8 @@ from .competition_evidence_codec import (
     checked_digest,
     checked_size,
     decode_evidence,
-    encode_evidence,
 )
+from .competition_evidence_reuse import EvidenceEncodingReuse
 from .open_competition import digest, identity
 from .private_files import (
     ensure_private_directory,
@@ -41,6 +43,16 @@ MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
 _MAX_PUBLISHED_OBJECTS = 4096
 Kind = Literal["history", "endpoint", "interval", "registration"]
+
+
+def _publication_clock_ns():
+    # Linux inode ctime may use the coarse realtime clock (clock ID 5).
+    # A file changed within that same tick can retain every stamp field.
+    # Other platforms keep ordinary publication until their clock is qualified.
+    if sys.platform == "linux":
+        with suppress(OSError, ValueError):
+            return time.clock_gettime_ns(5)
+    return None
 
 
 class _Bytes(StrictProtocolModel):
@@ -80,6 +92,7 @@ class RewardProofArchive:
         self._published = OrderedDict()
         self._publication_lock = Lock()
         self._pid = os.getpid()
+        self._encoding = EvidenceEncodingReuse()
 
     @staticmethod
     def _object_stamp(path):
@@ -131,14 +144,19 @@ class RewardProofArchive:
                     if self._object_stamp(path) == prior:
                         self._published[sha] = prior
                         return sha
+            verification_tick = _publication_clock_ns()
             self._publish_bytes(path, raw)
             # Only a completed durable publication creates a reusable receipt.
             # Retain bounded metadata, never object payloads or proof authority.
             with suppress(OSError, ValueError):
                 stamp = self._object_stamp(path)
-                self._published[sha] = stamp
-                while len(self._published) > _MAX_PUBLISHED_OBJECTS:
-                    self._published.popitem(last=False)
+                # Only cache a file whose ctime predates this verification.
+                # A newly written file must be checked after its creation tick;
+                # waiting alone cannot make an earlier same-tick check reusable.
+                if verification_tick is not None and stamp[-1] < verification_tick:
+                    self._published[sha] = stamp
+                    while len(self._published) > _MAX_PUBLISHED_OBJECTS:
+                        self._published.popitem(last=False)
         return sha
 
     @staticmethod
@@ -177,7 +195,9 @@ class RewardProofArchive:
             checked_size(len(raw), MAX_FIELD_BYTES)
             parts = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
+                encoded = self._encoding.encode(
+                    raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof"
+                )
                 for value in encoded.objects.values():
                     self._retain_bytes(value)
                 parts.append(

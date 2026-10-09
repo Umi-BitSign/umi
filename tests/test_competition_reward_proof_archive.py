@@ -8,11 +8,21 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import rfc8785
 
+from umi import competition_reward_proof_archive as archive_module
 from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.protocol import canonical_json_bytes
 
 
-def test_large_object_publication_reuses_success_with_unchanged_metadata(tmp_path, monkeypatch):
+@pytest.fixture
+def settled_publication_clock(monkeypatch):
+    # These tests isolate stamp invalidation/LRU/ownership after the inode's
+    # timestamp tick. The separate clock tests cover initial publication.
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: 2**63 - 1)
+
+
+def test_large_object_publication_reuses_success_with_unchanged_metadata(
+    tmp_path, monkeypatch, settled_publication_clock
+):
     archive = RewardProofArchive(tmp_path / "export")
     raw = bytes(range(256)) * 8192
     serialize = rfc8785.dumps
@@ -35,7 +45,9 @@ def test_large_object_publication_reuses_success_with_unchanged_metadata(tmp_pat
 
 
 @pytest.mark.parametrize("change", ["replace", "delete", "parent", "mode", "link", "symlink"])
-def test_publication_cache_invalidates_changed_objects(tmp_path, monkeypatch, change):
+def test_publication_cache_invalidates_changed_objects(
+    tmp_path, monkeypatch, change, settled_publication_clock
+):
     archive = RewardProofArchive(tmp_path / "export")
     original, calls = archive._publish_bytes, []
 
@@ -75,7 +87,9 @@ def test_publication_cache_invalidates_changed_objects(tmp_path, monkeypatch, ch
     assert len(calls) == 2
 
 
-def test_failed_publication_sync_does_not_create_reuse_receipt(tmp_path, monkeypatch):
+def test_failed_publication_sync_does_not_create_reuse_receipt(
+    tmp_path, monkeypatch, settled_publication_clock
+):
     archive = RewardProofArchive(tmp_path / "export")
     original, calls = archive._publish_bytes, []
 
@@ -108,7 +122,9 @@ def test_same_size_corruption_with_restored_mtime_cannot_reuse_publication(tmp_p
     assert sha not in archive._published
 
 
-def test_publication_cache_is_bounded_and_process_local(tmp_path, monkeypatch):
+def test_publication_cache_is_bounded_and_process_local(
+    tmp_path, monkeypatch, settled_publication_clock
+):
     import umi.competition_reward_proof_archive as module
 
     monkeypatch.setattr(module, "_MAX_PUBLISHED_OBJECTS", 2)
@@ -130,7 +146,9 @@ def test_publication_cache_is_bounded_and_process_local(tmp_path, monkeypatch):
     assert calls[-2:] == [b"b", b"b"]
 
 
-def test_concurrent_exact_publications_share_one_completed_write(tmp_path, monkeypatch):
+def test_concurrent_exact_publications_share_one_completed_write(
+    tmp_path, monkeypatch, settled_publication_clock
+):
     archive = RewardProofArchive(tmp_path / "export")
     original, calls = archive._publish_bytes, []
 
@@ -142,6 +160,57 @@ def test_concurrent_exact_publications_share_one_completed_write(tmp_path, monke
     with ThreadPoolExecutor(max_workers=8) as executor:
         values = tuple(executor.map(archive._retain_bytes, [b"original"] * 16))
     assert len(set(values)) == len(calls) == 1
+
+
+def test_initial_tick_requires_later_verified_publication_before_reuse(tmp_path, monkeypatch):
+    archive = RewardProofArchive(tmp_path / "export")
+    publish, calls = archive._publish_bytes, []
+
+    def counted(path, raw):
+        calls.append(raw)
+        publish(path, raw)
+
+    monkeypatch.setattr(archive, "_publish_bytes", counted)
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: 0)
+    sha = archive._retain_bytes(b"original")
+    assert not archive._published
+    path = archive.root / "objects" / (sha + ".json")
+    tick = path.stat().st_ctime_ns
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: tick)
+    archive._retain_bytes(b"original")
+    assert not archive._published
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: tick + 1)
+    archive._retain_bytes(b"original")
+    assert sha in archive._published and len(calls) == 3
+    archive._retain_bytes(b"original")
+    assert len(calls) == 3
+
+
+def test_corruption_in_initial_tick_is_not_trusted_after_time_passes(tmp_path, monkeypatch):
+    archive = RewardProofArchive(tmp_path / "export")
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: 0)
+    sha = archive._retain_bytes(b"original")
+    path = archive.root / "objects" / (sha + ".json")
+    stamp = archive._object_stamp(path)
+    assert not archive._published
+    path.write_bytes(canonical_json_bytes({"hex": b"modified".hex()}))
+    monkeypatch.setattr(archive, "_object_stamp", lambda path: stamp)
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: stamp[-1] + 1)
+    with pytest.raises(ValueError, match="different bytes"):
+        archive._retain_bytes(b"original")
+    assert not archive._published
+
+
+def test_unqualified_clock_uses_ordinary_publication(tmp_path, monkeypatch):
+    archive = RewardProofArchive(tmp_path / "export")
+    monkeypatch.setattr(archive_module, "_publication_clock_ns", lambda: None)
+    sha = archive._retain_bytes(b"original")
+    assert archive._retain_bytes(b"original") == sha and not archive._published
+    (archive.root / "objects" / (sha + ".json")).write_bytes(
+        canonical_json_bytes({"hex": b"modified".hex()})
+    )
+    with pytest.raises(ValueError, match="different bytes"):
+        archive._retain_bytes(b"original")
 
 
 def test_archive_preserves_original_bytes_and_idempotent_frames(tmp_path):
