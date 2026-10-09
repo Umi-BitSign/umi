@@ -39,6 +39,7 @@ from .open_competition import Signature, digest, identity
 from .private_files import PrivateStateBusyError, lock_private_file
 from .private_state_wait import run_private_state_operation
 from .protocol import Video
+from .sqlite_contention import is_sqlite_contention
 
 _RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
 
@@ -184,7 +185,9 @@ class ServiceWorkWorker:
                         retirement=retirement,
                     ),
                 )
-            except PrivateStateBusyError:
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise
@@ -212,7 +215,9 @@ class ServiceWorkWorker:
                     source,
                     execution_boundary(capture),
                 )
-            except PrivateStateBusyError:
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise

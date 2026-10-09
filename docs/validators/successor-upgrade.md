@@ -1975,6 +1975,12 @@ is being retained; updating the export cursor still uses its separate writer.
 Paid-service discovery and endpoint recovery polling also read their cursors and
 queues through read-only snapshots. Their later cursor updates and response
 retention continue to use writer transactions.
+Paid request/terminal preparation and authority observation retry classified
+SQLite BUSY/LOCKED contention within their existing operation budgets. Each
+retry refreshes mutable authority; other database failures still propagate.
+Local idempotent journal operations, including replacement-certificate retention,
+also retry classified SQLite contention within the same budgets. Retries preserve
+the original signed inputs and drain their owned thread before cancellation.
 The cohort and standing-reward systemd templates signal the main process first
 (`KillMode=mixed`, `SendSIGKILL=no`, `TimeoutStopSec=infinity`), allowing its
 cooperative shutdown to finish an owned proof operation before closing children.

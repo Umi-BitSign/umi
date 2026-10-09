@@ -105,7 +105,7 @@ async def publish_all(h):
 async def test_export_page_reads_while_execution_writer_is_busy(exporting):
     worker = exporting.workers[0]
     owner = worker.executions[0]
-    expected = tuple(owner.journal.keys("assignment")[:worker.batch_size])
+    expected = tuple(owner.journal.keys("assignment")[: worker.batch_size])
     entered, release = threading.Event(), threading.Event()
 
     def writer():

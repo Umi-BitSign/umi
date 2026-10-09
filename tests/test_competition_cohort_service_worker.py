@@ -7,6 +7,8 @@ installed coordinator, external reviewer host or chain effect is represented.
 import asyncio
 import errno
 import json
+import sqlite3
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from umi.miner import create_app
 from umi.open_competition import digest, sign_object
 from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes, request_digest
+from umi.sqlite_contention import is_sqlite_contention
 
 from .test_competition_cohort_intake import history_tip
 from .test_competition_cohort_recovery import signatures
@@ -62,6 +65,24 @@ from .test_competition_cohort_service_grants import service_catalog_inputs as se
 from .test_competition_cohort_service_grants import service_owner as service_owner
 from .test_competition_cohort_service_grants import shared_control_group as shared_control_group
 from .test_open_competition import wallet
+
+
+@pytest.fixture(params=["mutex", "sqlite"])
+def contention_error(request, tmp_path):
+    if request.param == "mutex":
+        return PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+    path = tmp_path / "actual-writer-contention.sqlite3"
+    writer, reader = sqlite3.connect(path), sqlite3.connect(path, timeout=0)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            reader.execute("BEGIN IMMEDIATE")
+        assert is_sqlite_contention(caught.value)
+        return caught.value
+    finally:
+        writer.rollback()
+        writer.close()
+        reader.close()
 
 
 @pytest.fixture
@@ -364,7 +385,9 @@ async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monke
         await worker._stop_tasks(task for _, task in active.values())
 
 
-async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):
+async def test_service_prepare_refreshes_inputs_after_mutex_contention(
+    loop, monkeypatch, contention_error
+):
     s = loop
     worker = s.worker()
     original = worker.requests.prepare
@@ -373,7 +396,7 @@ async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, mon
     def contended(*args, **kwargs):
         attempts.append(args)
         if len(attempts) == 1:
-            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+            raise contention_error
         return original(*args, **kwargs)
 
     monkeypatch.setattr(worker.requests, "prepare", contended)
@@ -382,7 +405,9 @@ async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, mon
     assert body.assignment == s.c.assignment
 
 
-async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(loop, monkeypatch):
+async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(
+    loop, monkeypatch, contention_error
+):
     s = loop
     worker = s.worker()
     for expected in (
@@ -403,7 +428,7 @@ async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(l
         attempts.append(args)
         if len(attempts) == 1:
             s.p.finality.head += 1
-            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+            raise contention_error
         return original(*args)
 
     monkeypatch.setattr(worker.terminals, "prepare", contended)
@@ -421,7 +446,20 @@ async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(l
     assert s.p.model.calls == s.p.fetcher.calls == s.inputs == s.signs == 1
 
 
-@pytest.mark.parametrize("failure", [ValueError("invalid proof"), OSError("storage unavailable")])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("invalid proof"),
+        OSError("storage unavailable"),
+        pytest.param(
+            sqlite3.OperationalError("database is locked"),
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 11), reason="Python 3.10 classifies SQLite by message"
+            ),
+        ),
+        sqlite3.OperationalError("disk I/O error"),
+    ],
+)
 async def test_terminal_retry_does_not_hide_other_failures(loop, monkeypatch, failure):
     worker = loop.worker()
     calls = []

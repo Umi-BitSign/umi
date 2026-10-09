@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import os
+import sqlite3
 import threading
 
 import pytest
@@ -40,7 +41,14 @@ async def test_waits_for_real_private_mutex_without_deleting_it(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "error", [ValueError("invalid record"), OSError("disk failed"), PermissionError("permission")]
+    "error",
+    [
+        ValueError("invalid record"),
+        OSError("disk failed"),
+        PermissionError("permission"),
+        sqlite3.OperationalError("disk I/O error"),
+        sqlite3.OperationalError("permission denied"),
+    ],
 )
 async def test_non_contention_error_is_not_retried(error):
     calls = []
@@ -52,6 +60,71 @@ async def test_non_contention_error_is_not_retried(error):
     with pytest.raises(type(error)) as caught:
         await run_private_state_operation(fail, timeout=5)
     assert caught.value is error and calls == [1]
+
+
+async def test_sqlite_writer_contention_retries_original_operation(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    holder = sqlite3.connect(path)
+    holder.execute("CREATE TABLE retained (id INTEGER PRIMARY KEY, body BLOB NOT NULL)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")
+    attempted = threading.Event()
+    payload = b"original signed bytes"
+    calls = []
+
+    def retain():
+        calls.append(1)
+        db = sqlite3.connect(path, timeout=0)
+        try:
+            attempted.set()
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("INSERT OR IGNORE INTO retained VALUES (1, ?)", (payload,))
+            return db.execute("SELECT body FROM retained WHERE id=1").fetchone()[0]
+        finally:
+            db.close()
+
+    task = asyncio.create_task(run_private_state_operation(retain, timeout=30))
+    try:
+        assert await asyncio.to_thread(attempted.wait, 10)
+        await asyncio.sleep(0.1)
+        assert not task.done()
+        holder.rollback()
+        assert await task == payload
+        assert len(calls) > 1
+        assert holder.execute("SELECT * FROM retained").fetchall() == [(1, payload)]
+        assert await run_private_state_operation(retain, timeout=30) == payload
+        assert holder.execute("SELECT COUNT(*) FROM retained").fetchone()[0] == 1
+    finally:
+        holder.rollback()
+        holder.close()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_sqlite_contention_budget_does_not_hide_exhaustion(tmp_path):
+    path = tmp_path / "busy.sqlite3"
+    holder = sqlite3.connect(path)
+    holder.execute("BEGIN IMMEDIATE")
+    failures = []
+
+    def acquire():
+        db = sqlite3.connect(path, timeout=0)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as error:
+            failures.append(error)
+            raise
+        finally:
+            db.close()
+
+    try:
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            await run_private_state_operation(acquire, timeout=0.1)
+        assert len(failures) > 1 and caught.value is failures[-1]
+    finally:
+        holder.rollback()
+        holder.close()
 
 
 async def test_wait_budget_preserves_busy_error():

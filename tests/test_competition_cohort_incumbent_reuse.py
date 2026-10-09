@@ -70,9 +70,7 @@ async def test_started_snapshot_does_not_wait_for_uncommitted_execution(executio
     pending = asyncio.create_task(asyncio.to_thread(writer))
     try:
         assert await asyncio.to_thread(entered.wait, 30)
-        assert await asyncio.wait_for(
-            asyncio.to_thread(owner._execution_started, job), 10
-        ) is False
+        assert await asyncio.wait_for(asyncio.to_thread(owner._execution_started, job), 10) is False
     finally:
         release.set()
         await pending

@@ -1,7 +1,8 @@
 """Native service authority with synthetic RPC, finality, codec and DNS boundaries."""
 
-import errno
 import json
+import sqlite3
+import sys
 import threading
 from dataclasses import replace
 
@@ -10,12 +11,12 @@ import pytest
 from umi.competition_cohort_service_authority import ServiceWorkAuthority
 from umi.competition_origin import FinalizedEndpointProvider
 from umi.open_competition import digest
-from umi.private_files import PrivateStateBusyError
 
 from .test_competition_cohort_order_signer import source_for
 from .test_competition_cohort_service_worker import base_policy as base_policy
 from .test_competition_cohort_service_worker import chain as chain
 from .test_competition_cohort_service_worker import chain_config as chain_config
+from .test_competition_cohort_service_worker import contention_error as contention_error
 from .test_competition_cohort_service_worker import endpoint as endpoint
 from .test_competition_cohort_service_worker import execution as execution
 from .test_competition_cohort_service_worker import granted as granted
@@ -149,7 +150,9 @@ async def test_service_origin_survives_repeated_long_coordinator_gaps(authority)
         assert owner.queue.assignment(c.claim) == original
 
 
-async def test_contention_recollects_authority_before_persisting(authority, monkeypatch):
+async def test_contention_recollects_authority_before_persisting(
+    authority, monkeypatch, contention_error
+):
     c, owner = authority
     original = owner._remember
     attempts, histories = [], []
@@ -163,7 +166,7 @@ async def test_contention_recollects_authority_before_persisting(authority, monk
         attempts.append(block)
         if len(attempts) == 1:
             c.p.e.r.h.source = source_for(c.p.e.r.h.batch, c.p.e.r.h.batch["history"])
-            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+            raise contention_error
         return original(assignment, source, block)
 
     owner.history = counted_history
@@ -246,3 +249,30 @@ async def test_service_authority_does_not_waive_persistent_head_regression(autho
     with pytest.raises(OSError, match="precedes required origin"):
         await owner.observe(c.assignment)
     assert c.queue.assignment(c.claim) == c.assignment
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "disk I/O error",
+        pytest.param(
+            "database is locked",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 11), reason="Python 3.10 classifies SQLite by message"
+            ),
+        ),
+    ],
+)
+async def test_authority_does_not_retry_unclassified_sqlite_error(authority, monkeypatch, message):
+    c, owner = authority
+    failure = sqlite3.OperationalError(message)
+    calls = []
+
+    def fail(*args):
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(owner, "_remember", fail)
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        await owner.observe(c.assignment)
+    assert caught.value is failure and len(calls) == 1

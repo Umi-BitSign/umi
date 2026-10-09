@@ -1,7 +1,6 @@
 """Terminal contention budgets and cancellation, with fixture authority only."""
 
 import asyncio
-import errno
 import threading
 import time
 from types import SimpleNamespace
@@ -9,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from umi.competition_cohort_service_worker import ServiceWorkWorker
-from umi.private_files import PrivateStateBusyError
 
 from .test_competition_cohort_service_queue import capture
+from .test_competition_cohort_service_worker import contention_error as contention_error
 
 
 def worker_for(prepare, timeout=60):
@@ -27,9 +26,9 @@ def worker_for(prepare, timeout=60):
     return worker, SimpleNamespace(admission=SimpleNamespace(work_sha256="ab" * 32))
 
 
-async def test_terminal_contention_exhaustion_preserves_the_busy_error():
+async def test_terminal_contention_exhaustion_preserves_the_busy_error(contention_error):
     calls = []
-    failure = PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+    failure = contention_error
 
     def prepare(*args):
         calls.append(args)
@@ -37,13 +36,13 @@ async def test_terminal_contention_exhaustion_preserves_the_busy_error():
         raise failure
 
     worker, assignment = worker_for(prepare, timeout=0.5)
-    with pytest.raises(PrivateStateBusyError) as caught:
+    with pytest.raises(type(failure)) as caught:
         await worker._prepare_terminal(assignment, "slot", "response", "retirement")
     assert caught.value is failure
     assert len(calls) == 1
 
 
-async def test_terminal_cancel_drains_owned_prepare_before_propagating():
+async def test_terminal_cancel_drains_owned_prepare_before_propagating(contention_error):
     entered, release = asyncio.Event(), threading.Event()
     loop = asyncio.get_running_loop()
     completed = []
@@ -52,7 +51,7 @@ async def test_terminal_cancel_drains_owned_prepare_before_propagating():
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(timeout=60)
         completed.append(args)
-        raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+        raise contention_error
 
     worker, assignment = worker_for(prepare)
     task = asyncio.create_task(
