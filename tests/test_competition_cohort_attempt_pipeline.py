@@ -273,16 +273,18 @@ async def test_missing_parent_is_pending_and_recovery_resumes_exact_archive(deci
     selected = await p.delivery_recovery.prepare_case(grant, p.transport_policy)
     slot = selection_slot(selected)
     db = p.delivery_recovery.journal.journal
-    get = db.get
+    get_raw = db.get_raw
 
     def missing(kind, key, **kw):
         if kind == "endpoint_recovery_selection" and key == p.retire_slot:
             return None
-        return get(kind, key, **kw)
+        return get_raw(kind, key, **kw)
 
     before = len(p.transmissions)
     with monkeypatch.context() as m:
-        m.setattr(db, "get", missing)
+        # Selection validation reads retained canonical bytes, including for a
+        # previously verified parent; hide that actual storage boundary.
+        m.setattr(db, "get_raw", missing)
         with pytest.raises(FileNotFoundError, match="parent"):
             await p.driver.deliver(slot)
     assert len(p.transmissions) == before
