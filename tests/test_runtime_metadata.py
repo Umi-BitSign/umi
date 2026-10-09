@@ -94,6 +94,9 @@ def test_runtime_execution_reused_with_fresh_proof_and_private_codec(
     monkeypatch.setattr(executor, "_invoke", count)
     original = executor.execute(snapshot, evidence(snapshot))
     original._runtime.spec_version = 999
+    monkeypatch.setattr(
+        executor, "_decode_output", lambda *args: pytest.fail("decoded unchanged helper output")
+    )
     next_snapshot = replace(snapshot, block_number=124, block_hash="0x" + "44" * 32)
     proof = evidence(next_snapshot)
     current = executor.execute(next_snapshot, proof)
@@ -103,6 +106,18 @@ def test_runtime_execution_reused_with_fresh_proof_and_private_codec(
     assert current._runtime is not original._runtime
     with pytest.raises(RuntimeMetadataError, match="runtime_code_evidence_invalid"):
         executor.execute(next_snapshot, evidence(snapshot))
+
+
+def test_metadata_reuse_still_rejects_an_invalid_fresh_codec(snapshot, executor, monkeypatch):
+    executor.execute(snapshot, evidence(snapshot))
+    monkeypatch.setattr(
+        "umi.runtime_metadata.bittensor_core.Runtime",
+        lambda *args, **kwargs: SimpleNamespace(
+            spec_version=459, transaction_version=1, constant=lambda *args: 0
+        ),
+    )
+    with pytest.raises(RuntimeMetadataError, match="runtime_execution_response_invalid"):
+        executor.execute(snapshot, evidence(snapshot))
 
 
 def test_runtime_execution_does_not_reuse_other_code_or_helper(snapshot, executor, monkeypatch):
@@ -209,6 +224,11 @@ def test_overlapping_runtime_execution_is_coalesced(snapshot, executor, monkeypa
         ("metadata_sha256", "0" * 64),
         ("metadata_hex", "00"),
         ("metadata_hex", "6d 65 74 61 0e"),
+        ("metadata_hex", ""),
+        ("metadata_hex", "6d6574610"),
+        ("metadata_hex", "6D6574610E"),
+        ("metadata_hex", "6d6574610e\n"),
+        ("metadata_hex", "0x6d6574610e"),
         ("spec_version", True),
         ("spec_version", 0),
         ("spec_version", 2**32),

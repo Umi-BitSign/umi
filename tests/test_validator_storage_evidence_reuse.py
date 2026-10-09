@@ -185,6 +185,7 @@ def test_only_owned_runtime_code_collector_selects_bounded_reuse(tmp_path):
     )
     owner = SimpleNamespace(
         _owned=True,
+        _runtime_proof_reads=False,
         config=config,
         _finality=FakeFinality(),
         resources=SimpleNamespace(

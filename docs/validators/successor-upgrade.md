@@ -447,6 +447,13 @@ proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
 Restart requires native replay even when all archive files are already present.
 
+Within a running provider, identical proof-backed runtime code reuses the already
+validated immutable metadata from the pinned executor. This bounded reuse avoids
+decoding the same helper response for every block. Every caller still supplies
+its own native code proof and receives a fresh mutable runtime codec bound to
+that snapshot. Different code or a different executor digest cannot reuse the
+entry; failed validation is not retained.
+
 Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-replication/)
 with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
 Stage a verified rclone executable and replace the template paths and service
