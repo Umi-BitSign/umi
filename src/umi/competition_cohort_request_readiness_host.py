@@ -34,7 +34,7 @@ class CombinedRequestReadiness:
         )
         self.running, self.selected = running, {}
         self.last_reports = {}
-        self.selection_stamp = None
+        self.selection_stamps = {}
         self.peers = tuple(
             (
                 identity(peer.signer),
@@ -58,8 +58,8 @@ class CombinedRequestReadiness:
     def _orders(self, source):
         cohort = source.cohort
         stamp = self._selection_stamp(cohort)
-        if stamp != self.selection_stamp:
-            self.selected.clear()
+        if stamp != self.selection_stamps.get(cohort):
+            self.selected.pop(cohort, None)
         if cohort not in self.selected:
             with canonical_json_reuse():
                 orders = self.orders._retained_orders(cohort)
@@ -70,9 +70,9 @@ class CombinedRequestReadiness:
         if any(order.round != source.roster.round for order in orders):
             raise ValueError("request readiness changed the prepared round")
         if self._selection_stamp(cohort) != stamp:
-            self.selected.clear()
+            self.selected.pop(cohort, None)
             raise OSError("order selection changed during readiness; retry")
-        self.selection_stamp = stamp
+        self.selection_stamps[cohort] = stamp
         return orders
 
     def _selection_stamp(self, cohort):
@@ -80,13 +80,15 @@ class CombinedRequestReadiness:
 
         This fingerprint supplies no authority. A cold/changed selection still
         passes native order verification; observe() checks current cohort
-        history and owned finality on every request.
+        history and owned finality on every request. Original order history is
+        embedded in each intent; newly appended history does not change that
+        selection. Other cohorts retain independent cache entries.
         """
         stamp = hashlib.sha256(b"umi-request-readiness-selection-v1\0")
-        with self.orders.queue.journal.transaction() as db:
+        with self.orders.queue.journal.read_transaction() as db:
             rows = db.execute(
                 "SELECT kind,id,body FROM records WHERE "
-                "(kind='order_host_roster' AND id=?) OR kind='order_history' "
+                "kind='order_host_roster' AND id=? "
                 "ORDER BY kind,id",
                 (cohort,),
             )

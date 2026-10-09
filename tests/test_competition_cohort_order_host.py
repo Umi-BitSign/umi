@@ -174,20 +174,31 @@ async def test_retained_roster_returns_verified_orders_and_rejects_later_tamperi
         host._retained_orders(r.cohort)
 
 
-async def test_readiness_ignores_delivery_noise_but_rejects_changed_selection(owner):
+async def test_readiness_ignores_delivery_noise_but_rejects_changed_selection(owner, monkeypatch):
     o, r = owner, owner.network.r
     host = o.host()
     await host.select(r.cohort)
     # The selection reader uses a real signed roster and native journal. Its
     # surrounding HTTP/finality ports are exercised by the readiness suite.
     reader = CombinedRequestReadiness.__new__(CombinedRequestReadiness)
-    reader.orders, reader.selected, reader.selection_stamp = host, {}, None
+    reader.orders, reader.selected, reader.selection_stamps = host, {}, {}
     source = SimpleNamespace(cohort=r.cohort, roster=SimpleNamespace(round=r.h.order.round))
     original = reader._orders(source)
-    stamp = reader.selection_stamp
+    stamp = reader.selection_stamps[r.cohort]
     await host.worker.poll_once()
+    # A newly observed history has no effect on the original intent's embedded
+    # history. Replaying every order after each append can starve delivery.
+    history = host.queue.intent(
+        host.queue.journal.get("order_host_roster", r.cohort)["slots"][0]
+    ).source
+    host.queue.journal.put("order_history", "a1" * 32, history)
     assert reader._selection_stamp(r.cohort) == stamp
-    assert reader._orders(source) == original
+    with monkeypatch.context() as context:
+        context.setattr(
+            host, "_retained_orders", lambda _: pytest.fail("unchanged roster replayed")
+        )
+        context.setattr(host.queue.journal, "transaction", lambda: pytest.fail("read takes writer"))
+        assert reader._orders(source) == original
     selected = host.queue.journal.get("order_host_roster", r.cohort)
     slot = selected["slots"][0]
     damaged = json.loads(canonical_json_bytes(host.queue.journal.get("intent", slot)))
@@ -225,6 +236,26 @@ async def test_partial_selection_resumes_originals_after_long_outage(owner, monk
     assert await resumed.select(r.cohort) == count
     assert canonical_json_bytes(resumed.queue.intent(saved[0])) == original
     assert len(resumed.queue.pending(r.cohort)) == count
+
+
+def test_readiness_keeps_independent_cohort_selections():
+    # Authentication of the selected objects uses the native owner tests above.
+    # Alternating readiness probes must not replay both immutable rosters.
+    reader = CombinedRequestReadiness.__new__(CombinedRequestReadiness)
+    reader.selected, reader.selection_stamps = {}, {}
+    rounds = {cohort: object() for cohort in ("a", "b")}
+    calls = []
+
+    def retained(cohort):
+        calls.append(cohort)
+        return (SimpleNamespace(round=rounds[cohort]),)
+
+    reader.orders = SimpleNamespace(_retained_orders=retained)
+    reader._selection_stamp = lambda cohort: cohort + "-unchanged"
+    for cohort in ("a", "b", "a", "b"):
+        source = SimpleNamespace(cohort=cohort, roster=SimpleNamespace(round=rounds[cohort]))
+        assert reader._orders(source)[0].round is rounds[cohort]
+    assert calls == ["a", "b"]
 
 
 async def test_missing_original_runtime_does_not_select_replacement_or_smaller_roster(owner):

@@ -224,7 +224,13 @@ class ServiceWorkWorker:
         self._stage(work, "assignment_read")
         assignment = await self._local(self.queue.assignment, admission.claim)
         self._stage(work, "terminal_read")
-        if await self._local(self.terminals.read, assignment) is not None:
+        # An absent terminal needs no second reconstruction of the accepted
+        # assignment. Presence is only a hint: native read still authenticates
+        # retained terminals and recovers interrupted immutable exports.
+        retained = await self._local(
+            self.journal.get_raw, "service_terminal", assignment.admission.work_sha256
+        )
+        if retained is not None and await self._local(self.terminals.read, assignment) is not None:
             return "completed", "original_terminal_retained"
         self._stage(work, "request_lineage")
         body = await self._local(self.requests.latest, admission.claim, self.transport.evaluator)
