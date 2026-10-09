@@ -343,6 +343,11 @@ being exported. Shutdown drains all owned work before releasing the poll owner.
 These partial exports do not close requests, release references or authorize an
 allocation; final settlement still requires the complete certified cohort.
 
+Historical block-body reads reuse a method-specific connection, as other proof
+reads do. Each connection carries one request at a time, retains its receive-size
+ceiling, and is discarded after protocol errors or cancellation. Block bytes
+still undergo the normal native header, body-root and event-proof checks.
+
 Historical reward scans reuse at most three verified runtime-code storage records,
 bounded to 51 MiB, for the exact block snapshot and storage key. The next block
 can therefore reuse its parent's code proof without another RPC request or
