@@ -343,6 +343,11 @@ being exported. Shutdown drains all owned work before releasing the poll owner.
 These partial exports do not close requests, release references or authorize an
 allocation; final settlement still requires the complete certified cohort.
 
+Paid service recovery retries the original miner-signed retirement after request
+expiry even if a grant acknowledgement was lost and grant delivery still fails.
+A missing or unavailable grant remains pending unless the miner supplies a valid
+retirement receipt; expiry alone does not prove absence or authorize replacement.
+
 Historical block-body reads reuse a method-specific connection, as other proof
 reads do. Each connection carries one request at a time, retains its receive-size
 ceiling, and is discarded after protocol errors or cancellation. Block bytes

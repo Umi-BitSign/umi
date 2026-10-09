@@ -224,6 +224,17 @@ class ServiceWorkTransport:
             if raw is None:
                 raw = await self._exchange(capture, COHORT_GRANT_PATH, grant, 64 * 1024)
                 if raw is None:
+                    # The miner may have retained the grant before its reply was
+                    # lost. After expiry, a failed grant retry must not prevent
+                    # native retirement of that exact original request. Missing
+                    # grants/receipts remain pending; the clock proves no absence.
+                    if (
+                        retire
+                        and bt.timelock.current_round() >= grant.body.request.response_close_round
+                    ):
+                        if response is None:
+                            response = await self._recover(grant, capture)
+                        return await self._retire(slot, grant, capture, response)
                     return ServiceTransportOutcome("grant_pending", response)
                 receipt = SignedCohortMinerGrantReceipt.model_validate_json(raw)
                 if canonical_json_bytes(receipt) != raw:
@@ -367,27 +378,34 @@ class ServiceWorkTransport:
                 # Dispatch ownership has drained and its durable intent/reply
                 # survives. Let the scheduler give retirement its own capacity.
                 return ServiceTransportOutcome("request_retirement_pending", response)
-            raw = await self._exchange(capture, COHORT_RETIRE_PATH, grant.body.request, 16 * 1024)
-            if raw is None:
-                return ServiceTransportOutcome("retirement_pending", response)
-            retired = SignedEndpointRetirementReceipt.model_validate_json(raw)
-            if canonical_json_bytes(retired) != raw:
-                raise ValueError("service retirement acknowledgement is noncanonical")
-            retired = self._retirement(grant, retired)
-            if retired.receipt.result != "response_retained" and not retirement_absence_elapsed(
-                retired.receipt,
-                grant.body.request,
-                observed_block=capture.block,
-                observed_round=bt.timelock.current_round(),
-            ):
-                return ServiceTransportOutcome("request_window_open", response)
-            # Retirement may race completion. Recover before recording that fence.
-            if retired.receipt.result == "response_retained" and response is None:
-                response = await self._recover(grant, capture)
-                if response is None:
-                    return ServiceTransportOutcome("retired_response_pending")
-            self._agrees(retired, response)
-            await run_owned_thread(self.journal.put, "service_retirement", slot, retired)
+            return await self._retire(slot, grant, capture, response)
+        return await self._retired_outcome(grant, response, retired)
+
+    async def _retire(self, slot, grant, capture, response):
+        raw = await self._exchange(capture, COHORT_RETIRE_PATH, grant.body.request, 16 * 1024)
+        if raw is None:
+            return ServiceTransportOutcome("retirement_pending", response)
+        retired = SignedEndpointRetirementReceipt.model_validate_json(raw)
+        if canonical_json_bytes(retired) != raw:
+            raise ValueError("service retirement acknowledgement is noncanonical")
+        retired = self._retirement(grant, retired)
+        if retired.receipt.result != "response_retained" and not retirement_absence_elapsed(
+            retired.receipt,
+            grant.body.request,
+            observed_block=capture.block,
+            observed_round=bt.timelock.current_round(),
+        ):
+            return ServiceTransportOutcome("request_window_open", response)
+        # Retirement may race completion. Recover before recording that fence.
+        if retired.receipt.result == "response_retained" and response is None:
+            response = await self._recover(grant, capture)
+            if response is None:
+                return ServiceTransportOutcome("retired_response_pending")
+        self._agrees(retired, response)
+        await run_owned_thread(self.journal.put, "service_retirement", slot, retired)
+        return await self._retired_outcome(grant, response, retired)
+
+    async def _retired_outcome(self, grant, response, retired):
         self._agrees(retired, response)
         if self.windows is not None:
             await self.windows.retire(grant, grant.body.request, retired)

@@ -572,6 +572,56 @@ async def test_expired_unsent_service_reaches_retirement_lane(loop, monkeypatch)
     )
 
 
+@pytest.mark.parametrize("expired,retained_grant", [(False, True), (True, True), (True, False)])
+async def test_failed_grant_retry_does_not_block_expired_native_retirement(
+    loop, monkeypatch, expired, retained_grant
+):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    slot = service_grant_slot(body)
+    original = canonical_json_bytes(body)
+    if retained_grant:
+        s.lost = COHORT_GRANT_PATH
+        first = await worker.transport.advance(slot, retire=False)
+        assert first.reason == "grant_pending"
+        assert worker.journal.get("service_grant_delivery", slot) is None
+
+    # Restart with only the original durable state. Further grant deliveries
+    # fail, while the miner's native recovery/retirement routes are available.
+    worker = s.worker()
+    exchange = worker.transport._exchange
+
+    async def grant_unavailable(capture, path, body, maximum):
+        if path == COHORT_GRANT_PATH:
+            return None
+        return await exchange(capture, path, body, maximum)
+
+    monkeypatch.setattr(worker.transport, "_exchange", grant_unavailable)
+    if expired:
+        p.finality.head = body.request.deadline_block + 3000
+        monkeypatch.setattr(
+            bt.timelock, "current_round", lambda: body.request.response_close_round + 500
+        )
+    result = await worker.transport.advance(slot)
+    if expired and retained_grant:
+        assert result.reason == "retry_required"
+        assert result.retirement.receipt.result == "no_response_retained"
+        assert worker.journal.get("service_retirement", slot) is not None
+        assert COHORT_RETIRE_PATH in s.paths
+    else:
+        assert result.reason == ("retirement_pending" if expired else "grant_pending")
+        assert result.retirement is None
+        assert worker.journal.get("service_retirement", slot) is None
+        if not expired:
+            assert COHORT_RETIRE_PATH not in s.paths
+    assert worker.journal.get("service_dispatch_intent", slot) is None
+    assert worker.journal.get("service_terminal", s.c.assignment.admission.work_sha256) is None
+    assert s.paths.count(TRANSLATE_PATH) == p.model.calls == 0
+    assert canonical_json_bytes(worker.requests._body(slot)) == original
+
+
 async def test_queue_rotation_survives_restart_and_unavailable_first_miner_work(loop):
     s, c, p = loop, loop.c, loop.p
     claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
