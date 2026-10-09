@@ -390,6 +390,7 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                         maximum_proof_node_bytes=MAX_CODE_BYTES,
                         maximum_proof_bytes=MAX_CODE_BYTES + 1024**2,
                     ),
+                    maximum_cached_storage_evidence_bytes=3 * (2 * MAX_CODE_BYTES + 1024**2),
                 )
                 if self._owned
                 else self._proofs

@@ -559,6 +559,7 @@ class FinalizedProofCollector:
         finality: VerifiedFinalizedSnapshotPort,
         verifier: StorageProofVerifier,
         limits: ProofCollectionLimits | None = None,
+        maximum_cached_storage_evidence_bytes: int = 0,
     ) -> None:
         if not callable(getattr(rpc, "request", None)):
             raise TypeError("rpc must implement RawJsonRpc")
@@ -566,12 +567,20 @@ class FinalizedProofCollector:
             raise TypeError("finality must implement VerifiedFinalizedSnapshotPort")
         if not callable(verifier):
             raise TypeError("verifier must be callable")
+        if (
+            type(maximum_cached_storage_evidence_bytes) is not int
+            or not 0 <= maximum_cached_storage_evidence_bytes <= 64 * 1024**2
+        ):
+            raise ValueError("storage evidence reuse budget is invalid")
         self._rpc = rpc
         self._finality = finality
         self._verifier = verifier
         self._limits = limits or ProofCollectionLimits()
         self._checked_snapshots = OrderedDict()
         self._snapshot_lock = asyncio.Lock()
+        self._storage_evidence_budget = maximum_cached_storage_evidence_bytes
+        self._storage_evidence_bytes = 0
+        self._storage_evidence = OrderedDict()
 
     def with_evidence_rpc(self, rpc: RawJsonRpc) -> FinalizedProofCollector:
         """Reuse the same verifier and limits for retained untrusted storage bytes.
@@ -579,6 +588,8 @@ class FinalizedProofCollector:
         The source of bytes grants no finality authority. Replay callers must
         select the snapshot from their owned finality port before decoding or
         proving storage. No network fallback is added to the supplied port.
+        Replay never inherits online evidence reuse: supplied archive bytes
+        must still be consumed and checked, even for an already collected block.
         """
         return FinalizedProofCollector(
             rpc, finality=self._finality, verifier=self._verifier, limits=self._limits
@@ -786,6 +797,11 @@ class FinalizedProofCollector:
             raise ValueError("storage_key must be non-empty bytes")
         if len(storage_key) > self._limits.maximum_storage_key_bytes:
             raise ValidatorChainError("storage_key_limit")
+        retained_key = (snapshot, storage_key)
+        retained = self._storage_evidence.get(retained_key)
+        if retained is not None:
+            self._storage_evidence.move_to_end(retained_key)
+            return retained[0]
         key_hex = "0x" + storage_key.hex()
 
         try:
@@ -802,7 +818,7 @@ class FinalizedProofCollector:
             nodes = await self._read_proof(snapshot, (key_hex,))
 
             try:
-                return await run_owned_thread(
+                evidence = await run_owned_thread(
                     partial(
                         StorageEvidence,
                         snapshot=snapshot,
@@ -814,10 +830,36 @@ class FinalizedProofCollector:
                 )
             except (TypeError, ValueError) as error:
                 raise ValidatorChainError("storage_proof_verification_failed") from error
+            self._retain_storage_evidence(evidence)
+            return evidence
         except ValidatorChainError:
             raise
         except Exception as error:
             raise ValidatorChainError("storage_proof_rpc_failed") from error
+
+    def _retain_storage_evidence(self, evidence: StorageEvidence) -> None:
+        # Historical runtime collection revisits the preceding block as the
+        # next block's parent. Three entries keep the previous current/parent
+        # pair until the next current block has been collected;
+        # this supplies no finality, codec or mutable account-state authority.
+        if not self._storage_evidence_budget:
+            return
+        size = (
+            len(evidence.storage_key) + len(evidence.value or b"") + sum(map(len, evidence.proof))
+        )
+        if size > self._storage_evidence_budget:
+            return
+        key = (evidence.snapshot, evidence.storage_key)
+        previous = self._storage_evidence.pop(key, None)
+        if previous is not None:
+            self._storage_evidence_bytes -= previous[1]
+        self._storage_evidence[key] = (evidence, size)
+        self._storage_evidence_bytes += size
+        while len(self._storage_evidence) > 3 or (
+            self._storage_evidence_bytes > self._storage_evidence_budget
+        ):
+            _, (_, removed_size) = self._storage_evidence.popitem(last=False)
+            self._storage_evidence_bytes -= removed_size
 
     async def storage_evidence_many(
         self,

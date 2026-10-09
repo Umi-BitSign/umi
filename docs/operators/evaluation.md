@@ -319,6 +319,13 @@ conflicts remain durable holds. Batches with index callbacks always retain their
 writer transaction, including exact retries. This lets repeated archive exports
 confirm retained objects without competing with new signing or retirement work.
 
+Historical reward scans reuse at most three verified runtime-code storage records,
+bounded to 51 MiB, for the exact block snapshot and storage key. The next block
+can therefore reuse its parent's code proof without another RPC request or
+proof verification. Finality selection and runtime codec construction remain
+independent checks. Account and weight collectors do not enable this cache, and
+archive replay always consumes and verifies the supplied archive bytes.
+
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
 the existing 16-connection control budget for history, votes and exports. Slow
