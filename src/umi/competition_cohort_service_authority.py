@@ -83,12 +83,11 @@ class ServiceWorkAuthority:
                 else self.provider.collect()
             )
             capture = await wait_for_owned(collection, timeout=self.timeout)
-            if minimum_block is not None and execution_boundary(capture).block < minimum_block:
+            boundary = await run_owned_thread(execution_boundary, capture)
+            if minimum_block is not None and boundary.block < minimum_block:
                 raise OSError("owned registration head precedes required origin")
             try:
-                await run_owned_thread(
-                    self._remember, assignment, source, execution_boundary(capture).block
-                )
+                await run_owned_thread(self._remember, assignment, source, boundary.block)
                 return source, capture
             except FinalizedHeadRegression:
                 # Another operation can persist a newer owned observation while
@@ -98,7 +97,7 @@ class ServiceWorkAuthority:
                 if regressed or loop.time() >= deadline:
                     raise
                 regressed = True
-                minimum_block = max(minimum_block or 0, execution_boundary(capture).block + 1)
+                minimum_block = max(minimum_block or 0, boundary.block + 1)
             except PrivateStateBusyError:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -139,7 +138,9 @@ class ServiceWorkAuthority:
         current, finished = await self.observe(assignment, minimum_block=capture.block)
         if current != source:
             raise OSError("service authority changed during origin collection")
-        before, after = execution_boundary(started), execution_boundary(finished)
+        before, after = await run_owned_thread(
+            lambda: (execution_boundary(started), execution_boundary(finished))
+        )
         if not before.block <= capture.block <= after.block or any(
             boundary.block == capture.block
             and (boundary.block_hash, boundary.state_root)

@@ -323,6 +323,26 @@ attempt also use fresh read-only snapshots. New order-history heads keep their
 atomic monotonic update, and signing rechecks its selected history immediately
 before use. These reads do not rescan capacity or occupy the writer slot.
 
+Private-file publication retries compare current file bytes directly with the
+canonical output instead of repeatedly serializing the retained object. Schema,
+private-file ownership, bounds, publication locking and directory sync still run.
+Large proof-object publication reuses canonical bytes within one bounded call;
+it does not cache imported proof authority or skip checking changed files.
+History export uses the exact bytes just verified and retained, avoiding a second
+decode of the same journal frame. Export must still finish before its history
+cursor advances; interrupted exports remain retryable.
+Paid-service registration-boundary checks run off the event loop and each
+observation computes its boundary once. Fresh history and minimum-block checks
+remain required after contention or a regressed head.
+
+Terminal certification and evidence export run while other cohort requests are
+unfinished. The export worker processes up to four independent assignments at
+once, retaining each assignment's signing lock and original publication bytes.
+A slow signature or copy does not prevent another completed assignment from
+being exported. Shutdown drains all owned work before releasing the poll owner.
+These partial exports do not close requests, release references or authorize an
+allocation; final settlement still requires the complete certified cohort.
+
 Historical reward scans reuse at most three verified runtime-code storage records,
 bounded to 51 MiB, for the exact block snapshot and storage key. The next block
 can therefore reuse its parent's code proof without another RPC request or

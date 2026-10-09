@@ -49,6 +49,36 @@ async def test_retained_control_requires_replayed_prefix_and_survives_offline_re
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
 
 
+async def test_export_uses_the_verified_frame_without_reloading_it(
+    history_case, tmp_path, monkeypatch
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
+
+    h = history_case
+    archive = RewardProofArchive(tmp_path / "export")
+    h.reader.export_archive = archive
+    load = h.reader._load
+    heights = []
+
+    def counted(height):
+        heights.append(height)
+        return load(height)
+
+    monkeypatch.setattr(h.reader, "_load", counted)
+    result = await h.reader.advance(h.item.provider, through_block=h.end)
+    assert result.history is not None
+    assert heights == list(range(h.reader.first_block, h.end + 1))
+    for height in heights:
+        saved = load(height)
+        context, received = archive.read(
+            "history",
+            history_archive_key(h.reader.config_sha256, h.reader.hotkey, height),
+            bounds={key: len(value) for key, value in saved.items()},
+        )
+        assert context == h.reader._archive_context(height)
+        assert received == saved
+
+
 @pytest.fixture
 async def history_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path)

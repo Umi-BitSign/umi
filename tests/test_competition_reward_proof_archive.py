@@ -4,9 +4,34 @@ import hashlib
 import json
 
 import pytest
+import rfc8785
 
 from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.protocol import canonical_json_bytes
+
+
+def test_large_object_publication_reuses_serialization_but_rereads_current_file(
+    tmp_path, monkeypatch
+):
+    archive = RewardProofArchive(tmp_path / "export")
+    raw = bytes(range(256)) * 8192
+    serialize = rfc8785.dumps
+    calls = []
+
+    def counted(value):
+        calls.append(None)
+        return serialize(value)
+
+    monkeypatch.setattr(rfc8785, "dumps", counted)
+    sha = archive._retain_bytes(raw)
+    path = archive.root / "objects" / (sha + ".json")
+    before = path.stat()
+    assert archive._retain_bytes(raw) == sha
+    assert len(calls) == 2  # One canonical serialization per operation.
+    assert path.stat().st_ino == before.st_ino
+    path.write_bytes(b'{"hex":"00"}')
+    with pytest.raises(ValueError, match="different bytes"):
+        archive._retain_bytes(raw)
 
 
 def test_archive_preserves_original_bytes_and_idempotent_frames(tmp_path):

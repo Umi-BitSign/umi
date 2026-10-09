@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     MAX_RECIPE_BYTES,
@@ -74,11 +75,15 @@ class RewardProofArchive:
     def _retain_bytes(self, raw: bytes) -> str:
         checked_size(len(raw), MAX_EVIDENCE_BYTES)
         sha = hashlib.sha256(raw).hexdigest()
-        publish_private_model(
-            self.root / "objects" / (sha + ".json"),
-            _Bytes(hex=raw.hex()),
-            maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
-        )
+        # Model validation and publication serialize the same hex object. Reuse
+        # those exact canonical bytes within this call only; the current file,
+        # publication lock, schema and durability checks still run on every retry.
+        with canonical_json_reuse(maximum_bytes=32 * 1024**2):
+            publish_private_model(
+                self.root / "objects" / (sha + ".json"),
+                _Bytes(hex=raw.hex()),
+                maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+            )
         return sha
 
     def _bytes(self, sha: str, maximum: int) -> bytes:

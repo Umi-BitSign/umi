@@ -23,7 +23,7 @@ from .competition_cohort_request_terminal import (
 )
 from .competition_progress import _failure_details
 from .competition_round_journal import RoundJournal
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import Signature, digest, identity
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,12 @@ class RequestExportWorker:
         journal: RoundJournal,
         *,
         batch_size: int = 16,
+        concurrency: int = 4,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("request export batch size is outside bounds")
+        if type(concurrency) is not int or not 1 <= concurrency <= 16:
+            raise ValueError("request export concurrency is outside bounds")
         if not executions or any(e.policy != provider.policy for e in executions):
             raise ValueError("request exporter needs its evaluator's selected execution journals")
         if len({identity(e.config.signer) for e in executions}) != 1:
@@ -62,6 +65,7 @@ class RequestExportWorker:
             raise ValueError("request export files, cursor and executions must remain separate")
         self.executions, self.provider, self.sign = tuple(executions), provider, sign
         self.files, self.journal, self.batch_size = files, journal, batch_size
+        self.concurrency = concurrency
         self.serial = asyncio.Lock()
         with journal.transaction() as db:
             db.execute(
@@ -176,6 +180,7 @@ class RequestExportWorker:
             considered = complete = pending = retries = 0
             last_error = ""
             last_failure = None
+            ready = []
             for owner in self.executions:
                 try:
                     slots = await run_owned_thread(self._page, owner)
@@ -184,7 +189,16 @@ class RequestExportWorker:
                     last_error = type(error).__name__
                     last_failure = _failure_details(error)[0]
                     continue
-                for slot in slots:
+                ready.extend((owner, slot) for slot in slots)
+
+            # A slow seal or object copy must not hold up other completed work.
+            # Use a bounded worker group, retaining each assignment's original
+            # signing lock and immutable publication checks.
+            work = iter(ready)
+
+            async def export_ready():
+                nonlocal considered, complete, pending, retries, last_error, last_failure
+                for owner, slot in work:
                     considered += 1
                     try:
                         if await self._export(owner, slot, capture.snapshot.block):
@@ -195,6 +209,24 @@ class RequestExportWorker:
                         retries += 1
                         last_error = type(error).__name__
                         last_failure = _failure_details(error)[0]
+
+            tasks = [
+                asyncio.create_task(export_ready())
+                for _ in range(min(self.concurrency, len(ready)))
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+
+                async def drain():
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Repeated cancellation cannot release the poll owner while a
+                # child still owns an execution lock or a publication thread.
+                await await_owned_task(asyncio.create_task(drain()))
             return {
                 "status": "request_exports_pending"
                 if pending or retries

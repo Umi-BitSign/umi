@@ -6,6 +6,7 @@ Signing, journals, immutable delivery and request replay are native.
 
 import asyncio
 import json
+import threading
 from contextlib import ExitStack
 from functools import partial
 
@@ -179,6 +180,86 @@ async def test_missing_local_steps_or_endpoint_archive_stays_pending(exporting):
     assert h.window().completion == "pending"
     # Another completed assignment is still exported in the same batch.
     assert len(h.exports_signed) == len(h.workers[0].executions) - 1
+
+
+async def test_slow_certificate_does_not_block_other_completed_exports(exporting):
+    h = exporting
+    worker = h.workers[0]
+    assert len(worker.executions) > 1
+    entered, release = asyncio.Event(), asyncio.Event()
+    sign = worker.sign
+    first = True
+
+    async def delayed(body):
+        nonlocal first
+        if first:
+            first = False
+            entered.set()
+            await release.wait()
+        return await sign(body)
+
+    worker.sign = delayed
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=60)
+
+        async def delivered():
+            while not list(h.files.orders(h.b["roster"])):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(delivered(), timeout=60)
+        assert not task.done()
+        # Partial certificates do not authorize closure of the original work.
+        assert h.window().completion == "pending"
+    finally:
+        release.set()
+        report = await asyncio.wait_for(task, timeout=120)
+    assert report["assignments_exported"] == len(worker.executions)
+    count = len(h.exports_signed)
+    await worker.poll_once()
+    assert len(h.exports_signed) == count
+
+
+async def test_parallel_export_cancellation_drains_owned_threads(exporting, monkeypatch):
+    from umi.concurrency import run_owned_thread
+
+    worker = exporting.workers[0]
+    worker.concurrency = 2
+    entered, release = threading.Event(), threading.Event()
+    active, peak = 0, 0
+
+    def blocked():
+        assert release.wait(60)
+
+    async def export(owner, slot, block):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 2:
+            entered.set()
+        try:
+            await run_owned_thread(blocked)
+        finally:
+            active -= 1
+        return True
+
+    monkeypatch.setattr(worker, "_export", export)
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        assert await asyncio.to_thread(entered.wait, 60)
+        assert peak == 2
+        task.cancel()
+        await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert worker.serial.locked()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=120)
+    assert active == 0
+    assert not worker.serial.locked()
 
 
 async def test_partial_object_copy_never_publishes_terminal_index(exporting, monkeypatch):

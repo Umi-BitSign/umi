@@ -393,7 +393,7 @@ class RewardControlHistoryReader:
                     if self.export_archive is not None:
                         # Retain original bytes before advancing the replay cursor.
                         # A failed export leaves this block retryable after restart.
-                        await run_owned_thread(self._export, self._next, self.export_archive)
+                        await run_owned_thread(self._export, observation, self.export_archive)
                     if unresolved:
                         self._unresolved.append(self._next)
                     self._writes.extend(
@@ -428,13 +428,17 @@ class RewardControlHistoryReader:
             "block": height,
         }
 
-    def _export(self, height: int, archive: RewardProofArchive) -> None:
-        saved = self._load(height)
-        if saved is None:
-            raise FileNotFoundError("verified control history is not retained")
+    def _export(self, observation: OwnedRewardControlWrites, archive: RewardProofArchive) -> None:
+        # advance() has verified and durably retained these exact bytes. Reloading
+        # the frame here only decodes the same large proof objects a second time.
+        height = observation.slot.snapshot.block_number
         archive.write(
             "history",
             history_archive_key(self.config_sha256, self.hotkey, height),
             context=self._archive_context(height),
-            fields=saved,
+            fields={
+                "slot_evidence": observation.slot.evidence,
+                "slot_metadata": observation.slot.metadata,
+                "evidence": observation.evidence,
+            },
         )

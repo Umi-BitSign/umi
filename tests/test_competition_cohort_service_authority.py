@@ -2,6 +2,7 @@
 
 import errno
 import json
+import threading
 from dataclasses import replace
 
 import pytest
@@ -60,6 +61,26 @@ async def test_service_origin_uses_native_axon_proof_and_original_scope(authorit
     assert scope["assignment"]["admission"]["work_sha256"] == c.assignment.admission.work_sha256
     with pytest.raises(ValueError, match="not current"):
         await owner.origins.collect_origin(c.assignment.admission.submission)
+
+
+async def test_registration_boundary_checks_run_off_the_event_loop(authority, monkeypatch):
+    import umi.competition_cohort_service_authority as module
+
+    c, owner = authority
+    boundary = module.execution_boundary
+    loop_thread = threading.get_ident()
+    observed = []
+
+    def checked(capture):
+        assert threading.get_ident() != loop_thread
+        observed.append(capture)
+        return boundary(capture)
+
+    monkeypatch.setattr(module, "execution_boundary", checked)
+    await owner.origin(c.assignment)
+    # One check per observation, then the final before/after comparison. In
+    # particular, the minimum-block observation does not hash its roster twice.
+    assert len(observed) == 4
 
 
 async def test_service_origin_rejects_closed_then_rolled_back_history(authority):
