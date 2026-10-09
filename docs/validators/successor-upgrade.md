@@ -458,11 +458,11 @@ open a connection per object. The next frame load takes a fresh snapshot and
 observes newly committed conflict holds; byte bounds, content identities and
 native proof verification are unchanged.
 
-History retention and proof exporters reuse lossless encodings of identical
-metadata and proof bytes. Each instance retains at most 64 entries and 64 MiB
-of input, output and digest bytes. This is a byte-conversion optimization;
-original hashes, native proof checks, journal conflicts and durable archive
-publication remain unchanged. Restart starts with an empty encoding cache.
+Within that one frame snapshot, repeated byte objects are decoded once, bounded
+by 128 entries and 32 MiB. The next frame load discards that cache so new conflict
+holds remain visible. Lossless encoding locates quoted hex with bounded byte
+scanning; original match boundaries, recipes, hashes and published bytes are
+unchanged. Neither optimization substitutes for native proof verification.
 
 For each verified historical block, body and event collection overlap after
 selecting its parent runtime. Both remain bound to the same finalized identity;
@@ -906,12 +906,16 @@ again. Reviewers read the selected originals at the authenticated
 drains workers before releasing keys, clients and process locks.
 
 Clip delivery verifies the local digest, retains the URL before uploading, and
-verifies the downloaded bytes before request selection. Lost acknowledgements
-reuse that URL; missing objects are republished at the same URL. New requests
-after a long outage can use a fresh bounded capability for the same clip. Signed
-requests and past delivery records remain unchanged. The existing clip Worker
-must be deployed with the matching upload credential; private clip replication
-and retention remain separate deployment requirements.
+verifies the downloaded bytes once before recording completion. Subsequent
+requests, including after restart, reuse that exact completion record while its
+delivery window remains valid; they do not reread or download the clip again.
+Incomplete publications recover lost acknowledgements or republish missing bytes
+at their original URL. A new delivery window requires its own verified publication.
+Signed requests and past delivery records remain unchanged. The existing clip
+Worker must use the matching upload credential and retain completed objects for
+their full capability lifetime: completed publications are not probed for deletion
+on each request. Private clip replication and retention remain deployment
+requirements.
 
 Benchmark evaluator startup and private evidence replication still require their
 own running services. Accepted-service dispatch alone does not establish full

@@ -26,8 +26,8 @@ from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     checked_digest,
     decode_evidence,
+    encode_evidence,
 )
-from .competition_evidence_reuse import EvidenceEncodingReuse
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
@@ -48,6 +48,8 @@ from .concurrency import run_owned_thread
 from .open_competition import digest
 
 _ISSUER = object()
+_MAX_FRAME_OBJECTS = 128
+_MAX_FRAME_OBJECT_BYTES = MAX_EVIDENCE_BYTES
 _FIELDS = {
     "slot_evidence": MAX_CONTROL_ARCHIVE_BYTES,
     "slot_metadata": MAX_CONTROL_METADATA_BYTES,
@@ -148,7 +150,6 @@ class RewardControlHistoryReader:
         self.first_block = first_block
         self.archive = archive
         self.export_archive = export_archive
-        self._encoding = EvidenceEncodingReuse()
         binding = {
             "schema": "umi-reward-control-history/1",
             "control_hotkey": self.hotkey,
@@ -241,9 +242,7 @@ class RewardControlHistoryReader:
         ):
             refs[name] = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = self._encoding.encode(
-                    raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof"
-                )
+                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
                 records.extend(
                     ("control_history_object", sha, {"hex": value.hex()})
                     for sha, value in encoded.objects.items()
@@ -290,6 +289,23 @@ class RewardControlHistoryReader:
             return None
         if type(frame) is not dict or set(frame) != set(_FIELDS):
             raise ValueError("control history frame has invalid fields")
+        objects = {}
+        object_bytes = 0
+
+        def resolve(sha, size):
+            nonlocal object_bytes
+            key = sha, size
+            if key not in objects:
+                raw = self._object(sha, size, db=db)
+                if (
+                    len(objects) < _MAX_FRAME_OBJECTS
+                    and object_bytes + len(raw) <= _MAX_FRAME_OBJECT_BYTES
+                ):
+                    objects[key] = raw
+                    object_bytes += len(raw)
+                return raw
+            return objects[key]
+
         result = {}
         for name, maximum in _FIELDS.items():
             refs = frame[name]
@@ -325,7 +341,7 @@ class RewardControlHistoryReader:
                         sha256=sha,
                         expanded_bytes=chunk["length"],
                         kind="proof",
-                        resolve=partial(self._object, db=db),
+                        resolve=resolve,
                     )
                 )
             result[name] = b"".join(parts)

@@ -77,14 +77,13 @@ async def test_upload_recovers_lost_ack_and_automatically_renews(clips):
     assert first == intent.video
     assert len(c.uploads) == 1
     assert c.uploads[0] in first.url
-    # Deletion is repaired at the exact same capability; no new signed request.
-    c.objects.clear()
+    # A completed capability is reused across restart without another download.
     assert await c.open()(c.sha) == first
-    assert c.uploads[0] == c.uploads[1]
+    assert len(c.uploads) == 1
     c.now += 10 * 86400
     next_ = await c.open()(c.sha)
     assert next_.url != first.url and next_.sha256 == first.sha256
-    assert len(c.uploads) == 3
+    assert len(c.uploads) == 2
 
 
 @pytest.mark.parametrize("error", [httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout])
@@ -107,10 +106,34 @@ async def test_transport_failure_retries_original_intent_without_republishing(cl
 
 @pytest.mark.parametrize("fault", ["digest", "oversize", "redirect"])
 async def test_bad_delivery_does_not_return_a_video(clips, fault):
-    await clips.open()(clips.sha)
     clips.fault = fault
     with pytest.raises((OSError, ValueError)):
         await clips.open()(clips.sha)
+
+
+async def test_verified_delivery_retries_read_neither_local_nor_remote_bytes(clips, monkeypatch):
+    video = await clips.open()(clips.sha)
+    clips.transport_error = httpx.ConnectError
+
+    def no_read(*args):
+        raise AssertionError("verified local clip was reread")
+
+    monkeypatch.setattr(delivery, "read_case_video", no_read)
+    assert await clips.open()(clips.sha) == video
+    assert len(clips.uploads) == 1
+    # A new delivery window cannot borrow the old completion receipt.
+    clips.now += 86400
+    with pytest.raises(AssertionError, match="reread"):
+        await clips.open()(clips.sha)
+
+
+async def test_completed_receipt_must_bind_the_exact_capability(clips):
+    uploader = clips.open()
+    slot, _, _ = uploader._select(clips.sha, clips.now)
+    uploader.journal.put("complete", slot, {"intent": "b" * 64})
+    with pytest.raises(ValueError, match="receipt differs"):
+        await clips.open()(clips.sha)
+    assert not clips.uploads
 
 
 async def test_changed_local_original_is_not_uploaded(clips):

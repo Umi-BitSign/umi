@@ -122,6 +122,50 @@ async def test_retained_frame_load_observes_new_conflict_on_next_read(history_ca
         h.reader._load(h.end)
 
 
+@pytest.mark.parametrize("bound", ["normal", "bytes", "entries"])
+async def test_frame_object_reuse_is_bounded_and_does_not_cross_snapshots(
+    history_case, monkeypatch, bound
+):
+    from collections import Counter
+
+    from umi import competition_reward_history as module
+
+    h = history_case
+    raw = canonical_json_bytes({"proof": (b"repeated native object" * 512).hex()})
+    height = h.end + 1
+    h.reader._save(
+        SimpleNamespace(
+            slot=SimpleNamespace(
+                evidence=raw, metadata=raw, snapshot=SimpleNamespace(block_number=height)
+            ),
+            evidence=raw,
+        )
+    )
+    if bound == "bytes":
+        monkeypatch.setattr(module, "_MAX_FRAME_OBJECT_BYTES", 0)
+    elif bound == "entries":
+        monkeypatch.setattr(module, "_MAX_FRAME_OBJECTS", 0)
+    original, calls = h.reader._object, []
+
+    def counted(sha, size, *, db):
+        calls.append((sha, size))
+        return original(sha, size, db=db)
+
+    monkeypatch.setattr(h.reader, "_object", counted)
+    expected = dict.fromkeys(("slot_evidence", "slot_metadata", "evidence"), raw)
+    assert h.reader._load(height) == expected
+    counts = Counter(calls)
+    assert set(counts.values()) == ({1} if bound == "normal" else {3})
+    calls.clear()
+    assert h.reader._load(height) == expected
+    assert Counter(calls) == counts  # A new snapshot rechecks every retained object.
+    sha, _ = next(iter(counts))
+    with pytest.raises(ValueError, match="conflict"):
+        h.reader.journal.put("control_history_object", sha, {"hex": "00"})
+    with pytest.raises(ValueError, match="conflict held"):
+        h.reader._load(height)
+
+
 @pytest.fixture
 async def history_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path)

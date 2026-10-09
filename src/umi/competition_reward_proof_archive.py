@@ -28,8 +28,8 @@ from .competition_evidence_codec import (
     checked_digest,
     checked_size,
     decode_evidence,
+    encode_evidence,
 )
-from .competition_evidence_reuse import EvidenceEncodingReuse
 from .open_competition import digest, identity
 from .private_files import (
     ensure_private_directory,
@@ -92,7 +92,6 @@ class RewardProofArchive:
         self._published = OrderedDict()
         self._publication_lock = Lock()
         self._pid = os.getpid()
-        self._encoding = EvidenceEncodingReuse()
 
     @staticmethod
     def _object_stamp(path):
@@ -195,9 +194,7 @@ class RewardProofArchive:
             checked_size(len(raw), MAX_FIELD_BYTES)
             parts = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = self._encoding.encode(
-                    raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof"
-                )
+                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
                 for value in encoded.objects.values():
                     self._retain_bytes(value)
                 parts.append(

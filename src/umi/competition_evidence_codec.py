@@ -19,7 +19,7 @@ MAX_EVIDENCE_BYTES = 32 * 1024**2
 MAX_METADATA_BYTES = 16 * 1024**2
 MAX_RECIPE_BYTES = 4 * 1024**2
 MAX_SEGMENTS = 32768
-_HEX = re.compile(rb'"(?:0x)?([0-9a-f]{64,})"')
+_HEX_DIGITS = b"0123456789abcdef"
 _SHA = re.compile(r"[0-9a-f]{64}")
 _SCHEMA = "umi-weight-evidence-recipe/1"
 
@@ -50,6 +50,27 @@ class EncodedEvidence:
     objects: dict[str, bytes]
 
 
+def _hex_spans(raw: bytes):
+    """Locate the same flat quoted hex literals without a large regex scan."""
+    position = 0
+    while True:
+        opening = raw.find(b'"', position)
+        if opening < 0:
+            return
+        closing = raw.find(b'"', opening + 1)
+        if closing < 0:
+            return
+        start = opening + 1
+        if raw[start : start + 2] == b"0x":
+            start += 2
+        if closing - start >= 64 and not raw[start:closing].translate(None, _HEX_DIGITS):
+            yield start, closing
+            position = closing + 1
+        else:
+            # A failed candidate's closing quote can start the next match.
+            position = closing
+
+
 def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
     if not isinstance(raw, bytes):
         raise ValueError("evidence must be bytes")
@@ -70,16 +91,16 @@ def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
 
     position = 0
     if kind == "proof":
-        for match in _HEX.finditer(raw):
-            if len(match[1]) % 2:
+        for start, end in _hex_spans(raw):
+            if (end - start) % 2:
                 continue
             # Reserve the trailing literal too; otherwise the encoder could
             # emit MAX_SEGMENTS+1 while the bounded decoder correctly refuses it.
             if len(segments) + 3 > MAX_SEGMENTS:
                 break
-            append("b", raw[position : match.start(1)])
-            append("x", bytes.fromhex(match[1].decode("ascii")))
-            position = match.end(1)
+            append("b", raw[position:start])
+            append("x", bytes.fromhex(raw[start:end].decode("ascii")))
+            position = end
     append("b", raw[position:])
     encoded = recipe(segments)
     plain = recipe([["b", identity, len(raw)]])
