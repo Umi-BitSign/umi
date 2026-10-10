@@ -24,6 +24,21 @@ _NULL_MEANS_UNAVAILABLE = {"chain_getBlock", "chain_getBlockHash", "chain_getHea
 _LOGGER = logging.getLogger(__name__)
 
 
+def _failure(index, error):
+    result = {
+        "provider_index": index,
+        "reason_code": error.reason_code,
+        "rpc_method": error.rpc_method,
+        "rpc_error_code": error.rpc_error_code,
+        "rpc_block_hash": error.rpc_block_hash,
+    }
+    for name in ("rpc_http_status", "rpc_transport_error"):
+        value = getattr(error, name)
+        if value is not None:
+            result[name] = value
+    return result
+
+
 class FailoverProofRpc:
     def __init__(self, transports: tuple, *, timeout_seconds: float):
         if len(transports) != 3 or not 0 < timeout_seconds <= 600:
@@ -89,24 +104,22 @@ class FailoverProofRpc:
                         raise ValidatorChainError("proof_rpc_error")
                     return result
                 except asyncio.TimeoutError as error:
-                    last_error = ValidatorChainError("proof_rpc_failed")
+                    method, params = arguments if operation == "request" else (None, ())
+                    last_error = ValidatorChainError(
+                        "proof_rpc_failed",
+                        rpc_method=method,
+                        rpc_block_hash=params[-1] if params else None,
+                        rpc_transport_error="timeout",
+                    )
                     last_error.__cause__ = error
-                    failures.append({"provider_index": index, "reason_code": "proof_rpc_failed"})
+                    failures.append(_failure(index, last_error))
                     self._cooldown_until[index] = self._now() + 10.0
                     self._cooldown_reasons[index] = "proof_rpc_failed"
                 except ValidatorChainError as error:
                     if error.reason_code not in _RETRYABLE:
                         raise
                     last_error = error
-                    failures.append(
-                        {
-                            "provider_index": index,
-                            "reason_code": error.reason_code,
-                            "rpc_method": error.rpc_method,
-                            "rpc_error_code": error.rpc_error_code,
-                            "rpc_block_hash": error.rpc_block_hash,
-                        }
-                    )
+                    failures.append(_failure(index, error))
                     if error.reason_code == "proof_rpc_rate_limited":
                         retry_after = _retry_after(error)
                         self._cooldown_until[index] = self._now() + retry_after

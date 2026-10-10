@@ -25,7 +25,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import bittensor_core
-from websockets.exceptions import InvalidStatus, PayloadTooBig
+from websockets.exceptions import ConnectionClosed, InvalidStatus, PayloadTooBig
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence, StorageProofVerifier
 from .concurrency import run_owned_thread
@@ -61,6 +61,8 @@ class ValidatorChainError(RuntimeError):
         rpc_method: str | None = None,
         rpc_error_code: int | None = None,
         rpc_block_hash: str | None = None,
+        rpc_http_status: int | None = None,
+        rpc_transport_error: str | None = None,
     ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
@@ -77,6 +79,18 @@ class ValidatorChainError(RuntimeError):
         self.rpc_block_hash = (
             rpc_block_hash
             if type(rpc_block_hash) is str and _HASH_RE.fullmatch(rpc_block_hash)
+            else None
+        )
+        self.rpc_http_status = (
+            rpc_http_status
+            if type(rpc_http_status) is int and 100 <= rpc_http_status <= 599
+            else None
+        )
+        self.rpc_transport_error = (
+            rpc_transport_error
+            if type(rpc_transport_error) is str
+            and rpc_transport_error
+            in {"handshake_rejected", "timeout", "connection_closed", "os_error", "unknown"}
             else None
         )
         self.rpc_failures: tuple[dict, ...] = ()
@@ -248,9 +262,27 @@ class BittensorRawJsonRpc:
                 if error.response.status_code == 429
                 else "proof_rpc_failed"
             )
-            raise ValidatorChainError(reason) from error
+            raise ValidatorChainError(
+                reason,
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+                rpc_http_status=error.response.status_code,
+                rpc_transport_error="handshake_rejected",
+            ) from error
         except Exception as error:
-            raise ValidatorChainError("proof_rpc_failed") from error
+            transport_error = "unknown"
+            if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+                transport_error = "timeout"
+            elif isinstance(error, ConnectionClosed):
+                transport_error = "connection_closed"
+            elif isinstance(error, OSError):
+                transport_error = "os_error"
+            raise ValidatorChainError(
+                "proof_rpc_failed",
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+                rpc_transport_error=transport_error,
+            ) from error
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

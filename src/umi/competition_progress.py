@@ -133,7 +133,13 @@ def _failure_details(error):
             }
         )
         if isinstance(error, ValidatorChainError):
-            for name in ("rpc_method", "rpc_error_code", "rpc_block_hash"):
+            for name in (
+                "rpc_method",
+                "rpc_error_code",
+                "rpc_block_hash",
+                "rpc_http_status",
+                "rpc_transport_error",
+            ):
                 value = getattr(error, name)
                 if value is not None:
                     causes[-1][name] = value

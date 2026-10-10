@@ -1854,6 +1854,13 @@ existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming
 the operational switch is complete.
 
+When all proof providers fail, the phase report retains each provider's index,
+request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
+transport category such as `timeout` or `connection_closed`. Inspect every
+provider entry: a rate-limit refusal from the last fallback does not establish
+why the authenticated primary failed. Reports omit remote text, headers and
+credentials. These diagnostics do not change fallback or proof-validation rules.
+
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 
 ### Acceptance checks

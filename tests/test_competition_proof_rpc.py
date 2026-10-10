@@ -728,6 +728,99 @@ async def test_failed_providers_retain_each_numeric_error_without_remote_text():
     assert calls == [(code, "state_getReadProof", params) for code in (429, -32000, 4003)]
 
 
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_failed_primary_handshake_survives_later_provider_errors(chain, wire, status):
+    from umi.competition_progress import _failure_details
+
+    state, router = wire
+    state.primary_status = status
+    state.fallback_rpc_error = state.second_rpc_error = True
+    block = chain.finality.ref.block_hash
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error") as caught:
+        await router.request("chain_getHeader", (block,))
+    failures = _failure_details(caught.value)[0]["rpc_failures"]
+    assert [item["provider_index"] for item in failures] == [0, 1, 2]
+    assert failures[0]["rpc_http_status"] == status
+    assert failures[0]["rpc_transport_error"] == "handshake_rejected"
+    assert failures[0]["rpc_method"] == "chain_getHeader"
+    assert failures[0]["rpc_block_hash"] == block
+    assert failures[0]["reason_code"] == (
+        "proof_rpc_rate_limited" if status == 429 else "proof_rpc_failed"
+    )
+    assert "fixture unavailable" not in json.dumps(failures)
+    assert "Retry-After" not in json.dumps(failures)
+
+
+@pytest.mark.parametrize(
+    "cause", [TimeoutError("secret"), OSError("secret"), RuntimeError("secret")]
+)
+async def test_transport_failure_keeps_safe_kind_and_request_identity(cause):
+    from umi.competition_progress import _failure_details
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _RpcClient
+
+    def fail(*_args, **_kwargs):
+        raise cause
+
+    block = _hash(77)
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=fail)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_failed") as caught:
+        await rpc.request("state_getReadProof", (["0x3a636f6465"], block))
+    report = _failure_details(caught.value)[0]
+    expected = (
+        "timeout"
+        if isinstance(cause, TimeoutError)
+        else "os_error"
+        if isinstance(cause, OSError)
+        else "unknown"
+    )
+    assert report["rpc_transport_error"] == expected
+    assert report["rpc_method"] == "state_getReadProof"
+    assert report["rpc_block_hash"] == block
+    assert "secret" not in json.dumps(_failure_details(caught.value))
+
+
+async def test_provider_budget_expiry_retains_timeout_before_next_failure():
+    from umi.competition_progress import _failure_details
+
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, index):
+            self.index = index
+
+        async def request(self, method, params):
+            if self.index == 0:
+                await asyncio.Event().wait()
+            raise ValidatorChainError(
+                "proof_rpc_error", rpc_method=method, rpc_block_hash=params[-1]
+            )
+
+    rpc = FailoverProofRpc(tuple(Transport(i) for i in range(3)), timeout_seconds=0.03)
+    block = _hash(77)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error") as caught:
+        await rpc.request("chain_getHeader", (block,))
+    failures = _failure_details(caught.value)[0]["rpc_failures"]
+    assert failures[0]["rpc_transport_error"] == "timeout"
+    assert failures[0]["rpc_method"] == "chain_getHeader"
+    assert failures[0]["rpc_block_hash"] == block
+    assert [item["provider_index"] for item in failures] == [0, 1, 2]
+
+
+@pytest.mark.parametrize("status", [True, 99, 600, "secret", None])
+def test_transport_metadata_rejects_unbounded_provider_values(status):
+    from umi.competition_progress import _failure_details
+
+    error = ValidatorChainError(
+        "proof_rpc_failed", rpc_http_status=status, rpc_transport_error="secret"
+    )
+    report = _failure_details(error)[0]
+    assert "rpc_http_status" not in report
+    assert "rpc_transport_error" not in report
+    assert "secret" not in json.dumps(report)
+
+
 @pytest.mark.parametrize(
     "code,message,throttled",
     [
