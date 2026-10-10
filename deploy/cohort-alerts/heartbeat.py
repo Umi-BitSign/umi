@@ -184,6 +184,9 @@ def successor_healthy(service, invocation_id):
             return status in {"worker_started", "worker_healthy"} or (status, reason) in {
                 ("started", "successor_worker_started"),
                 ("healthy", "successor_worker_healthy"),
+                ("healthy", "current_worker_healthy"),
+                ("healthy", "future_directive_staged"),
+                ("healthy", "future_stage_failed"),
             }
     except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
         pass

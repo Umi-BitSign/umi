@@ -219,8 +219,16 @@ class BittensorRawJsonRpc:
                 raise ValidatorChainError("proof_rpc_response_invalid")
             if set(response) == {"jsonrpc", "id", "error"}:
                 error = response["error"]
+                # The archive reports its historical-work quota in a normal
+                # JSON-RPC reply, not an HTTP 429. Match the observed pair;
+                # the numeric server code alone has no universal meaning.
+                historical_throttle = (
+                    isinstance(error, dict)
+                    and error.get("code") == -32004
+                    and error.get("message") == "Historical work rate limit exceeded"
+                )
                 raise ValidatorChainError(
-                    "proof_rpc_error",
+                    "proof_rpc_rate_limited" if historical_throttle else "proof_rpc_error",
                     rpc_method=method,
                     rpc_error_code=error.get("code") if isinstance(error, dict) else None,
                     rpc_block_hash=params[-1] if params else None,

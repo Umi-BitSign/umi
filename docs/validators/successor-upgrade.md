@@ -351,6 +351,20 @@ uses the retained proofs and a fixed target block while catching up; it grants n
 current submission authority. The executor checks fresh control before signing.
 Cancellation drains owned signing work before releasing the writer locks.
 
+While first-activation replay is pending, predecessor reconciliation publishes
+the same `umi-successor-host-status/1` reports as the ordinary supervisor.
+Monitoring uses the current service invocation's native result: a held writer
+remains unhealthy even when the process is running. A healthy current worker
+can continue while a future directive is staged or its staging fails; that
+result does not establish successor activation or received rewards.
+
+An archive response of `Historical work rate limit exceeded` is a provider
+throttle even when it arrives as JSON-RPC code `-32004` over an established
+connection. It enters the same bounded cooldown as an HTTP 429; alternate
+providers must still prove the exact requested block. Unrelated errors with
+that numeric code do not imply throttling. Cached reads reduce repeat requests,
+but completing uncached historical proofs still requires available archive capacity.
+
 The supervisor selects `standing-reward-boot.json` beside its existing supervisor
 configuration when that file is present. This works with the installed service
 command and its original process lock; no second service or command override is

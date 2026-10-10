@@ -728,6 +728,55 @@ async def test_failed_providers_retain_each_numeric_error_without_remote_text():
     assert calls == [(code, "state_getReadProof", params) for code in (429, -32000, 4003)]
 
 
+@pytest.mark.parametrize(
+    "code,message,throttled",
+    [
+        (-32004, "Historical work rate limit exceeded", True),
+        (-32004, "Method not supported", False),
+        (-32000, "Historical work rate limit exceeded", False),
+    ],
+)
+async def test_historical_work_throttle_enters_provider_cooldown(code, message, throttled):
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _FakeConnect, _RpcClient
+
+    calls = []
+    block = _hash(77)
+    params = (["0x3a636f6465"], block)
+
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, index):
+            self.index = index
+
+        async def request(self, method, arguments):
+            calls.append((self.index, method, arguments))
+            if self.index:
+                return {"at": block, "proof": []}
+            response = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": code, "message": message, "data": "private must not escape"},
+                }
+            )
+            rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(response))
+            return await rpc.request(method, arguments)
+
+    rpc = FailoverProofRpc(tuple(Transport(i) for i in range(3)), timeout_seconds=30)
+    now = [100.0]
+    rpc._now = lambda: now[0]
+    for _ in range(2):
+        assert await rpc.request("state_getReadProof", params) == {"at": block, "proof": []}
+    assert [i for i, _, _ in calls] == ([0, 1, 1] if throttled else [0, 1, 0, 1])
+    assert all(arguments == params for _, _, arguments in calls)
+    now[0] = 111.0
+    await rpc.request("state_getReadProof", params)
+    assert [i for i, _, _ in calls[-2:]] == [0, 1]
+
+
 @pytest.mark.parametrize("code", [True, "secret", 2**40, None])
 async def test_rpc_error_diagnostics_do_not_copy_invalid_codes_or_arguments(code):
     from umi.competition_progress import _failure_details

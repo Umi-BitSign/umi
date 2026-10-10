@@ -263,6 +263,9 @@ class HeartbeatTests(unittest.TestCase):
         for status, reason in (
             ("started", "successor_worker_started"),
             ("healthy", "successor_worker_healthy"),
+            ("healthy", "current_worker_healthy"),
+            ("healthy", "future_directive_staged"),
+            ("healthy", "future_stage_failed"),
         ):
             read.return_value = json.dumps(
                 {

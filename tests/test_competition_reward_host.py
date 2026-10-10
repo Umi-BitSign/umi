@@ -7,6 +7,7 @@ old writer locks, journal identity, crash ordering and restart are real.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -40,6 +41,7 @@ from umi.competition_reward_service import StandingRewardServiceLimits, run_stan
 from umi.competition_reward_standing_handoff import hold_standing_reward_handoff
 from umi.competition_reward_transactions import StandingWeightJournal
 from umi.competition_round_journal import RoundJournal
+from umi.competition_supervisor_runtime import SuccessorRuntimeResult
 from umi.open_competition import digest, identity
 from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
@@ -1008,7 +1010,7 @@ async def test_service_reports_failed_stage_and_recovers_without_reset(
         monkeypatch.setattr(target, name, interrupted)
 
     async def predecessor():
-        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+        return SuccessorRuntimeResult("healthy", "current_worker_healthy", 1, "a" * 64, 1000)
 
     with caplog.at_level(logging.INFO):
         async with c.reopen() as runtime:
@@ -1086,7 +1088,7 @@ async def test_service_boot_retries_before_handoff_and_keeps_replay_target(
     monkeypatch.setattr(service, "_prepare_first", prepare)
 
     async def predecessor():
-        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+        return SuccessorRuntimeResult("healthy", "current_worker_healthy", 1, "a" * 64, 1000)
 
     async with c.reopen() as runtime:
         c.current_runtime = runtime
@@ -1112,7 +1114,7 @@ async def test_service_stop_during_boot_preserves_old_handoff_state(service_case
     monkeypatch.setattr(service, "_prepare_first", prepare)
 
     async def predecessor():
-        return SimpleNamespace(status="healthy", reason="fixture_legacy_continuation")
+        return SuccessorRuntimeResult("healthy", "current_worker_healthy", 1, "a" * 64, 1000)
 
     async with c.reopen() as runtime:
         c.current_runtime = runtime
@@ -1153,7 +1155,9 @@ async def test_slow_boot_continues_c4_and_feed_failure_does_not_block_c5(
                 reconciled.set()
                 if feed_fails:
                     raise OSError("fixture unavailable old feed")
-                return SimpleNamespace(status="healthy", reason="current_worker_healthy")
+                return SuccessorRuntimeResult(
+                    "healthy", "current_worker_healthy", 1, "a" * 64, 1000
+                )
 
         monkeypatch.setattr(runtime, "reconcile", reconcile)
         await run_standing_reward_service(runtime, **c.service_options)
@@ -1161,6 +1165,38 @@ async def test_slow_boot_continues_c4_and_feed_failure_does_not_block_c5(
     assert reconciles == ["old-worker"]
     assert len(c.executors) == 1
     assert not any(t.get_name() == "standing-predecessor-continuation" for t in asyncio.all_tasks())
+
+
+@pytest.mark.parametrize(
+    "status,reason,block",
+    [
+        ("holding", "successor_reconcile_failed", None),
+        ("waiting", "weights_rate_limited", 1000),
+        ("started", "successor_worker_started", 1000),
+        ("healthy", "current_worker_healthy", 1001),
+    ],
+)
+async def test_predecessor_replay_emits_native_status_for_monitoring(caplog, status, reason, block):
+    stop = asyncio.Event()
+
+    async def reconcile():
+        stop.set()
+        return SuccessorRuntimeResult(status, reason, 23, "a" * 64, block)
+
+    runtime = SimpleNamespace(_standing_handoff_intent=lambda: None, reconcile=reconcile)
+    with caplog.at_level(logging.INFO, logger=service.__name__):
+        await service._continue_predecessor(runtime, stop, 12)
+    reports = [json.loads(r.message) for r in caplog.records if r.name == service.__name__]
+    assert reports == [
+        {
+            "schema": "umi-successor-host-status/1",
+            "status": status,
+            "reason": reason,
+            "accepted_sequence": 23,
+            "accepted_directive_sha256": "a" * 64,
+            "finalized_block": block,
+        }
+    ]
 
 
 async def test_boot_continuation_never_restarts_c4_after_retained_handoff(
