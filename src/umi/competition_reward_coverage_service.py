@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .competition_evidence_codec import checked_size
+from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_collector import RewardCoverageCollector
 from .competition_reward_coverage_journal import RewardCoverageJournal
@@ -246,7 +247,12 @@ class StandingRewardCoverageService:
                 try:
                     await operation()
                 except Exception as error:
-                    logger.warning("coverage_retry phase=%s reason=%s", name, type(error).__name__)
+                    logger.warning(
+                        "coverage_retry phase=%s reason=%s details=%s",
+                        name,
+                        type(error).__name__,
+                        canonical_json_bytes(_failure_details(error)).decode(),
+                    )
 
     async def opportunity(self, activation: RewardActivation) -> VerifiedRewardOpportunity:
         async with self._lock:

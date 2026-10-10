@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
@@ -375,10 +376,11 @@ class StandingRewardCoordinator:
                     )
                 except Exception as error:
                     logger.warning(
-                        "reward_coordinator_retry phase=%s sequence=%d reason=%s",
+                        "reward_coordinator_retry phase=%s sequence=%d reason=%s details=%s",
                         self.phase,
                         self.sequence,
                         type(error).__name__,
+                        canonical_json_bytes(_failure_details(error)).decode(),
                     )
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=poll_seconds)

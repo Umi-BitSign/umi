@@ -164,6 +164,18 @@ class HistoricalHeaderRecovery:
         current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
         if cached is not None and current["number"] != height:
             raise ValueError("historical registration differs from finalized ancestry")
+        # Another request may already have proved a closer descendant under
+        # this exact anchor. Continue from that link instead of repeating the
+        # entire walk when, for example, the next target is its parent.
+        nearest = min(
+            (number for number in self._verified if height < number < current["number"]),
+            default=None,
+        )
+        if nearest is not None:
+            encoded = self._verified[nearest]
+            current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+            if current["number"] != nearest:
+                raise ValueError("historical registration differs from finalized ancestry")
         used = 0
         for _ in range(self.batch_size):
             if current["number"] == height:

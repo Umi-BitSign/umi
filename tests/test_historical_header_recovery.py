@@ -246,6 +246,27 @@ async def test_verified_link_reuse_requires_the_exact_target(walk, field):
         await service.recover(w.anchor, replace(w.target, **{field: value}), w.request)
 
 
+async def test_adjacent_older_target_continues_from_verified_descendant(walk, monkeypatch):
+    w = walk
+    original = w.target
+    height = original.block_number + 1
+    block_hash = w.by_height[height]
+    header = w.headers[block_hash]
+    w.target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
+    service = HistoricalHeaderRecovery(w.connect, batch_size=4)
+    assert (await finish(service, w)).snapshot == w.target
+    loaded, load = [], service._load
+
+    def counted(block_hash):
+        loaded.append(block_hash)
+        return load(block_hash)
+
+    monkeypatch.setattr(service, "_load", counted)
+    assert (await service.recover(w.anchor, original, w.request)).snapshot == original
+    assert loaded == [original.block_hash]
+    assert len(w.calls) == len(set(w.calls)) == w.anchor.height - original.block_number
+
+
 async def test_new_anchor_rechecks_durable_links(walk, monkeypatch, chain_config, policy):
     w = walk
     service = HistoricalHeaderRecovery(w.connect)

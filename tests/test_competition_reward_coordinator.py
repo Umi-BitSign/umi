@@ -215,15 +215,47 @@ async def test_recurring_owner_recovers_peer_without_replaying_or_resigning(coor
 
 
 async def test_retry_log_identifies_phase_without_exception_credentials(coordinator_case, caplog):
+    from umi.validator_chain import ValidatorChainError
+
     h = coordinator_case
     stop = asyncio.Event()
 
     async def rejected(body, prefix):
         stop.set()
-        raise ValueError("failed URL https://example.test/private?token=secret-test-value")
+        try:
+            raise ValueError("failed URL https://example.test/private?token=secret-test-value")
+        except ValueError as error:
+            raise ValidatorChainError("proof_rpc_failed") from error
 
     h.coordinator.reviewer.review = rejected
     await h.coordinator.run(stop, poll_seconds=0.001)
-    assert "phase=native_review sequence=0 reason=ValueError" in caplog.text
+    assert "phase=native_review sequence=0 reason=ValidatorChainError" in caplog.text
+    assert '"reason_code":"proof_rpc_failed"' in caplog.text
+    assert '"error_type":"builtins.ValueError"' in caplog.text
     assert "secret-test-value" not in caplog.text
     assert not h.votes and not h.sends and h.owner.journal.load(0) is None
+
+
+async def test_coverage_failure_reports_cause_without_blocking_discovery(caplog):
+    from umi.competition_reward_coverage_service import StandingRewardCoverageService
+    from umi.validator_chain_scan import ValidatorChainScanError
+
+    service = object.__new__(StandingRewardCoverageService)
+    service._lock = asyncio.Lock()
+    discovered = []
+
+    async def failed():
+        try:
+            raise OSError("https://example.test/private?token=secret-test-value")
+        except OSError as error:
+            raise ValidatorChainScanError("block_rpc_failed") from error
+
+    async def discover():
+        discovered.append(True)
+
+    service._collect, service._discover = failed, discover
+    await service.step()
+    assert discovered == [True]
+    assert '"reason_code":"block_rpc_failed"' in caplog.text
+    assert '"error_type":"builtins.OSError"' in caplog.text
+    assert "secret-test-value" not in caplog.text

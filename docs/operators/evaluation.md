@@ -425,6 +425,13 @@ completed entries do not consume the page capacity for unfinished work.
 Concurrent readers tolerate a private SQLite sidecar disappearing during its
 metadata check. Symlinks, extra hard links, public permissions and wrong owners
 remain rejected; the main database and process lock must stay linked.
+Historical header walks can continue from a closer descendant already verified
+under the same owned anchor. An adjacent older target therefore checks only the
+missing links. A changed anchor or process restart still requires native ancestry
+verification; durable hints never become proof by themselves.
+Reward coordinator and coverage retry logs include bounded native reason codes
+and source locations for nested failures, without exception messages or request
+contents. Use these to distinguish proof/RPC holds from history still advancing.
 Request-readiness roster reuse is scoped to each cohort's original selection
 and intent bytes, including the history embedded in those intents. Appending a
 new current history or delivery receipt does not replay every original order.
