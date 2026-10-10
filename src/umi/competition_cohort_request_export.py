@@ -214,8 +214,13 @@ def replay_request_export(
         ):
             raise ValueError("request export service history is incomplete or inconsistent")
         previous = service
-    if previous != record.service or (
-        record.fence is not None and record.fence not in exported.services
+    if (
+        previous != record.service
+        or (record.fence is not None and record.fence not in exported.services)
+        or (
+            record.tail_fence is not None
+            and not any(s.observation == record.tail_fence.observation for s in exported.services)
+        )
     ):
         raise ValueError("request export changed its original service observation or fence")
     records = tuple(

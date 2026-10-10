@@ -25,6 +25,9 @@ from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_cohort_request_closure import CohortRequestClosure
+from .competition_cohort_request_inventory import request_inventory_observations
+from .competition_cohort_request_tail import verify_request_tail_clock
 from .competition_cohort_settlement import CohortSettlement
 from .competition_cohort_settlement_assembly import assemble_settlement_inputs
 from .competition_cohort_settlement_config import SettlementServiceConfig
@@ -234,6 +237,42 @@ class CohortSettlementService:
         self.store.publish_history(history, self.config.policy, current_block=block)
         return history
 
+    async def _request_inventory_proofs(self, data):
+        """Authenticate the original cutoff clock and evaluator snapshot boundaries."""
+        benchmark = CohortRequestClosure.model_validate_json(
+            data.objects(data.inputs.closure.benchmark_closure_sha256)
+        )
+        tail = benchmark.tail
+        if tail is None:
+            return
+        observations = [tail.opened_observation, tail.observation]
+        if tail.selected_observation is not None:
+            observations.append(tail.selected_observation)
+        observations.extend(request_inventory_observations(benchmark, data.objects))
+        checked = {}
+        for observation in observations:
+            key = digest(observation)
+            if key in checked:
+                continue
+            raw, metadata = await self.proofs.read(observation)
+            reviewed = await self.provider.review_archive(observation, raw, metadata)
+            if (
+                reviewed.original != observation
+                or reviewed.replayed_at.block_number < observation.block
+            ):
+                raise ValueError(
+                    "settlement request inventory proof changed its original observation"
+                )
+            checked[key] = reviewed
+        verify_request_tail_clock(
+            tail,
+            checked[digest(tail.opened_observation)],
+            checked[digest(tail.observation)],
+            None
+            if tail.selected_observation is None
+            else checked[digest(tail.selected_observation)],
+        )
+
     async def _start(self, history):
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
@@ -311,6 +350,7 @@ class CohortSettlementService:
                 maximum_bytes=self.config.maximum_package_bytes,
             )
         )
+        await self._request_inventory_proofs(self.data)
         self.journal.put(kind, "original", {"sha256": digest(package)})
         self.package = package
         delivered = SettlementEvidenceFiles(Path(self.config.exchange_inbox) / "objects")
@@ -417,10 +457,12 @@ class CohortSettlementService:
             self.promotion.directory / "model-reward-acceptances",
             review,
         )
+        completed = {p.submission_sha256 for p in review.closure.participants}
         participants = tuple(
             participant
             for participant in review.roster.participants
             if participant.record.request.signed_submission.submission.track == "model"
+            and digest(participant.record.request.signed_submission.submission) in completed
         )
         for participant, certificate in zip(participants, certificates, strict=True):
             await self.model_artifacts.ensure(participant, certificate)

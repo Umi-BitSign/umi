@@ -841,6 +841,30 @@ service must provision disk and RPC capacity for the complete interval. Slow
 proof verification and decoding drain in owned threads, keeping the event loop
 responsive without abandoning work during shutdown.
 
+`maximum_history_bytes` in both standing-validator and coordinator/reviewer boot
+configurations supports 1 KiB through 512 GiB. Choose an explicit budget from the
+complete required interval, measured proof growth and available disk; the
+reader's direct-construction default remains 4 GiB. History's total record count
+is bounded by that byte budget, since every canonical record consumes at least
+one byte. It has no separate 65,536-block or 5,242,880-record cutoff. Per-frame
+and per-call bounds, conflict holds, exact-byte checks and atomic capacity
+accounting still apply. The SQLite page bound is the selected budget plus 16 MiB;
+indexes and page overhead can exhaust that physical bound before logical bodies
+reach the budget. Proof exports and header stores need their own disk budgets.
+
+Increasing this operational envelope reopens the same history path and preserves
+its binding, first block, original proofs and reservation receipts. It supports
+original journals with or without reservation tables and repeated upgrades;
+unsupported byte budgets fail before creating journal state. Restart still
+replays every retained frame before issuing a verified prefix. Current and
+predecessor histories each receive the configured envelope during series
+succession; retain predecessor stores while native recovery needs them. Ordinary
+round journals keep their existing 16 GiB and round-derived record limits.
+Before selecting a larger budget, verify that the installed reader supports it,
+provision the complete storage path and account for cooperative shutdown and
+native replay. Increasing a configured envelope does not reserve filesystem
+space or reset any journal.
+
 The runtime executor reuses successful deterministic output for identical proven
 Wasm and helper digests. This process-local cache retains at most four outputs
 within one maximum-response byte budget. Every call still requires code evidence

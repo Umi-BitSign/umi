@@ -513,6 +513,29 @@ async def test_capacity_can_grow_without_changing_history_binding(history_case):
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
 
 
+async def test_large_capacity_upgrade_still_replays_original_native_history(history_case):
+    h = history_case
+    first = h.old.height
+    await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    prefix = await h.reader.verified_prefix(first)
+    original = h.reader._load(first)
+    inode = h.reader.journal.path.stat().st_ino
+    h.offline_through = first + 1
+    h.reader = h.new_reader(maximum_bytes=64 * 1024**3)
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.verified_prefix(first)
+    result = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    assert result is not None
+    assert await h.reader.verified_prefix(first) == prefix
+    assert h.reader._load(first) == original
+    assert h.reader.journal.path.stat().st_ino == inode
+    h.offline_through = h.end
+    h.reader = h.new_reader(maximum_bytes=512 * 1024**3)
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history == result
+    assert h.reader._load(first) == original
+    assert h.reader.journal.path.stat().st_ino == inode
+
+
 @pytest.mark.parametrize("mutation", ["frame", "object", "missing", "gap"])
 async def test_retained_cursor_cannot_skip_missing_or_changed_proofs(history_case, mutation):
     h = history_case
@@ -598,3 +621,283 @@ async def test_cancelled_save_drains_before_releasing_archive_owner(
     h.reader = await h.restart()
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
     assert h.body_requests.count(h.old.height) == 1
+
+
+@pytest.mark.parametrize("stage", ["save", "export"])
+async def test_one_frame_capture_overlaps_publication_without_advancing_prefix(
+    history_case, monkeypatch, tmp_path, stage
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    h = history_case
+    first = h.old.height
+    h.reader.export_archive = RewardProofArchive(tmp_path / "pipeline-export")
+    entered, following_ready = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    prepare = h.reader._prepare
+    requested = []
+
+    async def prepared(provider, height):
+        requested.append(height)
+        result = await prepare(provider, height)
+        if height == first + 1:
+            following_ready.set()
+        return result
+
+    method = "_save" if stage == "save" else "_export"
+    publish = getattr(h.reader, method)
+
+    def blocked(observation, *args):
+        if observation.slot.snapshot.block_number == first:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(10), "publication did not drain"
+        return publish(observation, *args)
+
+    monkeypatch.setattr(h.reader, "_prepare", prepared)
+    monkeypatch.setattr(h.reader, method, blocked)
+    task = asyncio.create_task(
+        h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(following_ready.wait(), 5)
+        assert requested == [first, first + 1]
+        assert h.body_requests == [first, first + 1]
+        assert h.reader._next == first
+        assert h.reader._tip is None and h.reader._prefixes == {}
+        assert h.reader.journal.get("control_history_block", str(first + 1)) is None
+        assert (h.reader.journal.get("control_history_block", str(first)) is not None) == (
+            stage == "export"
+        )
+    finally:
+        release.set()
+        result = await task
+    assert result.next_block == first + 2 and result.history is None
+    assert requested == [first, first + 1]
+
+
+@pytest.mark.parametrize("boundary", ["work", "target"])
+async def test_lookahead_never_exceeds_frozen_work_or_target_boundary(
+    history_case, monkeypatch, boundary
+):
+    h = history_case
+    first = h.old.height
+    prepare = h.reader._prepare
+    requested = []
+
+    async def prepared(provider, height):
+        requested.append(height)
+        assert height == first, "a frame escaped its selected work boundary"
+        return await prepare(provider, height)
+
+    monkeypatch.setattr(h.reader, "_prepare", prepared)
+    result = await h.reader.advance(
+        h.item.provider,
+        through_block=h.end if boundary == "work" else first,
+        maximum_blocks=1 if boundary == "work" else 64,
+    )
+    assert result.next_block == first + 1 and requested == [first]
+    assert (result.history is None) == (boundary == "work")
+
+
+async def test_lookahead_preserves_sequential_original_proof_and_export_bytes(
+    history_case, tmp_path
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
+
+    h = history_case
+    first = h.old.height
+    serial_archive = RewardProofArchive(tmp_path / "serial-export")
+    serial = RewardControlHistoryReader(
+        tmp_path / "serial-history",
+        control_hotkey=h.item.hotkey,
+        chain_config_sha256=digest(h.item.config),
+        first_block=first,
+        maximum_bytes=4 * 1024**2,
+        export_archive=serial_archive,
+    )
+    for _ in range(h.end - first + 1):
+        expected = await serial.advance(h.item.provider, through_block=h.end, maximum_blocks=1)
+    assert expected.history is not None
+    parallel_archive = RewardProofArchive(tmp_path / "lookahead-export")
+    h.reader.export_archive = parallel_archive
+    actual = await h.reader.advance(h.item.provider, through_block=h.end)
+    assert actual.history == expected.history
+    for height in range(first, h.end + 1):
+        fields = serial._load(height)
+        assert h.reader._load(height) == fields
+        key = history_archive_key(serial.config_sha256, serial.hotkey, height)
+        arguments = {"bounds": {name: len(raw) for name, raw in fields.items()}}
+        assert parallel_archive.read("history", key, **arguments) == serial_archive.read(
+            "history", key, **arguments
+        )
+        assert (
+            parallel_archive._path("history", key).read_bytes()
+            == serial_archive._path("history", key).read_bytes()
+        )
+    h.offline_through = h.end
+    h.reader = await h.restart()
+    h.rpc_calls.clear()
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history == actual.history
+    assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
+
+
+@pytest.mark.parametrize("stage", ["save", "export"])
+async def test_publication_failure_discards_lookahead_and_preserves_original_error(
+    history_case, monkeypatch, tmp_path, stage
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    h = history_case
+    first = h.old.height
+    h.reader.export_archive = RewardProofArchive(tmp_path / "failed-export")
+    prepare = h.reader._prepare
+    started, finished = asyncio.Event(), asyncio.Event()
+    release = asyncio.Event()
+    failure = OSError("original publication failure")
+
+    async def prepared(provider, height):
+        if height != first + 1:
+            return await prepare(provider, height)
+        started.set()
+        try:
+            await release.wait()
+            raise ValueError("secondary lookahead failure")
+        finally:
+            finished.set()
+
+    def failed(*args):
+        raise failure
+
+    monkeypatch.setattr(h.reader, "_prepare", prepared)
+    monkeypatch.setattr(h.reader, "_save" if stage == "save" else "_export", failed)
+    task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert h.reader._lock.locked()
+        assert h.reader._next == first
+        assert h.reader.journal.get("control_history_block", str(first + 1)) is None
+        with pytest.raises((ValueError, RuntimeError, BlockingIOError)):
+            await h.new_reader().advance(h.item.provider, through_block=h.end)
+    finally:
+        release.set()
+    with pytest.raises(OSError) as raised:
+        await task
+    assert raised.value is failure
+    assert finished.is_set() and not h.reader._lock.locked()
+    assert h.reader._next == first
+
+
+async def test_failed_native_lookahead_preserves_committed_prefix(history_case):
+    h = history_case
+    first = h.old.height
+    h.fail_block = first + 1
+    with pytest.raises(RuntimeError, match="block_body_fetch_failed"):
+        await h.reader.advance(h.item.provider, through_block=h.end)
+    assert h.reader._next == first + 1
+    assert h.reader._load(first) is not None
+    assert h.reader._load(first + 1) is None
+    assert h.body_requests == [first, first + 1]
+    h.fail_block = None
+    h.offline_through = first
+    h.reader = await h.restart()
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    assert h.body_requests.count(first) == 1
+
+
+async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
+    history_case, monkeypatch
+):
+    h = history_case
+    first = h.old.height
+    await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    h.offline_through = first + 1
+    h.reader = await h.restart()
+    prepare = h.reader._prepare
+    requested = []
+
+    async def wrong_height(provider, height):
+        requested.append(height)
+        # Replay an authentic retained native proof, but return it for a
+        # different height. Its signatures/binding still pass; interval
+        # validation must reject it before scheduling another frame.
+        return await prepare(provider, first if height == first + 1 else height)
+
+    monkeypatch.setattr(h.reader, "_prepare", wrong_height)
+    with pytest.raises(ValueError, match="gap or a different parent"):
+        await h.reader.advance(h.item.provider, through_block=h.end)
+    assert requested == [first, first + 1]
+    assert h.reader._next == first + 1
+    assert (await h.reader.verified_prefix(first)).tip.block_number == first
+    with pytest.raises(ValueError, match="not been natively verified"):
+        await h.reader.verified_prefix(first + 1)
+
+
+@pytest.mark.parametrize("publication", ["save", "export"])
+async def test_repeated_cancellation_drains_publication_and_native_lookahead_before_release(
+    history_case, monkeypatch, tmp_path, publication
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    h = history_case
+    first = h.old.height
+    h.reader.export_archive = RewardProofArchive(tmp_path / "cancel-export")
+    published = asyncio.Event()
+    release_publication = threading.Event()
+    native_started = asyncio.Event()
+    release_native = threading.Event()
+    loop = asyncio.get_running_loop()
+    method = "_save" if publication == "save" else "_export"
+    publish = getattr(h.reader, method)
+    verify = h.item.verifier.verify_extrinsics_root
+
+    def blocked_publication(observation, *args):
+        if observation.slot.snapshot.block_number == first:
+            loop.call_soon_threadsafe(published.set)
+            assert release_publication.wait(10), "publication thread was abandoned"
+        return publish(observation, *args)
+
+    calls = 0
+
+    def blocked_native(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            loop.call_soon_threadsafe(native_started.set)
+            assert release_native.wait(10), "prefetched native proof thread was abandoned"
+        return verify(**kwargs)
+
+    monkeypatch.setattr(h.reader, method, blocked_publication)
+    monkeypatch.setattr(h.item.verifier, "verify_extrinsics_root", blocked_native)
+    task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
+    try:
+        await asyncio.wait_for(published.wait(), 5)
+        await asyncio.wait_for(native_started.wait(), 5)
+        task.cancel()
+        for _ in range(3):
+            await asyncio.sleep(0)
+            task.cancel()
+        assert not task.done() and h.reader._lock.locked()
+        assert h.item.provider._lock.locked()
+        release_publication.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+            task.cancel()
+        assert not task.done() and h.reader._lock.locked()
+        with pytest.raises((ValueError, RuntimeError, BlockingIOError)):
+            await h.new_reader().advance(h.item.provider, through_block=h.end)
+    finally:
+        release_publication.set()
+        release_native.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not h.reader._lock.locked() and not h.item.provider._lock.locked()
+    assert h.reader._next == first
+    assert h.reader._load(first) is not None and h.reader._load(first + 1) is None
+    h.offline_through = first
+    h.reader = await h.restart()
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None

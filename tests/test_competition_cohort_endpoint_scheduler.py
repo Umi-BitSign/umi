@@ -622,6 +622,12 @@ async def test_single_writer_lock_prevents_second_scheduler_effects(scheduled):
 async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
     scheduled, monkeypatch
 ):
+    from umi.competition_cohort_request_files import RequestCompletionFiles
+    from umi.competition_cohort_request_partial import (
+        PartialRequestManifest,
+        review_partial_request,
+    )
+
     q, p = scheduled, scheduled.p
     first = q.worker()
     # A signed miner failure is also a completed response; it cannot be retried
@@ -634,6 +640,12 @@ async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
     ]
     assert len(completed) == 1
     saved = first.schedule.reference(q.slot, completed[0].case_id)
+    partials = RequestCompletionFiles(first.schedule.journal.root.parent / "partial-exports")
+    partial_sha = partials.publish_partial(
+        first.schedule.owner, q.slot, completed_by_block=2**53 - 1
+    )
+    partial_manifest = PartialRequestManifest.model_validate_json(partials.objects(partial_sha))
+    assert partial_manifest.cases == (saved,)
     selected, assignment, _ = p.delivery_recovery.selection(q.slot)
     original = canonical_json_bytes(selected)
     grant = selection_grant(selected, assignment)
@@ -681,6 +693,36 @@ async def test_outage_keeps_completed_case_and_refreshes_only_missing_requests(
 
     with pytest.raises(FileNotFoundError):
         tuple(endpoint_archive_cases(archive, missing_parent, p.c.policy))
+    complete_sha = partials.publish_partial(schedule.owner, q.slot, completed_by_block=2**53 - 1)
+    complete_manifest = PartialRequestManifest.model_validate_json(partials.objects(complete_sha))
+    assert complete_manifest.item_count > partial_manifest.item_count
+    assert complete_sha != partial_sha
+    assert (
+        review_partial_request(
+            complete_sha,
+            partials.objects,
+            p.c.policy,
+            assignment.certificate,
+            opened_at_block=0,
+            completed_by_block=2**53 - 1,
+        )
+        == assignment
+    )
+
+    def partial_missing_parent(sha):
+        if sha == parent_sha:
+            raise FileNotFoundError("partial predecessor unavailable")
+        return partials.objects(sha)
+
+    with pytest.raises(FileNotFoundError, match="partial predecessor"):
+        review_partial_request(
+            complete_sha,
+            partial_missing_parent,
+            p.c.policy,
+            assignment.certificate,
+            opened_at_block=0,
+            completed_by_block=2**53 - 1,
+        )
 
 
 async def test_selected_case_advances_before_slow_assignment_preparation(scheduled, monkeypatch):

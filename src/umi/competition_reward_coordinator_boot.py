@@ -23,7 +23,7 @@ from .competition_cohort_direct_model_review import (
 )
 from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
-from .competition_reward_boot import Capacity, ObjectCapacity, _disjoint
+from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
 from .competition_reward_control_publisher import StandingControlPublisher
@@ -92,7 +92,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     exchange_inbox: Directory
     exchange_outbox: Directory
     service: StandingRewardServiceLimits
-    maximum_history_bytes: Capacity
+    maximum_history_bytes: HistoryCapacity
     maximum_coverage_bytes: Capacity
     maximum_reader_bytes: Capacity
     maximum_package_bytes: ObjectCapacity

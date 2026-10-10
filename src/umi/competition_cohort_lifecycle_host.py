@@ -30,6 +30,7 @@ from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_readiness import LiveIntakePhaseObserver
 from .competition_cohort_request_export import RequestReviewExporter
 from .competition_cohort_request_files import RequestCompletionFiles
+from .competition_cohort_request_inventory import RequestInventoryCutoff
 from .competition_cohort_request_phase import NativeRequestProgressSource
 from .competition_cohort_request_publication import CohortRequestSettlementPublisher
 from .competition_cohort_request_readiness import LiveRequestPhaseObserver
@@ -44,7 +45,7 @@ from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
 from .open_competition import digest
 from .policy import ScoringPolicy, scoring_policy_hash
-from .private_files import Directory, read_private_model
+from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -115,6 +116,7 @@ class LifecycleHost:
         )
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}
+        self.request_opening_clocks = {}
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
@@ -203,6 +205,19 @@ class LifecycleHost:
             maximum_rounds=65536,
             maximum_bytes=c.maximum_state_bytes,
         )
+
+        def publish_inventory_cutoff(tail):
+            publish_private_model(
+                Path(c.settlement_history_directory) / (cohort + "-inventory-cutoff.json"),
+                RequestInventoryCutoff(
+                    schema="umi-private-request-inventory-cutoff/1",
+                    cohort_sha256=cohort,
+                    policy_sha256=digest(self.service.intake.policy),
+                    observation=tail.observation,
+                ),
+                maximum_bytes=16384,
+            )
+
         return NativeRequestProgressSource(
             self.service.intake,
             journal,
@@ -213,8 +228,23 @@ class LifecycleHost:
             orders=partial(self.files.orders, prepared.roster),
             terminals=self.files.terminal,
             objects=self.files.objects,
+            partial_source=partial(self.files.partial, prepared.roster),
+            inventory_source=partial(self.files.inventories, prepared.roster),
+            publish_inventory_cutoff=publish_inventory_cutoff,
             maximum_sample_gap_blocks=self.service.config.admission_owner.maximum_sample_gap_blocks,
         )
+
+    async def _request_opening_clock(self, source, state):
+        observation = await run_owned_thread(source.request_opening, state)
+        key = digest(observation)
+        if key not in self.request_opening_clocks:
+            raw, metadata = await self.provider.retained_archive(observation)
+            reviewed = await self.provider.review_archive(observation, raw, metadata)
+            if reviewed.original != observation or type(reviewed.timestamp_ms) is not int:
+                raise ValueError("request opening lacks its native timestamp proof")
+            await self.proofs.publish(observation)
+            self.request_opening_clocks[key] = reviewed
+        return self.request_opening_clocks[key]
 
     async def _requests(self, cohort):
         if cohort not in self.requests:
@@ -225,6 +255,7 @@ class LifecycleHost:
             self.config.public_origin,
             client=self.client,
             timeout_seconds=self.timeout_seconds,
+            opening_clock=partial(self._request_opening_clock, source),
         )
         publisher = CohortRequestSettlementPublisher(
             source,

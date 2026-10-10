@@ -53,6 +53,13 @@ class FinalizedHeadRegression(ValueError):
 class RoundJournal:
     """Bounded immutable records and durable conflict holds, shared by both roles."""
 
+    MAXIMUM_BYTES = 16 * 1024**3
+
+    @property
+    def maximum_records(self) -> int:
+        """Total retained records; per-call batches keep their separate bound."""
+        return self.maximum_rounds * 80
+
     def __init__(
         self,
         root: Path,
@@ -66,7 +73,7 @@ class RoundJournal:
         if (
             type(maximum_rounds) is not int
             or not 1 <= maximum_rounds <= 65536
-            or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 16 * 1024**3)
+            or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= self.MAXIMUM_BYTES)
             or type(maximum_record_bytes) is not int
             or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
         ):
@@ -513,7 +520,7 @@ class RoundJournal:
         cursor = db.execute(f"SELECT {_OBLIGATION_COLUMNS} FROM record_reservations")
         try:
             for offset, row in enumerate(cursor):
-                if offset >= self.maximum_rounds * 80:
+                if offset >= self.maximum_records:
                     raise ValueError("round reservation batch capacity exhausted")
                 self._decode_obligation(row)
         finally:
@@ -566,7 +573,7 @@ class RoundJournal:
             for kind in ("plan", "prepared", "intent", "suite", "certificate")
         ):
             raise ValueError("round journal record capacity exhausted")
-        if count > self.maximum_rounds * 80 or used > self.maximum_bytes:
+        if count > self.maximum_records or used > self.maximum_bytes:
             raise ValueError("round journal capacity exhausted")
 
     def reserve_records(
@@ -674,7 +681,7 @@ class RoundJournal:
                 or type(identity_["maximum_rounds"]) is not int
                 or not 1 <= identity_["maximum_rounds"] <= 65536
                 or type(identity_["maximum_bytes"]) is not int
-                or not 1024 <= identity_["maximum_bytes"] <= 16 * 1024**3
+                or not 1024 <= identity_["maximum_bytes"] <= self.MAXIMUM_BYTES
             )
         ):
             raise ValueError("round reservation journal binding changed")
@@ -836,7 +843,7 @@ class RoundJournal:
                     capacity_error = "round journal record capacity exhausted"
                 elif (
                     used + extra_bytes > self.maximum_bytes
-                    or count + extra_count > self.maximum_rounds * 80
+                    or count + extra_count > self.maximum_records
                 ):
                     capacity_error = "round journal capacity exhausted"
                 else:

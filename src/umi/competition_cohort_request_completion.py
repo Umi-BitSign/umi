@@ -1,8 +1,9 @@
 """Construct complete request evidence from the original accepted work.
 
 The caller selects the authenticated catalog set and owner seals. Missing
-terminal work stays pending without an age cutoff. This builder neither seals
-admissions nor reveals references, signs a phase, or changes a reward allocation.
+terminal work requires the explicit certified tail rule or remains pending. This
+builder neither seals admissions nor reveals references, signs a phase, or changes
+an allocation.
 """
 
 from __future__ import annotations
@@ -69,17 +70,19 @@ def build_service_request_closure(
         raise ValueError("request completion requires every selected catalog and owner seal")
     if read_endpoint_object(objects, digest(benchmark)) != canonical_json_bytes(benchmark):
         raise ValueError("request completion changed the retained benchmark")
+    tail = benchmark.schema_ == "umi-cohort-request-closure/3"
     pending, completed = [], []
     for catalog, seal in zip(catalogs, seals, strict=True):
         if read_endpoint_object(objects, digest(seal)) != canonical_json_bytes(seal):
             raise ValueError("request completion changed an owner seal")
-        terminals = []
+        terminals, skipped = [], []
         for assignment in sealed_service_assignments(
             seal, objects, policy, catalog=catalog, round_=roster.round
         ):
             terminal = terminal_source(assignment)
             if terminal is None:
                 pending.append(assignment.admission.work_sha256)
+                skipped.append(assignment.admission.work_sha256)
                 continue
             terminal = SignedServiceTerminal.model_validate_json(canonical_json_bytes(terminal))
             if terminal.terminal.work_sha256 != assignment.admission.work_sha256:
@@ -90,12 +93,13 @@ def build_service_request_closure(
                 catalog_sha256=digest(catalog.catalog),
                 seal_sha256=digest(seal),
                 terminals=tuple(terminals),
+                skipped_work=tuple(sorted(skipped)) if tail else None,
             )
         )
-    if pending:
+    if pending and not tail:
         raise PendingServiceRequestClosure(tuple(pending))
     closure = CohortServiceRequestClosure(
-        schema="umi-cohort-request-closure/2",
+        schema="umi-cohort-request-closure/4" if tail else "umi-cohort-request-closure/2",
         benchmark_closure_sha256=digest(benchmark),
         recovery_tip_sha256=benchmark.recovery_tip_sha256,
         observation=benchmark.observation,

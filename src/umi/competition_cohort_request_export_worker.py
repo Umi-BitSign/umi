@@ -16,15 +16,22 @@ from .competition_cohort_endpoint_archive import EndpointReplayArchive, JournalE
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_order_signer import OrderFinality
 from .competition_cohort_request_files import RequestCompletionFiles
+from .competition_cohort_request_inventory import (
+    RequestInventory,
+    RequestInventoryCutoff,
+    seal_request_inventory,
+)
 from .competition_cohort_request_terminal import (
     RequestTerminal,
     SignedRequestTerminal,
     seal_request_terminal,
 )
+from .competition_execution import execution_boundary
 from .competition_progress import _failure_details
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import Signature, digest, identity
+from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +41,15 @@ class RequestExportWorker:
         self,
         executions: Sequence[CohortExecutionJournal],
         provider: OrderFinality,
-        sign: Callable[[RequestTerminal], Awaitable[Signature]],
+        sign: Callable[[RequestTerminal | RequestInventory], Awaitable[Signature]],
         files: RequestCompletionFiles,
         journal: RoundJournal,
         *,
         batch_size: int = 16,
         concurrency: int = 4,
+        publish_inventory_proof=None,
+        inventory_needed=None,
+        inventory_cutoff=None,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("request export batch size is outside bounds")
@@ -67,6 +77,11 @@ class RequestExportWorker:
         self.files, self.journal, self.batch_size = files, journal, batch_size
         self.concurrency = concurrency
         self.serial = asyncio.Lock()
+        self.publish_inventory_proof = publish_inventory_proof
+        self.inventory_serial = asyncio.Lock()
+        self.inventory_observation = None
+        self.inventory_needed = inventory_needed
+        self.inventory_cutoff = inventory_cutoff
         with journal.transaction() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS request_export_cursor "
@@ -102,6 +117,92 @@ class RequestExportWorker:
                 )
         return tuple(r[0] for r in rows)
 
+    async def _partial(self, owner, slot, block):
+        manifest_key = await run_owned_thread(
+            partial(self.files.publish_partial, owner, slot, completed_by_block=block)
+        )
+        if self.publish_inventory_proof is None or self.inventory_cutoff is None:
+            return
+        assignment = await run_owned_thread(owner.assignment, slot)
+        cohort = assignment.certificate.order.round.cohort_sha256
+        if self.inventory_needed is not None and not self.inventory_needed(cohort):
+            return
+        cutoff = await run_owned_thread(self.inventory_cutoff, cohort)
+        if cutoff is None:
+            return
+        cutoff = RequestInventoryCutoff.model_validate_json(canonical_json_bytes(cutoff))
+        if cutoff.cohort_sha256 != cohort or cutoff.policy_sha256 != digest(owner.policy):
+            raise ValueError("inventory cutoff changed its original cohort or policy")
+        if block <= cutoff.observation.block:
+            return
+        # One immutable advisory cutoff and one observation per actual manifest:
+        # elapsed time alone never grows signed state, even through long stalls.
+        await run_owned_thread(self.journal.put, "request_inventory_cutoff", cohort, cutoff)
+
+        def selection_key(manifest):
+            return digest(
+                ["umi-request-inventory-selection/1", digest(cutoff), digest(assignment), manifest]
+            )
+
+        raw = await run_owned_thread(
+            self.journal.get, "request_inventory_selection", selection_key(manifest_key)
+        )
+        if raw is not None:
+            body = RequestInventory.model_validate_json(canonical_json_bytes(raw))
+            if (
+                body.manifest_sha256 != manifest_key
+                or body.observation.block <= cutoff.observation.block
+            ):
+                raise ValueError("retained inventory changed its original cutoff or manifest")
+            assignment, manifest, collected = await run_owned_thread(
+                self.files.recover_inventory, body, owner.policy
+            )
+            signed = await seal_request_inventory(
+                body,
+                self.journal,
+                self.sign,
+                signer=owner.config.signer,
+                timeout_seconds=owner.config.signing_timeout_seconds,
+            )
+            await run_owned_thread(
+                self.files.publish_inventory, signed, assignment, manifest, collected
+            )
+            return
+        # Complete terminal exports retain their cheap finalized-height path.
+        # A missing evaluator additionally needs an independently replayable
+        # original observation, shared across this poll's pending assignments.
+        async with self.inventory_serial:
+            if self.inventory_observation is None or self.inventory_observation.block < block:
+                observation = execution_boundary(await self.provider.collect())
+                if observation.block < block:
+                    raise ValueError("request inventory proof is behind owned finality")
+                await self.publish_inventory_proof(observation)
+                self.inventory_observation = observation
+            observation = self.inventory_observation
+        body, assignment, manifest, collected = await run_owned_thread(
+            self.files.collect_inventory, owner, slot, observation
+        )
+        key = selection_key(body.manifest_sha256)
+        prior = await run_owned_thread(self.journal.get, "request_inventory_selection", key)
+        if prior is None:
+            await run_owned_thread(self.files.publish_inventory_objects, collected)
+            await run_owned_thread(self.journal.put, "request_inventory_selection", key, body)
+        else:
+            body = RequestInventory.model_validate_json(canonical_json_bytes(prior))
+            assignment, manifest, collected = await run_owned_thread(
+                self.files.recover_inventory, body, owner.policy
+            )
+        signed = await seal_request_inventory(
+            body,
+            self.journal,
+            self.sign,
+            signer=owner.config.signer,
+            timeout_seconds=owner.config.signing_timeout_seconds,
+        )
+        await run_owned_thread(
+            self.files.publish_inventory, signed, assignment, manifest, collected
+        )
+
     async def _export(self, owner, slot, block):
         objects = JournalEndpointObjects(owner.journal)
         retained = await run_owned_thread(owner.journal.get, "request_terminal", slot)
@@ -110,11 +211,13 @@ class RequestExportWorker:
             # that lock on every pending poll can starve the producer we await.
             evidence = await run_owned_thread(owner.evidence, slot)
             if evidence is None:
+                await self._partial(owner, slot, block)
                 return False
             if evidence.job.mode == "endpoint_incumbent":
                 archive = await run_owned_thread(owner.journal.get, "endpoint_replay_archive", slot)
                 intent = await run_owned_thread(owner.journal.get, "request_terminal_intent", slot)
                 if archive is None and intent is None:
+                    await self._partial(owner, slot, block)
                     return False
             # Only creation needs the execution writer lock. Once sealed, the
             # immutable terminal can be exported while settlement reads the job.

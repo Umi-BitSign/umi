@@ -30,6 +30,9 @@ def scheduler(tmp_path, *, miners=(0, 1, 2), concurrency=2, batch_size=2):
             "CREATE TABLE service_worker_cursor "
             "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ordinal INTEGER NOT NULL)"
         )
+        db.execute(
+            "CREATE TABLE service_worker_turns (ordinal INTEGER PRIMARY KEY, turn INTEGER NOT NULL)"
+        )
     rows = tuple(
         SimpleNamespace(
             ordinal=i + 1,

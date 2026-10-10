@@ -18,7 +18,7 @@ from umi.competition_cohort_model_award import (
     build_model_award,
 )
 from umi.competition_cohort_quality_signing import build_quality_manifest
-from umi.open_competition import digest, model_content_digest
+from umi.open_competition import digest, identity, model_content_digest
 from umi.protocol import canonical_json_bytes
 
 from .cohort_request_closure_fixture import closure_fixture
@@ -118,8 +118,30 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
             artifacts.append(a.model_copy(update={"steps": tuple(steps)}))
         scenario["artifacts"] = tuple(artifacts)
     b = await closure_fixture(s, tmp_path / "execution", prepared=b)
+    signable = b
+    if mode == "tail":
+        from .cohort_request_closure_fixture import build
+        from .cohort_tail_settlement_fixture import partial_original, tail_observation
+
+        original, selected = b["closure"], b["orders"][0]
+        who = identity(selected.order.submission.submission.hotkey)
+
+        def terminals(order, evaluator):
+            if order == selected and evaluator == selected.order.evaluators[-1]:
+                return None
+            return b["terminals"].get((digest(order), identity(evaluator)))
+
+        partial = partial_original(b, selected, selected.order.evaluators[-1])
+        b["closure"] = build(
+            b,
+            tail=tail_observation(b, (who,)),
+            terminal_source=terminals,
+            partial_source=lambda _: (partial,),
+        )
+        b["original_closure"] = original
+        signable = {**b, "orders": tuple(o for o in b["orders"] if o != selected)}
     review = reviewer(b)
-    certificates = await certificates_for(b, review, tmp_path / "certificates")
+    certificates = await certificates_for(signable, review, tmp_path / "certificates")
     manifest = build_quality_manifest(review, certificates.get)
     archive = tmp_path / "preserved"
     preserve_bundle(
@@ -167,6 +189,54 @@ def award(c, **changes):
         changes.get("acceptances", accepted),
         changes.get("archive", archive),
     )
+
+
+@pytest.mark.parametrize("model_case", [("tail", 11)], indirect=True)
+async def test_tail_model_partition_keeps_real_quality_and_duplicate_priority(model_case, tmp_path):
+    from umi.competition_cohort_model_award import read_model_acceptances
+    from umi.competition_cohort_quality_signing import review_quality_manifest
+    from umi.private_files import publish_private_model
+
+    b, review, manifest, acceptances, _ = model_case
+    original = b["original_closure"]
+    skipped = b["closure"].skipped[0].submission_sha256
+    completed = {p.submission_sha256 for p in b["closure"].participants}
+    assert manifest.schema_ == "umi-cohort-quality-manifest/2"
+    assert manifest.skipped_participants == tuple(digest(p) for p in b["closure"].skipped)
+    outcomes = review_quality_manifest(manifest, review)
+    assert {o.submission_sha256 for o in outcomes} == completed
+    assert len(outcomes) == 10 and len(b["closure"].skipped) == 1
+    assert b["closure"].participants == tuple(
+        p for p in original.participants if p.submission_sha256 != skipped
+    )
+    with pytest.raises(ValueError, match="unselected participant"):
+        review.outcome(skipped)
+    for replacement in ((), ("ff" * 32,), (*manifest.skipped_participants,) * 2):
+        with pytest.raises(ValueError):
+            review_quality_manifest(
+                manifest.model_copy(update={"skipped_participants": replacement}), review
+            )
+    with pytest.raises(ValueError, match="exact certified roster"):
+        review_quality_manifest(
+            manifest.model_copy(update={"participants": manifest.participants[:-1]}), review
+        )
+    accepted = tuple(a for a in acceptances if a.acceptance.submission_sha256 in completed)
+    directory = tmp_path / "retained-acceptances"
+    for certificate in accepted:
+        publish_private_model(
+            directory
+            / digest(b["history"].plan)
+            / (certificate.acceptance.submission_sha256 + ".json"),
+            certificate,
+        )
+    assert read_model_acceptances(directory, review) == accepted
+    result = award(model_case, review=review, manifest=manifest, acceptances=accepted)
+    assert result.skipped_participants == manifest.skipped_participants
+    assert {c.submission_sha256 for c in result.candidates} == completed
+    expected = min(accepted, key=lambda a: a.acceptance.accepted_ordinal).acceptance
+    assert result.recipient_hotkey == expected.recipient_hotkey
+    with pytest.raises(PendingModelAward, match="entire sealed"):
+        award(model_case, review=review, manifest=manifest, acceptances=acceptances)
 
 
 @pytest.mark.parametrize(

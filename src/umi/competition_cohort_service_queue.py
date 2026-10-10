@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -26,6 +27,7 @@ from .competition_cohort_order_signer import (
     CohortOrderParticipant,
     remember_order_history,
 )
+from .competition_cohort_service_fence import ServiceTailAdmissionFence, ServiceTailFenceBinding
 from .competition_cohort_service_seal import (
     MAX_SERVICE_SEAL_BYTES,
     ServiceAcceptedWork,
@@ -48,7 +50,7 @@ from .competition_cohort_service_work import (
 from .competition_execution import execution_boundary
 from .competition_round_journal import RecordReservation, RoundJournal
 from .open_competition import CompetitionPolicy, SignedSubmission, digest
-from .private_files import Directory
+from .private_files import Directory, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_ADMISSION_BYTES = 2 * 1024**2
@@ -313,6 +315,10 @@ class ServiceWorkQueue:
                     return value
                 if self.journal.get("service_work_seal", self.config.catalog_sha256, db=db):
                     raise ServiceQueueBackpressure("service queue is sealed to new claims")
+                if self._tail_admission_fence(db) is not None:
+                    raise ServiceQueueBackpressure(
+                        "service queue has its durable cohort tail fence"
+                    )
                 count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
                 previous = None if count == 0 else self._read(count, db)
             catalog, round_ = self._catalog()
@@ -503,10 +509,65 @@ class ServiceWorkQueue:
             (RecordReservation("service_work_seal", key, MAX_SERVICE_SEAL_BYTES),),
         )
 
+    def bind_tail_admission_fence(self, binding: ServiceTailFenceBinding) -> None:
+        """Add the shared private cutoff path before any cohort queue is sealed."""
+        binding = ServiceTailFenceBinding.model_validate_json(canonical_json_bytes(binding))
+        with self.journal.locked():
+            catalog, _ = self._catalog()
+            if (
+                binding.policy_sha256 != self.config.policy_sha256
+                or binding.cohort_sha256 != catalog.catalog.cohort_sha256
+            ):
+                raise ValueError("tail admission binding differs from original cohort or policy")
+            self.journal.put("service_tail_fence_binding", self.config.catalog_sha256, binding)
+
+    def _tail_admission_fence(self, db=None) -> ServiceTailAdmissionFence | None:
+        raw = self.journal.get("service_tail_fence_binding", self.config.catalog_sha256, db=db)
+        if raw is None:
+            return None
+        binding = ServiceTailFenceBinding.model_validate_json(canonical_json_bytes(raw))
+        catalog, _ = self._catalog(db)
+        if (
+            binding.policy_sha256 != self.config.policy_sha256
+            or binding.cohort_sha256 != catalog.catalog.cohort_sha256
+        ):
+            raise ValueError("tail admission binding changed its original cohort or policy")
+        try:
+            fence = read_private_model(
+                Path(binding.directory) / "tail.json",
+                ServiceTailAdmissionFence,
+                maximum_bytes=128 * 1024,
+            )
+        except FileNotFoundError:
+            return None
+        if (
+            fence.cohort_sha256 != binding.cohort_sha256
+            or fence.policy_sha256 != binding.policy_sha256
+            or self.config.catalog_sha256 not in fence.catalog_sha256s
+        ):
+            raise ValueError("tail admission fence differs from the selected original cohort")
+        return fence
+
     def retained_seal(self) -> ServiceWorkSeal | None:
         """Read the owner's complete immutable fence without closing admissions."""
         with self.journal.locked(), canonical_json_reuse():
             return self._retained_seal()
+
+    @contextmanager
+    def closure_inventory(self):
+        """Hold admissions across native inventory review and conditional sealing.
+
+        A cohort owner enters every catalog lease in catalog order before deciding
+        whether its distinct-miner tail qualifies. Leaving without sealing does
+        not close admissions or alter accepted work.
+        """
+        with self.journal.locked(), canonical_json_reuse():
+            with self.journal.read_transaction() as db:
+                rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+                if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
+                    raise ValueError("service accepted prefix has a missing ordinal")
+                assignments = tuple(self._assignment(self._read(row[0], db), db) for row in rows)
+            yield assignments
 
     def _retained_seal(self) -> ServiceWorkSeal | None:
         old = self.journal.get("service_work_seal", self.config.catalog_sha256)
@@ -538,9 +599,14 @@ class ServiceWorkQueue:
         The host authenticates the current proof/history and later exports the
         seal with quorum request closure. Sealing does not finish pending work.
         """
+        with self.journal.locked(), canonical_json_reuse():
+            return self.seal_locked(source, capture, expected_tip_sha256=expected_tip_sha256)
+
+    def seal_locked(self, source, capture, *, expected_tip_sha256: str) -> ServiceWorkSeal:
+        """Seal while the caller owns ``closure_inventory`` for every cohort queue."""
         key = self.config.catalog_sha256
         objects = JournalEndpointObjects(self.journal)
-        with self.journal.locked(), canonical_json_reuse():
+        with canonical_json_reuse():
             catalog, round_ = self._catalog()
             old = self._retained_seal()
             if old is not None:

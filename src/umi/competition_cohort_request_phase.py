@@ -1,7 +1,7 @@
 """Owner-side request completion from compensated service and native queue records.
 
-The host supplies actual readiness and owned finality. Accepted work remains
-pending until every original terminal can be replayed. This observer neither
+The host supplies actual readiness and owned finality. Closure replays every
+original terminal or its explicit qualified tail disposition. This observer neither
 signs progress nor reveals references. Remote reviewers need authenticated owner
 exports; sharing a peer's live database is not a supported transport.
 """
@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import RegistrationCapture
 from .competition_cohort_availability import (
@@ -35,15 +37,26 @@ from .competition_cohort_intake import CohortIntake
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_recovery import StandingCohortRecoveryAuthority
-from .competition_cohort_request_closure import PendingRequestClosure, build_request_closure
+from .competition_cohort_request_closure import (
+    CohortRequestClosure,
+    PendingRequestClosure,
+    build_request_closure,
+)
 from .competition_cohort_request_completion import (
     PendingServiceRequestClosure,
     build_service_request_closure,
 )
+from .competition_cohort_request_inventory import request_inventory_observations
 from .competition_cohort_request_progress import (
     RequestClosureProgressEvidence,
     request_closure_progress,
 )
+from .competition_cohort_request_tail import (
+    MINIMUM_REQUEST_OPEN_MS,
+    RequestTailObservation,
+    review_request_tail,
+)
+from .competition_cohort_request_tail_owner import select_request_tail
 from .competition_cohort_request_terminal import SignedRequestTerminal
 from .competition_cohort_reward_package import DEFAULT_PACKAGE_BYTES, ReplayObjectCollector
 from .competition_cohort_roster import RecoverableRosterEvidence
@@ -51,25 +64,45 @@ from .competition_cohort_service_closure import (
     CohortServiceRequestClosure,
     review_service_request_closure,
 )
+from .competition_cohort_service_fence import ServiceTailAdmissionFence, ServiceTailFenceBinding
 from .competition_cohort_service_queue import ServiceWorkQueue
 from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_terminal import ServiceWorkTerminals
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_execution import ExecutionBoundary
+from .competition_historical_registration import HistoricalRegistration
 from .competition_round_journal import RoundJournal
-from .open_competition import CompetitionPolicy, digest
+from .open_competition import CompetitionPolicy, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
+from .private_files import publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 
 
 class RequestProgressReviewRecord(StrictProtocolModel):
-    schema_: Literal["umi-request-progress-review/1"] = Field(alias="schema")
+    schema_: Literal["umi-request-progress-review/1", "umi-request-progress-review/2"] = Field(
+        alias="schema"
+    )
     progress: CohortPhaseProgress
     history_sha256: Hex32
     service: CohortAvailabilityObservation
     fence: CohortAvailabilityObservation | None
+    tail_fence: RequestTailObservation | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.tail_fence is None:
+            value.pop("tail_fence", None)
+        return value
+
+    @model_validator(mode="after")
+    def selected_version(self):
+        if (self.schema_ == "umi-request-progress-review/2") != (self.tail_fence is not None):
+            raise ValueError("request review version differs from its explicit tail fence")
+        return self
 
 
 @dataclass(frozen=True)
@@ -78,6 +111,8 @@ class NativeRequestReview:
     history: CohortRecoveryHistory
     decisions: tuple[CohortDecisionInput, ...]
     consents: tuple[str, ...]
+    tail: RequestTailObservation | None = None
+    inventory_observations: tuple[ExecutionBoundary, ...] = ()
 
 
 class NativeRequestProgressSource:
@@ -93,6 +128,9 @@ class NativeRequestProgressSource:
         orders: Callable[[], Iterable[SignedRecoverableEvaluationOrder]],
         terminals: Callable[[SignedRecoverableEvaluationOrder, str], SignedRequestTerminal | None],
         objects: EndpointObjectSource,
+        partial_source: Callable[[str], Iterable[str]] | None = None,
+        inventory_source: Callable[..., Iterable[str]] | None = None,
+        publish_inventory_cutoff: Callable[[RequestTailObservation], None] | None = None,
         maximum_sample_gap_blocks: int = 10,
         maximum_observation_bytes: int = 256 * 1024**2,
         maximum_replay_bytes: int = DEFAULT_PACKAGE_BYTES,
@@ -122,6 +160,9 @@ class NativeRequestProgressSource:
             ServiceWorkTerminals(ServiceWorkRequests(q, self.transport)) for q in queues
         )
         self.orders, self.terminals, self.external = orders, terminals, objects
+        self.partial_source = partial_source
+        self.inventory_source = inventory_source
+        self.publish_inventory_cutoff = publish_inventory_cutoff
         self.objects = JournalEndpointObjects(journal)
         self.epoch = CohortServiceEpoch()
         self.gap, self.observation_bytes = maximum_sample_gap_blocks, maximum_observation_bytes
@@ -139,6 +180,17 @@ class NativeRequestProgressSource:
                 "transport": scoring_policy_hash(self.transport),
             },
         )
+        self.tail_admission_binding = ServiceTailFenceBinding(
+            schema="umi-private-service-tail-fence-binding/1",
+            directory=str(self.queues[0].journal.root / "cohort-tail-admission"),
+            cohort_sha256=self.cohort,
+            policy_sha256=digest(intake.policy),
+        )
+        # Existing queues gain an additive private admission dependency before
+        # any cutoff publication. A restarted queue reads it without reopening
+        # the lifecycle owner's live SQLite journal.
+        for queue in self.queues:
+            queue.bind_tail_admission_fence(self.tail_admission_binding)
 
     def _availability(self, store):
         return CohortServiceAvailability(
@@ -200,6 +252,57 @@ class NativeRequestProgressSource:
             raise ValueError("request queue was fenced before restoring unavailable service")
         return value
 
+    def _tail_fence(self, state, history, sources):
+        raw = self.journal.get("request_tail_fence", state.tip_sha256)
+        try:
+            durable = read_private_model(
+                Path(self.tail_admission_binding.directory) / "tail.json",
+                ServiceTailAdmissionFence,
+                maximum_bytes=128 * 1024,
+            )
+        except FileNotFoundError:
+            if raw is not None:
+                raise FileNotFoundError(
+                    "request tail lost its shared durable admission fence"
+                ) from None
+            return None
+        if (
+            durable.cohort_sha256 != self.cohort
+            or durable.policy_sha256 != digest(self.intake.policy)
+            or durable.recovery_tip_sha256 != state.tip_sha256
+            or durable.catalog_sha256s != tuple(digest(c.catalog) for c in self.catalogs)
+        ):
+            raise ValueError("shared request tail fence changed its original owner bindings")
+        value = review_request_tail(
+            durable.tail,
+            roster=self.roster,
+            history=history,
+            decision_source=sources.__getitem__,
+            observation=durable.tail.observation,
+        )
+        if raw is None:
+            # Publication can commit before its owner-journal acknowledgement.
+            # Admissions already see the exact fence; roll forward that record.
+            self.journal.put("request_tail_fence", state.tip_sha256, value)
+        elif RequestTailObservation.model_validate_json(canonical_json_bytes(raw)) != value:
+            raise ValueError("request tail changed its shared durable admission fence")
+        return value
+
+    def _retain_tail_fence(self, state, tail):
+        publish_private_model(
+            Path(self.tail_admission_binding.directory) / "tail.json",
+            ServiceTailAdmissionFence(
+                schema="umi-private-service-tail-admission-fence/1",
+                cohort_sha256=self.cohort,
+                policy_sha256=digest(self.intake.policy),
+                recovery_tip_sha256=state.tip_sha256,
+                catalog_sha256s=tuple(digest(c.catalog) for c in self.catalogs),
+                tail=tail,
+            ),
+            maximum_bytes=128 * 1024,
+        )
+        self.journal.put("request_tail_fence", state.tip_sha256, tail)
+
     def sample_service(
         self, state, capture: RegistrationCapture, *, serving: bool
     ) -> CohortAvailabilityObservation | None:
@@ -216,7 +319,26 @@ class NativeRequestProgressSource:
                 self.cohort, capture, serving=serving, genesis_signatures=history.genesis_signatures
             )
 
-    def observe(self, state, capture: RegistrationCapture, *, serving: bool) -> CohortPhaseProgress:
+    def request_opening(self, state):
+        """Return the original certified request opening without changing it."""
+        with self.intake._connection() as (_, store):
+            history, _, sources, _, _ = self._state(store, state)
+            opened = next(
+                item.transition
+                for item in history.transitions
+                if item.transition.phase == "preparation"
+                and item.transition.operation == "close_phase"
+            )
+            return sources[opened.evidence_sha256].observation
+
+    def observe(
+        self,
+        state,
+        capture: RegistrationCapture,
+        *,
+        serving: bool,
+        opened: HistoricalRegistration | None = None,
+    ) -> CohortPhaseProgress:
         """Called by the owned runtime after probing admission/dispatch readiness."""
         self.epoch.identity()
         with self.intake._connection() as (db, store):
@@ -229,24 +351,21 @@ class NativeRequestProgressSource:
             progress = pending_availability_progress(state, service)
             target = next(t.target_block for t in state.targets if t.phase == "requests")
             fence = self._fence(db, availability, state, restored, prior)
-            if (
+            tail_fence = self._tail_fence(state, history, sources)
+            if tail_fence is not None and self.publish_inventory_cutoff is not None:
+                self.publish_inventory_cutoff(tail_fence)
+            ordinary_ready = (
                 service.serving
                 and service.observation.block >= target + service.unavailable_blocks - restored
-            ):
-                if fence is None:
-                    if any(q.retained_seal() is not None for q in self.queues):
-                        raise ValueError("request queue lacks its original service-window fence")
-                    # Preserve the compensated fence before touching any queue.
-                    # A crash between different queues resumes the same fence.
-                    self.journal.put("request_window_fence", state.tip_sha256, service)
-                    fence = service
-                owner_history = CohortOrderHistory(history=history, decisions=decisions)
-                seals = tuple(
-                    q.seal(owner_history, capture, expected_tip_sha256=state.tip_sha256)
-                    for q in self.queues
-                )
-                if any(s.observation.block < fence.observation.block for s in seals):
-                    raise ValueError("request queue was sealed before its service-window fence")
+            )
+            tail_ready = (
+                opened is not None
+                and type(opened.timestamp_ms) is int
+                and type(capture.provenance.get("timestamp_ms")) is int
+                and capture.provenance["timestamp_ms"] - opened.timestamp_ms
+                >= MINIMUM_REQUEST_OPEN_MS
+            )
+            if ordinary_ready or tail_ready:
                 captured = ReplayObjectCollector(self._source, self.replay_bytes)
                 records = tuple(self.intake._records(db, history))
                 common = dict(
@@ -255,62 +374,152 @@ class NativeRequestProgressSource:
                     expected_tip_sha256=state.tip_sha256,
                     current_block=service.observation.block,
                 )
-                try:
-                    benchmark = build_request_closure(
-                        self.roster,
-                        self.orders(),
-                        self.terminals,
-                        captured,
-                        self.intake.policy,
-                        history,
-                        service.observation,
-                        **common,
+                orders = tuple(self.orders())
+                by_catalog = {
+                    q.config.catalog_sha256: owner
+                    for q, owner in zip(self.queues, self.services, strict=True)
+                }
+                benchmark_reads, service_reads = {}, {}
+                admissions_locked = False
+
+                def benchmark_terminal(order, evaluator):
+                    key = (digest(order), identity(evaluator))
+                    if key not in benchmark_reads:
+                        benchmark_reads[key] = self.terminals(order, evaluator)
+                    return benchmark_reads[key]
+
+                def service_terminal(assignment):
+                    key = digest(assignment)
+                    if key not in service_reads:
+                        owner = by_catalog[assignment.admission.catalog_sha256]
+                        read = owner.read_locked if admissions_locked else owner.read
+                        service_reads[key] = read(assignment, preserve_completed=tail_ready)
+                    return service_reads[key]
+
+                # Hold every native admission lease across the exact accepted
+                # inventory, threshold decision and seals. A nonqualifying tail
+                # leaves admissions open, including while dispatch is unavailable.
+                seals = None
+                with ExitStack() as leases:
+                    inventories = tuple(
+                        leases.enter_context(q.closure_inventory()) for q in self.queues
                     )
-                    captured.retain(benchmark)
+                    admissions_locked = True
+                    tail = select_request_tail(
+                        roster=self.roster,
+                        orders=orders,
+                        terminals=benchmark_terminal,
+                        catalogs=self.catalogs,
+                        seals=(),
+                        service_terminals=service_terminal,
+                        objects=captured,
+                        policy=self.intake.policy,
+                        opened=opened,
+                        capture=capture,
+                        accepted_assignments=(a for values in inventories for a in values),
+                    )
+                    if tail is not None and tail_fence is not None:
+                        tail = tail.model_copy(
+                            update={
+                                "selected_observation": tail_fence.observation,
+                                "selected_timestamp_ms": tail_fence.observed_timestamp_ms,
+                            }
+                        )
+                    if ordinary_ready or tail is not None:
+                        if fence is None and tail_fence is None:
+                            if any(q._retained_seal() is not None for q in self.queues):
+                                raise ValueError("request queue lacks its original admission fence")
+                            if ordinary_ready and tail is None:
+                                self.journal.put("request_window_fence", state.tip_sha256, service)
+                                fence = service
+                        if tail is not None and tail_fence is None:
+                            # Retain one cutoff even when the ordinary window
+                            # was already fenced, so evaluator inventory can
+                            # acknowledge a fixed observation across retries.
+                            self._retain_tail_fence(state, tail)
+                            tail_fence = tail
+                            if self.publish_inventory_cutoff is not None:
+                                self.publish_inventory_cutoff(tail_fence)
+                        owner_history = CohortOrderHistory(history=history, decisions=decisions)
+                        seals = tuple(
+                            q.seal_locked(
+                                owner_history, capture, expected_tip_sha256=state.tip_sha256
+                            )
+                            for q in self.queues
+                        )
+                        first_fence = (
+                            fence.observation if fence is not None else tail_fence.observation
+                        )
+                        if any(s.observation.block < first_fence.block for s in seals):
+                            raise ValueError("request queue was sealed before its admission fence")
+                admissions_locked = False
+                if seals is not None:
                     for seal in seals:
                         captured.retain(seal)
-                    by_catalog = {
-                        q.config.catalog_sha256: s
-                        for q, s in zip(self.queues, self.services, strict=True)
-                    }
-                    closure = build_service_request_closure(
-                        benchmark,
-                        self.roster,
-                        self.catalogs,
-                        seals,
-                        lambda a: by_catalog[a.admission.catalog_sha256].read(a),
-                        captured,
-                        self.intake.policy,
-                        history,
-                        self.transport,
-                        **common,
-                    )
-                except (PendingRequestClosure, PendingServiceRequestClosure) as pending:
-                    count = (
-                        len(pending.obligations)
-                        if isinstance(pending, PendingRequestClosure)
-                        else len(pending.work)
-                    )
-                    logger.info(
-                        "cohort_requests_pending cohort=%s reason=%s count=%s",
-                        self.cohort,
-                        type(pending).__name__,
-                        count,
-                    )
-                else:
-                    progress, evidence = request_closure_progress(closure, service, state)
-                    captured.retain(closure)
-                    captured.retain(evidence)
-                    # A complete progress record is written only after its entire
-                    # native replay read-set is durable. Retry needs no inference.
-                    for key, raw in captured.values.items():
-                        self.journal.put("endpoint_replay_object", key, json.loads(raw))
+                    try:
+                        benchmark = build_request_closure(
+                            self.roster,
+                            orders,
+                            benchmark_terminal,
+                            captured,
+                            self.intake.policy,
+                            history,
+                            service.observation,
+                            tail=tail,
+                            partial_source=self.partial_source,
+                            inventory_source=self.inventory_source,
+                            **common,
+                        )
+                        captured.retain(benchmark)
+                        closure = build_service_request_closure(
+                            benchmark,
+                            self.roster,
+                            self.catalogs,
+                            seals,
+                            service_terminal,
+                            captured,
+                            self.intake.policy,
+                            history,
+                            self.transport,
+                            **common,
+                        )
+                    except (PendingRequestClosure, PendingServiceRequestClosure) as pending:
+                        count = (
+                            len(pending.obligations)
+                            if isinstance(pending, PendingRequestClosure)
+                            else len(pending.work)
+                        )
+                        logger.info(
+                            "cohort_requests_pending cohort=%s reason=%s count=%s",
+                            self.cohort,
+                            type(pending).__name__,
+                            count,
+                        )
+                    else:
+                        progress, evidence = request_closure_progress(
+                            closure, service, state, tail=tail
+                        )
+                        captured.retain(closure)
+                        captured.retain(evidence)
+                        # A complete progress record is written only after its entire
+                        # native replay read-set is durable. Retry needs no inference.
+                        for key, raw in captured.values.items():
+                            self.journal.put("endpoint_replay_object", key, json.loads(raw))
+            # Pending progress has no closure authority. Keep its review bytes
+            # unchanged if this same finalized observation subsequently selects
+            # a tail cutoff while evaluator inventories are still in transit.
+            # The durable owner fence remains separate and is included once a
+            # complete closure actually binds it into certified evidence.
+            review_tail_fence = tail_fence if progress.completion == "complete" else None
             record = RequestProgressReviewRecord(
-                schema="umi-request-progress-review/1",
+                schema="umi-request-progress-review/1"
+                if review_tail_fence is None
+                else "umi-request-progress-review/2",
                 progress=progress,
                 history_sha256=digest(history),
                 service=service,
                 fence=fence,
+                tail_fence=review_tail_fence,
             )
             self.journal.put("request_progress", digest(progress), record)
             return progress
@@ -329,7 +538,7 @@ class NativeRequestProgressSource:
         record = RequestProgressReviewRecord.model_validate_json(canonical_json_bytes(raw))
         with self.intake._connection() as (db, store):
             state, _ = store.status(self.cohort)
-            history, decisions, _sources, restored, prior = self._state(store, state)
+            history, decisions, sources, restored, prior = self._state(store, state)
             if record.progress != progress or record.history_sha256 != digest(history):
                 raise ValueError("request review changed its original progress or history")
             availability = self._availability(store)
@@ -337,10 +546,16 @@ class NativeRequestProgressSource:
             records = tuple(self.intake._records(db, history))
             if progress.completion == "complete":
                 fence = self._fence(db, availability, state, restored, prior)
-                if fence is None or record.fence != fence:
-                    raise ValueError("request completion lacks its original window fence")
+                tail_fence = self._tail_fence(state, history, sources)
+                if (
+                    (fence is None and tail_fence is None)
+                    or record.fence != fence
+                    or record.tail_fence != tail_fence
+                ):
+                    raise ValueError("request completion lacks its original admission fence")
                 seals = tuple(q.retained_seal() for q in self.queues)
-                if any(s is None or s.observation.block < fence.observation.block for s in seals):
+                first_fence = fence.observation if fence is not None else tail_fence.observation
+                if any(s is None or s.observation.block < first_fence.block for s in seals):
                     raise ValueError("request completion changed an owner queue fence")
             else:
                 seals = ()
@@ -410,18 +625,35 @@ def replay_request_completion(
     ):
         raise ValueError("request review differs from its original standing history")
     expected = pending_availability_progress(state, record.service)
+    tail = None
+    inventory_observations = ()
     if progress.completion == "complete":
         fence = record.fence
+        tail_fence = record.tail_fence
         target = next(t.target_block for t in state.targets if t.phase == "requests")
-        if (
-            fence is None
-            or not fence.serving
-            or fence.observation.block > record.service.observation.block
-            or fence.observation.block < target + fence.unavailable_blocks - restored
-            or any(s.observation.block < fence.observation.block for s in seals)
-        ):
-            raise ValueError("request completion lacks its original compensated fence")
-        pending_availability_progress(state, fence)
+        if fence is not None:
+            if (
+                not fence.serving
+                or fence.observation.block > record.service.observation.block
+                or fence.observation.block < target + fence.unavailable_blocks - restored
+            ):
+                raise ValueError("request completion lacks its original compensated fence")
+            pending_availability_progress(state, fence)
+        if tail_fence is not None:
+            review_request_tail(
+                tail_fence,
+                roster=roster,
+                history=history,
+                decision_source=sources.__getitem__,
+                observation=tail_fence.observation,
+            )
+            if tail_fence.observation.block > record.service.observation.block:
+                raise ValueError("request tail fence is ahead of its closure")
+        if fence is None and tail_fence is None:
+            raise ValueError("request completion lacks its original admission fence")
+        first_fence = fence.observation if fence is not None else tail_fence.observation
+        if any(s.observation.block < first_fence.block for s in seals):
+            raise ValueError("request queue was sealed before its admission fence")
         closure = CohortServiceRequestClosure.model_validate_json(
             objects(progress.phase_result_sha256)
         )
@@ -439,7 +671,23 @@ def replay_request_completion(
             expected_tip_sha256=state.tip_sha256,
             current_block=progress.observed_at_block,
         )
-        expected, evidence = request_closure_progress(closure, record.service, state)
+        benchmark = CohortRequestClosure.model_validate_json(
+            objects(closure.benchmark_closure_sha256)
+        )
+        tail = benchmark.tail
+        inventory_observations = request_inventory_observations(benchmark, objects)
+        if tail_fence is not None and (
+            tail is None
+            or tail.opened_observation != tail_fence.opened_observation
+            or tail.opened_timestamp_ms != tail_fence.opened_timestamp_ms
+            or tail.original_hotkeys != tail_fence.original_hotkeys
+            or tail.observed_timestamp_ms < tail_fence.observed_timestamp_ms
+            or (tail.selected_observation or tail.observation) != tail_fence.observation
+            or (tail.selected_timestamp_ms or tail.observed_timestamp_ms)
+            != tail_fence.observed_timestamp_ms
+        ):
+            raise ValueError("request completion changed its original tail fence")
+        expected, evidence = request_closure_progress(closure, record.service, state, tail=tail)
         retained = RequestClosureProgressEvidence.model_validate_json(
             objects(progress.evidence_sha256)
         )
@@ -449,4 +697,11 @@ def replay_request_completion(
         raise ValueError("pending request review cannot claim a complete queue inventory")
     if expected != progress:
         raise ValueError("request progress differs from native completion")
-    return NativeRequestReview(record, history, decisions, tuple(k for k, _ in intake_records))
+    return NativeRequestReview(
+        record,
+        history,
+        decisions,
+        tuple(k for k, _ in intake_records),
+        tail,
+        inventory_observations,
+    )

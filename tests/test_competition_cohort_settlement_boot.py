@@ -440,9 +440,13 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
                 events.append("node_drained")
 
     class Exports:
-        def __init__(self, executions, provider, sign, files, journal):
+        def __init__(self, executions, provider, sign, files, journal, **inventory):
             assert executions[0].config == config.executions[0]
             assert files.root == Path(config.request_export_directory)
+            assert callable(inventory["publish_inventory_proof"])
+            assert callable(inventory["inventory_needed"])
+            assert callable(inventory["inventory_cutoff"])
+            assert inventory["inventory_cutoff"](digest(config.series.cohorts[0])) is None
             if failure == "construction":
                 raise ValueError("export constructor failed")
             self.sign = sign

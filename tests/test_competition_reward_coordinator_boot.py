@@ -91,6 +91,20 @@ def test_proof_read_selection_preserves_existing_configuration_bytes(config_case
         )
 
 
+def test_coordinator_history_capacity_matches_native_history_envelope(config_case):
+    original = config_case.config.model_dump(by_alias=True)
+    for maximum in [1024, 16 * 1024**3 + 1, 64 * 1024**3, 512 * 1024**3]:
+        selected = boot.RewardCoordinatorConfig.model_validate(
+            original | {"maximum_history_bytes": maximum}
+        )
+        assert selected.maximum_history_bytes == maximum
+    for maximum in [True, 1023, 512 * 1024**3 + 1]:
+        with pytest.raises(ValueError):
+            boot.RewardCoordinatorConfig.model_validate(
+                original | {"maximum_history_bytes": maximum}
+            )
+
+
 def test_direct_series_requires_read_only_coordinator_source(config_case, tmp_path):
     direct = direct_reward_config(config_case.config, tmp_path, "umi-reward-coordinator-config/2")
     assert boot.RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(direct)) == direct
@@ -186,7 +200,14 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     config_case, monkeypatch, role, failure, proof_reads
 ):
     h = config_case
-    config = h.config.model_copy(update={"runtime_proof_reads": proof_reads})
+    config = h.config.model_copy(
+        update={
+            "runtime_proof_reads": proof_reads,
+            "maximum_history_bytes": 512 * 1024**3
+            if proof_reads
+            else h.config.maximum_history_bytes,
+        }
+    )
     if role == "reviewer":
         config = boot.RewardCoordinatorConfig.model_validate(
             config.model_dump(by_alias=True)
@@ -258,6 +279,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     async def collect(self, stop, *, poll_seconds):
         collector_lifecycle.append("started")
         try:
+            assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             if failure == "coverage":
                 raise OSError("coverage failure")
             if failure == "coverage_exit":

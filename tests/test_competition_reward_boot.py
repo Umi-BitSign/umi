@@ -240,12 +240,21 @@ def inputs(series_case, tmp_path, monkeypatch):
     return SimpleNamespace(value=value, path=path, anchor=anchor, approval=approval, save=save, c=c)
 
 
-def test_boot_reads_original_root_approval_and_accepts_capacity_increase(inputs):
+@pytest.mark.parametrize("maximum", [16 * 1024**2, 64 * 1024**3, 512 * 1024**3])
+def test_boot_reads_original_root_approval_and_accepts_capacity_increase(inputs, maximum):
     i = inputs
     assert boot.load_standing_boot(i.path, i.anchor) == i.value
-    raised = i.value.model_copy(update={"maximum_history_bytes": 16 * 1024**2})
+    raised = i.value.model_copy(update={"maximum_history_bytes": maximum})
     i.save(i.path, canonical_json_bytes(raised))
     assert boot.load_standing_boot(i.path, i.anchor) == raised
+
+
+def test_boot_rejects_unsupported_history_envelopes(inputs):
+    for maximum in [True, 1023, 512 * 1024**3 + 1]:
+        with pytest.raises(ValueError):
+            boot.StandingRewardBootConfig.model_validate(
+                inputs.value.model_dump(by_alias=True) | {"maximum_history_bytes": maximum}
+            )
 
 
 def test_direct_series_requires_read_only_reward_source(inputs, tmp_path):
@@ -451,7 +460,14 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
     inputs, monkeypatch, failure, proof_reads
 ):
     i = inputs
-    selected = i.value.model_copy(update={"runtime_proof_reads": proof_reads})
+    selected = i.value.model_copy(
+        update={
+            "runtime_proof_reads": proof_reads,
+            "maximum_history_bytes": 512 * 1024**3
+            if proof_reads
+            else i.value.maximum_history_bytes,
+        }
+    )
     events, providers = [], []
 
     class Provider:
@@ -474,6 +490,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert kwargs["legacy_providers"] == {digest(old.chain): providers[1]}
         assert providers[1].kwargs["resources"] == old.resources
         assert kwargs["history"].config_sha256 == digest(i.value.chain)
+        assert kwargs["history"].journal.maximum_bytes == selected.maximum_history_bytes
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
         collection = kwargs["coverage"]
         assert collection.provider is kwargs["provider"]
@@ -508,6 +525,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
 async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch):
     i = inputs
     candidate, approval = successor_boot(i)
+    candidate = candidate.model_copy(update={"maximum_history_bytes": 64 * 1024**3})
     i.save(Path(candidate.approval_path), canonical_json_bytes(approval))
     events, providers = [], []
 
@@ -537,6 +555,8 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert coverage.profile == i.value.eligibility
         assert coverage.history.archive is kwargs["history"].archive
         assert coverage.history.export_archive is kwargs["history"].export_archive
+        assert coverage.history.journal.maximum_bytes == 64 * 1024**3
+        assert kwargs["history"].journal.maximum_bytes == 64 * 1024**3
 
     runtime = SimpleNamespace(
         config=i.anchor.config,

@@ -293,10 +293,12 @@ class StandingRewardPreparation:
         award = package.allocation.model_award
         if self.model_artifacts is None or award is None:
             return
+        completed = {a.acceptance.submission_sha256 for a in award.acceptances}
         participants = tuple(
             participant
             for participant in package.inputs.roster.participants
             if participant.record.request.signed_submission.submission.track == "model"
+            and digest(participant.record.request.signed_submission.submission) in completed
         )
         await self.model_artifacts.ensure_all(participants, award.acceptances)
 

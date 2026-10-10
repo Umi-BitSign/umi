@@ -675,6 +675,26 @@ def test_seal_freezes_complete_prefix_and_preserves_duplicate_recovery(queue_cas
     assert c.queue.entries() == tuple(accepted)
 
 
+def test_conditional_closure_inventory_holds_admission_without_premature_seal(queue_case):
+    c = queue_case
+    first = admit(c)
+    with c.queue.closure_inventory() as assignments:
+        assert tuple(a.admission for a in assignments) == (first,)
+        with pytest.raises(BlockingIOError):
+            admit(c, nonce=2)
+        assert c.queue.journal.get("service_work_seal", c.cfg.catalog_sha256) is None
+    second = admit(c, nonce=2)
+    with c.queue.closure_inventory() as assignments:
+        assert tuple(a.admission for a in assignments) == (first, second)
+        sealed = c.queue.seal_locked(
+            c.h.source, capture(400), expected_tip_sha256=history_tip(c.h.source.history)
+        )
+    assert tuple(r.work_sha256 for r in sealed.accepted) == (first.work_sha256, second.work_sha256)
+    with pytest.raises(ServiceQueueBackpressure):
+        admit(c, nonce=3)
+    assert admit(c) == first
+
+
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_seal_crash_and_ack_loss_preserve_whole_accepted_set(queue_case, monkeypatch, after_commit):
     c = queue_case

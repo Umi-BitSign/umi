@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from typing import Annotated, Literal, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_chain import RegistrationCapture
@@ -41,7 +41,9 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class CohortPhaseProgress(StrictProtocolModel):
-    schema_: Literal["umi-cohort-phase-progress/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-phase-progress/1", "umi-cohort-phase-progress/2"] = Field(
+        alias="schema"
+    )
     cohort_sha256: Hex32
     recovery_tip_sha256: Hex32
     phase: Phase
@@ -51,9 +53,26 @@ class CohortPhaseProgress(StrictProtocolModel):
     completion: Literal["pending", "complete"]
     phase_result_sha256: Hex32 | None
     evidence_sha256: Hex32
+    request_tail_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.request_tail_sha256 is None:
+            value.pop("request_tail_sha256", None)
+        return value
 
     @model_validator(mode="after")
     def result_binding(self) -> Self:
+        tail = self.request_tail_sha256 is not None
+        if tail != (self.schema_ == "umi-cohort-phase-progress/2"):
+            raise ValueError("request tail progress requires its explicit version and evidence")
+        if tail and (
+            self.phase != "requests"
+            or self.completion != "complete"
+            or self.request_tail_sha256 == "0" * 64
+        ):
+            raise ValueError("request tail only authorizes completed request progress")
         if (self.completion == "complete") != (self.phase_result_sha256 is not None):
             raise ValueError("completed phase requires its immutable result identity")
         if "0" * 64 in {self.evidence_sha256, self.phase_result_sha256}:
@@ -105,7 +124,11 @@ def _choice(
     window = state.phase in {"intake", "requests"}
     missing = checkpoint.unavailable_blocks - restored
     if checkpoint.completion == "complete":
-        if window and checkpoint.observed_at_block < target + missing:
+        if (
+            window
+            and checkpoint.request_tail_sha256 is None
+            and checkpoint.observed_at_block < target + missing
+        ):
             raise ValueError("participant window closed before restoring unavailable service")
         if state.phase == "reference_reveal" and block <= state.observed_at_block:
             return None, 0
@@ -132,6 +155,7 @@ def _choice(
         observed_at_block=block,
         evidence_sha256=digest(evidence),
         extension_blocks=extension,
+        request_tail_sha256=checkpoint.request_tail_sha256,
     ), restored_now
 
 
@@ -329,6 +353,7 @@ class CohortRecoveryCoordinator:
                     observed_at_block=proposal.observed_at_block,
                     evidence_sha256=key,
                     extension_blocks=proposal.extension_blocks,
+                    request_tail_sha256=proposal.request_tail_sha256,
                 )
                 if intent is not None:
                     self.store.finish_progress(self.cohort, state.tip_sha256, intent)

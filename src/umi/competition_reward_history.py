@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -44,17 +45,34 @@ from .competition_reward_control_writes import (
 from .competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import digest
 
 _ISSUER = object()
 _MAX_FRAME_OBJECTS = 128
 _MAX_FRAME_OBJECT_BYTES = MAX_EVIDENCE_BYTES
+MAX_HISTORY_BYTES = 512 * 1024**3
 _FIELDS = {
     "slot_evidence": MAX_CONTROL_ARCHIVE_BYTES,
     "slot_metadata": MAX_CONTROL_METADATA_BYTES,
     "evidence": MAX_WRITE_EVIDENCE_BYTES,
 }
+
+
+class _HistoryJournal(RoundJournal):
+    """History grows by charged bytes, independently of round counts.
+
+    Every canonical record consumes at least one logical byte. The byte budget
+    therefore also bounds total records without an earlier fixed count limit.
+    Per-kind and per-call limits, accounting and reservation formats are shared
+    with ordinary round journals; their operational envelopes are unchanged.
+    """
+
+    MAXIMUM_BYTES = MAX_HISTORY_BYTES
+
+    @property
+    def maximum_records(self) -> int:
+        return self.maximum_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +174,7 @@ class RewardControlHistoryReader:
             "chain_config_sha256": self.config_sha256,
             "first_block": first_block,
         }
-        self.journal = RoundJournal(
+        self.journal = _HistoryJournal(
             root,
             binding,
             maximum_rounds=65536,
@@ -347,6 +365,32 @@ class RewardControlHistoryReader:
             result[name] = b"".join(parts)
         return result
 
+    async def _prepare(self, provider: HistoricalRewardControlProvider, height: int):
+        """Prepare one exact frame without publishing it or changing the prefix."""
+        saved = await run_owned_thread(self._load, height)
+        retained = saved is not None
+        if not retained and self.archive is not None:
+            try:
+                context, saved = await run_owned_thread(
+                    partial(
+                        self.archive.read,
+                        "history",
+                        history_archive_key(self.config_sha256, self.hotkey, height),
+                        bounds=_FIELDS,
+                    ),
+                )
+            except FileNotFoundError:
+                saved = None
+            else:
+                if context != self._archive_context(height):
+                    raise ValueError("imported history changes its requested domain")
+        observation = (
+            await capture_control_writes(provider, self.hotkey, height)
+            if saved is None
+            else await review_control_writes(provider, **saved)
+        )
+        return observation, retained
+
     async def advance(
         self,
         provider: HistoricalRewardControlProvider,
@@ -366,82 +410,77 @@ class RewardControlHistoryReader:
             if through_block < self.first_block or through_block < self._next - 1:
                 raise ValueError("control history target regressed")
             with self.journal.locked():
-                for _ in range(maximum_blocks):
-                    if self._next > through_block:
-                        break
-                    saved = await run_owned_thread(self._load, self._next)
-                    retained = saved is not None
-                    if not retained and self.archive is not None:
-                        try:
-                            context, saved = await run_owned_thread(
-                                partial(
-                                    self.archive.read,
-                                    "history",
-                                    history_archive_key(
-                                        self.config_sha256, self.hotkey, self._next
-                                    ),
-                                    bounds=_FIELDS,
-                                ),
-                            )
-                        except FileNotFoundError:
-                            saved = None
-                        else:
-                            if context != self._archive_context(self._next):
-                                raise ValueError("imported history changes its requested domain")
-                    observation = (
-                        await capture_control_writes(provider, self.hotkey, self._next)
-                        if saved is None
-                        else await review_control_writes(provider, **saved)
-                    )
-                    validate_control_writes(
-                        observation,
-                        expected_control_hotkey=self.hotkey,
-                        expected_chain_config_sha256=self.config_sha256,
-                    )
-                    slot = observation.slot
-                    if slot.snapshot.block_number != self._next or (
-                        self._tip is not None
-                        and slot.snapshot.parent_hash != self._tip.slot.snapshot.block_hash
-                    ):
-                        raise ValueError("control history has a gap or a different parent")
-                    if not retained:
-                        await run_owned_thread(self._save, observation)
-                    unresolved = bool(observation.unresolved_extrinsics)
-                    if self._tip is not None and not observation.writes:
-                        prior = self._tip.slot
-                        if (slot.control_sha256, slot.committed_at_block) != (
-                            prior.control_sha256,
-                            prior.committed_at_block,
+                last = min(through_block, self._next + maximum_blocks - 1)
+                pending = None
+                try:
+                    if self._next <= last:
+                        pending = asyncio.create_task(self._prepare(provider, self._next))
+                    while self._next <= last:
+                        observation, retained = await await_owned_task(pending)
+                        pending = None
+                        validate_control_writes(
+                            observation,
+                            expected_control_hotkey=self.hotkey,
+                            expected_chain_config_sha256=self.config_sha256,
+                        )
+                        slot = observation.slot
+                        if slot.snapshot.block_number != self._next or (
+                            self._tip is not None
+                            and slot.snapshot.parent_hash != self._tip.slot.snapshot.block_hash
                         ):
-                            # A cleared slot or an unattributed effect must be
-                            # resolved by a future native decoder, never skipped.
-                            unresolved = True
-                    if self.export_archive is not None:
-                        # Retain original bytes before advancing the replay cursor.
-                        # A failed export leaves this block retryable after restart.
-                        await run_owned_thread(self._export, observation, self.export_archive)
-                    if unresolved:
-                        self._unresolved.append(self._next)
-                    self._writes.extend(
-                        HistoricalControlWrite(self._next, w.extrinsic_index, w.decision_sha256)
-                        for w in observation.writes
-                    )
-                    self._evidence_sha256 = digest(
-                        {
-                            "prior": self._evidence_sha256,
-                            "block": self._next,
-                            "slot": slot.evidence_sha256,
-                            "writes": hashlib.sha256(observation.evidence).hexdigest(),
-                        }
-                    )
-                    self._tip = observation
-                    self._prefixes[self._next] = (
-                        slot.snapshot,
-                        self._evidence_sha256,
-                        len(self._writes),
-                        len(self._unresolved),
-                    )
-                    self._next += 1
+                            raise ValueError("control history has a gap or a different parent")
+                        if self._next < last:
+                            # Only one following frame may overlap this frame's
+                            # persistence/export. The provider keeps its own
+                            # collection lock; native checks are not parallelized.
+                            pending = asyncio.create_task(self._prepare(provider, self._next + 1))
+                        if not retained:
+                            await run_owned_thread(self._save, observation)
+                        unresolved = bool(observation.unresolved_extrinsics)
+                        if self._tip is not None and not observation.writes:
+                            prior = self._tip.slot
+                            if (slot.control_sha256, slot.committed_at_block) != (
+                                prior.control_sha256,
+                                prior.committed_at_block,
+                            ):
+                                # A cleared slot or an unattributed effect must be
+                                # resolved by a future native decoder, never skipped.
+                                unresolved = True
+                        if self.export_archive is not None:
+                            # Retain original bytes before advancing the replay cursor.
+                            # A failed export leaves this block retryable after restart.
+                            await run_owned_thread(self._export, observation, self.export_archive)
+                        if unresolved:
+                            self._unresolved.append(self._next)
+                        self._writes.extend(
+                            HistoricalControlWrite(self._next, w.extrinsic_index, w.decision_sha256)
+                            for w in observation.writes
+                        )
+                        self._evidence_sha256 = digest(
+                            {
+                                "prior": self._evidence_sha256,
+                                "block": self._next,
+                                "slot": slot.evidence_sha256,
+                                "writes": hashlib.sha256(observation.evidence).hexdigest(),
+                            }
+                        )
+                        self._tip = observation
+                        self._prefixes[self._next] = (
+                            slot.snapshot,
+                            self._evidence_sha256,
+                            len(self._writes),
+                            len(self._unresolved),
+                        )
+                        self._next += 1
+                finally:
+                    if pending is not None:
+                        # Do not cancel a frame's finality/RPC/proof work. Drain
+                        # it before releasing journal ownership, also through
+                        # repeated cancellation. A discarded frame changes no
+                        # history state, and its error cannot replace the
+                        # publication/cancellation error already being raised.
+                        with suppress(asyncio.CancelledError, Exception):
+                            await await_owned_task(pending)
                 history = None
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)

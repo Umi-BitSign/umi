@@ -133,10 +133,15 @@ class StandingRewardDecisionReviewer:
         if body.activation is not None:
             package = await run_owned_thread(p.files.package, body.activation.package_sha256)
             if p.model_artifacts is not None and package.allocation.model_award is not None:
+                completed = {
+                    a.acceptance.submission_sha256
+                    for a in package.allocation.model_award.acceptances
+                }
                 participants = tuple(
                     participant
                     for participant in package.inputs.roster.participants
                     if participant.record.request.signed_submission.submission.track == "model"
+                    and digest(participant.record.request.signed_submission.submission) in completed
                 )
                 await p.model_artifacts.ensure_all(
                     participants, package.allocation.model_award.acceptances
