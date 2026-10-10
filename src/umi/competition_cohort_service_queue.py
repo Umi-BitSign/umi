@@ -364,20 +364,35 @@ class ServiceWorkQueue:
             return value
 
     def entries(
-        self, *, after_ordinal: int = 0, limit: int = 64
+        self, *, after_ordinal: int = 0, limit: int = 64, pending_only: bool = False
     ) -> tuple[ServiceWorkAdmission, ...]:
+        """Read authenticated admissions, optionally omitting terminal scheduling hints.
+
+        Terminal presence can avoid redispatch; it cannot prove completion or
+        authorize credit. Sealing and all evidence consumers use the full page.
+        """
         if (
             type(after_ordinal) is not int
             or not 0 <= after_ordinal <= 8192
             or type(limit) is not int
             or not 1 <= limit <= 256
+            or type(pending_only) is not bool
         ):
             raise ValueError("invalid service queue page")
         with canonical_json_reuse(), self.journal.read_transaction() as db:
             rows = db.execute(
                 "SELECT ordinal FROM service_claims WHERE ordinal>? ORDER BY ordinal LIMIT ?",
-                (after_ordinal, limit),
+                (after_ordinal, 8192 if pending_only else limit),
             ).fetchall()
+            if pending_only and rows:
+                catalog = self._catalog(db)[0].catalog
+                completed = {
+                    row[0]
+                    for row in db.execute("SELECT id FROM records WHERE kind='service_terminal'")
+                }
+                rows = [row for row in rows if service_work_key(catalog, row[0]) not in completed][
+                    :limit
+                ]
             return tuple(self._read(row[0], db) for row in rows)
 
     def retained_registration_blocks(self) -> frozenset[int]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -206,6 +207,36 @@ def test_exact_put_retains_reservation_and_generation_checks(journal):
         db.execute('DROP TRIGGER "round_generation_records_insert"')
     with pytest.raises(ValueError, match="capability fence missing"):
         journal.put("intent", "a", changed)
+
+
+@pytest.mark.parametrize("target", ["-journal", "-wal", "-shm", "database", "lock"])
+def test_unlinked_sidecar_stat_does_not_reject_a_valid_snapshot(journal, monkeypatch, target):
+    journal.put("intent", "a", {"original": True})
+    path = (
+        journal.path
+        if target == "database"
+        else journal.lock_path
+        if target == "lock"
+        else Path(str(journal.path) + target)
+    )
+    # lstat can resolve a rollback sidecar immediately before SQLite unlinks
+    # it, then return metadata with st_nlink=0. This is not a hard link.
+    fields = list(journal.path.lstat())
+    fields[3] = 0
+    disappeared = os.stat_result(fields)
+    original = Path.lstat
+
+    def during_unlink(self, *args, **kwargs):
+        return disappeared if self == path else original(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", during_unlink)
+        if target in {"database", "lock"}:
+            with pytest.raises(ValueError, match="private and owned"):
+                journal.get("intent", "a")
+        else:
+            assert journal.get("intent", "a") == {"original": True}
+    assert journal.get("intent", "a") == {"original": True}
 
 
 @pytest.mark.parametrize("damage", ["symlink", "dangling", "hardlink", "public"])

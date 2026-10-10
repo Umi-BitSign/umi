@@ -191,8 +191,8 @@ class RoundJournal:
 
     def _check_files(self):
         _private(self.root)
-        paths = [Path(str(self.path) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
-        paths.append(self.lock_path)
+        sidecars = tuple(Path(str(self.path) + suffix) for suffix in ("-journal", "-wal", "-shm"))
+        paths = (self.path, *sidecars, self.lock_path)
         for p in paths:
             try:
                 s = p.lstat()
@@ -203,9 +203,15 @@ class RoundJournal:
                 continue
             if stat.S_ISLNK(s.st_mode):
                 raise ValueError("round journal symlink")
+            # SQLite may unlink a private sidecar between path resolution and
+            # lstat's inode read. A zero-link sidecar has already disappeared,
+            # just like FileNotFoundError above; it is not an extra hard link.
+            # The database/lock must remain linked, and every observed inode
+            # still has to be regular, private and owned by this process user.
+            permitted_links = (0, 1) if p in sidecars else (1,)
             if (
                 not stat.S_ISREG(s.st_mode)
-                or s.st_nlink != 1
+                or s.st_nlink not in permitted_links
                 or (s.st_uid != os.getuid() or s.st_mode & 0o077)
             ):
                 raise ValueError("round journal must be private and owned")

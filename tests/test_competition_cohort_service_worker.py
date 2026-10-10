@@ -214,6 +214,19 @@ async def test_batch_discovery_reads_while_an_unrelated_writer_is_busy(loop):
         )
 
 
+async def test_pending_batch_wraps_without_treating_presence_as_credit(loop):
+    worker = loop.worker()
+    original = worker._batch(advance=False)
+    worker._advance_cursor(8192)
+    assert worker._batch(advance=False, pending_only=True) == original
+    for value in original:
+        worker.journal.put("service_terminal", value.work_sha256, {"unverified": True})
+    assert worker._batch(advance=False, pending_only=True) == ()
+    assert worker._batch(advance=False) == original
+    with pytest.raises(ValueError):
+        worker.terminals.read(loop.c.assignment)
+
+
 async def finish(s):
     reports = []
     for _ in range(4):

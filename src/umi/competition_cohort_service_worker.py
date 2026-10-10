@@ -319,15 +319,17 @@ class ServiceWorkWorker:
         await self._local(self.terminals.retain, terminal, signature)
         return "completed", "terminal_retained"
 
-    def _batch(self, *, advance=True):
+    def _batch(self, *, advance=True, pending_only=False):
         with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_worker_cursor WHERE singleton=1"
             ).fetchone()
         after = 0 if row is None else row[0]
-        rows = self.queue.entries(after_ordinal=after, limit=self.batch_size)
+        rows = self.queue.entries(
+            after_ordinal=after, limit=self.batch_size, pending_only=pending_only
+        )
         if not rows and after:
-            rows = self.queue.entries(limit=self.batch_size)
+            rows = self.queue.entries(limit=self.batch_size, pending_only=pending_only)
         if rows and advance:
             self._advance_cursor(rows[-1].ordinal)
         return rows
@@ -434,7 +436,7 @@ class ServiceWorkWorker:
             if work not in active:
                 del self._operation_lanes[work]
         if len(active) < len(lanes) * self.concurrency:
-            rows = await self._local(partial(self._batch, advance=False))
+            rows = await self._local(partial(self._batch, advance=False, pending_only=True))
             miners = {miner for miner, _ in active.values()}
             last = None
             for admission in rows:

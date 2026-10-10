@@ -740,6 +740,39 @@ def test_read_assignment_still_observes_new_conflict_hold(queue_case):
         c.queue.assignment(signed)
 
 
+def test_pending_page_skips_completed_decode_without_shortening_fifo_page(queue_case, monkeypatch):
+    c = queue_case
+    values = [admit(c, "Alice", i) for i in range(1, 5)]
+    # Presence is deliberately only a scheduling hint, not a valid terminal.
+    for value in values[::2]:
+        c.queue.journal.put("service_terminal", value.work_sha256, {"unverified": True})
+    read = Mock(wraps=c.queue._read)
+    monkeypatch.setattr(c.queue, "_read", read)
+    assert c.queue.entries(limit=2, pending_only=True) == (values[1], values[3])
+    assert [call.args[0] for call in read.call_args_list] == [2, 4]
+    assert c.queue.entries(after_ordinal=2, limit=1, pending_only=True) == (values[3],)
+    assert c.queue.entries(after_ordinal=4, pending_only=True) == ()
+    assert c.queue.entries() == tuple(values)
+    # Each scheduling pass reads current presence, including after restart.
+    with c.queue.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='service_terminal'")
+    restarted = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    assert restarted.entries(limit=1, pending_only=True) == (values[0],)
+
+
+def test_terminal_hint_does_not_bypass_full_admission_review(queue_case):
+    c = queue_case
+    accepted = admit(c)
+    c.queue.journal.put("service_terminal", accepted.work_sha256, {"unverified": True})
+    with c.queue.journal.transaction() as db:
+        db.execute("UPDATE service_claims SET admission=?", ("ff" * 32,))
+    assert c.queue.entries(pending_only=True) == ()
+    with pytest.raises(ValueError, match="index differs"):
+        c.queue.entries()
+    with pytest.raises(ValueError, match="index differs"):
+        c.queue.assignment(accepted.claim)
+
+
 def test_static_assignment_reuse_preserves_mutation_and_policy_checks(queue_case, monkeypatch):
     from umi import competition_cohort_service_work as work
     from umi.competition_assignment_reuse import AssignmentVerificationReuse

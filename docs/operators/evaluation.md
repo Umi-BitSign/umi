@@ -416,9 +416,15 @@ parent bindings, current phase and quorum signatures remain separate checks.
 Model acceptance uses the already decoded indexed intake record without decoding
 it a second time; its native participation and certificate review remain required.
 
-Paid workers check for a retained terminal before reconstructing it; unfinished
-work still authenticates its accepted assignment before advancing. A retained
-terminal always passes native verification and interrupted-export recovery.
+Paid scheduling pages omit work with a retained terminal before reconstructing
+its admission. This presence check only avoids redispatch: full queue reads,
+sealing, terminal verification and interrupted-export recovery still authenticate
+the original records. Unfinished work authenticates its accepted assignment
+before advancing. Each scheduling pass reads current terminal presence, and
+completed entries do not consume the page capacity for unfinished work.
+Concurrent readers tolerate a private SQLite sidecar disappearing during its
+metadata check. Symlinks, extra hard links, public permissions and wrong owners
+remain rejected; the main database and process lock must stay linked.
 Request-readiness roster reuse is scoped to each cohort's original selection
 and intent bytes, including the history embedded in those intents. Appending a
 new current history or delivery receipt does not replay every original order.
