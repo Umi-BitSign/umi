@@ -390,15 +390,18 @@ class CohortExecutionJournal:
             schema="umi-recoverable-execution-evidence/1", job=job, steps=evidence.steps
         )
 
-    def step(self, job: RecoverableExecutionJob, index: int) -> ExecutionStep | None:
-        raw = self.journal.get("step", execution_step_key(job, index))
+    def step(self, job: RecoverableExecutionJob, index: int, *, db=None) -> ExecutionStep | None:
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self.step(job, index, db=db)
+        raw = self.journal.get("step", execution_step_key(job, index), db=db)
         if raw is None:
             return None
-        attempt = self.head(job, index)
+        attempt = self.head(job, index, db=db)
         if attempt is None:
             raise ValueError("completed step has no attempt")
         record = ExecutionStep.model_validate_json(canonical_json_bytes(raw))
-        pending = self.result(job, attempt)
+        pending = self.result(job, attempt, db=db)
         if pending is None or (record.role, record.started, record.execution) != (
             pending.role,
             pending.started,
@@ -408,15 +411,19 @@ class CohortExecutionJournal:
         check_boundary(record.finished, record.started)
         return record
 
-    def head(self, job: RecoverableExecutionJob, index: int) -> CohortExecutionAttempt | None:
-        with self.journal.read_transaction() as db:
-            row = db.execute(
-                "SELECT attempt FROM execution_heads WHERE step=?",
-                (execution_step_key(job, index),),
-            ).fetchone()
-            if row is None:
-                return None
-            raw = self.journal.get("attempt", row[0], db=db)
+    def head(
+        self, job: RecoverableExecutionJob, index: int, *, db=None
+    ) -> CohortExecutionAttempt | None:
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self.head(job, index, db=db)
+        row = db.execute(
+            "SELECT attempt FROM execution_heads WHERE step=?",
+            (execution_step_key(job, index),),
+        ).fetchone()
+        if row is None:
+            return None
+        raw = self.journal.get("attempt", row[0], db=db)
         attempt = CohortExecutionAttempt.model_validate_json(canonical_json_bytes(raw))
         if (
             digest(attempt) != row[0]
@@ -427,9 +434,9 @@ class CohortExecutionJournal:
         return attempt
 
     def result(
-        self, job: RecoverableExecutionJob, attempt: CohortExecutionAttempt
+        self, job: RecoverableExecutionJob, attempt: CohortExecutionAttempt, *, db=None
     ) -> PendingExecutionStep | None:
-        raw = self.journal.get("result", digest(attempt))
+        raw = self.journal.get("result", digest(attempt), db=db)
         if raw is None:
             return None
         result = PendingExecutionStep.model_validate_json(canonical_json_bytes(raw))
@@ -577,13 +584,18 @@ class CohortExecutionJournal:
         if shared is not None:
             return self._reused_incumbent(job, shared)
         steps = []
-        for index in range(step_count(job)):
-            step = self.step(job, index)
-            if step is None:
-                return None
-            if steps:
-                check_boundary(step.started, steps[-1].finished)
-            steps.append(step)
+        # A completed result's steps, heads and observations belong to one
+        # snapshot. Avoid opening and checking a database for every record.
+        # Fresh calls still check current conflict holds and every original
+        # output/boundary; this does not cache evidence or grant authority.
+        with self.journal.read_transaction() as db:
+            for index in range(step_count(job)):
+                step = self.step(job, index, db=db)
+                if step is None:
+                    return None
+                if steps:
+                    check_boundary(step.started, steps[-1].finished)
+                steps.append(step)
         return RecoverableExecutionEvidence(
             schema="umi-recoverable-execution-evidence/1", job=job, steps=tuple(steps)
         )

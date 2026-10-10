@@ -259,3 +259,68 @@ async def test_coverage_failure_reports_cause_without_blocking_discovery(caplog)
     assert '"reason_code":"block_rpc_failed"' in caplog.text
     assert '"error_type":"builtins.OSError"' in caplog.text
     assert "secret-test-value" not in caplog.text
+
+
+@pytest.mark.parametrize("role", ["coverage", "coordinator"])
+@pytest.mark.parametrize("outcome", ["progress", "capacity", "rpc", "mixed_failure"])
+async def test_bounded_header_progress_continues_without_failure_backoff(role, outcome):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from umi import historical_header_recovery as headers
+    from umi.competition_reward_coverage_service import StandingRewardCoverageService
+
+    stop = asyncio.Event()
+    calls, waits, yields = [], [], []
+    progress_type = getattr(
+        headers, "HistoricalHeaderRecoveryProgress", headers.HistoricalHeaderRecoveryPending
+    )
+    failure = {
+        "progress": progress_type,
+        "capacity": headers.HistoricalHeaderRecoveryPending,
+        "rpc": ConnectionError,
+        "mixed_failure": progress_type,
+    }[outcome]
+
+    async def work():
+        calls.append(True)
+        if len(calls) == 1:
+            asyncio.get_running_loop().call_soon(yields.append, True)
+            raise failure("bounded work or unavailable input")
+        assert yields == [True]
+        stop.set()
+        return SimpleNamespace(status="idle", sequence=0, decision_sha256=None)
+
+    async def collection():
+        if outcome == "mixed_failure":
+            raise OSError("collection unavailable")
+
+    async def wait():
+        waits.append(True)
+        stop.set()
+        return True
+
+    stop.wait = wait
+    provider = SimpleNamespace(ensure_observer_running=lambda: None)
+    if role == "coverage":
+        service = object.__new__(StandingRewardCoverageService)
+        service.provider, service._lock = provider, asyncio.Lock()
+        service._collect, service._discover = collection, work
+    else:
+        service = object.__new__(StandingRewardCoordinator)
+        service.publisher = SimpleNamespace(provider=provider, hold_writer=nullcontext)
+        service.phase, service.sequence, service.step = "native_review", 0, work
+        if outcome == "mixed_failure":
+            # A nested failure is not a progress signal, even if its cause was one.
+            async def wrapped():
+                calls.append(True)
+                try:
+                    raise progress_type("bounded pass")
+                except progress_type as error:
+                    raise OSError("subsequent operation failed") from error
+
+            service.step = wrapped
+    await asyncio.wait_for(service.run(stop, poll_seconds=3600), timeout=10)
+    assert len(calls) == (2 if outcome == "progress" else 1)
+    if outcome != "progress":
+        assert waits == [True]

@@ -101,8 +101,9 @@ async def test_cancelled_download_preserves_prior_links(walk):
 async def test_capacity_increase_resumes_same_target(walk):
     w = walk
     service = HistoricalHeaderRecovery(w.connect, maximum_bytes=600)
-    with pytest.raises(HistoricalHeaderRecoveryPending, match="capacity"):
+    with pytest.raises(HistoricalHeaderRecoveryPending, match="capacity") as pending:
         await service.recover(w.anchor, w.target, w.request)
+    assert type(pending.value) is HistoricalHeaderRecoveryPending
     with w.connect() as db:
         retained = db.execute("SELECT COUNT(*) FROM historical_header_hints").fetchone()[0]
     assert retained > 0
@@ -336,3 +337,14 @@ async def test_gap_beyond_2048_recovers_height_without_rpc_hash_claim(walk):
     assert len(w.calls) == len(set(w.calls)) == 2050
     assert (await service.recover(w.anchor, w.target, w.request)).snapshot == w.target
     assert len(w.calls) == 2050
+
+
+async def test_successful_bounded_header_pass_reports_progress(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect, batch_size=4)
+    with pytest.raises(HistoricalHeaderRecoveryPending) as pending:
+        await service.recover(w.anchor, w.target, w.request)
+    assert type(pending.value).__name__ == "HistoricalHeaderRecoveryProgress"
+    assert len(w.calls) == 4
+    assert (await finish(service, w)).snapshot == w.target
+    assert len(w.calls) == len(set(w.calls)) == w.anchor.height - w.target.block_number

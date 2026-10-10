@@ -40,6 +40,7 @@ from .competition_reward_series_handoff import StandingRewardPredecessorOpportun
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import Signature, digest
 from .protocol import canonical_json_bytes
 
@@ -374,6 +375,16 @@ class StandingRewardCoordinator:
                             }
                         ).decode()
                     )
+                except HistoricalHeaderRecoveryProgress:
+                    logger.info(
+                        "reward_coordinator_header_progress phase=%s sequence=%d",
+                        self.phase,
+                        self.sequence,
+                    )
+                    # The bounded pass retained progress. Yield to other tasks,
+                    # then resume its fixed target without a failure backoff.
+                    await asyncio.sleep(0)
+                    continue
                 except Exception as error:
                     logger.warning(
                         "reward_coordinator_retry phase=%s sequence=%d reason=%s details=%s",

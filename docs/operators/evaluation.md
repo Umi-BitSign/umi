@@ -381,6 +381,13 @@ of retained proof bytes. Completing a separate full scan first does not remove
 that replay cost. History preparation alone cannot certify an allocation or
 activate reward weights.
 
+Historical ancestry recovery verifies bounded batches. When a batch retains
+verified links but has not reached its fixed target, the ordinary coordinator
+and coverage service yield to other tasks and continue without the failure
+poll delay. RPC failures, capacity holds and other errors retain their normal
+backoff. A concurrent failure in coverage collection or discovery also keeps
+backoff; progress is not permission to retry an unavailable dependency in a loop.
+
 Historical control capture also retains the runtime and storage proofs verified
 within that capture. Encoding their archive does not immediately replay those
 same proofs or rebuild the codec. The archive's size and format, current owned
@@ -409,6 +416,11 @@ holds are still checked on every observation. Changed inputs miss the bounded
 process-local cache. If another paid-service operation persists a newer finalized
 head while an observation waits, the worker recollects history and a strictly
 newer capture once; a persistently lagging provider remains held.
+
+Completed local execution reads its steps, selected attempts and retained outputs
+in one query-only snapshot. Each read still checks conflict holds, original
+outputs and execution boundaries. Reading completion does not invoke a model,
+change an attempt or authorize settlement.
 
 Service queues retain bounded private copies of decoded catalog, round, admission
 and history records. Each lookup first rereads the exact retained bytes and its

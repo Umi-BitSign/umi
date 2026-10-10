@@ -23,7 +23,11 @@ MAXIMUM_VERIFIED_HEADER_BYTES = 8 * 1024**2
 
 
 class HistoricalHeaderRecoveryPending(FileNotFoundError):
-    """A bounded pass preserved progress; the next review should resume it."""
+    """Recovery is unfinished; preserve its target and retry after backoff."""
+
+
+class HistoricalHeaderRecoveryProgress(HistoricalHeaderRecoveryPending):
+    """A bounded pass verified and retained links; the same target can continue."""
 
 
 @dataclass(frozen=True)
@@ -200,7 +204,7 @@ class HistoricalHeaderRecovery:
             if used >= MAXIMUM_PATH_BYTES:
                 break
         if current["number"] != height:
-            raise HistoricalHeaderRecoveryPending("historical header recovery in progress")
+            raise HistoricalHeaderRecoveryProgress("historical header recovery in progress")
         recovered = FinalizedSnapshotRef(
             current["number"], current["hash"], current["parent_hash"], current["state_root"]
         )

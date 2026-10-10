@@ -30,6 +30,7 @@ from .competition_reward_opportunity import VerifiedRewardOpportunity, opportuni
 from .competition_reward_opportunity_review import review_opportunity_certificate
 from .competition_reward_preparation import StandingRewardPreparation
 from .concurrency import run_owned_thread
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -239,20 +240,28 @@ class StandingRewardCoverageService:
             completion.certificate_sha256,
         )
 
-    async def step(self):
+    async def step(self) -> bool:
         async with self._lock:
+            progressed, failed = False, False
             # Owned work can finish from retained evidence even while discovery
             # or the coordinator is unavailable. Failures are independent.
             for name, operation in (("collection", self._collect), ("discovery", self._discover)):
                 try:
                     await operation()
+                except HistoricalHeaderRecoveryProgress:
+                    progressed = True
+                    logger.info("coverage_header_progress phase=%s", name)
                 except Exception as error:
+                    failed = True
                     logger.warning(
                         "coverage_retry phase=%s reason=%s details=%s",
                         name,
                         type(error).__name__,
                         canonical_json_bytes(_failure_details(error)).decode(),
                     )
+            # A successful ancestry page must not turn a failure in the other
+            # phase into a tight retry loop. Capacity and RPC holds keep backoff.
+            return progressed and not failed
 
     async def opportunity(self, activation: RewardActivation) -> VerifiedRewardOpportunity:
         async with self._lock:
@@ -335,6 +344,8 @@ class StandingRewardCoverageService:
             raise ValueError("coverage poll interval is outside its host bound")
         while not stop.is_set():
             self.provider.ensure_observer_running()
-            await self.step()
+            if await self.step():
+                await asyncio.sleep(0)
+                continue
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
