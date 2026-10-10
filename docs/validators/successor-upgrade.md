@@ -2026,8 +2026,12 @@ storage failures remain errors rather than being retried as lock contention.
 Discovery also resumes interrupted aggregate completion after the last endpoint
 case was retained. It authenticates the original case decisions and builds the
 missing archive without repeating inference or creating new signed requests.
-The existing private cursor advances only through considered admissions and
-survives restart. The worker retains its process lease until all outstanding
+The private discovery cursor rotates bounded admission pages. Within each page,
+work that has never started, or started least recently, gets the next available
+turn. Only a started operation advances its retained turn; skipped busy-miner or
+full-phase jobs keep their priority across polls and restarts. This operational
+metadata preserves original FIFO admission identities, signed request clocks and
+terminal evidence. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
 include in-flight operation counts, phase capacity, aggregate native stages and the age of the
 oldest stage. Stage state is removed after completion, failure or cooperative

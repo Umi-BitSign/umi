@@ -1193,3 +1193,146 @@ async def test_service_unknown_second_send_cannot_repeat_after_restart(loop):
         assert (await s.worker().poll_once())["work_pending"] == 1
     assert len(seen) == 2 and s.p.model.calls == 0
     assert worker.journal.get("service_dispatch_retry_intent", slot) is not None
+
+
+async def test_rolling_same_miner_rotates_pending_jobs_and_restart(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    claims = [c.claim]
+    for nonce in ("02",):
+        claim = c.claim.claim.model_copy(update={"nonce": nonce * 32})
+        signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+        c.queue.admit(
+            signed,
+            c.assignment.admission.submission,
+            c.assignment.admission.participant,
+            p.e.r.h.source,
+            capture(p.finality.head),
+            expected_tip_sha256=history_tip(p.e.r.h.source.history),
+        )
+        claims.append(signed)
+    admissions = [c.queue.assignment(claim).admission for claim in claims]
+    expected = [r.work_sha256 for r in admissions]
+    assert len(set(expected)) == 2
+    seen = []
+
+    async def unavailable_work(row, **kwargs):
+        seen.append(row.work_sha256)
+        return "pending", "fixture_dependency_unavailable"
+
+    # Each process gets an actual durable cursor. A page contains both
+    # pending jobs, but only one may start because their miner is the same.
+    for _ in range(2):
+        worker = s.worker(batch_size=16)
+        monkeypatch.setattr(worker, "_advance", unavailable_work)
+        active = {}
+        try:
+            for _ in range(2):
+                await worker._rolling_poll(active)
+                assert len(active) == 1
+                await asyncio.gather(*(task for _, task in active.values()))
+        finally:
+            await worker._stop_tasks(task for _, task in active.values())
+    assert seen == expected * 2
+
+
+@pytest.mark.parametrize("hold_first", [False, True])
+async def test_rolling_rotation_reaches_skipped_jobs_and_busy_pages(loop, monkeypatch, hold_first):
+    # Isolate scheduling with three admissions, while keeping the native durable
+    # cursor and page selection. This does not qualify signatures or inference.
+    worker = loop.worker(batch_size=1 if hold_first else 16, concurrency=2)
+    rows = tuple(
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=SimpleNamespace(claim=SimpleNamespace(hotkey=wallet(name).hotkey.ss58_address)),
+        )
+        for i, name in enumerate(("Alice", "Alice", "Bob"), 1)
+    )
+
+    def entries(*, after_ordinal=0, limit, pending_only=False):
+        return tuple(r for r in rows if r.ordinal > after_ordinal)[:limit]
+
+    monkeypatch.setattr(worker.queue, "entries", entries)
+    monkeypatch.setattr(worker, "_ready_stage", lambda _: "preparation")
+    seen = []
+    release = asyncio.Event()
+
+    async def advance(row, **kwargs):
+        seen.append(row.ordinal)
+        if hold_first and row.ordinal == 1:
+            await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            miners = [miner for miner, _ in active.values()]
+            assert len(miners) == len(set(miners))
+            assert len(active) <= 2
+            await asyncio.sleep(0)
+            if not hold_first:
+                await asyncio.gather(*(task for _, task in active.values()))
+        if hold_first:
+            # The page containing only Alice's blocked second job must not
+            # prevent Bob's next page from running while Alice is still busy.
+            assert seen == [1, 3]
+            assert not release.is_set()
+        else:
+            # Advancing past the last started job (Bob) would repeatedly wrap
+            # to Alice's first job and starve her second job.
+            assert {1, 2, 3} <= set(seen)
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+
+
+async def test_rolling_busy_poll_preserves_skipped_turn_across_restart(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+    c.queue.admit(
+        signed,
+        c.assignment.admission.submission,
+        c.assignment.admission.participant,
+        p.e.r.h.source,
+        capture(p.finality.head),
+        expected_tip_sha256=history_tip(p.e.r.h.source.history),
+    )
+    expected = [
+        c.assignment.admission.work_sha256,
+        c.queue.assignment(signed).admission.work_sha256,
+    ]
+    entered, release = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    async def advance(row, **kwargs):
+        seen.append(row.work_sha256)
+        entered.set()
+        await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    worker = s.worker(batch_size=16)
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 30)
+        # Repeated busy polls may rotate discovery but cannot consume the
+        # second job's opportunity to run after this miner becomes available.
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            assert len(active) == 1 and seen == expected[:1]
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    restarted = s.worker(batch_size=16)
+    monkeypatch.setattr(restarted, "_advance", advance)
+    active = {}
+    try:
+        await restarted._rolling_poll(active)
+        await asyncio.gather(*(task for _, task in active.values()))
+        assert seen == expected
+    finally:
+        await restarted._stop_tasks(task for _, task in active.values())

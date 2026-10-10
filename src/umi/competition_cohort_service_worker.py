@@ -101,6 +101,10 @@ class ServiceWorkWorker:
                 "CREATE TABLE IF NOT EXISTS service_worker_cursor "
                 "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ordinal INTEGER NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS service_worker_turns "
+                "(ordinal INTEGER PRIMARY KEY, turn INTEGER NOT NULL)"
+            )
         # Restart may change operational capacity, but never the evaluator.
         self.journal.put(
             "service_worker_binding",
@@ -347,6 +351,24 @@ class ServiceWorkWorker:
                 (ordinal,),
             )
 
+    def _fair_order(self, rows):
+        # Scheduling metadata never grants credit or changes admission order.
+        # Skipped jobs keep their turn when a miner or phase is already busy.
+        with self.journal.read_transaction() as db:
+            turns = dict(db.execute("SELECT ordinal,turn FROM service_worker_turns"))
+        return sorted(rows, key=lambda row: (turns.get(row.ordinal, 0), row.ordinal))
+
+    def _remember_turn(self, ordinal):
+        with self.journal.transaction() as db:
+            turn = db.execute(
+                "SELECT COALESCE(MAX(turn),0)+1 FROM service_worker_turns"
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO service_worker_turns VALUES (?,?) "
+                "ON CONFLICT(ordinal) DO UPDATE SET turn=excluded.turn",
+                (ordinal, turn),
+            )
+
     async def poll_once(self):
         async with self.serial:
             lease = lock_private_file(self.journal.root / "service-worker.lock")
@@ -443,11 +465,10 @@ class ServiceWorkWorker:
         if len(active) < len(lanes) * self.concurrency:
             rows = await self._local(partial(self._batch, advance=False, pending_only=True))
             miners = {miner for miner, _ in active.values()}
-            last = None
-            for admission in rows:
+            last = max((row.ordinal for row in rows), default=None)
+            for admission in await self._local(self._fair_order, rows):
                 if all(counts[lane] >= self.concurrency for lane in lanes):
                     break
-                last = admission.ordinal
                 miner = identity(admission.claim.claim.hotkey)
                 work = admission.work_sha256
                 if work in active or miner in miners:
@@ -457,6 +478,7 @@ class ServiceWorkWorker:
                     continue
                 if counts[lane] >= self.concurrency:
                     continue
+                await self._local(self._remember_turn, admission.ordinal)
                 self._operation_lanes[work] = lane
                 counts[lane] += 1
                 active[work] = (miner, asyncio.create_task(perform(admission)))
