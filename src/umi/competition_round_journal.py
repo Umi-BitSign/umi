@@ -122,6 +122,13 @@ class RoundJournal:
                 "CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, body BLOB NOT NULL, "
                 "PRIMARY KEY(kind,id))"
             )
+            # Capacity checks need counts and byte lengths, not proof bodies.
+            # SQLite maintains this covering index in the same transaction as
+            # every record write. Existing records, bindings and limits remain
+            # unchanged; older readers can continue using the journal.
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS records_capacity_lengths ON records(kind,LENGTH(body))"
+            )
             db.execute("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS highwater (block INTEGER NOT NULL)")
             db.execute(

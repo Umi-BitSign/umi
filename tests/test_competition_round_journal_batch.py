@@ -27,6 +27,51 @@ def journal(tmp_path):
     return result
 
 
+@pytest.mark.parametrize("reserved", [False, True])
+def test_capacity_index_migrates_without_changing_records_or_reservations(tmp_path, reserved):
+    root, binding = tmp_path / "legacy", {"policy": "unchanged"}
+    journal = rounds.RoundJournal(root, binding, maximum_rounds=4)
+    if reserved:
+        journal.reserve_records("prior", (rounds.RecordReservation("intent", "a", 2048),))
+    journal.put("intent", "a", {"signed": "original bytes"})
+    inode = journal.path.stat().st_ino
+    with journal.transaction() as db:
+        db.execute("DROP INDEX records_capacity_lengths")
+        before = db.execute("SELECT * FROM records ORDER BY kind,id").fetchall()
+        prior_binding = db.execute("SELECT body FROM binding").fetchall()
+        generation = db.execute("PRAGMA user_version").fetchone()
+        capacity = journal._capacity(db) if reserved else None
+
+    reopened = rounds.RoundJournal(root, binding, maximum_rounds=4)
+    with reopened.read_transaction() as db:
+        assert db.execute("SELECT * FROM records ORDER BY kind,id").fetchall() == before
+        assert db.execute("SELECT body FROM binding").fetchall() == prior_binding
+        assert db.execute("PRAGMA user_version").fetchone() == generation
+        if reserved:
+            assert reopened._capacity(db) == capacity
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+            "AND name='records_capacity_lengths'"
+        ).fetchone() == (1,)
+    assert reopened.path.stat().st_ino == inode
+
+    # A previously opened owner still writes ordinary records. SQLite updates
+    # the size index atomically, including rollback, without a summary cache.
+    journal.put("intent", "b", {"next": "retained"})
+    with pytest.raises(RuntimeError, match="rollback"), journal.transaction() as db:
+        db.execute("INSERT INTO records VALUES ('intent','rolled-back',?)", (b"{}",))
+        raise RuntimeError("rollback")
+    with reopened.read_transaction() as db:
+        query = "SELECT kind,COUNT(*),SUM(LENGTH(body)) FROM records {} GROUP BY kind"
+        assert db.execute(query.format("INDEXED BY records_capacity_lengths")).fetchall() == (
+            db.execute(query.format("NOT INDEXED")).fetchall()
+        )
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (2,)
+    assert rounds.RoundJournal(root, binding, maximum_rounds=4).get("intent", "a") == {
+        "signed": "original bytes"
+    }
+
+
 def retained(journal):
     with sqlite3.connect(journal.path) as db:
         return {
