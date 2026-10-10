@@ -399,6 +399,7 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
         )
     )
     events, stop, entered = [], asyncio.Event(), asyncio.Event()
+    preparation_entered = asyncio.Event()
 
     class Provider:
         def __init__(self, chain, policy):
@@ -433,6 +434,7 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
         async def run(self, halted, *, poll_seconds):
             try:
                 await entered.wait()
+                await preparation_entered.wait()
                 events.append("export_started")
                 signature = await self.sign(config.series)
                 verify_signature(config.series, signature)
@@ -442,10 +444,25 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
             finally:
                 events.append("export_drained")
 
+    class Preparation:
+        def __init__(self, conf, promotion, direct_by_cohort):
+            assert conf == config
+            assert promotion.directory == Path(config.promotion_directory)
+            assert direct_by_cohort == {}
+
+        async def run(self, halted):
+            try:
+                events.append("preparation_started")
+                preparation_entered.set()
+                await halted.wait()
+            finally:
+                events.append("preparation_drained")
+
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
     monkeypatch.setattr(boot, "load_named_hotkey", lambda *args: wallet("Charlie"))
     monkeypatch.setattr(boot, "CohortSettlementService", Node)
     monkeypatch.setattr(boot, "RequestExportWorker", Exports)
+    monkeypatch.setattr(boot, "SettlementArtifactPreparation", Preparation)
     if failure:
         with pytest.raises((ValueError, RuntimeError), match="export"):
             await boot.run_settlement_service(config, stop)
@@ -455,3 +472,5 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
     assert ("node_started" in events) == (failure != "construction")
     assert ("node_drained" in events) == (failure != "construction")
     assert ("export_drained" in events) == (failure != "construction")
+    assert ("preparation_started" in events) == (failure != "construction")
+    assert ("preparation_drained" in events) == (failure != "construction")

@@ -16,6 +16,7 @@ from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_settlement_config import SettlementServiceConfig
+from .competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_cohort_settlement_service import CohortSettlementService
 from .competition_historical_registration import HistoricalRegistrationProvider
@@ -120,10 +121,22 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             )
         )
         nodes = []
+        direct_by_cohort = {}
         for plan in config.series.cohorts:
             store = resources.enter_context(
                 settlement_store(root / digest(plan), config.maximum_state_bytes)
             )
+            model_artifacts = (
+                None
+                if direct_artifacts is None
+                else DirectModelSettlementVerifier(
+                    direct_artifacts,
+                    promotion.directory / "model-reward-artifacts",
+                    root / digest(plan) / "direct-model-settlement-receipts",
+                )
+            )
+            if model_artifacts is not None:
+                direct_by_cohort[digest(plan)] = model_artifacts
             nodes.append(
                 CohortSettlementService(
                     config,
@@ -134,15 +147,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     promotion=promotion,
                     executions=executions,
                     sign=sign,
-                    model_artifacts=(
-                        None
-                        if direct_artifacts is None
-                        else DirectModelSettlementVerifier(
-                            direct_artifacts,
-                            promotion.directory / "model-reward-artifacts",
-                            root / digest(plan) / "direct-model-settlement-receipts",
-                        )
-                    ),
+                    model_artifacts=model_artifacts,
                 )
             )
         exports = None
@@ -167,8 +172,10 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     maximum_bytes=config.maximum_state_bytes,
                 ),
             )
+        preparation = SettlementArtifactPreparation(config, promotion, direct_by_cohort)
         await provider.start()
         tasks = [asyncio.create_task(node.run(stop)) for node in nodes]
+        tasks.append(asyncio.create_task(preparation.run(stop)))
         if exports is not None:
             tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))
         for task in tasks:

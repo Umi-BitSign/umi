@@ -359,13 +359,29 @@ def _has_preserved_verification(bundle, archive, expected):
                 not stat.S_ISREG(info.st_mode)
                 or info.st_nlink != 1
                 or info.st_uid != root_info.st_uid
-                or stat.S_IMODE(info.st_mode) != 0o400
+                or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
                 or not 0 < info.st_size <= 4 * 1024**2
             ):
                 raise ValueError("preserved verification receipt has unsafe metadata")
             raw = receipt.read(4 * 1024**2 + 1)
             if len(raw) != info.st_size:
                 raise ValueError("preserved verification receipt changed while reading")
+        if stat.S_IMODE(info.st_mode) == 0o600:
+            # Older producers wrote owner-private version-one receipts. They
+            # cannot authorize reuse: verify the complete native artifact under
+            # its lock, then atomically replace this receipt with version two.
+            # A failed check leaves the original receipt and model untouched.
+            prior = json.loads(raw)
+            current = json.loads(expected)
+            if (
+                isinstance(prior, dict)
+                and prior.get("schema") == "umi-preserved-content-verification/1"
+                and prior.keys() == current.keys() - {"archive_identity"}
+                and prior.get("model_sha256") == digest(bundle)
+                and canonical_json_bytes(prior) == raw
+            ):
+                return False
+            raise ValueError("preserved verification receipt has unsafe metadata")
         if raw == expected:
             return True
         current = json.loads(expected)
