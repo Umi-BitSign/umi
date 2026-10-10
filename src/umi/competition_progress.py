@@ -13,6 +13,7 @@ from functools import wraps
 from itertools import count
 
 from .competition_weight_timing import WeightRateLimitWait
+from .validator_chain import ValidatorChainError
 
 _LOG = logging.getLogger("umi.competition.progress")
 _PARENT = ContextVar("competition_progress_parent", default=None)
@@ -131,6 +132,13 @@ def _failure_details(error):
                 "source_frames": frames[-8:],
             }
         )
+        if isinstance(error, ValidatorChainError):
+            for name in ("rpc_method", "rpc_error_code", "rpc_block_hash"):
+                value = getattr(error, name)
+                if value is not None:
+                    causes[-1][name] = value
+            if error.rpc_failures:
+                causes[-1]["rpc_failures"] = error.rpc_failures
         error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
     return causes
 

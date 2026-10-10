@@ -54,9 +54,32 @@ _RPC_RESPONSE_LIMITS = {
 class ValidatorChainError(RuntimeError):
     """A stable, non-sensitive failure while collecting finalized evidence."""
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        rpc_method: str | None = None,
+        rpc_error_code: int | None = None,
+        rpc_block_hash: str | None = None,
+    ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        # Remote messages, response data and URLs may contain secrets. Retain
+        # only bounded public request identity and a numeric provider code.
+        self.rpc_method = (
+            rpc_method if type(rpc_method) is str and rpc_method in _RPC_RESPONSE_LIMITS else None
+        )
+        self.rpc_error_code = (
+            rpc_error_code
+            if type(rpc_error_code) is int and -(2**31) <= rpc_error_code < 2**31
+            else None
+        )
+        self.rpc_block_hash = (
+            rpc_block_hash
+            if type(rpc_block_hash) is str and _HASH_RE.fullmatch(rpc_block_hash)
+            else None
+        )
+        self.rpc_failures: tuple[dict, ...] = ()
 
 
 class RawJsonRpc(Protocol):
@@ -195,7 +218,13 @@ class BittensorRawJsonRpc:
             if response.get("jsonrpc") != "2.0" or response.get("id") != 1:
                 raise ValidatorChainError("proof_rpc_response_invalid")
             if set(response) == {"jsonrpc", "id", "error"}:
-                raise ValidatorChainError("proof_rpc_error")
+                error = response["error"]
+                raise ValidatorChainError(
+                    "proof_rpc_error",
+                    rpc_method=method,
+                    rpc_error_code=error.get("code") if isinstance(error, dict) else None,
+                    rpc_block_hash=params[-1] if params else None,
+                )
             if set(response) != {"jsonrpc", "id", "result"}:
                 raise ValidatorChainError("proof_rpc_response_invalid")
             return response["result"]

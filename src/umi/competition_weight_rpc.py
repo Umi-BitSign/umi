@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from .competition_chain import _BatchConnections
 from .competition_proof_rpc import FailoverProofRpc
+from .proof_rpc_cache import BlockPinnedRpcCache
 from .validator_chain import BittensorRawJsonRpc, ValidatorChainError
 
 
@@ -75,6 +76,7 @@ class WeightProofRpc:
             if len(transports) == 1
             else FailoverProofRpc(transports, timeout_seconds=config.collection_timeout_seconds)
         )
+        self._read_cache = BlockPinnedRpcCache(self._rpc.request)
 
     async def request(self, method, params):
         if self._closed:
@@ -85,7 +87,7 @@ class WeightProofRpc:
             if tuple(params) not in self._batch_values:
                 raise ValueError("weight storage request differs from prefetched batch")
             return self._batch_values[tuple(params)]
-        return await self._rpc.request(method, params)
+        return await self._read_cache.request(method, params)
 
     @asynccontextmanager
     async def read_batch(self, block_hash, keys):
@@ -148,4 +150,7 @@ class WeightProofRpc:
 
     async def aclose(self):
         self._closed = True
+        # Closing this owner must also release a caller blocked on its RPC.
+        # The cache drains cancellation before transports release their leases.
+        await self._read_cache.aclose(cancel_inflight=True)
         await self._rpc.aclose()

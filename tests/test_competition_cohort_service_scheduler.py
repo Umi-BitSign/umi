@@ -38,11 +38,13 @@ def scheduler(tmp_path, *, miners=(0, 1, 2), concurrency=2, batch_size=2):
         )
         for i, m in enumerate(miners)
     )
-    worker.queue = SimpleNamespace(
-        entries=lambda *, after_ordinal=0, limit=16: [r for r in rows if r.ordinal > after_ordinal][
-            :limit
-        ]
-    )
+
+    def entries(*, after_ordinal=0, limit=16, pending_only=False):
+        # These scheduling fixtures have no retained terminal records, so every
+        # row is pending in both the full and pending-only queue views.
+        return [r for r in rows if r.ordinal > after_ordinal][:limit]
+
+    worker.queue = SimpleNamespace(entries=entries)
     worker.batch_size, worker.concurrency = batch_size, concurrency
     worker.capacity, worker.serial = asyncio.Semaphore(concurrency), asyncio.Lock()
     worker._operation_stages = {}

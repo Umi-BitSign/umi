@@ -60,6 +60,7 @@ class FailoverProofRpc:
         # endpoint, including when a primary stalls rather than returning 429.
         timeout = self.timeout_seconds / len(eligible)
         last_error = None
+        failures = []
         for index in eligible:
             if self._closed:
                 raise ValueError("registration RPC is closed")
@@ -90,12 +91,22 @@ class FailoverProofRpc:
                 except asyncio.TimeoutError as error:
                     last_error = ValidatorChainError("proof_rpc_failed")
                     last_error.__cause__ = error
+                    failures.append({"provider_index": index, "reason_code": "proof_rpc_failed"})
                     self._cooldown_until[index] = self._now() + 10.0
                     self._cooldown_reasons[index] = "proof_rpc_failed"
                 except ValidatorChainError as error:
                     if error.reason_code not in _RETRYABLE:
                         raise
                     last_error = error
+                    failures.append(
+                        {
+                            "provider_index": index,
+                            "reason_code": error.reason_code,
+                            "rpc_method": error.rpc_method,
+                            "rpc_error_code": error.rpc_error_code,
+                            "rpc_block_hash": error.rpc_block_hash,
+                        }
+                    )
                     if error.reason_code == "proof_rpc_rate_limited":
                         retry_after = _retry_after(error)
                         self._cooldown_until[index] = self._now() + retry_after
@@ -115,6 +126,8 @@ class FailoverProofRpc:
                         self._cooldown_reasons[index] = "proof_rpc_failed"
                     # A JSON-RPC unavailable-state error is block specific, so
                     # historical failure does not quarantine current reads.
+        if last_error is not None:
+            last_error.rpc_failures = tuple(failures)
         raise last_error or ValidatorChainError(self._cooldown_reason())
 
     def _cooldown_reason(self):

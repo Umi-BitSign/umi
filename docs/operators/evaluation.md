@@ -94,6 +94,20 @@ do not establish provider independence. A recent-state endpoint may serve live
 intake while lacking proofs for an older roster; keep an archive-capable primary
 and qualify historical reads on a backup too.
 
+Structured failure diagnostics retain the RPC method, selected public block
+hash and numeric error code for an RPC error response. When every configured
+provider fails, `rpc_failures` records each attempted provider index and reason.
+Use this to distinguish the primary failure from a fallback lacking historical
+state. Remote error messages, response data and endpoint URLs are not logged.
+These diagnostics do not change retry selection, cooldowns or proof validation.
+
+Weight and reward proof transports also reuse the existing bounded exact-block
+RPC cache: identical successful reads coalesce and remain available for 30
+seconds, within 64 MiB and 512 entries per transport owner. Different blocks or
+keys remain separate. Failed reads and null results are not retained, and every
+consumer still verifies its original proof. Shutdown drains in-flight reads;
+the cache never grants finality or permission to submit weights.
+
 Adding the two fallbacks to an otherwise identical configuration preserves the
 existing registration namespace, captures, metadata artifacts and observed head.
 The cache records the old and new configuration bindings and the explicit
