@@ -94,6 +94,22 @@ def test_settlement_config_and_cli_use_exact_root_selection(selected, capsys):
         load_settlement_service_config(selected.path)
 
 
+def test_cli_exposes_background_preparation_and_restores_logging(selected, monkeypatch, capsys):
+    import logging
+
+    logger = logging.getLogger("umi.competition_cohort_settlement_preparation")
+    before = (logger.level, logger.propagate, tuple(logger.handlers))
+
+    async def running(config):
+        assert config == selected.config
+        logger.info("cohort_settlement_preparation entries_ready=2")
+
+    monkeypatch.setattr(cli, "_run", running)
+    cli.main(["run", "--config", str(selected.path)])
+    assert "cohort_settlement_preparation entries_ready=2" in capsys.readouterr().err
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
+
+
 @pytest.mark.parametrize(
     "fault", [None, "version", "role", "tracks", "cohort", "authority", "key", "overlap"]
 )
