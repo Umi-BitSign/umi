@@ -359,6 +359,11 @@ retained control history and replays its original reward package. A successor or
 revocation in that history does not erase the initial handoff. Historical replay
 uses the retained proofs and a fixed target block while catching up; it grants no
 current submission authority. The executor checks fresh control before signing.
+Each proof-verifier instance remembers up to 64 successful exact storage-proof
+checks. Reuse binds the state root, claimed keys and values, every proof node,
+verifier binary identity and configured bounds. Changed claims or proofs still
+require verification, failures are never reused, and process restart clears the
+cache. Archive loading and current finality and authority checks still run.
 Cancellation drains owned signing work before releasing the writer locks.
 The standing supervisor and reward-reader CLI request cooperative cancellation
 when SIGTERM or SIGINT sets their stop event, including during initial history

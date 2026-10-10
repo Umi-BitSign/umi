@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,132 @@ def test_single_item_callback_wraps_verify_many(tmp_path: Path) -> None:
         )
         is True
     )
+
+
+def test_exact_success_reuse_binds_root_claims_nodes_and_instance(tmp_path, monkeypatch):
+    path, digest = executable(tmp_path, "success-single")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    invoke = verifier._invoke
+    calls = []
+
+    def counted(raw, *, request_id):
+        calls.append(request_id)
+        return invoke(raw, request_id=request_id)
+
+    monkeypatch.setattr(verifier, "_invoke", counted)
+    request = dict(state_root=b"r" * 32, items=((b"key", b"value"),), proof=(b"proof",))
+    assert verifier.verify_many(**request)
+    assert verifier.verify_many(**request)
+    assert len(calls) == 1
+    assert verifier.verify_many(**(request | {"state_root": b"s" * 32}))
+    assert len(calls) == 2
+    for changed in (
+        {"items": ((b"different-key", b"value"),)},
+        {"items": ((b"key", None),)},
+        {"items": ((b"key", b""),)},
+        {"proof": (b"error-invalid_proof",)},
+    ):
+        before = len(calls)
+        with pytest.raises(SubstrateProofVerifierError):
+            verifier.verify_many(**(request | changed))
+        assert len(calls) == before + 1
+    assert verifier.verify_many(**request)
+    assert len(calls) == 6
+    restarted = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    monkeypatch.setattr(restarted, "_invoke", counted)
+    assert restarted.verify_many(**request)
+    assert len(calls) == 7
+
+
+def test_failed_proofs_never_enter_success_reuse(tmp_path, monkeypatch):
+    path, digest = executable(tmp_path, "success-single")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    invoke = verifier._invoke
+    calls = []
+
+    def counted(raw, *, request_id):
+        calls.append(request_id)
+        return invoke(raw, request_id=request_id)
+
+    monkeypatch.setattr(verifier, "_invoke", counted)
+    for _ in range(2):
+        with pytest.raises(SubstrateProofVerifierError, match="invalid_proof"):
+            verifier.verify_many(
+                state_root=b"r" * 32,
+                items=((b"key", None),),
+                proof=(b"error-invalid_proof",),
+            )
+    assert len(calls) == 2 and not verifier._successful_proofs
+
+
+def test_inherited_verifier_does_not_acquire_parent_lock_or_reuse_success(tmp_path, monkeypatch):
+    path, digest = executable(tmp_path, "success-single")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    request = dict(state_root=b"r" * 32, items=((b"key", b"value"),), proof=(b"proof",))
+    assert verifier.verify_many(**request)
+    parent_cache = dict(verifier._successful_proofs)
+    monkeypatch.setattr(os, "getpid", lambda: verifier._pid + 1)
+
+    class ParentLock:
+        def __enter__(self):
+            pytest.fail("inherited lock must not be acquired")
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(verifier, "_success_lock", ParentLock())
+    calls = []
+    invoke = verifier._invoke
+
+    def counted(raw, *, request_id):
+        calls.append(request_id)
+        return invoke(raw, request_id=request_id)
+
+    monkeypatch.setattr(verifier, "_invoke", counted)
+    assert verifier.verify_many(**request)
+    assert verifier.verify_many(**request)
+    assert len(calls) == 2
+    assert verifier._successful_proofs == parent_cache
+
+
+def test_cached_success_still_checks_binary_and_current_bounds(tmp_path):
+    path, digest = executable(tmp_path, "success-single", copy=True)
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    request = dict(state_root=b"r" * 32, items=((b"key", b"value"),), proof=(b"proof",))
+    assert verifier.verify_many(**request)
+    original_limits = verifier._limits
+    verifier._limits = replace(original_limits, maximum_request_bytes=4)
+    with pytest.raises(ValueError, match="encoded proof request"):
+        verifier.verify_many(**request)
+    verifier._limits = original_limits
+    path.write_bytes(path.read_bytes() + b"\n")
+    with pytest.raises(SubstrateProofVerifierError, match="binary_hash_mismatch"):
+        verifier.verify_many(**request)
+
+
+def test_success_reuse_is_bounded_and_evicted_proofs_are_checked_again(tmp_path, monkeypatch):
+    path, digest = executable(tmp_path, "success-single")
+    verifier = SubprocessStorageProofVerifier(binary_path=path, expected_sha256=digest)
+    calls = []
+
+    def affirm(raw, *, request_id):
+        calls.append(request_id)
+        return True
+
+    monkeypatch.setattr(verifier, "_invoke", affirm)
+    for height in range(65):
+        assert verifier.verify_many(
+            state_root=height.to_bytes(32, "big"),
+            items=((b"key", b"value"),),
+            proof=(b"proof",),
+        )
+    assert len(verifier._successful_proofs) == 64 and len(calls) == 65
+    assert verifier.verify_many(
+        state_root=bytes(32),
+        items=((b"key", b"value"),),
+        proof=(b"proof",),
+    )
+    assert len(calls) == 66 and len(verifier._successful_proofs) == 64
 
 
 @pytest.mark.parametrize("state_version", [0, 1])
