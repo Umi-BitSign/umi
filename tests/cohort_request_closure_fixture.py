@@ -214,4 +214,14 @@ def build(b, **changes):
         current_block=1680,
     )
     args.update(changes)
+    if args.get("partial_source") is not None and "inventory_source" not in changes:
+        from .cohort_tail_settlement_fixture import inventory_original
+
+        def inventories(key, *, selected_at_block, completed_by_block):
+            return tuple(
+                inventory_original(b, partial, args["observation"])
+                for partial in args["partial_source"](key)
+            )
+
+        args["inventory_source"] = inventories
     return build_request_closure(**args)

@@ -151,9 +151,12 @@ class BlockPinnedRpcCache:
         if not task.cancelled():
             task.exception()  # Consume abandoned failures without logging private RPC data.
 
-    async def aclose(self):
+    async def aclose(self, *, cancel_inflight=False):
         self.closed = True
         tasks = tuple(self.inflight.values())
+        if cancel_inflight:
+            for task in tasks:
+                task.cancel()
         if tasks:
             await await_owned_task(asyncio.gather(*tasks, return_exceptions=True))
         self.entries.clear()

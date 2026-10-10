@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +11,7 @@ import pytest
 
 import umi.competition_round_journal as rounds
 from umi.open_competition import digest
-from umi.protocol import canonical_json_bytes
+from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_round_preparation import setup as preparation_fixture
 from .test_open_competition import policy as policy
@@ -24,6 +25,51 @@ def journal(tmp_path):
     with result.transaction() as db:
         db.execute("CREATE TABLE caller_index (id TEXT PRIMARY KEY, value INTEGER)")
     return result
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_capacity_index_migrates_without_changing_records_or_reservations(tmp_path, reserved):
+    root, binding = tmp_path / "legacy", {"policy": "unchanged"}
+    journal = rounds.RoundJournal(root, binding, maximum_rounds=4)
+    if reserved:
+        journal.reserve_records("prior", (rounds.RecordReservation("intent", "a", 2048),))
+    journal.put("intent", "a", {"signed": "original bytes"})
+    inode = journal.path.stat().st_ino
+    with journal.transaction() as db:
+        db.execute("DROP INDEX records_capacity_lengths")
+        before = db.execute("SELECT * FROM records ORDER BY kind,id").fetchall()
+        prior_binding = db.execute("SELECT body FROM binding").fetchall()
+        generation = db.execute("PRAGMA user_version").fetchone()
+        capacity = journal._capacity(db) if reserved else None
+
+    reopened = rounds.RoundJournal(root, binding, maximum_rounds=4)
+    with reopened.read_transaction() as db:
+        assert db.execute("SELECT * FROM records ORDER BY kind,id").fetchall() == before
+        assert db.execute("SELECT body FROM binding").fetchall() == prior_binding
+        assert db.execute("PRAGMA user_version").fetchone() == generation
+        if reserved:
+            assert reopened._capacity(db) == capacity
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+            "AND name='records_capacity_lengths'"
+        ).fetchone() == (1,)
+    assert reopened.path.stat().st_ino == inode
+
+    # A previously opened owner still writes ordinary records. SQLite updates
+    # the size index atomically, including rollback, without a summary cache.
+    journal.put("intent", "b", {"next": "retained"})
+    with pytest.raises(RuntimeError, match="rollback"), journal.transaction() as db:
+        db.execute("INSERT INTO records VALUES ('intent','rolled-back',?)", (b"{}",))
+        raise RuntimeError("rollback")
+    with reopened.read_transaction() as db:
+        query = "SELECT kind,COUNT(*),SUM(LENGTH(body)) FROM records {} GROUP BY kind"
+        assert db.execute(query.format("INDEXED BY records_capacity_lengths")).fetchall() == (
+            db.execute(query.format("NOT INDEXED")).fetchall()
+        )
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (2,)
+    assert rounds.RoundJournal(root, binding, maximum_rounds=4).get("intent", "a") == {
+        "signed": "original bytes"
+    }
 
 
 def retained(journal):
@@ -158,6 +204,86 @@ def test_read_transaction_preserves_reservation_fence_checks(journal):
         journal.get("intent", "a")
 
 
+@pytest.mark.parametrize("reserved", [False, True])
+@pytest.mark.parametrize("value", [None, {"original": True}])
+def test_exact_put_does_not_queue_for_writer_and_keeps_fresh_holds(journal, reserved, value):
+    if reserved:
+        journal.reserve_records("batch", (rounds.RecordReservation("intent", "a", 1024),))
+    journal.put("intent", "a", value)
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('a')")
+            entered.set()
+            assert release.wait(60)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(writer)
+        try:
+            assert entered.wait(30)
+            # The unchanged retry sees the valid committed record; it neither
+            # waits for nor changes the other writer's uncommitted conflict.
+            assert pool.submit(journal.put, "intent", "a", value).result(timeout=5) is None
+        finally:
+            release.set()
+        pending.result(timeout=30)
+    with pytest.raises(ValueError, match="conflict held"):
+        journal.put("intent", "a", value)
+
+
+def test_exact_put_retains_reservation_and_generation_checks(journal):
+    value = {"original": True}
+    journal.reserve_records(
+        "batch",
+        (rounds.RecordReservation("intent", "a", 1024, sha256_hex(canonical_json_bytes(value))),),
+    )
+    journal.put("intent", "a", value)
+    changed = {"original": False}
+    with sqlite3.connect(journal.path) as db:
+        db.create_function("umi_round_writer_generation", 0, lambda: 2)
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='intent' AND id='a'",
+            (canonical_json_bytes(changed),),
+        )
+    with pytest.raises(ValueError, match="differs from reservation"):
+        journal.put("intent", "a", changed)
+    with sqlite3.connect(journal.path) as db:
+        db.execute('DROP TRIGGER "round_generation_records_insert"')
+    with pytest.raises(ValueError, match="capability fence missing"):
+        journal.put("intent", "a", changed)
+
+
+@pytest.mark.parametrize("target", ["-journal", "-wal", "-shm", "database", "lock"])
+def test_unlinked_sidecar_stat_does_not_reject_a_valid_snapshot(journal, monkeypatch, target):
+    journal.put("intent", "a", {"original": True})
+    path = (
+        journal.path
+        if target == "database"
+        else journal.lock_path
+        if target == "lock"
+        else Path(str(journal.path) + target)
+    )
+    # lstat can resolve a rollback sidecar immediately before SQLite unlinks
+    # it, then return metadata with st_nlink=0. This is not a hard link.
+    fields = list(journal.path.lstat())
+    fields[3] = 0
+    disappeared = os.stat_result(fields)
+    original = Path.lstat
+
+    def during_unlink(self, *args, **kwargs):
+        return disappeared if self == path else original(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", during_unlink)
+        if target in {"database", "lock"}:
+            with pytest.raises(ValueError, match="private and owned"):
+                journal.get("intent", "a")
+        else:
+            assert journal.get("intent", "a") == {"original": True}
+    assert journal.get("intent", "a") == {"original": True}
+
+
 @pytest.mark.parametrize("damage", ["symlink", "dangling", "hardlink", "public"])
 def test_concurrent_read_path_still_rejects_unsafe_sqlite_sidecars(journal, tmp_path, damage):
     journal.put("intent", "a", {"original": True})
@@ -252,7 +378,7 @@ def test_exact_batch_retry_repairs_index_without_ledger_accounting_scan(journal,
     assert retained(journal)["caller_index"] == [("a", 1)]
 
 
-def test_single_put_delegates_without_a_second_transaction(journal, monkeypatch):
+def test_new_single_put_uses_the_native_batch_writer(journal, monkeypatch):
     calls = []
     original = journal.put_many
 

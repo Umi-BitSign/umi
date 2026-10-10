@@ -16,9 +16,11 @@ from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_d
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import CohortIntakePublisher, history_tip
 from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_request_closure import CohortRequestClosure
 from .competition_cohort_request_phase import (
     NativeRequestProgressSource,
     RequestProgressReviewRecord,
+    replay_request_completion,
 )
 from .competition_cohort_request_progress import request_closure_progress
 from .competition_cohort_reward_package import MAX_PACKAGE_OBJECTS, ReplayObjectCollector
@@ -32,12 +34,14 @@ from .competition_execution import ExecutionBoundary
 from .concurrency import run_owned_thread
 from .open_competition import digest
 from .private_files import private_path, publish_private_model
+from .protocol import canonical_json_bytes
 
 
 @dataclass(frozen=True)
 class CertifiedRequestExport:
     history: CohortOrderHistory
     objects: dict[str, bytes]
+    observations: tuple[ExecutionBoundary, ...]
 
 
 class CohortRequestSettlementPublisher:
@@ -84,8 +88,8 @@ class CohortRequestSettlementPublisher:
         if exported is None:
             return
         await run_owned_thread(self._objects, exported)
-        for decision in exported.history.decisions:
-            await self.publish_proof(decision.observation)
+        for observation in exported.observations:
+            await self.publish_proof(observation)
         # Recheck the selected authority after asynchronous proof delivery.
         observed = await self.capture()
         await run_owned_thread(self._commit, exported, observed.snapshot.block)
@@ -112,8 +116,8 @@ class CohortRequestSettlementPublisher:
                 for t in history.transitions
             }
             progress = decisions[closed.evidence_sha256].progress.progress
-            record = RequestProgressReviewRecord.model_validate(
-                owner.journal.get("request_progress", digest(progress))
+            record = RequestProgressReviewRecord.model_validate_json(
+                canonical_json_bytes(owner.journal.get("request_progress", digest(progress)))
             )
             index = next(i for i, t in enumerate(history.transitions) if t.transition == closed)
             prefix = history.model_copy(update={"transitions": history.transitions[:index]})
@@ -125,18 +129,25 @@ class CohortRequestSettlementPublisher:
             availability = owner._availability(store)
             owner._service(db, availability, record.service, state, restored, prior)
             fence = owner._fence(db, availability, state, restored, prior)
+            tail_fence = owner._tail_fence(state, prefix, decisions)
             seals = tuple(q.retained_seal() for q in owner.queues)
             if (
-                fence is None
-                or record.fence != fence
-                or any(s is None or s.observation.block < fence.observation.block for s in seals)
+                record.fence != fence
+                or record.tail_fence != tail_fence
+                or any(s is None for s in seals)
             ):
                 raise ValueError("request publication changed an owner queue fence")
             objects = ReplayObjectCollector(owner.objects, owner.replay_bytes)
             closure = CohortServiceRequestClosure.model_validate_json(
                 objects(progress.phase_result_sha256)
             )
-            if request_closure_progress(closure, record.service, state)[0] != progress:
+            benchmark = CohortRequestClosure.model_validate_json(
+                objects(closure.benchmark_closure_sha256)
+            )
+            if (
+                request_closure_progress(closure, record.service, state, tail=benchmark.tail)[0]
+                != progress
+            ):
                 raise ValueError("request publication changed its retained service evidence")
             records = tuple(owner.intake._records(db, history))
             if (
@@ -144,6 +155,18 @@ class CohortRequestSettlementPublisher:
                 or sum(len(raw) for _, raw in records) > owner.replay_bytes
             ):
                 raise ValueError("request publication intake export exceeds its bound")
+            reviewed = replay_request_completion(
+                record,
+                prefix,
+                tuple(decisions[t.transition.evidence_sha256] for t in prefix.transitions),
+                policy=owner.intake.policy,
+                roster=owner.roster,
+                catalogs=owner.catalogs,
+                seals=seals,
+                transport=owner.transport,
+                intake_records=records,
+                objects=objects,
+            )
             verify_certified_service_request_closure(
                 closure,
                 owner.roster,
@@ -161,6 +184,12 @@ class CohortRequestSettlementPublisher:
             for seal in seals:
                 objects.retain(seal)
             initial = history.model_copy(update={"transitions": history.transitions[: index + 1]})
+            observations = [
+                decisions[t.transition.evidence_sha256].observation for t in initial.transitions
+            ]
+            observations.extend(reviewed.inventory_observations)
+            if benchmark.tail is not None and benchmark.tail.selected_observation is not None:
+                observations.append(benchmark.tail.selected_observation)
             return CertifiedRequestExport(
                 CohortOrderHistory(
                     history=initial,
@@ -169,6 +198,7 @@ class CohortRequestSettlementPublisher:
                     ),
                 ),
                 objects.values,
+                tuple({digest(value): value for value in observations}.values()),
             )
 
     def _objects(self, exported: CertifiedRequestExport) -> None:

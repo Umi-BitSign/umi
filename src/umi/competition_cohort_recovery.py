@@ -303,7 +303,9 @@ class CohortRecoveryGenesis(StrictProtocolModel):
 
 
 class CohortRecoveryTransition(StrictProtocolModel):
-    schema_: Literal["umi-cohort-recovery-transition/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-recovery-transition/1", "umi-cohort-recovery-transition/2"] = (
+        Field(alias="schema")
+    )
     cohort_sha256: Hex32
     authority_sha256: Hex32
     sequence: Annotated[int, Field(ge=1, le=2**53 - 1)]
@@ -314,10 +316,27 @@ class CohortRecoveryTransition(StrictProtocolModel):
     observed_at_block: Block
     evidence_sha256: Hex32
     targets: Targets
+    request_tail_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.request_tail_sha256 is None:
+            value.pop("request_tail_sha256", None)
+        return value
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
         _targets(self.targets)
+        tail = self.request_tail_sha256 is not None
+        if tail != (self.schema_ == "umi-cohort-recovery-transition/2"):
+            raise ValueError("request tail transition requires its explicit evidence version")
+        if tail and (
+            self.phase != "requests"
+            or self.operation != "close_phase"
+            or self.request_tail_sha256 == "0" * 64
+        ):
+            raise ValueError("request tail only authorizes request closure")
         if self.evidence_sha256 == "0" * 64:
             raise ValueError("phase decisions require retained evidence")
         if (self.operation == "extend") != (self.extension_blocks is not None):
@@ -437,6 +456,7 @@ def _revised_targets(
     operation: RecoveryOperation,
     observed_at_block: int,
     extension_blocks: int | None,
+    request_tail_sha256: str | None = None,
 ) -> tuple[PhaseTarget, ...]:
     if state.phase not in PHASES:
         raise ValueError("completed or revoked cohort cannot acquire new work or extensions")
@@ -455,7 +475,11 @@ def _revised_targets(
         shift = extension_blocks
         first = index
     elif operation == "close_phase":
-        if state.phase in {"intake", "requests"} and observed_at_block < target:
+        if (
+            state.phase in {"intake", "requests"}
+            and request_tail_sha256 is None
+            and observed_at_block < target
+        ):
             raise ValueError("cannot shorten an announced participant window")
         if state.phase == "reference_reveal" and observed_at_block <= state.observed_at_block:
             raise ValueError("reference reveal must follow the preceding phase observation")
@@ -481,6 +505,7 @@ def propose_recovery_transition(
     observed_at_block: int,
     evidence_sha256: str,
     extension_blocks: int | None = None,
+    request_tail_sha256: str | None = None,
 ) -> CohortRecoveryTransition:
     """Pure proposal. Reserve exact bytes durably before asking authorities to sign."""
     state = CohortRecoveryState.model_validate_json(canonical_json_bytes(state))
@@ -509,8 +534,16 @@ def propose_recovery_transition(
         )
     if operation != "extend" and extension_blocks is not None:
         raise ValueError("only an extension specifies additional blocks")
+    if request_tail_sha256 is not None and (
+        operation != "close_phase" or state.phase != "requests"
+    ):
+        raise ValueError("request tail only authorizes request closure")
     return CohortRecoveryTransition(
-        schema="umi-cohort-recovery-transition/1",
+        schema=(
+            "umi-cohort-recovery-transition/1"
+            if request_tail_sha256 is None
+            else "umi-cohort-recovery-transition/2"
+        ),
         cohort_sha256=state.cohort_sha256,
         authority_sha256=state.authority_sha256,
         sequence=state.sequence + 1,
@@ -520,7 +553,10 @@ def propose_recovery_transition(
         observed_at_block=observed_at_block,
         evidence_sha256=evidence_sha256,
         extension_blocks=extension_blocks,
-        targets=_revised_targets(state, authority, operation, observed_at_block, extension_blocks),
+        targets=_revised_targets(
+            state, authority, operation, observed_at_block, extension_blocks, request_tail_sha256
+        ),
+        request_tail_sha256=request_tail_sha256,
     )
 
 
@@ -546,6 +582,7 @@ def apply_recovery_transition(
         observed_at_block=transition.observed_at_block,
         evidence_sha256=transition.evidence_sha256,
         extension_blocks=transition.extension_blocks,
+        request_tail_sha256=transition.request_tail_sha256,
     )
     if transition != expected:
         raise ValueError("recovery decision forks history or changes an unauthorized phase")

@@ -8,6 +8,8 @@ reviewer's behalf nor claims that a selected request has been delivered.
 
 from __future__ import annotations
 
+from .canonical_reuse import canonical_json_reuse
+from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_decision_contracts import SignedCohortEndpointCaseDecision
 from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
@@ -37,7 +39,9 @@ class ServiceWorkRequests:
     def __init__(self, queue: ServiceWorkQueue, transport: ScoringPolicy):
         self.queue, self.journal, self.policy = queue, queue.journal, queue.policy
         self.transport = ScoringPolicy.model_validate_json(canonical_json_bytes(transport))
+        self._static_records = AssignmentVerificationReuse(maximum_entries=1024)
 
+    @canonical_json_reuse()
     def latest(self, claim: SignedServiceWorkClaim, evaluator: str) -> ServiceRequestBody | None:
         """Recover selected ancestry before consulting any fresh execution source."""
         assignment = self.queue.assignment(claim)
@@ -48,27 +52,49 @@ class ServiceWorkRequests:
         }:
             raise ValueError("service work already has another evaluator or transport")
         obligation = service_obligation(assignment, evaluator)
-        latest, number = None, 1
+        latest_slot, number = None, 1
         while True:
             slot = digest(["umi-cohort-service-request-slot/1", obligation, number])
-            if self.journal.get("service_request", slot) is None:
-                if selected is not None and latest is None:
-                    raise ValueError("service work lost its original selected request")
-                return latest
-            latest = self._body(slot)
-            if latest.assignment != assignment:
-                raise ValueError("service request changed the original assignment")
+            if self.journal.get_raw("service_request", slot) is None:
+                break
+            latest_slot = slot
             number += 1
+        if latest_slot is None:
+            if selected is not None:
+                raise ValueError("service work lost its original selected request")
+            return None
+        # The latest body verifies every retained parent grant, selected body,
+        # conflict hold and retirement link. Repeating that complete walk for
+        # each earlier attempt makes recovery quadratic in the retry count.
+        latest = self._body(latest_slot)
+        if latest.assignment != assignment:
+            raise ValueError("service request changed the original assignment")
+        return latest
 
-    def _body(self, slot):
-        raw = self.journal.get("service_request", slot)
+    def _static_record(self, kind, slot, model, verify):
+        # Read current bytes and conflict holds before reusing immutable proof
+        # work. Assignment ownership and complete parent lineage remain fresh
+        # caller checks; this result supplies no current execution authority.
+        raw = self.journal.get_raw(kind, slot)
         if raw is None:
-            raise FileNotFoundError("service request has not been selected")
-        value = validate_service_body(
-            ServiceRequestBody.model_validate_json(canonical_json_bytes(raw)),
-            self.policy,
-            self.transport,
+            return None
+        key = assignment_reuse_key(
+            self.journal, slot, (raw,), self.queue.config, self.policy, self.transport
         )
+        cache_slot = kind, slot
+        value = self._static_records.lookup(cache_slot, key)
+        if value is None:
+            value = verify(model.model_validate_json(raw), self.policy, self.transport)
+            self._static_records.remember(cache_slot, key, value)
+        return value
+
+    @canonical_json_reuse()
+    def _body(self, slot):
+        value = self._static_record(
+            "service_request", slot, ServiceRequestBody, validate_service_body
+        )
+        if value is None:
+            raise FileNotFoundError("service request has not been selected")
         if service_grant_slot(value) != slot:
             raise ValueError("service request changed its selected slot")
         original = self.queue.assignment(value.assignment.admission.claim)
@@ -80,18 +106,13 @@ class ServiceWorkRequests:
             if key in seen:
                 raise ValueError("service request lineage is cyclic")
             seen.add(key)
-            raw = self.journal.get("service_grant", key)
-            if raw is None:
-                raise FileNotFoundError("selected service parent certificate is missing")
-            parent = verify_service_grant(
-                ServiceMinerGrant.model_validate_json(canonical_json_bytes(raw)),
-                self.policy,
-                self.transport,
+            parent = self._static_record(
+                "service_grant", key, ServiceMinerGrant, verify_service_grant
             )
-            selected = self.journal.get("service_request", key)
-            if selected is None or canonical_json_bytes(parent.body) != canonical_json_bytes(
-                selected
-            ):
+            if parent is None:
+                raise FileNotFoundError("selected service parent certificate is missing")
+            selected = self.journal.get_raw("service_request", key)
+            if selected is None or canonical_json_bytes(parent.body) != selected:
                 raise ValueError("service parent certificate differs from its selection")
             verify_service_parent_body(current, parent)
             current = parent.body
@@ -237,18 +258,14 @@ class ServiceWorkRequests:
             return signature
 
     def _retained_certificate(self, slot, body) -> ServiceMinerGrant | None:
-        old = self.journal.get("service_grant", slot)
-        if old is None:
+        value = self._static_record("service_grant", slot, ServiceMinerGrant, verify_service_grant)
+        if value is None:
             return None
-        value = verify_service_grant(
-            ServiceMinerGrant.model_validate_json(canonical_json_bytes(old)),
-            self.policy,
-            self.transport,
-        )
         if value.body != body:
             raise ValueError("service certificate changed its selected request")
         return value
 
+    @canonical_json_reuse()
     def certificate(self, slot) -> ServiceMinerGrant:
         body = self._body(slot)
         # Retained grants and selections are immutable. Recovery must not take

@@ -51,6 +51,7 @@ from .competition_supervisor_runtime import (
     hold_successor_startup_lease,
 )
 from .competition_upgrade import _fingerprint, _open_without_links
+from .concurrency import run_until_stopped
 from .protocol import canonical_json_bytes
 from .rpc_transport import transport_config_path
 from .validator_supervisor import (
@@ -472,7 +473,9 @@ async def run_supervisor(
                         raise TypeError("standing startup requires the native adapter factory")
                     runtime.adapter = runtime.adapter._get()
                     with _standing_logs():
-                        await run_installed_standing_rewards(runtime, standing, stop)
+                        await run_until_stopped(
+                            run_installed_standing_rewards(runtime, standing, stop), stop
+                        )
                     return
                 while not stop.is_set():
                     result = await runtime.reconcile()

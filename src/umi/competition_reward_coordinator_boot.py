@@ -23,7 +23,7 @@ from .competition_cohort_direct_model_review import (
 )
 from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
-from .competition_reward_boot import Capacity, ObjectCapacity, _disjoint
+from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
 from .competition_reward_control_publisher import StandingControlPublisher
@@ -92,7 +92,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     exchange_inbox: Directory
     exchange_outbox: Directory
     service: StandingRewardServiceLimits
-    maximum_history_bytes: Capacity
+    maximum_history_bytes: HistoryCapacity
     maximum_coverage_bytes: Capacity
     maximum_reader_bytes: Capacity
     maximum_package_bytes: ObjectCapacity
@@ -100,6 +100,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
@@ -116,6 +117,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if not self.runtime_proof_reads:
+            value.pop("runtime_proof_reads", None)
         return value
 
     @model_validator(mode="after")
@@ -282,6 +285,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         provider = HistoricalRewardControlProvider(
             config.chain,
             config.policy,
+            runtime_proof_reads=config.runtime_proof_reads,
             historical_header_directory=root / "headers",
             historical_header_maximum_bytes=config.maximum_header_bytes,
             historical_header_database_maximum_bytes=config.maximum_header_database_bytes,
@@ -450,25 +454,23 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         await provider.start()
         work = asyncio.create_task(run(stop, poll_seconds=config.service.poll_seconds))
         resources.push_async_callback(_stop_task, work)
-        if config.role == "coordinator":
-            # Capture and recover minimum opportunity automatically, including
-            # while the next cohort is being evaluated. Validators also export
-            # original proofs; no periodic coordinator renewal is involved.
-            collectors = [
-                asyncio.create_task(coverage.run(stop, poll_seconds=config.service.poll_seconds))
-            ]
-            if predecessor_coverage is not None:
-                collectors.append(
-                    asyncio.create_task(
-                        predecessor_coverage.run(stop, poll_seconds=config.service.poll_seconds)
-                    )
+        # Both roles keep their native history and opportunity evidence ready
+        # while waiting for work. Otherwise a reviewer would start a full
+        # historical replay only after the coordinator requests its first vote.
+        # The reviewer still never loads the control transaction key.
+        collectors = [
+            asyncio.create_task(coverage.run(stop, poll_seconds=config.service.poll_seconds))
+        ]
+        if predecessor_coverage is not None:
+            collectors.append(
+                asyncio.create_task(
+                    predecessor_coverage.run(stop, poll_seconds=config.service.poll_seconds)
                 )
-            for collector in collectors:
-                resources.push_async_callback(_stop_task, collector)
-            done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-            if not stop.is_set():
-                raise RuntimeError("reward coordinator component exited before shutdown")
-        else:
-            await work
+            )
+        for collector in collectors:
+            resources.push_async_callback(_stop_task, collector)
+        done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+        if not stop.is_set():
+            raise RuntimeError("reward coordinator component exited before shutdown")

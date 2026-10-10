@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
@@ -39,6 +40,7 @@ from .competition_reward_series_handoff import StandingRewardPredecessorOpportun
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import Signature, digest
 from .protocol import canonical_json_bytes
 
@@ -131,10 +133,15 @@ class StandingRewardDecisionReviewer:
         if body.activation is not None:
             package = await run_owned_thread(p.files.package, body.activation.package_sha256)
             if p.model_artifacts is not None and package.allocation.model_award is not None:
+                completed = {
+                    a.acceptance.submission_sha256
+                    for a in package.allocation.model_award.acceptances
+                }
                 participants = tuple(
                     participant
                     for participant in package.inputs.roster.participants
                     if participant.record.request.signed_submission.submission.track == "model"
+                    and digest(participant.record.request.signed_submission.submission) in completed
                 )
                 await p.model_artifacts.ensure_all(
                     participants, package.allocation.model_award.acceptances
@@ -373,12 +380,23 @@ class StandingRewardCoordinator:
                             }
                         ).decode()
                     )
+                except HistoricalHeaderRecoveryProgress:
+                    logger.info(
+                        "reward_coordinator_header_progress phase=%s sequence=%d",
+                        self.phase,
+                        self.sequence,
+                    )
+                    # The bounded pass retained progress. Yield to other tasks,
+                    # then resume its fixed target without a failure backoff.
+                    await asyncio.sleep(0)
+                    continue
                 except Exception as error:
                     logger.warning(
-                        "reward_coordinator_retry phase=%s sequence=%d reason=%s",
+                        "reward_coordinator_retry phase=%s sequence=%d reason=%s details=%s",
                         self.phase,
                         self.sequence,
                         type(error).__name__,
+                        canonical_json_bytes(_failure_details(error)).decode(),
                     )
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=poll_seconds)

@@ -28,11 +28,20 @@ class RequestReadiness(StrictProtocolModel):
 
 
 class LiveRequestPhaseObserver:
-    def __init__(self, source, origin: str, *, client: httpx.AsyncClient, timeout_seconds=2400):
+    def __init__(
+        self,
+        source,
+        origin: str,
+        *,
+        client: httpx.AsyncClient,
+        timeout_seconds=2400,
+        opening_clock=None,
+    ):
         if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 3600:
             raise ValueError("request readiness timeout must be bounded")
         self.source, self.origin = source, validate_intake_origin(origin)
         self.client, self.timeout = client, timeout_seconds
+        self.opening_clock = opening_clock
 
     async def _ready(self, state, capture):
         nonce = secrets.token_hex(16)
@@ -82,7 +91,12 @@ class LiveRequestPhaseObserver:
 
     async def __call__(self, state, capture):
         serving = await self._ready(state, capture)
-        return await run_owned_thread(partial(self.source.observe, state, capture, serving=serving))
+        options = {}
+        if self.opening_clock is not None:
+            options["opened"] = await self.opening_clock(state)
+        return await run_owned_thread(
+            partial(self.source.observe, state, capture, serving=serving, **options)
+        )
 
     async def sample_service(self, state, capture):
         serving = await self._ready(state, capture)

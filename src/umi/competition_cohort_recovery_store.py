@@ -218,6 +218,7 @@ class CohortRecoveryStore:
                 observed_at_block=transition.observed_at_block,
                 evidence_sha256=transition.evidence_sha256,
                 extension_blocks=transition.extension_blocks,
+                request_tail_sha256=transition.request_tail_sha256,
             )
             if sequence != state.sequence + 1 or transition != expected:
                 raise ValueError("retained cohort decision forks its authenticated history")
@@ -333,10 +334,10 @@ class CohortRecoveryStore:
             if row is None:
                 raise ValueError("cohort has no published admission")
             genesis = _decode(_PublishedGenesis, row[0], 64 * 1024)
-            binding, _, _ = self._load(cohort)
-            if genesis.genesis != binding.genesis:
+            history = self.read_history(cohort, genesis_signatures=genesis.signatures)
+            if genesis.genesis != history.genesis:
                 raise ValueError("published admission differs from the retained cohort")
-        return self.export_history(cohort, genesis_signatures=genesis.signatures)
+            return history
 
     def retain_source(self, cohort: str, value: StrictProtocolModel) -> str:
         """Retain decision input before reservation; consumers authenticate its meaning."""
@@ -479,6 +480,7 @@ class CohortRecoveryStore:
         observed_at_block: int,
         evidence_sha256: str,
         extension_blocks: int | None = None,
+        request_tail_sha256: str | None = None,
     ) -> CohortRecoveryTransition:
         """Acknowledge the same decision or return pending bytes before new work.
 
@@ -507,6 +509,7 @@ class CohortRecoveryStore:
                 observed_at_block=observed_at_block,
                 evidence_sha256=evidence_sha256,
                 extension_blocks=extension_blocks,
+                request_tail_sha256=request_tail_sha256,
             )
             raw = canonical_json_bytes(transition)
             _decode(CohortRecoveryTransition, raw, 16 * 1024)

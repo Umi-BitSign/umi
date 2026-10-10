@@ -22,6 +22,7 @@ from .competition_cohort_request_export import (
     replay_request_export,
 )
 from .competition_cohort_request_phase import NativeRequestReview, RequestProgressReviewRecord
+from .competition_cohort_request_tail import verify_request_tail_clock
 from .competition_cohort_review_export import (
     MAX_EXPORT_BYTES,
     review_export_limits,
@@ -133,9 +134,14 @@ class RemoteRequestProgressReviewer:
         observations = [
             original.record.service.observation,
             *(d.observation for d in original.decisions),
+            *original.inventory_observations,
         ]
         if original.record.fence is not None:
             observations.append(original.record.fence.observation)
+        if original.record.tail_fence is not None:
+            observations.append(original.record.tail_fence.observation)
+        if original.tail is not None and original.tail.selected_observation is not None:
+            observations.append(original.tail.selected_observation)
         seal = self.roster.intake_seal
         if progress.completion == "complete":
             observations.extend([seal.observation, *(s.observation for s in exported.seals)])
@@ -151,6 +157,17 @@ class RemoteRequestProgressReviewer:
                 or checked[key].replayed_at.block_number < observation.block
             ):
                 raise ValueError("request proof differs from its original observation")
+        for tail in (original.tail, original.record.tail_fence):
+            if tail is None:
+                continue
+            verify_request_tail_clock(
+                tail,
+                checked[digest(tail.opened_observation)],
+                checked[digest(tail.observation)],
+                None
+                if tail.selected_observation is None
+                else checked[digest(tail.selected_observation)],
+            )
         if progress.completion == "complete":
             if checked[digest(seal.observation)].snapshot != seal.snapshot:
                 raise ValueError("request roster seal changed its original registration")

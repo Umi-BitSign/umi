@@ -12,7 +12,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -54,8 +54,16 @@ class ModelAwardEvidence(StrictProtocolModel):
     suite_sha256: Hex32
     acceptances: Annotated[tuple[CertifiedModelArtifactAcceptance, ...], Field(max_length=512)]
     candidates: Annotated[tuple[ModelAwardCandidate, ...], Field(max_length=512)]
+    skipped_participants: Annotated[tuple[Hex32, ...], Field(max_length=512)] | None = None
     reference_promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.skipped_participants is None:
+            value.pop("skipped_participants", None)
+        return value
 
 
 class CohortModelAward(ModelAwardEvidence):
@@ -379,6 +387,14 @@ def build_model_award(
         rule=authority.model_reward_rule,
         acceptances=accepted,
         candidates=tuple(candidates),
+        skipped_participants=tuple(
+            digest(p)
+            for p in review.closure.skipped
+            if participants[p.submission_sha256].record.request.signed_submission.submission.track
+            == "model"
+        )
+        if review.closure.schema_ == "umi-cohort-request-closure/3"
+        else None,
     )
     if authority.model_reward_rule == "baseline_or_better_best_score_first_complete/1":
         winner = min(choices) if choices else None
@@ -468,8 +484,9 @@ def build_model_award(
 def read_model_acceptances(
     directory: Path, review: ClosedQualityReview
 ) -> tuple[CertifiedModelArtifactAcceptance, ...]:
-    """Load one retained complete acceptance per selected model; never skip missing files."""
+    """Load every completed model's acceptance; certified unperformed entries earn no award."""
     cohort = digest(review.history.plan)
+    completed = {p.submission_sha256 for p in review.closure.participants}
     return tuple(
         read_private_model(
             directory / cohort / (digest(p.record.request.signed_submission.submission) + ".json"),
@@ -478,4 +495,5 @@ def read_model_acceptances(
         )
         for p in review.roster.participants
         if p.record.request.signed_submission.submission.track == "model"
+        and digest(p.record.request.signed_submission.submission) in completed
     )

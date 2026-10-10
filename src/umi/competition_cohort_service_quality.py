@@ -9,7 +9,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -188,12 +188,32 @@ class ServiceWorkQuality(StrictProtocolModel):
 
 
 class ClosedServiceQuality(StrictProtocolModel):
-    schema_: Literal["umi-cohort-service-quality/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-service-quality/1", "umi-cohort-service-quality/2"] = Field(
+        alias="schema"
+    )
     terms_sha256: Hex32
     request_closure_sha256: Hex32
     reference_reveal_sha256: Hex32
     work: Annotated[tuple[ServiceWorkQuality, ...], Field(max_length=524288)]
+    skipped_work: Annotated[tuple[Hex32, ...], Field(max_length=524288)] = ()
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.schema_ == "umi-cohort-service-quality/1" and not self.skipped_work:
+            value.pop("skipped_work", None)
+        return value
+
+    @model_validator(mode="after")
+    def unperformed_has_no_credit(self):
+        if self.schema_ == "umi-cohort-service-quality/1" and self.skipped_work:
+            raise ValueError("legacy service quality cannot skip work")
+        if self.skipped_work != tuple(sorted(set(self.skipped_work))) or set(self.skipped_work) & {
+            work.work_sha256 for work in self.work
+        }:
+            raise ValueError("unperformed service work cannot duplicate or earn work credit")
+        return self
 
 
 def replay_closed_service_quality(
@@ -324,9 +344,12 @@ def replay_closed_service_quality(
                 )
             )
     return ClosedServiceQuality(
-        schema="umi-cohort-service-quality/1",
+        schema="umi-cohort-service-quality/2"
+        if closure.schema_ == "umi-cohort-request-closure/4"
+        else "umi-cohort-service-quality/1",
         terms_sha256=digest(terms),
         request_closure_sha256=digest(closure),
         reference_reveal_sha256=digest(reveal),
         work=tuple(outcomes),
+        skipped_work=tuple(sorted(key for c in closure.catalogs for key in (c.skipped_work or ()))),
     )

@@ -140,7 +140,10 @@ async def test_cancellation_does_not_try_backup_and_discards_socket(chain, wire,
     assert state.handshakes == ["/primary", "/primary"]
 
 
-async def test_owned_weight_and_runtime_collectors_receive_fallback_config(chain, monkeypatch):
+@pytest.mark.parametrize("proof_reads", [False, True])
+async def test_owned_weight_and_runtime_collectors_receive_fallback_config(
+    chain, monkeypatch, proof_reads
+):
     config = with_fallback(chain.config).model_copy(
         update={
             "runtime_metadata_binary": "/test/runtime-executor",
@@ -157,6 +160,7 @@ async def test_owned_weight_and_runtime_collectors_receive_fallback_config(chain
         finality=chain.finality,
         proofs=chain.proofs,
         now_ms=lambda: chain.clock.now,
+        runtime_proof_reads=proof_reads,
     )
     try:
         provider._owned = True
@@ -169,6 +173,8 @@ async def test_owned_weight_and_runtime_collectors_receive_fallback_config(chain
         assert provider._weight_rpc._rpc is not provider._runtime_rpc._rpc
         assert provider._proofs._limits.maximum_storage_value_bytes == 65536
         assert provider._runtime_proofs._limits.maximum_storage_value_bytes > 65536
+        assert provider._runtime_proofs._read_values_from_proof is proof_reads
+        assert provider._proofs._read_values_from_proof is False
     finally:
         provider._owned = False
         await provider.aclose()

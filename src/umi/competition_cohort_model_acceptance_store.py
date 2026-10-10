@@ -234,9 +234,9 @@ class CohortModelAcceptances:
             ).fetchone()
             if row is None:
                 raise PendingModelArtifacts("model participant admission is not certified")
-            artifact = (
-                None if self.review_artifact is None else self.review_artifact(record.request)
-            )
+            # The reserved proposal already binds the original delivery object.
+            # Re-export and review must not depend on a live upload callback.
+            artifact = intent.acceptance.direct_artifact
             return ModelReviewRequest(
                 schema=(
                     "umi-cohort-model-review-request/1"
@@ -499,6 +499,16 @@ class CohortModelAcceptances:
                 RootModel(body),
                 maximum_bytes=16 * 1024**2,
             )
+        # Independent settlement signers can verify preserved bytes now, before
+        # request closure. This contains no labels or new signing authority.
+        request = self.review_request(cohort, submission)
+        if request.acceptance != publication.certificate.acceptance:
+            raise ValueError("model preparation differs from retained acceptance")
+        publish_private_model(
+            destination / "model-reward-preparation" / cohort / (submission + ".json"),
+            request,
+            maximum_bytes=16 * 1024**2,
+        )
         publish_private_model(
             destination / "model-reward-acceptances" / cohort / (submission + ".json"),
             publication.certificate,

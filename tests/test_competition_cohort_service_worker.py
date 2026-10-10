@@ -7,6 +7,8 @@ installed coordinator, external reviewer host or chain effect is represented.
 import asyncio
 import errno
 import json
+import sqlite3
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from umi.miner import create_app
 from umi.open_competition import digest, sign_object
 from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes, request_digest
+from umi.sqlite_contention import is_sqlite_contention
 
 from .test_competition_cohort_intake import history_tip
 from .test_competition_cohort_recovery import signatures
@@ -62,6 +65,24 @@ from .test_competition_cohort_service_grants import service_catalog_inputs as se
 from .test_competition_cohort_service_grants import service_owner as service_owner
 from .test_competition_cohort_service_grants import shared_control_group as shared_control_group
 from .test_open_competition import wallet
+
+
+@pytest.fixture(params=["mutex", "sqlite"])
+def contention_error(request, tmp_path):
+    if request.param == "mutex":
+        return PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+    path = tmp_path / "actual-writer-contention.sqlite3"
+    writer, reader = sqlite3.connect(path), sqlite3.connect(path, timeout=0)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            reader.execute("BEGIN IMMEDIATE")
+        assert is_sqlite_contention(caught.value)
+        return caught.value
+    finally:
+        writer.rollback()
+        writer.close()
+        reader.close()
 
 
 @pytest.fixture
@@ -165,6 +186,47 @@ def loop(service_owner):
     return s
 
 
+async def test_batch_discovery_reads_while_an_unrelated_writer_is_busy(loop):
+    import threading
+
+    worker = loop.worker()
+    expected = worker._batch(advance=False)
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with worker.journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('unrelated-pending-hold')")
+            entered.set()
+            assert release.wait(60)
+
+    pending = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        rows = await asyncio.wait_for(asyncio.to_thread(worker._batch, advance=False), 10)
+        assert rows == expected
+    finally:
+        release.set()
+        await pending
+    assert worker._batch() == expected
+    with worker.journal.read_transaction() as db:
+        assert db.execute("SELECT ordinal FROM service_worker_cursor").fetchone() == (
+            expected[-1].ordinal,
+        )
+
+
+async def test_pending_batch_wraps_without_treating_presence_as_credit(loop):
+    worker = loop.worker()
+    original = worker._batch(advance=False)
+    worker._advance_cursor(8192)
+    assert worker._batch(advance=False, pending_only=True) == original
+    for value in original:
+        worker.journal.put("service_terminal", value.work_sha256, {"unverified": True})
+    assert worker._batch(advance=False, pending_only=True) == ()
+    assert worker._batch(advance=False) == original
+    with pytest.raises(ValueError):
+        worker.terminals.read(loop.c.assignment)
+
+
 async def finish(s):
     reports = []
     for _ in range(4):
@@ -179,7 +241,16 @@ async def finish(s):
     raise AssertionError(reports)
 
 
-@pytest.mark.parametrize("stage", ["request_preparation", "request_certificate", "miner_transport"])
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "request_preparation",
+        "preparation_inputs",
+        "preparation_authority",
+        "request_certificate",
+        "miner_transport",
+    ],
+)
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_rolling_reports_native_wait_stage_without_private_work(
     loop, monkeypatch, stage, cancel
@@ -188,6 +259,8 @@ async def test_rolling_reports_native_wait_stage_without_private_work(
     entered, release = asyncio.Event(), asyncio.Event()
     owner, name = {
         "request_preparation": (worker, "_prepare"),
+        "preparation_inputs": (worker, "inputs"),
+        "preparation_authority": (worker, "observation"),
         "request_certificate": (worker, "_certificate"),
         "miner_transport": (worker.transport, "advance"),
     }[stage]
@@ -336,7 +409,120 @@ async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monke
         await worker._stop_tasks(task for _, task in active.values())
 
 
-async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, monkeypatch):
+@pytest.mark.parametrize("transport_phase", ["dispatch", "recovery"])
+async def test_same_miner_control_phases_do_not_block_transport(loop, monkeypatch, transport_phase):
+    worker = loop.worker(concurrency=2)
+    phases = (
+        "preparation",
+        "preparation",
+        transport_phase,
+        "recovery" if transport_phase == "dispatch" else "dispatch",
+        "certification",
+        "certification",
+    )
+    rows = [
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=loop.c.claim,
+        )
+        for i in range(1, len(phases) + 1)
+    ]
+    release = asyncio.Event()
+    started = []
+    monkeypatch.setattr(worker, "_batch", lambda **kwargs: rows)
+    monkeypatch.setattr(worker, "_advance_cursor", lambda _: None)
+    monkeypatch.setattr(worker, "_ready_stage", lambda row: phases[row.ordinal - 1])
+
+    async def advance(row, **kwargs):
+        started.append(row.ordinal)
+        await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.sleep(0)
+        # Preparation and certification cannot occupy this miner's transport
+        # slot. Dispatch and recovery still share one slot, and each control
+        # phase admits only one operation for this miner.
+        assert started == [1, 3, 5]
+        assert report["in_flight_phase_counts"] == {
+            "preparation": 1,
+            transport_phase: 1,
+            "certification": 1,
+        }
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            assert len(active) == 3 and started == [1, 3, 5]
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+
+
+async def test_answered_work_certifies_while_same_miner_preparation_is_held(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    worker = s.worker(concurrency=1)
+    for reason in (
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+    ):
+        assert await worker._advance(c.assignment.admission, one_stage=True) == ("pending", reason)
+    assert p.model.calls == p.fetcher.calls == 1 and s.signs == 0
+
+    claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+    c.queue.admit(
+        signed,
+        c.assignment.admission.submission,
+        c.assignment.admission.participant,
+        p.e.r.h.source,
+        capture(p.finality.head),
+        expected_tip_sha256=history_tip(p.e.r.h.source.history),
+    )
+    waiting = c.queue.assignment(signed).admission
+    answered = c.assignment.admission
+    # The new request is next in the persisted scheduling order. A slow input
+    # source must not block native terminal signing for the already retired job.
+    worker._remember_turn(answered.ordinal)
+    entered, release = asyncio.Event(), asyncio.Event()
+    inputs = worker.inputs
+
+    async def held_inputs(assignment):
+        if assignment.admission.work_sha256 == waiting.work_sha256:
+            entered.set()
+            await release.wait()
+        return await inputs(assignment)
+
+    monkeypatch.setattr(worker, "inputs", held_inputs)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 60)
+        assert report["in_flight_phase_counts"] == {"preparation": 1, "certification": 1}
+        result = await asyncio.wait_for(asyncio.shield(active[answered.work_sha256][1]), 60)
+        assert result == ("completed", "terminal_retained", [])
+        value = worker.terminals.read(c.assignment)
+        assert value is not None
+        read_service_terminal(value, worker.terminals.objects, p.c.policy, p.transport_policy)
+        assert not release.is_set() and p.model.calls == p.fetcher.calls == s.signs == 1
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    s.offline = True
+    assert await s.worker()._advance(answered, one_stage=True) == (
+        "completed",
+        "original_terminal_retained",
+    )
+    assert p.model.calls == p.fetcher.calls == s.signs == 1
+
+
+async def test_service_prepare_refreshes_inputs_after_mutex_contention(
+    loop, monkeypatch, contention_error
+):
     s = loop
     worker = s.worker()
     original = worker.requests.prepare
@@ -345,13 +531,82 @@ async def test_service_prepare_refreshes_inputs_after_mutex_contention(loop, mon
     def contended(*args, **kwargs):
         attempts.append(args)
         if len(attempts) == 1:
-            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, errno.EAGAIN)
+            raise contention_error
         return original(*args, **kwargs)
 
     monkeypatch.setattr(worker.requests, "prepare", contended)
     body = await worker._prepare(s.c.assignment)
     assert len(attempts) == 2 and s.inputs == 2
     assert body.assignment == s.c.assignment
+
+
+async def test_terminal_mutex_retry_refreshes_authority_without_repeating_work(
+    loop, monkeypatch, contention_error
+):
+    s = loop
+    worker = s.worker()
+    for expected in (
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+    ):
+        assert await worker._advance(s.c.assignment.admission, one_stage=True) == (
+            "pending",
+            expected,
+        )
+    paths = tuple(s.paths)
+    original = worker.terminals.prepare
+    attempts = []
+
+    def contended(*args):
+        attempts.append(args)
+        if len(attempts) == 1:
+            s.p.finality.head += 1
+            raise contention_error
+        return original(*args)
+
+    monkeypatch.setattr(worker.terminals, "prepare", contended)
+    assert await worker._advance(s.c.assignment.admission, one_stage=True) == (
+        "completed",
+        "terminal_retained",
+    )
+    assert len(attempts) == 2
+    assert attempts[1][-1].block == attempts[0][-1].block + 1
+    assert attempts[1][:3] == attempts[0][:3]
+    value = worker.terminals.read(s.c.assignment)
+    read_service_terminal(value, worker.terminals.objects, s.p.c.policy, s.p.transport_policy)
+    assert value.terminal.observation == attempts[1][-1]
+    assert tuple(s.paths) == paths
+    assert s.p.model.calls == s.p.fetcher.calls == s.inputs == s.signs == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("invalid proof"),
+        OSError("storage unavailable"),
+        pytest.param(
+            sqlite3.OperationalError("database is locked"),
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 11), reason="Python 3.10 classifies SQLite by message"
+            ),
+        ),
+        sqlite3.OperationalError("disk I/O error"),
+    ],
+)
+async def test_terminal_retry_does_not_hide_other_failures(loop, monkeypatch, failure):
+    worker = loop.worker()
+    calls = []
+
+    def fail(*args):
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(worker.terminals, "prepare", fail)
+    with pytest.raises(type(failure), match=str(failure)):
+        await worker._prepare_terminal(loop.c.assignment, "fixture-slot", None, None)
+    assert len(calls) == 1 and loop.signs == 0 and loop.p.model.calls == 0
 
 
 @pytest.mark.parametrize("path", [COHORT_GRANT_PATH, TRANSLATE_PATH, COHORT_RETIRE_PATH])
@@ -570,6 +825,147 @@ async def test_expired_unsent_service_reaches_retirement_lane(loop, monkeypatch)
         canonical_json_bytes(worker.requests.latest(s.c.claim, p.validator.hotkey.ss58_address))
         == original
     )
+
+
+async def test_transport_status_diagnostics_preserve_pending_work_and_hide_response(loop, caplog):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    slot = service_grant_slot(body)
+    original = canonical_json_bytes(body)
+    network = worker.transport.transport
+    logger = "umi.competition_cohort_service_transport"
+
+    class Unreadable(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("a failed response body must not be inspected for diagnostics")
+            yield b""  # pragma: no cover
+
+    def refused(status):
+        return httpx.MockTransport(
+            lambda request: httpx.Response(
+                status,
+                stream=Unreadable(),
+                headers={"X-Private-Diagnostic": "do-not-log-private-header"},
+            )
+        )
+
+    with caplog.at_level("WARNING", logger=logger):
+        for status in (413, 429, 503):
+            caplog.clear()
+            worker.transport.transport = refused(status)
+            outcome = await worker.transport.advance(slot, retire=False)
+            assert outcome.reason == "grant_pending" and outcome.response is None
+            assert worker.journal.get("service_grant_delivery", slot) is None
+            assert worker.journal.get("service_dispatch_intent", slot) is None
+            messages = [r.getMessage() for r in caplog.records if r.name == logger]
+            assert len(messages) == 1
+            assert "operation=grant" in messages[0] and f"http_status={status}" in messages[0]
+            assert "failure=http_status" in messages[0]
+            assert p.miner.hotkey_ss58 in messages[0]
+            assert "do-not-log-private-header" not in messages[0]
+            assert "https://" not in messages[0]
+
+        worker.transport.transport = network
+        outcome = await worker.transport.advance(slot, retire=False)
+        assert outcome.response is not None and outcome.retirement is None
+        assert p.model.calls == 1
+        for status in (429, 503):
+            caplog.clear()
+            worker.transport.transport = refused(status)
+            outcome = await worker.transport.advance(slot)
+            assert outcome.reason == "retirement_pending" and outcome.response is not None
+            assert worker.journal.get("service_retirement", slot) is None
+            messages = [r.getMessage() for r in caplog.records if r.name == logger]
+            assert len(messages) == 1
+            assert "operation=retirement" in messages[0] and f"http_status={status}" in messages[0]
+            assert p.model.calls == 1
+
+    worker.transport.transport = network
+    outcome = await worker.transport.advance(slot)
+    assert outcome.reason == "response_retained" and outcome.retirement is not None
+    assert canonical_json_bytes(worker.requests._body(slot)) == original
+    assert worker.journal.get("service_terminal", s.c.assignment.admission.work_sha256) is None
+    assert s.paths.count(TRANSLATE_PATH) == p.model.calls == 1
+
+
+async def test_transport_failure_diagnostics_never_copy_exception_messages(loop, caplog):
+    worker = loop.worker()
+    capture = await loop.origin(loop.c.assignment)
+    logger = "umi.competition_cohort_service_transport"
+    for error, failure in (
+        (httpx.ConnectError("https://private.example/bearer-secret"), "http_transport"),
+        (httpx.ReadTimeout("private-token"), "timeout"),
+        (OSError("private-host-path"), "os_error"),
+    ):
+
+        def fail(request, error=error):
+            raise error
+
+        worker.transport.transport = httpx.MockTransport(fail)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=logger):
+            assert (
+                await worker.transport._exchange(
+                    capture, COHORT_GRANT_PATH, {"private_body": "private-payload"}, 1024
+                )
+                is None
+            )
+        messages = [r.getMessage() for r in caplog.records if r.name == logger]
+        assert len(messages) == 1 and f"failure={failure}" in messages[0]
+        assert "http_status=0" in messages[0]
+        assert "private" not in messages[0] and "bearer-secret" not in messages[0]
+
+
+@pytest.mark.parametrize("expired,retained_grant", [(False, True), (True, True), (True, False)])
+async def test_failed_grant_retry_does_not_block_expired_native_retirement(
+    loop, monkeypatch, expired, retained_grant
+):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    slot = service_grant_slot(body)
+    original = canonical_json_bytes(body)
+    if retained_grant:
+        s.lost = COHORT_GRANT_PATH
+        first = await worker.transport.advance(slot, retire=False)
+        assert first.reason == "grant_pending"
+        assert worker.journal.get("service_grant_delivery", slot) is None
+
+    # Restart with only the original durable state. Further grant deliveries
+    # fail, while the miner's native recovery/retirement routes are available.
+    worker = s.worker()
+    exchange = worker.transport._exchange
+
+    async def grant_unavailable(capture, path, body, maximum):
+        if path == COHORT_GRANT_PATH:
+            return None
+        return await exchange(capture, path, body, maximum)
+
+    monkeypatch.setattr(worker.transport, "_exchange", grant_unavailable)
+    if expired:
+        p.finality.head = body.request.deadline_block + 3000
+        monkeypatch.setattr(
+            bt.timelock, "current_round", lambda: body.request.response_close_round + 500
+        )
+    result = await worker.transport.advance(slot)
+    if expired and retained_grant:
+        assert result.reason == "retry_required"
+        assert result.retirement.receipt.result == "no_response_retained"
+        assert worker.journal.get("service_retirement", slot) is not None
+        assert COHORT_RETIRE_PATH in s.paths
+    else:
+        assert result.reason == ("retirement_pending" if expired else "grant_pending")
+        assert result.retirement is None
+        assert worker.journal.get("service_retirement", slot) is None
+        if not expired:
+            assert COHORT_RETIRE_PATH not in s.paths
+    assert worker.journal.get("service_dispatch_intent", slot) is None
+    assert worker.journal.get("service_terminal", s.c.assignment.admission.work_sha256) is None
+    assert s.paths.count(TRANSLATE_PATH) == p.model.calls == 0
+    assert canonical_json_bytes(worker.requests._body(slot)) == original
 
 
 async def test_queue_rotation_survives_restart_and_unavailable_first_miner_work(loop):
@@ -908,3 +1304,146 @@ async def test_service_unknown_second_send_cannot_repeat_after_restart(loop):
         assert (await s.worker().poll_once())["work_pending"] == 1
     assert len(seen) == 2 and s.p.model.calls == 0
     assert worker.journal.get("service_dispatch_retry_intent", slot) is not None
+
+
+async def test_rolling_same_miner_rotates_pending_jobs_and_restart(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    claims = [c.claim]
+    for nonce in ("02",):
+        claim = c.claim.claim.model_copy(update={"nonce": nonce * 32})
+        signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+        c.queue.admit(
+            signed,
+            c.assignment.admission.submission,
+            c.assignment.admission.participant,
+            p.e.r.h.source,
+            capture(p.finality.head),
+            expected_tip_sha256=history_tip(p.e.r.h.source.history),
+        )
+        claims.append(signed)
+    admissions = [c.queue.assignment(claim).admission for claim in claims]
+    expected = [r.work_sha256 for r in admissions]
+    assert len(set(expected)) == 2
+    seen = []
+
+    async def unavailable_work(row, **kwargs):
+        seen.append(row.work_sha256)
+        return "pending", "fixture_dependency_unavailable"
+
+    # Each process gets an actual durable cursor. A page contains both
+    # pending jobs, but only one may start because their miner is the same.
+    for _ in range(2):
+        worker = s.worker(batch_size=16)
+        monkeypatch.setattr(worker, "_advance", unavailable_work)
+        active = {}
+        try:
+            for _ in range(2):
+                await worker._rolling_poll(active)
+                assert len(active) == 1
+                await asyncio.gather(*(task for _, task in active.values()))
+        finally:
+            await worker._stop_tasks(task for _, task in active.values())
+    assert seen == expected * 2
+
+
+@pytest.mark.parametrize("hold_first", [False, True])
+async def test_rolling_rotation_reaches_skipped_jobs_and_busy_pages(loop, monkeypatch, hold_first):
+    # Isolate scheduling with three admissions, while keeping the native durable
+    # cursor and page selection. This does not qualify signatures or inference.
+    worker = loop.worker(batch_size=1 if hold_first else 16, concurrency=2)
+    rows = tuple(
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=SimpleNamespace(claim=SimpleNamespace(hotkey=wallet(name).hotkey.ss58_address)),
+        )
+        for i, name in enumerate(("Alice", "Alice", "Bob"), 1)
+    )
+
+    def entries(*, after_ordinal=0, limit, pending_only=False):
+        return tuple(r for r in rows if r.ordinal > after_ordinal)[:limit]
+
+    monkeypatch.setattr(worker.queue, "entries", entries)
+    monkeypatch.setattr(worker, "_ready_stage", lambda _: "preparation")
+    seen = []
+    release = asyncio.Event()
+
+    async def advance(row, **kwargs):
+        seen.append(row.ordinal)
+        if hold_first and row.ordinal == 1:
+            await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            miners = [miner for miner, _ in active.values()]
+            assert len(miners) == len(set(miners))
+            assert len(active) <= 2
+            await asyncio.sleep(0)
+            if not hold_first:
+                await asyncio.gather(*(task for _, task in active.values()))
+        if hold_first:
+            # The page containing only Alice's blocked second job must not
+            # prevent Bob's next page from running while Alice is still busy.
+            assert seen == [1, 3]
+            assert not release.is_set()
+        else:
+            # Advancing past the last started job (Bob) would repeatedly wrap
+            # to Alice's first job and starve her second job.
+            assert {1, 2, 3} <= set(seen)
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+
+
+async def test_rolling_busy_poll_preserves_skipped_turn_across_restart(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+    c.queue.admit(
+        signed,
+        c.assignment.admission.submission,
+        c.assignment.admission.participant,
+        p.e.r.h.source,
+        capture(p.finality.head),
+        expected_tip_sha256=history_tip(p.e.r.h.source.history),
+    )
+    expected = [
+        c.assignment.admission.work_sha256,
+        c.queue.assignment(signed).admission.work_sha256,
+    ]
+    entered, release = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    async def advance(row, **kwargs):
+        seen.append(row.work_sha256)
+        entered.set()
+        await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    worker = s.worker(batch_size=16)
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 30)
+        # Repeated busy polls may rotate discovery but cannot consume the
+        # second job's opportunity to run after this miner becomes available.
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            assert len(active) == 1 and seen == expected[:1]
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    restarted = s.worker(batch_size=16)
+    monkeypatch.setattr(restarted, "_advance", advance)
+    active = {}
+    try:
+        await restarted._rolling_poll(active)
+        await asyncio.gather(*(task for _, task in active.values()))
+        assert seen == expected
+    finally:
+        await restarted._stop_tasks(task for _, task in active.values())

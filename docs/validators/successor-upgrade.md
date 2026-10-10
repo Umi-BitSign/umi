@@ -50,6 +50,16 @@ Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
 
+Renewed controls do not require hashing every older staged package during cache
+lookup. The supervisor checks sealed metadata and compares the small control
+files first, then verifies the complete matching stage before reuse. All retained
+stages still count toward cache limits; this lookup neither deletes evidence nor
+extends a directive's authorization interval. A process-issued staged capability
+reuses its payload hashes only while the complete sealed file identities remain
+unchanged; content edits, permission changes and replacement files invalidate it.
+Activation still uses fresh owned chain observations and reports missing validator
+permission separately from insufficient remaining authorization time.
+
 While the chain weight interval is pending, an already stopped supervisor may
 reuse its completed transaction audit only within the same process and while the
 registry, weight journal and every audited sealed package remain unchanged.
@@ -73,6 +83,10 @@ Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
 while a claim or another readiness probe owns the catalog's admission lock.
 It does not queue an HTTP request behind that long operation or cancel it.
 Only the ordinary fresh-input checks can return `ready: true`.
+Local capacity probes use a read-only journal snapshot, so they do not take the
+dispatch/retirement writer lock. Full or sealed catalogs return their hold without
+rescanning byte allowances. A new claim still rechecks capacity atomically when
+it commits; readiness does not reserve space or authorize an admission.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
 for capacity (bounded by the exporter timeout). A queued read rechecks that its
@@ -345,7 +359,31 @@ retained control history and replays its original reward package. A successor or
 revocation in that history does not erase the initial handoff. Historical replay
 uses the retained proofs and a fixed target block while catching up; it grants no
 current submission authority. The executor checks fresh control before signing.
+Each proof-verifier instance remembers up to 64 successful exact storage-proof
+checks. Reuse binds the state root, claimed keys and values, every proof node,
+verifier binary identity and configured bounds. Changed claims or proofs still
+require verification, failures are never reused, and process restart clears the
+cache. Archive loading and current finality and authority checks still run.
 Cancellation drains owned signing work before releasing the writer locks.
+The standing supervisor and reward-reader CLI request cooperative cancellation
+when SIGTERM or SIGINT sets their stop event, including during initial history
+replay. The current owned operation and cleanup finish before process ownership
+is released; shutdown need not finish the remaining replay batch. This does not
+add a forced termination deadline or permit a replacement writer to overlap.
+
+While first-activation replay is pending, predecessor reconciliation publishes
+the same `umi-successor-host-status/1` reports as the ordinary supervisor.
+Monitoring uses the current service invocation's native result: a held writer
+remains unhealthy even when the process is running. A healthy current worker
+can continue while a future directive is staged or its staging fails; that
+result does not establish successor activation or received rewards.
+
+An archive response of `Historical work rate limit exceeded` is a provider
+throttle even when it arrives as JSON-RPC code `-32004` over an established
+connection. It enters the same bounded cooldown as an HTTP 429; alternate
+providers must still prove the exact requested block. Unrelated errors with
+that numeric code do not imply throttling. Cached reads reduce repeat requests,
+but completing uncached historical proofs still requires available archive capacity.
 
 The supervisor selects `standing-reward-boot.json` beside its existing supervisor
 configuration when that file is present. This works with the installed service
@@ -437,11 +475,61 @@ receipt.
 The explicit, disjoint `proof_export_directory` receives original proof objects
 and frames automatically during history replay and interval collection. An
 interrupted write retries the same bytes before advancing the local cursor or
-crediting an interval. Objects are published before their frame. The separate
+crediting an interval. Objects are published before their frame. Within one exporter process, successful
+object publications reuse up to 4,096 metadata receipts while the exact content
+identity, private parent and file identity/metadata remain unchanged. Changed or
+missing files require ordinary publication again; failed writes are never cached.
+On Linux, a reuse receipt requires successful verification after the inode's
+coarse timestamp tick. Publication during the creation tick cannot qualify a
+later shortcut, even if time has since passed. Platforms without this qualified
+clock use ordinary publication. This avoids trusting a same-size rewrite that
+restored the original mtime within the same ctime tick.
+Readers still validate original objects and proofs independently. The separate
 `proof_import_directory` accepts transferred frames; native readers verify every
 proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
 Restart requires native replay even when all archive files are already present.
+
+Each retained history frame reads its chunk references and proof objects through
+one native query-only database snapshot. It does not reserve the writer slot or
+open a connection per object. The next frame load takes a fresh snapshot and
+observes newly committed conflict holds; byte bounds, content identities and
+native proof verification are unchanged.
+
+Within that one frame snapshot, repeated byte objects are decoded once, bounded
+by 128 entries and 32 MiB. The next frame load discards that cache so new conflict
+holds remain visible. Lossless encoding locates quoted hex with bounded byte
+scanning; original match boundaries, recipes, hashes and published bytes are
+unchanged. Neither optimization substitutes for native proof verification.
+
+For each verified historical block, body and event collection overlap after
+selecting its parent runtime. Both remain bound to the same finalized identity;
+failure or cancellation drains both operations before releasing the provider.
+
+The storage-proof helper retries a Linux `ETXTBSY` launch failure against the
+same verified private executable within its original total execution budget.
+This covers a staging write descriptor temporarily retained by another process.
+Other launch errors and rejected or malformed proof responses still fail.
+
+A collector configured for proof-only runtime reads and bounded evidence reuse
+can combine its retained parent code nodes with a small `:heappages` proof from
+the next block. It verifies the new auxiliary proof first, then proves the same
+code against the new block's state root. A runtime change, missing code branch
+or combined-proof size limit triggers the ordinary full code proof at that exact
+block. Invalid auxiliary proofs and verifier failures remain errors. Node and
+byte limits also bound accumulated proof nodes; replaying an external archive
+always consumes and verifies that archive's own value claim. The same selected
+native reader recovers each historical block's event bytes directly from its
+proof, avoiding a separate event-value RPC while preserving the event limits
+and downstream native check. Reuse supplies no finality or current authority
+and is discarded on restart.
+
+Within a running provider, identical proof-backed runtime code reuses the already
+validated immutable metadata from the pinned executor. This bounded reuse avoids
+decoding the same helper response for every block. Every caller still supplies
+its own native code proof and receives a fresh mutable runtime codec bound to
+that snapshot. Different code or a different executor digest cannot reuse the
+entry; failed validation is not retained.
 
 Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-replication/)
 with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
@@ -759,6 +847,25 @@ recheck certified history and native registration/Axon proofs against the origin
 queue assignment. A valid closure is retained before execution is refused, so a
 stale history cannot reopen work. Supply renewable media/window inputs and
 terminal signing separately.
+After window capture, the configured dispatcher requires its registration
+observation to reach the current owned finalized head. An otherwise age-valid
+cached observation must not predate request issuance. A lagging provider keeps
+the work pending; the dispatcher neither backdates the request nor relaxes its
+current-authority check.
+
+Worker reports separate preparation waits for inputs, current authority, media
+delivery, retained request lineage, the issuance window and journal persistence.
+`preparation_contention` identifies a retry after a busy journal. These names and
+elapsed times are operational diagnostics; they expose no work payloads and do
+not change request deadlines or authorize completion.
+
+`service_transport_pending` identifies a failed grant or retirement exchange by
+operation, miner hotkey, exact request-body digest and numeric HTTP status. A
+status of `0` means no HTTP response was available; `failure` distinguishes
+timeout, HTTP transport, operating-system and response-bound failures. Logs omit
+response bodies, headers, addresses and exception messages. A pending exchange
+does not authorize replacement work or establish an inference failure; the worker
+continues the original recovery and retirement procedure.
 
 Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
 It commits the fixed work, policy, cohort, authority and service terms without
@@ -856,12 +963,16 @@ again. Reviewers read the selected originals at the authenticated
 drains workers before releasing keys, clients and process locks.
 
 Clip delivery verifies the local digest, retains the URL before uploading, and
-verifies the downloaded bytes before request selection. Lost acknowledgements
-reuse that URL; missing objects are republished at the same URL. New requests
-after a long outage can use a fresh bounded capability for the same clip. Signed
-requests and past delivery records remain unchanged. The existing clip Worker
-must be deployed with the matching upload credential; private clip replication
-and retention remain separate deployment requirements.
+verifies the downloaded bytes once before recording completion. Subsequent
+requests, including after restart, reuse that exact completion record while its
+delivery window remains valid; they do not reread or download the clip again.
+Incomplete publications recover lost acknowledgements or republish missing bytes
+at their original URL. A new delivery window requires its own verified publication.
+Signed requests and past delivery records remain unchanged. The existing clip
+Worker must use the matching upload credential and retain completed objects for
+their full capability lifetime: completed publications are not probed for deletion
+on each request. Private clip replication and retention remain deployment
+requirements.
 
 Benchmark evaluator startup and private evidence replication still require their
 own running services. Accepted-service dispatch alone does not establish full
@@ -950,6 +1061,15 @@ without repeating inference. Poll reports contain bounded counts and failure
 types. Independent request closure and quality replay still determine completion
 and service credit. Preserve the queue and its worker binding across restart;
 changing the evaluator requires an authorized migration, not a configuration edit.
+
+The owner reuses successful validation of exact retained request and grant bytes
+within a process, with bounded memory. Finding the latest attempt checks its
+complete parent chain once, rather than repeating that walk for every earlier
+attempt. Each read still checks current journal
+conflicts, the accepted assignment and complete replacement ancestry. Changed
+bytes, policy, transport or journal identity require validation again; missing
+records remain missing. This reuse grants no current authority and does not
+change signed request clocks, reviewer quorum or reward eligibility.
 
 The endpoint cohort dispatcher and paid-service transport permit one durable
 retransmission of the same selected request when the signed policy allows at
@@ -1085,6 +1205,11 @@ missing endpoint responses and busy execution locks stay pending. Retries reuse
 the original terminal signature, and the durable scan cursor revisits pending
 work without blocking other assignments. Export reports describe the current
 batch. They do not confirm remote delivery or successful reward submission.
+Export uses the live owned finality provider's verified block height without
+collecting a new subnet membership proof. Its observer, freshness and rollback
+checks still apply, and work beyond that finalized height stays pending. The
+closure reviewer separately checks membership, authority and the certified
+request interval; export does not replace any of those checks.
 Successful local publication verification is retained in a bounded private
 `.publication-verification/` cache, so restarting an exporter does not replay
 unchanged exports. Reuse requires the same policy and capacity, a verification
@@ -1752,6 +1877,13 @@ existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming
 the operational switch is complete.
 
+When all proof providers fail, the phase report retains each provider's index,
+request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
+transport category such as `timeout` or `connection_closed`. Inspect every
+provider entry: a rate-limit refusal from the last fallback does not establish
+why the authenticated primary failed. Reports omit remote text, headers and
+credentials. These diagnostics do not change fallback or proof-validation rules.
+
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 
 ### Acceptance checks
@@ -1885,13 +2017,25 @@ many total operations. Endpoint scheduling similarly bounds dispatch, recovery
 and retirement, and certification separately, with one additional discovery
 operation. An operation yields at a retained phase boundary before entering the
 next phase; these counts are not counts of miners actively performing inference.
-Paid work still runs at most one job per miner within its queue. Miner-side
-concurrency and active-window limits remain unchanged.
+Paid work permits one transport operation per miner within its queue: dispatch
+and response recovery/retirement share that slot. Request preparation and terminal
+certification each have a separate per-miner slot, so a slow new request cannot
+block already answered work. Preparation yields before delivery; certification
+uses retained retirement evidence or a terminal intent. Global phase capacities,
+miner-side concurrency and shared active-window limits remain unchanged.
+Terminal preparation retries local journal contention within the existing operation
+budget and recollects current authority after each wait. It retains the original
+response and retirement evidence without redispatching work. Invalid evidence and
+storage failures remain errors rather than being retried as lock contention.
 Discovery also resumes interrupted aggregate completion after the last endpoint
 case was retained. It authenticates the original case decisions and builds the
 missing archive without repeating inference or creating new signed requests.
-The existing private cursor advances only through considered admissions and
-survives restart. The worker retains its process lease until all outstanding
+The private discovery cursor rotates bounded admission pages. Within each page,
+work that has never started, or started least recently, gets the next available
+turn. Only a started operation advances its retained turn; skipped busy-miner or
+full-phase jobs keep their priority across polls and restarts. This operational
+metadata preserves original FIFO admission identities, signed request clocks and
+terminal evidence. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
 include in-flight operation counts, phase capacity, aggregate native stages and the age of the
 oldest stage. Stage state is removed after completion, failure or cooperative
@@ -1954,6 +2098,22 @@ Admission-status, reviewer-queue and intake-readiness reads use the same snapsho
 path. They can finish while a publisher owns the writer gate, and a later read
 sees newly committed certificates and intake fences. Certificate assembly and
 publication still reserve the writer and validate the current generation.
+Request-export paging and execution-start inspection also use read-only snapshots
+of the execution journal. They can inspect committed results while another case
+is being retained; updating the export cursor still uses its separate writer.
+Paid-service discovery and endpoint recovery polling also read their cursors and
+queues through read-only snapshots. Their later cursor updates and response
+retention continue to use writer transactions.
+Paid request/terminal preparation and authority observation retry classified
+SQLite BUSY/LOCKED contention within their existing operation budgets. Each
+retry refreshes mutable authority; other database failures still propagate.
+Local idempotent journal operations, including replacement-certificate retention,
+also retry classified SQLite contention within the same budgets. Retries preserve
+the original signed inputs and drain their owned thread before cancellation.
+The cohort and standing-reward systemd templates signal the main process first
+(`KillMode=mixed`, `SendSIGKILL=no`, `TimeoutStopSec=infinity`), allowing its
+cooperative shutdown to finish an owned proof operation before closing children.
+Existing installed units need these settings retained during service upgrades.
 Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.

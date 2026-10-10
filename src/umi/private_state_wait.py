@@ -1,9 +1,11 @@
-"""Bounded waits for validated local mutex contention, with owned thread cleanup."""
+"""Bounded waits for local lock contention, with owned thread cleanup."""
 
 import asyncio
+import sqlite3
 
 from .concurrency import run_owned_thread
 from .private_files import PrivateStateBusyError
+from .sqlite_contention import is_sqlite_contention
 
 
 async def run_private_state_operation(function, *args, timeout: float):
@@ -20,7 +22,9 @@ async def run_private_state_operation(function, *args, timeout: float):
     while True:
         try:
             return await run_owned_thread(function, *args)
-        except PrivateStateBusyError:
+        except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+            if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                raise
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise

@@ -53,6 +53,13 @@ class FinalizedHeadRegression(ValueError):
 class RoundJournal:
     """Bounded immutable records and durable conflict holds, shared by both roles."""
 
+    MAXIMUM_BYTES = 16 * 1024**3
+
+    @property
+    def maximum_records(self) -> int:
+        """Total retained records; per-call batches keep their separate bound."""
+        return self.maximum_rounds * 80
+
     def __init__(
         self,
         root: Path,
@@ -66,7 +73,7 @@ class RoundJournal:
         if (
             type(maximum_rounds) is not int
             or not 1 <= maximum_rounds <= 65536
-            or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 16 * 1024**3)
+            or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= self.MAXIMUM_BYTES)
             or type(maximum_record_bytes) is not int
             or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
         ):
@@ -121,6 +128,13 @@ class RoundJournal:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, body BLOB NOT NULL, "
                 "PRIMARY KEY(kind,id))"
+            )
+            # Capacity checks need counts and byte lengths, not proof bodies.
+            # SQLite maintains this covering index in the same transaction as
+            # every record write. Existing records, bindings and limits remain
+            # unchanged; older readers can continue using the journal.
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS records_capacity_lengths ON records(kind,LENGTH(body))"
             )
             db.execute("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS highwater (block INTEGER NOT NULL)")
@@ -191,8 +205,8 @@ class RoundJournal:
 
     def _check_files(self):
         _private(self.root)
-        paths = [Path(str(self.path) + suffix) for suffix in ("", "-journal", "-wal", "-shm")]
-        paths.append(self.lock_path)
+        sidecars = tuple(Path(str(self.path) + suffix) for suffix in ("-journal", "-wal", "-shm"))
+        paths = (self.path, *sidecars, self.lock_path)
         for p in paths:
             try:
                 s = p.lstat()
@@ -203,9 +217,15 @@ class RoundJournal:
                 continue
             if stat.S_ISLNK(s.st_mode):
                 raise ValueError("round journal symlink")
+            # SQLite may unlink a private sidecar between path resolution and
+            # lstat's inode read. A zero-link sidecar has already disappeared,
+            # just like FileNotFoundError above; it is not an extra hard link.
+            # The database/lock must remain linked, and every observed inode
+            # still has to be regular, private and owned by this process user.
+            permitted_links = (0, 1) if p in sidecars else (1,)
             if (
                 not stat.S_ISREG(s.st_mode)
-                or s.st_nlink != 1
+                or s.st_nlink not in permitted_links
                 or (s.st_uid != os.getuid() or s.st_mode & 0o077)
             ):
                 raise ValueError("round journal must be private and owned")
@@ -500,7 +520,7 @@ class RoundJournal:
         cursor = db.execute(f"SELECT {_OBLIGATION_COLUMNS} FROM record_reservations")
         try:
             for offset, row in enumerate(cursor):
-                if offset >= self.maximum_rounds * 80:
+                if offset >= self.maximum_records:
                     raise ValueError("round reservation batch capacity exhausted")
                 self._decode_obligation(row)
         finally:
@@ -553,7 +573,7 @@ class RoundJournal:
             for kind in ("plan", "prepared", "intent", "suite", "certificate")
         ):
             raise ValueError("round journal record capacity exhausted")
-        if count > self.maximum_rounds * 80 or used > self.maximum_bytes:
+        if count > self.maximum_records or used > self.maximum_bytes:
             raise ValueError("round journal capacity exhausted")
 
     def reserve_records(
@@ -661,7 +681,7 @@ class RoundJournal:
                 or type(identity_["maximum_rounds"]) is not int
                 or not 1 <= identity_["maximum_rounds"] <= 65536
                 or type(identity_["maximum_bytes"]) is not int
-                or not 1024 <= identity_["maximum_bytes"] <= 16 * 1024**3
+                or not 1024 <= identity_["maximum_bytes"] <= self.MAXIMUM_BYTES
             )
         ):
             raise ValueError("round reservation journal binding changed")
@@ -717,6 +737,27 @@ class RoundJournal:
             return self._reservation(db, batch_id)
 
     def put(self, kind: str, key: str, value: object) -> None:
+        # Exact immutable retries need only the current committed snapshot.
+        # Retaking the writer slot for every retained archive object can hold
+        # up unrelated signing and retirement. Missing or different bytes still
+        # use the native writer, which retains conflicts atomically.
+        with self.read_transaction() as db:
+            prior = self.get_raw(kind, key, db=db)
+            if prior is not None:
+                raw = canonical_json_bytes(value)
+                if len(raw) > self.maximum_record_bytes:
+                    raise ValueError("round journal object exceeds its byte bound")
+                if prior == raw:
+                    doc = self._obligation(db, kind, key) if self._version(db) == 2 else None
+                    if doc is not None and (
+                        len(raw) > doc["maximum_bytes"]
+                        or (
+                            doc["value_sha256"] is not None
+                            and sha256_hex(raw) != doc["value_sha256"]
+                        )
+                    ):
+                        raise ValueError("retained round record differs from reservation")
+                    return
         self.put_many(((kind, key, value),))
 
     def put_many(
@@ -802,7 +843,7 @@ class RoundJournal:
                     capacity_error = "round journal record capacity exhausted"
                 elif (
                     used + extra_bytes > self.maximum_bytes
-                    or count + extra_count > self.maximum_rounds * 80
+                    or count + extra_count > self.maximum_records
                 ):
                     capacity_error = "round journal capacity exhausted"
                 else:

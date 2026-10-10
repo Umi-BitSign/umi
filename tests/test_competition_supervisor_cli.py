@@ -143,8 +143,9 @@ async def test_cli_orders_seal_host_lock_recovery_and_shutdown(host):
 
 @pytest.mark.parametrize("reject", [False, True])
 @pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("stop_during_replay", [False, True])
 async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
-    host, monkeypatch, tmp_path, reject, explicit
+    host, monkeypatch, tmp_path, reject, explicit, stop_during_replay
 ):
     from umi import competition_reward_boot as boot
 
@@ -174,6 +175,12 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
         assert runtime is host.runtime and runtime.adapter is adapter
         assert config is selection and stop is host.stop
         host.events.append("standing-service")
+        if stop_during_replay:
+            stop.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                host.events.append("standing-drained")
 
     monkeypatch.setattr(boot, "load_standing_boot", load)
     monkeypatch.setattr(boot, "run_installed_standing_rewards", run)
@@ -186,15 +193,20 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
             )
         assert "stop-startup-worker" not in host.events
     else:
-        await cli.run_supervisor(
-            Path("/etc/umi/supervisor.json"),
-            stop_event=host.stop,
-            standing_config=Path("/etc/umi/standing.json") if explicit else None,
+        await asyncio.wait_for(
+            cli.run_supervisor(
+                Path("/etc/umi/supervisor.json"),
+                stop_event=host.stop,
+                standing_config=Path("/etc/umi/standing.json") if explicit else None,
+            ),
+            timeout=30,
         )
         assert host.events.index("standing-approval") < host.events.index("stop-startup-worker")
         assert host.events.index("lock-and-recover") < host.events.index("require-lease")
         assert host.events.index("require-lease") < host.events.index("standing-service")
         assert "reconcile" not in host.events
+        if stop_during_replay:
+            assert host.events.index("standing-drained") < host.events.index("stop-and-unlock")
         assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
 
 

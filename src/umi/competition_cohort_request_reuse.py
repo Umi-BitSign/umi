@@ -33,7 +33,10 @@ class PublicationFileStamp(StrictProtocolModel):
     relative_path: Annotated[
         str,
         Field(
-            pattern=r"^(objects/[0-9a-f]{64}|(orders|terminals)/[0-9a-f]{64}/[0-9a-f]{64})\.json$"
+            pattern=(
+                r"^(objects/[0-9a-f]{64}|(orders|terminals)/[0-9a-f]{64}/[0-9a-f]{64}"
+                r"|partials/[0-9a-f]{64}/[0-9a-f]{64}/[0-9a-f]{64}/[0-9]{5})\.json$"
+            )
         ),
     ]
     # Nanosecond timestamps need decimal strings to remain exact canonical JSON.

@@ -143,14 +143,12 @@ class AuthenticatedSuccessorArtifactMaterializer:
             operator_consent=self.installation.operator_consent,
             finalized_block=block,
         )
-        if (
-            not observation.validator_permit
-            or block < directive.valid_from_block
-            or directive.valid_through_block - block < directive.minimum_activation_headroom_blocks
-        ):
-            raise SuccessorMaterializerError(
-                "materializer activation permit or interval is unavailable"
-            )
+        if not observation.validator_permit:
+            raise SuccessorMaterializerError("successor validator permit is absent")
+        if block < directive.valid_from_block:
+            raise SuccessorMaterializerError("successor directive is not active")
+        if directive.valid_through_block - block < directive.minimum_activation_headroom_blocks:
+            raise SuccessorMaterializerError("successor activation headroom is insufficient")
         return observation
 
     @log_phase("materializer_activation")

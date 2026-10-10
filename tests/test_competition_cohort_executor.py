@@ -122,6 +122,42 @@ async def test_inbox_to_complete_replay_and_offline_restart(execution):
     assert len(e.calls) == step_count(e.job) and not e.stops
 
 
+async def test_completed_execution_uses_bounded_snapshots_and_fresh_conflict_checks(
+    execution, monkeypatch
+):
+    from contextlib import contextmanager
+
+    e = execution
+    executor = e.executor()
+    for _ in range(step_count(e.job)):
+        e.r.h.block += 1
+        await executor.advance(e.assignment)
+    journal = executor.journal
+    expected = canonical_json_bytes(journal.evidence(e.r.slot))
+    transactions = 0
+    original = journal.journal.read_transaction
+
+    @contextmanager
+    def counted():
+        nonlocal transactions
+        transactions += 1
+        with original() as db:
+            yield db
+
+    monkeypatch.setattr(journal.journal, "read_transaction", counted)
+    assert canonical_json_bytes(journal.evidence(e.r.slot)) == expected
+    # Assignment and reuse lookup may have their own snapshots, but a full
+    # completed result must not open three more connections for every step.
+    assert transactions <= 3
+    from umi.competition_cohort_execution_journal import execution_step_key
+
+    key = execution_step_key(e.job, 0)
+    with pytest.raises(ValueError, match="conflict"):
+        journal.journal.put("step", key, {"changed": True})
+    with pytest.raises(ValueError, match="conflict"):
+        journal.evidence(e.r.slot)
+
+
 async def test_unfinished_execution_still_requires_the_job_writer_lock(execution):
     from umi.private_files import PrivateStateBusyError
 
@@ -129,6 +165,20 @@ async def test_unfinished_execution_still_requires_the_job_writer_lock(execution
     with e.journal().locked(e.r.slot), pytest.raises(PrivateStateBusyError):
         await e.executor().advance(e.assignment)
     assert not e.calls and e.journal().journal.get("assignment", e.r.slot) is None
+
+
+async def test_retained_attempt_head_does_not_wait_for_unrelated_writer(execution):
+    from concurrent.futures import ThreadPoolExecutor
+
+    e = execution
+    executor = e.executor()
+    source, started = await executor.current(e.assignment)
+    journal = executor.journal
+    job = journal.retain(e.assignment, source, started.block)
+    attempt = journal.begin(job, 0, source, started)
+    with ThreadPoolExecutor(max_workers=1) as pool, journal.journal.transaction():
+        read = pool.submit(journal.head, job, 0)
+        assert read.result(timeout=5) == attempt
 
 
 async def test_endpoint_worker_can_defer_incumbent_until_miner_terminal(execution):

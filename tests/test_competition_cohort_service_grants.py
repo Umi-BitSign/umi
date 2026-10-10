@@ -392,14 +392,14 @@ async def test_retained_service_certificate_still_checks_original_selection(serv
         )
     )
     verify_service_grant(changed, p.c.policy, p.transport_policy)
-    original = producer.journal.get
+    original = producer.journal.get_raw
 
     def conflicting(kind, key, **kwargs):
         if kind == "service_grant" and key == slot:
-            return changed.model_dump(mode="json", by_alias=True)
+            return canonical_json_bytes(changed)
         return original(kind, key, **kwargs)
 
-    monkeypatch.setattr(producer.journal, "get", conflicting)
+    monkeypatch.setattr(producer.journal, "get_raw", conflicting)
     with producer.journal.locked(), pytest.raises(ValueError, match="selected request"):
         producer.certificate(slot)
 
@@ -1595,20 +1595,36 @@ async def test_native_terminal_read_recovers_after_restart_without_fresh_work(se
     c, p = service, service.p
     owner = ServiceWorkTerminals(ServiceWorkRequests(c.queue, p.transport_policy))
     assert owner.read(c.assignment) is None
+    assert owner.read(c.assignment, preserve_completed=True) is None
+    with owner.journal.locked():
+        assert owner.read_locked(c.assignment, preserve_completed=True) is None
     assert p.model.calls == p.fetcher.calls == 0
     owner, response, retirement, source, observation = await terminal_response(c)
+    owner.journal.put("service_retirement", service_grant_slot(c.grant.body), retirement)
+    with pytest.raises(FileNotFoundError, match="recovery and certification"):
+        owner.read(c.assignment, preserve_completed=True)
+    owner.journal.put("service_response", service_grant_slot(c.grant.body), response)
+    with pytest.raises(FileNotFoundError, match="fencing and certification"):
+        owner.read(c.assignment, preserve_completed=True)
     intent = owner.prepare(
         service_grant_slot(c.grant.body), response, retirement, source, observation
     )
     assert owner.read(c.assignment) is None  # An unsigned intent is still pending.
+    with pytest.raises(FileNotFoundError, match="terminal certification"):
+        owner.read(c.assignment, preserve_completed=True)
     signed = owner.retain(intent, sign_object(intent, p.validator))
     restarted = ServiceWorkTerminals(
         ServiceWorkRequests(ServiceWorkQueue(c.cfg, p.c.policy), p.transport_policy)
     )
     assert restarted.read(c.assignment) == signed
+    assert restarted.read(c.assignment, preserve_completed=True) == signed
+    with restarted.journal.locked():
+        assert restarted.read_locked(c.assignment, preserve_completed=True) == signed
     assert p.model.calls == p.fetcher.calls == 1
     changed = c.assignment.model_copy(update={"previous": c.assignment.admission})
-    with pytest.raises(ValueError, match="accepted assignment"):
+    # This predecessor is already invalid at the original admission boundary,
+    # before the owner can compare the selected assignment.
+    with pytest.raises(ValueError, match="service admission changed"):
         restarted.read(changed)
 
 
@@ -2516,3 +2532,140 @@ def test_static_service_body_reuse_binds_transport(service_owner, monkeypatch):
     with pytest.raises(ValueError):
         grants.validate_service_body(grant.body, p.c.policy, changed)
     assert replay.call_count == 2
+
+
+def test_owner_request_reuse_keeps_private_values_and_fresh_assignment(service, monkeypatch):
+    from unittest.mock import Mock
+
+    from umi import competition_cohort_service_requests as requests
+
+    c, p = service, service.p
+    owner = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    body = Mock(wraps=requests.validate_service_body)
+    grant = Mock(wraps=requests.verify_service_grant)
+    assignment = Mock(wraps=c.queue.assignment)
+    monkeypatch.setattr(requests, "validate_service_body", body)
+    monkeypatch.setattr(requests, "verify_service_grant", grant)
+    monkeypatch.setattr(c.queue, "assignment", assignment)
+    assert owner.certificate(slot) == c.grant
+    changed = owner.certificate(slot)
+    assert (body.call_count, grant.call_count, assignment.call_count) == (1, 1, 2)
+    object.__setattr__(changed.body.request, "issued_block", 0)
+    assert owner.certificate(slot) == c.grant
+    assert (body.call_count, grant.call_count, assignment.call_count) == (1, 1, 3)
+    with owner.journal.transaction() as db:
+        db.execute("DELETE FROM service_claims")
+    with pytest.raises(FileNotFoundError, match="not been admitted"):
+        owner.certificate(slot)
+
+
+@pytest.mark.parametrize("kind", ["service_request", "service_grant"])
+def test_owner_request_reuse_rejects_changed_or_missing_bytes(service, kind):
+    c = service
+    owner = ServiceWorkRequests(c.queue, c.p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    assert owner.certificate(slot) == c.grant
+    with owner.journal.transaction() as db:
+        db.execute("UPDATE records SET body=? WHERE kind=? AND id=?", (b"{}", kind, slot))
+    with pytest.raises(ValueError):
+        owner.certificate(slot)
+    with owner.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, slot))
+    if kind == "service_request":
+        with pytest.raises(FileNotFoundError):
+            owner.certificate(slot)
+    else:
+        # Missing certificates are rebuilt from retained authentic votes, never
+        # treated as cache hits or fabricated from a body without quorum.
+        with owner.journal.transaction() as db:
+            db.execute("DELETE FROM records WHERE kind='service_request_vote'")
+        with pytest.raises(ValueError):
+            owner.certificate(slot)
+
+
+def test_owner_request_reuse_checks_fresh_conflict_holds(service):
+    c = service
+    owner = ServiceWorkRequests(c.queue, c.p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    assert owner.certificate(slot) == c.grant
+    with owner.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (slot,))
+    with pytest.raises(ValueError, match="conflict held"):
+        owner.certificate(slot)
+
+
+@pytest.mark.parametrize("context", ["transport", "policy", "materialization", "reopen"])
+def test_owner_request_reuse_revalidates_changed_context(service, monkeypatch, context):
+    import shutil
+    from unittest.mock import Mock
+
+    from umi import competition_cohort_service_requests as requests
+
+    c, p = service, service.p
+    owner = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(c.grant.body)
+    owner.certificate(slot)
+    replay = Mock(side_effect=RuntimeError("static revalidation required"))
+    monkeypatch.setattr(requests, "validate_service_body", replay)
+    if context == "transport":
+        owner.transport = owner.transport.model_copy(update={"validator_registry": ()})
+    elif context == "policy":
+        owner.policy = owner.policy.model_copy(
+            update={"minimum_score_bps": (owner.policy.minimum_score_bps + 1) % 10001}
+        )
+    elif context == "materialization":
+        replacement = owner.journal.path.with_suffix(".replacement")
+        shutil.copyfile(owner.journal.path, replacement)
+        replacement.chmod(0o600)
+        replacement.replace(owner.journal.path)
+    else:
+        owner = ServiceWorkRequests(c.queue, p.transport_policy)
+    with pytest.raises(RuntimeError, match="static revalidation required"):
+        owner.certificate(slot)
+    assert replay.call_count == 1
+
+
+@pytest.mark.parametrize("damage", ["parent_grant", "parent_selection", "parent_hold"])
+async def test_owner_request_reuse_keeps_fresh_parent_lineage(service, monkeypatch, damage):
+    c, p = service, service.p
+    child, _, _ = await replacement(c, monkeypatch)
+    owner = ServiceWorkRequests(c.queue, p.transport_policy)
+    slot = service_grant_slot(child.body)
+    parent_slot = service_grant_slot(c.grant.body)
+    assert owner.certificate(slot) == child
+    with owner.journal.transaction() as db:
+        if damage == "parent_hold":
+            db.execute("INSERT INTO holds VALUES (?)", (parent_slot,))
+        else:
+            kind = "service_grant" if damage == "parent_grant" else "service_request"
+            db.execute(
+                "UPDATE records SET body=? WHERE kind=? AND id=?", (b"{}", kind, parent_slot)
+            )
+    with pytest.raises(ValueError):
+        owner.certificate(slot)
+
+
+@pytest.mark.parametrize("damage", ["parent_hold", "parent_selection"])
+async def test_latest_request_walks_complete_ancestry_once(service, monkeypatch, damage):
+    from unittest.mock import Mock
+
+    c, p = service, service.p
+    original_slot = service_grant_slot(c.grant.body)
+    for _ in range(2):
+        c.grant, _, _ = await replacement(c, monkeypatch)
+    owner = ServiceWorkRequests(c.queue, p.transport_policy)
+    walk = Mock(wraps=owner._body)
+    monkeypatch.setattr(owner, "_body", walk)
+    assert owner.latest(c.claim, p.validator.hotkey.ss58_address) == c.grant.body
+    assert walk.call_count == 1
+    with owner.journal.transaction() as db:
+        if damage == "parent_hold":
+            db.execute("INSERT INTO holds VALUES (?)", (original_slot,))
+        else:
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='service_request' AND id=?",
+                (b"{}", original_slot),
+            )
+    with pytest.raises(ValueError):
+        owner.latest(c.claim, p.validator.hotkey.ss58_address)

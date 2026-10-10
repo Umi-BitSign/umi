@@ -38,7 +38,7 @@ from .competition_reward_handoff_models import (
     RewardHandoffPlan,
     verify_handoff_plan,
 )
-from .competition_reward_history import RewardControlHistoryReader
+from .competition_reward_history import MAX_HISTORY_BYTES, RewardControlHistoryReader
 from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
@@ -57,6 +57,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 MAX_BOOT_BYTES = 8 * 1024**2
 BOOT_FILENAME = "standing-reward-boot.json"
 Capacity = Annotated[int, Field(ge=1024, le=512 * 1024**3)]
+HistoryCapacity = Annotated[int, Field(ge=1024, le=MAX_HISTORY_BYTES)]
 ObjectCapacity = Annotated[int, Field(ge=1024, le=MAX_CONFIGURED_PRIVATE_BYTES)]
 
 
@@ -98,7 +99,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     proof_import_directory: Directory
     proof_export_directory: Directory
     service: StandingRewardServiceLimits
-    maximum_history_bytes: Capacity
+    maximum_history_bytes: HistoryCapacity
     maximum_coverage_bytes: Capacity
     maximum_reader_bytes: Capacity
     maximum_package_bytes: ObjectCapacity
@@ -106,6 +107,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
@@ -124,6 +126,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if not self.runtime_proof_reads:
+            value.pop("runtime_proof_reads", None)
         return value
 
     @model_validator(mode="after")
@@ -347,6 +351,8 @@ async def run_installed_standing_rewards(
                 chain,
                 policy,
                 resources=locations,
+                # Legacy recovery retains the original helper and read protocol.
+                runtime_proof_reads=config.runtime_proof_reads and sha == digest(config.chain),
                 historical_header_directory=root / "headers" / sha,
                 historical_header_maximum_bytes=config.maximum_header_bytes,
                 historical_header_database_maximum_bytes=config.maximum_header_database_bytes,

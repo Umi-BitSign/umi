@@ -337,3 +337,52 @@ async def test_cancelled_batch_drops_partial_values(rpc, monkeypatch):
         await task
     assert rpc._batch_values is None
     await rpc.aclose()
+
+
+async def test_exact_block_reads_coalesce_and_return_private_copies(rpc, sockets):
+    state, _ = sockets
+    block = "0x" + "ab" * 32
+    params = [["0x61"], block]
+    replies = await asyncio.gather(*(rpc.request("state_getReadProof", params) for _ in range(30)))
+    assert all(value == params for value in replies)
+    assert len(state.calls) == 1
+    replies[0][0].append("0x62")
+    assert await rpc.request("state_getReadProof", params) == params
+    assert len(state.calls) == 1
+    await rpc.request("state_getReadProof", [["0x62"], block])
+    await rpc.request("state_getReadProof", [["0x61"], "0x" + "cd" * 32])
+    assert len(state.calls) == 3
+    await rpc.aclose()
+    assert rpc._read_cache.bytes == 0
+
+
+async def test_cached_transport_keeps_fresh_heads_and_failed_proofs_retryable(rpc, sockets):
+    state, _ = sockets
+    for _ in range(2):
+        await rpc.request("chain_getBlockHash", [42])
+    assert len(state.calls) == 2
+    params = [["0x61"], "0x" + "ab" * 32]
+    state.response = '{"jsonrpc":"2.0","id":1,"error":{"code":429}}'
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error"):
+        await rpc.request("state_getReadProof", params)
+    state.response = '{"jsonrpc":"2.0","id":1,"result":null}'
+    assert await rpc.request("state_getReadProof", params) is None
+    state.response = None
+    assert await rpc.request("state_getReadProof", params) == params
+    assert len(state.calls) == 5
+    await rpc.aclose()
+
+
+async def test_successful_cached_proof_expires_without_changing_request_identity(rpc, sockets):
+    state, _ = sockets
+    clock = [0.0]
+    rpc._read_cache.now = lambda: clock[0]
+    params = [["0x61"], "0x" + "ab" * 32]
+    assert await rpc.request("state_getReadProof", params) == params
+    clock[0] = 29.0
+    assert await rpc.request("state_getReadProof", params) == params
+    assert len(state.calls) == 1
+    clock[0] = 30.0
+    assert await rpc.request("state_getReadProof", params) == params
+    assert len(state.calls) == 2
+    await rpc.aclose()

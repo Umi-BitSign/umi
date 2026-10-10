@@ -13,6 +13,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
@@ -41,7 +42,7 @@ from .competition_reward_standing_handoff import hold_standing_reward_handoff
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import digest
-from .protocol import StrictProtocolModel
+from .protocol import StrictProtocolModel, canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,14 @@ async def _continue_predecessor(runtime, stop, poll_seconds):
     while not stop.is_set() and runtime._standing_handoff_intent() is None:
         try:
             result = await runtime.reconcile()
-            logger.info("standing_predecessor status=%s reason=%s", result.status, result.reason)
+            # Use the installed supervisor's status contract during replay too.
+            # A running service alone must not hide a held predecessor writer.
+            logger.info(
+                "%s",
+                canonical_json_bytes(
+                    {"schema": "umi-successor-host-status/1", **asdict(result)}
+                ).decode(),
+            )
         except Exception as error:
             # Predecessor feed/RPC failure cannot prevent independent recovery.
             logger.warning("standing_predecessor_retry reason=%s", type(error).__name__)

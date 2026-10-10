@@ -55,6 +55,39 @@ than silently accepting changed content. The record is host bookkeeping and is
 not part of the published model bundle. Current policy, authorization and chain
 state checks still run.
 
+An older producer's owner-private, writable version-one receipt cannot authorize
+reuse. The native verifier checks that artifact completely once under its normal
+lock and, on success, replaces only the local receipt with the current read-only
+format. Failed verification preserves the old receipt and model. Other unsafe
+receipt ownership, links, permissions or identities remain errors; operators do
+not need to reset a model or edit its manifest.
+
+Each settlement service starts a bounded artifact-preparation worker alongside
+its normal request-export and settlement tasks. It begins during intake and
+requests, before request closure or reference release. Each pass prepares at
+most two entries in rotating order; missing or invalid entries stay pending
+without preventing their siblings from being prepared. Local legacy archives
+need no configuration change. Successful native verification receipts survive
+restart and are reused by final settlement. Preparation has no signing, scoring
+or phase-transition authority, and its per-pass ready count is not a count of
+certified results.
+
+For direct R2 delivery, acceptance export also publishes the original
+`ModelReviewRequest` under
+`model-reward-preparation/<cohort>/<submission>.json`. The `model-evidence`
+replication profile delivers it with the acceptance certificate. Each settlement
+signer checks the certified submission bindings, then uses its own read-only
+R2 verifier and private receipts to prepare the accepted object. No local model
+copy is created. Unchanged bytes are not downloaded again on restart or final
+settlement; ordinary object identity and authority checks still apply. Retained
+older acceptances without this publication remain supported by the final
+settlement path.
+
+Completed request evidence continues to be exported independently while these
+checks run. Final cohort quality decisions, allocation and signatures still
+require the original certified request closure and reference release. Background
+preparation cannot replace missing work or move those signed boundaries.
+
 During legacy upload completion, each finished staging file likewise retains a
 private verification record. Later completion passes and restarted uploaders
 reuse it while other files are still arriving. These temporary records are

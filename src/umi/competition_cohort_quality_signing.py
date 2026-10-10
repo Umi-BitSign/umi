@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_endpoint_archive import JournalEndpointObjects, read_endpoint_object
 from .competition_cohort_execution_journal import CohortExecutionJournal
@@ -34,11 +34,29 @@ class QualityCertificateRef(StrictProtocolModel):
 
 
 class CohortQualityManifest(StrictProtocolModel):
-    schema_: Literal["umi-cohort-quality-manifest/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-quality-manifest/1", "umi-cohort-quality-manifest/2"] = Field(
+        alias="schema"
+    )
     request_closure_sha256: Hex32
     participants: Annotated[tuple[QualityCertificateRef, ...], Field(min_length=1, max_length=512)]
+    skipped_participants: Annotated[tuple[Hex32, ...], Field(max_length=512)] = ()
     service_credit_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.schema_ == "umi-cohort-quality-manifest/1" and not self.skipped_participants:
+            value.pop("skipped_participants", None)
+        return value
+
+    @model_validator(mode="after")
+    def selected_version(self):
+        if self.schema_ == "umi-cohort-quality-manifest/1" and self.skipped_participants:
+            raise ValueError("legacy quality manifest cannot skip a participant")
+        if len(set(self.skipped_participants)) != len(self.skipped_participants):
+            raise ValueError("quality manifest repeats a skipped disposition")
+        return self
 
 
 class PendingQualityCertificates(ValueError):
@@ -181,6 +199,11 @@ def review_quality_manifest(
     manifest: CohortQualityManifest, review: ClosedQualityReview
 ) -> tuple[ClosedParticipantQuality, ...]:
     manifest = CohortQualityManifest.model_validate_json(canonical_json_bytes(manifest))
+    tail = review.closure.schema_ == "umi-cohort-request-closure/3"
+    if tail != (
+        manifest.schema_ == "umi-cohort-quality-manifest/2"
+    ) or manifest.skipped_participants != tuple(digest(p) for p in review.closure.skipped):
+        raise ValueError("quality manifest differs from certified unperformed dispositions")
     if manifest.request_closure_sha256 != review.request_closure_sha256 or tuple(
         p.submission_sha256 for p in manifest.participants
     ) != tuple(p.submission_sha256 for p in review.closure.participants):
@@ -214,9 +237,12 @@ def build_quality_manifest(
     if pending:
         raise PendingQualityCertificates(tuple(pending))
     manifest = CohortQualityManifest(
-        schema="umi-cohort-quality-manifest/1",
+        schema="umi-cohort-quality-manifest/2"
+        if review.closure.schema_ == "umi-cohort-request-closure/3"
+        else "umi-cohort-quality-manifest/1",
         request_closure_sha256=review.request_closure_sha256,
         participants=tuple(refs),
+        skipped_participants=tuple(digest(p) for p in review.closure.skipped),
     )
     review_quality_manifest(manifest, review)
     return manifest

@@ -89,9 +89,7 @@ def _byte_bound(maximum_bytes: int | None) -> int:
     return maximum_bytes
 
 
-def read_private_model(
-    path: Path, model: type[_Model], *, maximum_bytes: int | None = None
-) -> _Model:
+def _read_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
     maximum_bytes = _byte_bound(maximum_bytes)
     private_path(str(path))
     ensure_private_directory(path.parent)
@@ -108,8 +106,17 @@ def read_private_model(
         if not 1 <= info.st_size <= maximum_bytes:
             raise ValueError("evaluator input exceeds its byte bound")
         raw = stream.read(maximum_bytes + 1)
+    if len(raw) != info.st_size:
+        raise ValueError("evaluator input must have stable canonical bytes")
+    return raw
+
+
+def read_private_model(
+    path: Path, model: type[_Model], *, maximum_bytes: int | None = None
+) -> _Model:
+    raw = _read_private_bytes(path, maximum_bytes=_byte_bound(maximum_bytes))
     value = model.model_validate_json(raw)
-    if len(raw) != info.st_size or not canonical_json_matches(value, raw):
+    if not canonical_json_matches(value, raw):
         raise ValueError("evaluator input must have stable canonical bytes")
     return value
 
@@ -157,10 +164,15 @@ def publish_private_model(
 
 def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: int) -> None:
     if path.exists() or path.is_symlink():
-        if not canonical_json_matches(
-            read_private_model(path, type(value), maximum_bytes=maximum_bytes), raw
-        ):
+        # The caller already serialized the supplied model canonically. Exact
+        # bytes prove canonical equality without serializing the retained object
+        # twice more. Retain schema validation: callers can supply a constructed
+        # model that skipped validation, or a model with mutated nested content.
+        if _read_private_bytes(path, maximum_bytes=maximum_bytes) != raw:
             raise ValueError("evaluator outbox already contains different bytes")
+        retained = type(value).model_validate_json(raw)
+        if canonical_json_bytes(retained) != raw:
+            raise ValueError("evaluator input must have stable canonical bytes")
         return
     fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:

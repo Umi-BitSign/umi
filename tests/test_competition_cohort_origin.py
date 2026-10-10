@@ -35,6 +35,7 @@ from .test_competition_cohort_executor import recovery as recovery
 from .test_competition_cohort_executor import relay as relay
 from .test_competition_cohort_executor import runtime as runtime
 from .test_competition_cohort_order_signer import source_for
+from .test_open_competition import wallet
 
 
 @pytest.fixture
@@ -126,6 +127,38 @@ async def test_repeated_ten_hour_gaps_recover_without_renewing_original_authorit
         capture = await p.collect()
         assert capture.block == _HEIGHT + advance
         assert p.e.journal().assignment(p.e.r.slot) == original
+
+
+async def test_same_hotkey_can_return_at_new_uid_without_replacing_assignment(endpoint):
+    p = endpoint
+    original = canonical_json_bytes(p.e.assignment)
+    initial = await p.collect()
+    hotkey = p.e.assignment.certificate.order.submission.submission.hotkey
+    values = p.c.rpc.values
+    uid_key = ("SubtensorModule", "Uids", (78, hotkey))
+    replacement = wallet("Charlie").hotkey.ss58_address
+    assert replacement != hotkey
+    old_uid = values.pop(uid_key)
+    values[("SubtensorModule", "Keys", (78, old_uid))] = replacement
+    values[("SubtensorModule", "Uids", (78, replacement))] = old_uid
+    p.c.finality.ref = replace(p.c.finality.ref, block_number=_HEIGHT + 1, block_hash=_hash(81))
+    with pytest.raises(ValueError, match="registration storage membership is incomplete"):
+        await p.collect()
+    assert rows(p) == [(initial.evidence,)]
+    assert canonical_json_bytes(p.e.journal().assignment(p.e.r.slot)) == original
+
+    new_uid = values[("SubtensorModule", "SubnetworkN", (78,))]
+    values[("SubtensorModule", "SubnetworkN", (78,))] = new_uid + 1
+    values[uid_key] = new_uid
+    values[("SubtensorModule", "Keys", (78, new_uid))] = hotkey
+    p.c.finality.ref = replace(p.c.finality.ref, block_number=_HEIGHT + 2, block_hash=_hash(82))
+    recovered = await p.collect()
+    assert recovered.uid == new_uid != old_uid
+    assert recovered.submission_sha256 == initial.submission_sha256
+    assert recovered.origin == initial.origin
+    assert canonical_json_bytes(p.e.journal().assignment(p.e.r.slot)) == original
+    assert len(rows(p)) == 2
+    assert not any(method.startswith("author_") for method, _ in p.c.rpc.calls)
 
 
 @pytest.mark.parametrize("confirmation_advances", [True, False])

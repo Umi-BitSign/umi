@@ -153,32 +153,105 @@ class ServiceWorkTerminals:
         self.journal, self.policy = requests.journal, requests.policy
         self.objects = JournalEndpointObjects(self.journal)
 
-    def read(self, assignment: ServiceWorkAssignment) -> SignedServiceTerminal | None:
+    def read(
+        self, assignment: ServiceWorkAssignment, *, preserve_completed: bool = False
+    ) -> SignedServiceTerminal | None:
         """Recover the original terminal and any interrupted immutable export."""
+        with self.journal.locked():
+            return self.read_locked(assignment, preserve_completed=preserve_completed)
+
+    def read_locked(
+        self, assignment: ServiceWorkAssignment, *, preserve_completed: bool = False
+    ) -> SignedServiceTerminal | None:
+        """Read while the caller holds the queue's compound inventory lease."""
         assignment = review_service_assignment(assignment, self.policy)
         owned = self.requests.queue.assignment(assignment.admission.claim)
         if owned != assignment:
             raise ValueError("service terminal lookup changed its accepted assignment")
         work = owned.admission.work_sha256
-        with self.journal.locked():
-            raw = self.journal.get("service_terminal", work)
-            if raw is None:
-                return None
-            signed = SignedServiceTerminal.model_validate_json(canonical_json_bytes(raw))
-            intent = self.journal.get("service_terminal_intent", work)
-            if intent is None or canonical_json_bytes(intent) != canonical_json_bytes(
-                signed.terminal
-            ):
-                raise ValueError("service terminal differs from its original signing intent")
-            grant = read_service_terminal(
-                signed, self.objects, self.policy, self.requests.transport
+        raw = self.journal.get("service_terminal", work)
+        if raw is None:
+            if preserve_completed:
+                self._require_unperformed(owned)
+            return None
+        signed = SignedServiceTerminal.model_validate_json(canonical_json_bytes(raw))
+        intent = self.journal.get("service_terminal_intent", work)
+        if intent is None or canonical_json_bytes(intent) != canonical_json_bytes(signed.terminal):
+            raise ValueError("service terminal differs from its original signing intent")
+        grant = read_service_terminal(signed, self.objects, self.policy, self.requests.transport)
+        if grant.body.assignment != owned:
+            raise ValueError("service terminal belongs to another accepted assignment")
+        # Retention can commit before export acknowledges. Recover that
+        # exact object without another signature or fresh execution.
+        self.objects.put(signed)
+        return signed
+
+    def _require_unperformed(self, assignment: ServiceWorkAssignment) -> None:
+        """Signed paid responses must finish fencing/certification, never become skips."""
+        intent = self.journal.get("service_terminal_intent", assignment.admission.work_sha256)
+        if intent is not None:
+            grant = review_service_terminal(
+                ServiceTerminal.model_validate_json(canonical_json_bytes(intent)),
+                self.objects,
+                self.policy,
+                self.requests.transport,
             )
-            if grant.body.assignment != owned:
-                raise ValueError("service terminal belongs to another accepted assignment")
-            # Retention can commit before export acknowledges. Recover that
-            # exact object without another signature or fresh execution.
-            self.objects.put(signed)
-            return signed
+            if grant.body.assignment != assignment:
+                raise ValueError("pending service certification changed its accepted assignment")
+            raise FileNotFoundError("completed service work awaits terminal certification")
+        selected = self.journal.get("service_work_evaluator", assignment.admission.work_sha256)
+        if selected is None:
+            return
+        if not isinstance(selected, dict):
+            raise ValueError("pending service work has an invalid evaluator binding")
+        evaluator = next(
+            (e for e in self.policy.evaluators if identity(e.hotkey) == selected.get("evaluator")),
+            None,
+        )
+        if evaluator is None:
+            raise ValueError("pending service work has an unselected evaluator")
+        body = self.requests.latest(assignment.admission.claim, evaluator.hotkey)
+        if body is None:
+            return
+        slot = service_grant_slot(body)
+        response = self.journal.get("service_response", slot)
+        retirement = self.journal.get("service_retirement", slot)
+        if response is None and retirement is None:
+            return
+        raw = self.journal.get("service_grant", slot)
+        if raw is None:
+            raise FileNotFoundError("retained service response lacks its original grant")
+        grant = verify_service_grant(
+            ServiceMinerGrant.model_validate_json(canonical_json_bytes(raw)),
+            self.policy,
+            self.requests.transport,
+        )
+        if grant.body != body or body.assignment != assignment:
+            raise ValueError("retained service response changed its accepted assignment")
+        if retirement is not None:
+            retired = verify_retirement_receipt(
+                SignedEndpointRetirementReceipt.model_validate_json(
+                    canonical_json_bytes(retirement)
+                ),
+                request=body.request,
+                grant_sha256=digest(grant),
+                miner_hotkey=assignment.admission.submission.submission.hotkey,
+                evaluator_hotkey=body.evaluator_hotkey,
+            )
+            if retired.receipt.response_sha256 is not None and response is None:
+                raise FileNotFoundError(
+                    "completed service response awaits recovery and certification"
+                )
+        if response is None:
+            return
+        verify_recovered_response(
+            RecoveredEndpointResponse.model_validate_json(canonical_json_bytes(response)),
+            request=body.request,
+            validator_hotkey=body.evaluator_hotkey,
+            miner_hotkey=assignment.admission.submission.submission.hotkey,
+            limits=Limits.from_policy(self.requests.transport),
+        )
+        raise FileNotFoundError("completed service response awaits fencing and certification")
 
     def prepare(self, slot, response=None, retirement=None, source=None, observation=None):
         body = self.requests._body(slot)

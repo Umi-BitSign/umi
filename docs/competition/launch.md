@@ -80,6 +80,40 @@ cohort or authorize its evidence to be discarded.
 
 - Every phase is journaled and replayable. A coordinator, evaluator or validator
   outage leaves unfinished work pending and resumes it from retained evidence.
+- Request closure has an automatic miner-tail rule. Once at least 12 hours have
+  elapsed from the original certified request opening, unfinished work can be
+  recorded as skipped when at most 10% of distinct original selected
+  miner identities remain unfinished. Benchmark and accepted paid-work miners
+  count in one union; multiple entries, cases or retries cannot enlarge the
+  denominator. Existing cohorts use their original opening, without a new grace
+  period after an upgrade. The independently certified tail disposition can
+  close an unavailable or uncompensated request window; original outage records
+  and signed deadlines remain intact. The owner seals the exact accepted paid
+  inventory only after this threshold qualifies. Before sealing individual
+  queues, it publishes one durable cutoff under the first original catalog
+  queue's journal directory (`cohort-tail-admission/tail.json`). Every catalog
+  retains this directory binding: keep the file and directory with the existing
+  journals during recovery or migration. A crash between publication and sealing
+  still refuses fresh claims; accepted duplicate claims remain recoverable.
+- Independent reviewers verify the original and closing chain timestamps, exact
+  original inventory, genuine completed terminals and explicit skipped
+  dispositions before certifying closure. Completed assignments and earned paid
+  work retain their normal scoring and certification. Incomplete benchmark
+  assignments have no aggregate score, and unperformed paid work earns no credit.
+  Partial evidence is retained. The cutoff preserves work completed before its
+  selection, including completions received after the first 12 hours. It does
+  not rewrite signed attempt deadlines or create a miner retirement receipt.
+  Each missing evaluator terminal requires that evaluator's signed inventory at
+  a finalized block after the fixed cutoff and no later than closure. Reviewers
+  replay that observation's native proof and the retained partial originals.
+  An older partial export cannot establish that no newer work exists; a complete
+  inventory still requires ordinary case or terminal certification. Retries keep
+  the original cutoff while incorporating additional genuine completions.
+  The owner requests these snapshots through its existing settlement history
+  delivery only after selecting the cutoff. Each evaluator reuses the same
+  signed snapshot for unchanged work, so a stalled cohort does not accumulate
+  new inventory signatures or files on every poll. The cutoff request is
+  advisory; it never authorizes closure or substitutes for independent quorum.
 - The previous certified reward row remains effective until a newer cohort is
   certified and activated.
 - A five-hour rest starts after request closure is certified. The next cohort
@@ -89,9 +123,9 @@ cohort or authorize its evidence to be discarded.
   that opportunity.
 - Moving a service to another host preserves its journal, signed inputs and
   content-addressed evidence. Migration does not create a new cohort identity.
-- Operation timeouts and retries are bounded to detect a stuck attempt, but a
-  timeout does not become a terminal cohort deadline. Recovery schedules another
-  attempt with the original evidence.
+- Operation timeouts and retries detect stuck attempts. A timeout alone does not
+  complete an obligation; recovery uses original evidence or the separately
+  certified miner-tail disposition above.
 
 Standing cohort authority carries these rules without periodic coordinator
 renewal. A coordinator may be offline for longer than a nominal phase window;

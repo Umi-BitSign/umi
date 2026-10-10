@@ -25,16 +25,16 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import bittensor_core
-from websockets.exceptions import InvalidStatus, PayloadTooBig
+from websockets.exceptions import ConnectionClosed, InvalidStatus, PayloadTooBig
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence, StorageProofVerifier
 from .concurrency import run_owned_thread
 from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
+from .substrate_proof import SubstrateProofVerifierError
 
 _HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_HEX_RE = re.compile(r"^0x(?:[0-9a-f]{2})*$")
 _MAX_BLOCK_NUMBER = (1 << 64) - 1
 _MIB = 1024 * 1024
 _MAXIMUM_RPC_REQUEST_BYTES = 2 * _MIB
@@ -54,9 +54,46 @@ _RPC_RESPONSE_LIMITS = {
 class ValidatorChainError(RuntimeError):
     """A stable, non-sensitive failure while collecting finalized evidence."""
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        rpc_method: str | None = None,
+        rpc_error_code: int | None = None,
+        rpc_block_hash: str | None = None,
+        rpc_http_status: int | None = None,
+        rpc_transport_error: str | None = None,
+    ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        # Remote messages, response data and URLs may contain secrets. Retain
+        # only bounded public request identity and a numeric provider code.
+        self.rpc_method = (
+            rpc_method if type(rpc_method) is str and rpc_method in _RPC_RESPONSE_LIMITS else None
+        )
+        self.rpc_error_code = (
+            rpc_error_code
+            if type(rpc_error_code) is int and -(2**31) <= rpc_error_code < 2**31
+            else None
+        )
+        self.rpc_block_hash = (
+            rpc_block_hash
+            if type(rpc_block_hash) is str and _HASH_RE.fullmatch(rpc_block_hash)
+            else None
+        )
+        self.rpc_http_status = (
+            rpc_http_status
+            if type(rpc_http_status) is int and 100 <= rpc_http_status <= 599
+            else None
+        )
+        self.rpc_transport_error = (
+            rpc_transport_error
+            if type(rpc_transport_error) is str
+            and rpc_transport_error
+            in {"handshake_rejected", "timeout", "connection_closed", "os_error", "unknown"}
+            else None
+        )
+        self.rpc_failures: tuple[dict, ...] = ()
 
 
 class RawJsonRpc(Protocol):
@@ -195,7 +232,21 @@ class BittensorRawJsonRpc:
             if response.get("jsonrpc") != "2.0" or response.get("id") != 1:
                 raise ValidatorChainError("proof_rpc_response_invalid")
             if set(response) == {"jsonrpc", "id", "error"}:
-                raise ValidatorChainError("proof_rpc_error")
+                error = response["error"]
+                # The archive reports its historical-work quota in a normal
+                # JSON-RPC reply, not an HTTP 429. Match the observed pair;
+                # the numeric server code alone has no universal meaning.
+                historical_throttle = (
+                    isinstance(error, dict)
+                    and error.get("code") == -32004
+                    and error.get("message") == "Historical work rate limit exceeded"
+                )
+                raise ValidatorChainError(
+                    "proof_rpc_rate_limited" if historical_throttle else "proof_rpc_error",
+                    rpc_method=method,
+                    rpc_error_code=error.get("code") if isinstance(error, dict) else None,
+                    rpc_block_hash=params[-1] if params else None,
+                )
             if set(response) != {"jsonrpc", "id", "result"}:
                 raise ValidatorChainError("proof_rpc_response_invalid")
             return response["result"]
@@ -211,9 +262,27 @@ class BittensorRawJsonRpc:
                 if error.response.status_code == 429
                 else "proof_rpc_failed"
             )
-            raise ValidatorChainError(reason) from error
+            raise ValidatorChainError(
+                reason,
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+                rpc_http_status=error.response.status_code,
+                rpc_transport_error="handshake_rejected",
+            ) from error
         except Exception as error:
-            raise ValidatorChainError("proof_rpc_failed") from error
+            transport_error = "unknown"
+            if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+                transport_error = "timeout"
+            elif isinstance(error, ConnectionClosed):
+                transport_error = "connection_closed"
+            elif isinstance(error, OSError):
+                transport_error = "os_error"
+            raise ValidatorChainError(
+                "proof_rpc_failed",
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+                rpc_transport_error=transport_error,
+            ) from error
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -281,9 +350,18 @@ def _block_number(value: Any) -> int:
 
 
 def _bytes_from_hex(value: Any, reason_code: str) -> bytes:
-    if not isinstance(value, str) or _HEX_RE.fullmatch(value) is None:
+    if not isinstance(value, str) or len(value) % 2 or not value.startswith("0x"):
         raise ValidatorChainError(reason_code)
-    return bytes.fromhex(value[2:])
+    encoded = value[2:]
+    try:
+        raw = bytes.fromhex(encoded)
+    except ValueError as error:
+        raise ValidatorChainError(reason_code) from error
+    # fromhex permits whitespace and uppercase. Exact native round-trip keeps
+    # the strict wire language while avoiding a regex scan of every proof byte.
+    if raw.hex() != encoded:
+        raise ValidatorChainError(reason_code)
+    return raw
 
 
 def _strict_uint(value: Any, reason_code: str, *, maximum: int = _MAX_BLOCK_NUMBER) -> int:
@@ -559,6 +637,8 @@ class FinalizedProofCollector:
         finality: VerifiedFinalizedSnapshotPort,
         verifier: StorageProofVerifier,
         limits: ProofCollectionLimits | None = None,
+        maximum_cached_storage_evidence_bytes: int = 0,
+        read_values_from_proof: bool = False,
     ) -> None:
         if not callable(getattr(rpc, "request", None)):
             raise TypeError("rpc must implement RawJsonRpc")
@@ -566,12 +646,23 @@ class FinalizedProofCollector:
             raise TypeError("finality must implement VerifiedFinalizedSnapshotPort")
         if not callable(verifier):
             raise TypeError("verifier must be callable")
+        if type(read_values_from_proof) is not bool:
+            raise TypeError("proof value reader selection must be boolean")
+        if (
+            type(maximum_cached_storage_evidence_bytes) is not int
+            or not 0 <= maximum_cached_storage_evidence_bytes <= 64 * 1024**2
+        ):
+            raise ValueError("storage evidence reuse budget is invalid")
         self._rpc = rpc
         self._finality = finality
         self._verifier = verifier
+        self._read_values_from_proof = read_values_from_proof
         self._limits = limits or ProofCollectionLimits()
         self._checked_snapshots = OrderedDict()
         self._snapshot_lock = asyncio.Lock()
+        self._storage_evidence_budget = maximum_cached_storage_evidence_bytes
+        self._storage_evidence_bytes = 0
+        self._storage_evidence = OrderedDict()
 
     def with_evidence_rpc(self, rpc: RawJsonRpc) -> FinalizedProofCollector:
         """Reuse the same verifier and limits for retained untrusted storage bytes.
@@ -579,6 +670,9 @@ class FinalizedProofCollector:
         The source of bytes grants no finality authority. Replay callers must
         select the snapshot from their owned finality port before decoding or
         proving storage. No network fallback is added to the supplied port.
+        Replay never inherits online evidence reuse or proof-only value reads:
+        supplied archive claims must still be consumed and checked, even for an
+        already collected block.
         """
         return FinalizedProofCollector(
             rpc, finality=self._finality, verifier=self._verifier, limits=self._limits
@@ -786,23 +880,48 @@ class FinalizedProofCollector:
             raise ValueError("storage_key must be non-empty bytes")
         if len(storage_key) > self._limits.maximum_storage_key_bytes:
             raise ValidatorChainError("storage_key_limit")
+        retained_key = (snapshot, storage_key)
+        retained = self._storage_evidence.get(retained_key)
+        if retained is not None:
+            self._storage_evidence.move_to_end(retained_key)
+            return retained[0]
         key_hex = "0x" + storage_key.hex()
 
         try:
-            raw_value = await self._rpc.request(
-                "state_getStorageAt",
-                (key_hex, snapshot.block_hash),
-            )
-            value = (
-                None if raw_value is None else _bytes_from_hex(raw_value, "storage_value_invalid")
-            )
+            if self._read_values_from_proof:
+                if not callable(getattr(self._verifier, "read_many", None)):
+                    raise ValidatorChainError("storage_proof_reader_unavailable")
+                if storage_key == b":code":
+                    reused = await self._reuse_runtime_code_evidence(snapshot)
+                    if reused is not None:
+                        self._retain_storage_evidence(reused)
+                        return reused
+                nodes = await self._read_proof(snapshot, (key_hex,))
+                value = await self._value_from_proof(snapshot, storage_key, nodes)
+            else:
+                raw_value = await self._rpc.request(
+                    "state_getStorageAt",
+                    (key_hex, snapshot.block_hash),
+                )
+                value = (
+                    None
+                    if raw_value is None
+                    else _bytes_from_hex(raw_value, "storage_value_invalid")
+                )
+                nodes = None
             if value is not None and len(value) > self._limits.maximum_storage_value_bytes:
                 raise ValidatorChainError("storage_value_limit")
-
-            nodes = await self._read_proof(snapshot, (key_hex,))
+            if (
+                self._read_values_from_proof
+                and value is not None
+                and len(value) > self._limits.maximum_storage_values_bytes
+            ):
+                raise ValidatorChainError("storage_values_limit")
+            if nodes is None:
+                nodes = await self._read_proof(snapshot, (key_hex,))
 
             try:
-                return await run_owned_thread(
+                evidence = await run_owned_thread(
                     partial(
                         StorageEvidence,
                         snapshot=snapshot,
@@ -814,10 +933,122 @@ class FinalizedProofCollector:
                 )
             except (TypeError, ValueError) as error:
                 raise ValidatorChainError("storage_proof_verification_failed") from error
+            self._retain_storage_evidence(evidence)
+            return evidence
         except ValidatorChainError:
             raise
         except Exception as error:
             raise ValidatorChainError("storage_proof_rpc_failed") from error
+
+    async def _value_from_proof(
+        self, snapshot: FinalizedSnapshotRef, storage_key: bytes, nodes: tuple[bytes, ...]
+    ) -> bytes | None:
+        reader = self._verifier.read_many
+
+        def read_value():
+            values = reader(
+                state_root=bytes.fromhex(snapshot.state_root[2:]),
+                storage_keys=(storage_key,),
+                proof=nodes,
+                maximum_value_bytes=self._limits.maximum_storage_value_bytes,
+                maximum_total_value_bytes=self._limits.maximum_storage_values_bytes,
+            )
+            if (
+                type(values) is not tuple
+                or len(values) != 1
+                or type(values[0]) is not tuple
+                or len(values[0]) != 2
+                or values[0][0] != storage_key
+                or (values[0][1] is not None and type(values[0][1]) is not bytes)
+            ):
+                raise ValueError("proof reader changed the selected key or value shape")
+            value = values[0][1]
+            if value is not None and (
+                len(value) > self._limits.maximum_storage_value_bytes
+                or len(value) > self._limits.maximum_storage_values_bytes
+            ):
+                raise ValueError("proof reader exceeded the value bounds")
+            return value
+
+        try:
+            return await run_owned_thread(read_value)
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ValidatorChainError("storage_proof_verification_failed") from error
+
+    async def _reuse_runtime_code_evidence(
+        self, snapshot: FinalizedSnapshotRef
+    ) -> StorageEvidence | None:
+        # A parent proof is only a source of immutable trie nodes. The new root
+        # must independently authenticate the code, including across runtime upgrades.
+        parent = next(
+            (
+                evidence
+                for evidence, _ in reversed(self._storage_evidence.values())
+                if evidence.storage_key == b":code"
+                and evidence.value
+                and evidence.snapshot.block_hash == snapshot.parent_hash
+                and evidence.snapshot.block_number + 1 == snapshot.block_number
+            ),
+            None,
+        )
+        if parent is None:
+            return None
+        auxiliary_key = b":heappages"
+        nodes = await self._read_proof(snapshot, ("0x" + auxiliary_key.hex(),))
+        # An invalid fresh proof is never interpreted as a cache miss. An absence
+        # proof for this neighbouring key is sufficient and remains root-bound.
+        await self._value_from_proof(snapshot, auxiliary_key, nodes)
+        combined = tuple(dict.fromkeys((*nodes, *parent.proof)))
+        if (
+            len(combined) > self._limits.maximum_proof_nodes
+            or sum(map(len, combined)) > self._limits.maximum_proof_bytes
+        ):
+            return None
+        try:
+            return await run_owned_thread(
+                partial(
+                    StorageEvidence,
+                    snapshot=snapshot,
+                    storage_key=b":code",
+                    value=parent.value,
+                    proof=combined,
+                    verifier=self._verifier,
+                )
+            )
+        except ValueError as error:
+            cause = error.__cause__
+            if (
+                isinstance(cause, SubstrateProofVerifierError)
+                and cause.reason_code == "invalid_proof"
+            ):
+                # A valid new root may require different code or branch nodes.
+                # Fetch the ordinary full proof at the same exact block.
+                return None
+            raise ValidatorChainError("storage_proof_verification_failed") from error
+
+    def _retain_storage_evidence(self, evidence: StorageEvidence) -> None:
+        # Historical runtime collection revisits the preceding block as the
+        # next block's parent. Three entries keep the previous current/parent
+        # pair until the next current block has been collected;
+        # this supplies no finality, codec or mutable account-state authority.
+        if not self._storage_evidence_budget:
+            return
+        size = (
+            len(evidence.storage_key) + len(evidence.value or b"") + sum(map(len, evidence.proof))
+        )
+        if size > self._storage_evidence_budget:
+            return
+        key = (evidence.snapshot, evidence.storage_key)
+        previous = self._storage_evidence.pop(key, None)
+        if previous is not None:
+            self._storage_evidence_bytes -= previous[1]
+        self._storage_evidence[key] = (evidence, size)
+        self._storage_evidence_bytes += size
+        while len(self._storage_evidence) > 3 or (
+            self._storage_evidence_bytes > self._storage_evidence_budget
+        ):
+            _, (_, removed_size) = self._storage_evidence.popitem(last=False)
+            self._storage_evidence_bytes -= removed_size
 
     async def storage_evidence_many(
         self,

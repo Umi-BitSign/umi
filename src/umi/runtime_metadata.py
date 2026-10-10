@@ -14,6 +14,8 @@ import os
 import re
 import signal
 import subprocess
+import threading
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +32,7 @@ MAX_CODE_BYTES = 8 * 1024**2
 MAX_METADATA_BYTES = 16 * 1024**2
 MAX_RESPONSE_BYTES = 2 * MAX_METADATA_BYTES + 4096
 _HASH = re.compile(r"^[0-9a-f]{64}$")
-_HEX = re.compile(r"^(?:[0-9a-f]{2})+$")
+_HEX = re.compile(r"^[0-9a-f]+$")
 _FIELDS = frozenset(
     {
         "schema",
@@ -92,6 +94,11 @@ class RuntimeMetadataExecutor:
         self.binary_path = binary_path
         self.expected_sha256 = expected_sha256
         self.timeout_seconds = timeout_seconds
+        self._execution_lock = threading.Lock()
+        self._executed: OrderedDict[tuple[str, str], tuple[FinalizedRuntimePin, bytes, int]] = (
+            OrderedDict()
+        )
+        self._executed_bytes = 0
 
     def execute(self, snapshot: FinalizedSnapshotRef, evidence: StorageEvidence):
         if (
@@ -104,7 +111,31 @@ class RuntimeMetadataExecutor:
             or not 0 < len(evidence.value) <= MAX_CODE_BYTES
         ):
             raise RuntimeMetadataError("runtime_code_evidence_invalid")
-        raw = self._invoke(evidence.value)
+        # Reuse only validated immutable metadata, never a snapshot, proof or
+        # mutable runtime codec. Each caller above supplies its own code proof.
+        # Serializing first execution also coalesces overlapping history reads.
+        key = (self.expected_sha256, hashlib.sha256(evidence.value).hexdigest())
+        with self._execution_lock:
+            saved = self._executed.get(key)
+            if saved is None:
+                raw = self._invoke(evidence.value)
+                result = self._decode_output(snapshot, evidence, raw)
+                while self._executed and (
+                    len(self._executed) >= 4 or self._executed_bytes + len(raw) > MAX_RESPONSE_BYTES
+                ):
+                    _, previous = self._executed.popitem(last=False)
+                    self._executed_bytes -= previous[2]
+                # Charge the complete original response size conservatively,
+                # even though only its decoded metadata and frozen pin remain.
+                self._executed[key] = (result.pin, result.metadata_bytes, len(raw))
+                self._executed_bytes += len(raw)
+            else:
+                pin, metadata, _ = saved
+                result = self._runtime_context(snapshot, evidence, pin, metadata)
+            self._executed.move_to_end(key)
+            return result
+
+    def _decode_output(self, snapshot, evidence, raw):
         if (
             not raw
             or len(raw) > MAX_RESPONSE_BYTES
@@ -122,6 +153,7 @@ class RuntimeMetadataExecutor:
                 or value["runtime_code_sha256"] != hashlib.sha256(evidence.value).hexdigest()
                 or not isinstance(value["metadata_hex"], str)
                 or len(value["metadata_hex"]) > 2 * MAX_METADATA_BYTES
+                or len(value["metadata_hex"]) % 2
                 or not _HEX.fullmatch(value["metadata_hex"])
             ):
                 raise ValueError("response binding")
@@ -141,6 +173,14 @@ class RuntimeMetadataExecutor:
             )
             if hashlib.sha256(metadata).hexdigest() != pin.metadata_sha256:
                 raise ValueError("metadata digest")
+            return self._runtime_context(snapshot, evidence, pin, metadata)
+        except (ValueError, TypeError, KeyError, RuntimeError) as error:
+            raise RuntimeMetadataError("runtime_execution_response_invalid") from error
+
+    def _runtime_context(self, snapshot, evidence, pin, metadata):
+        # bittensor_core.Runtime is mutable: every consumer gets a new codec,
+        # bound to that consumer's freshly proven snapshot and code evidence.
+        try:
             runtime = bittensor_core.Runtime(
                 metadata, pin.spec_version, pin.transaction_version, ss58_format=pin.ss58_prefix
             )

@@ -3,6 +3,7 @@ import os
 import stat
 
 import pytest
+from pydantic import field_validator
 
 import umi.private_files as files
 from umi.protocol import StrictProtocolModel, canonical_json_bytes
@@ -28,6 +29,48 @@ def test_publication_exact_retry_preserves_inode_and_conflict_preserves_bytes(tm
     assert path.stat().st_ino == inode
     assert path.read_bytes() == canonical_json_bytes(value)
     assert not list(path.parent.glob(".pending-*"))
+
+
+def test_exact_retry_compares_current_bytes_without_repeated_canonical_checks(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "outbox" / "record.json"
+    value = StoredRecord(value="retained")
+    files.publish_private_model(path, value)
+
+    def unexpected_serialization(*args):
+        raise AssertionError("exact bytes already establish canonical equality")
+
+    monkeypatch.setattr(files, "canonical_json_matches", unexpected_serialization)
+    files.publish_private_model(path, value)
+    path.write_bytes(canonical_json_bytes(StoredRecord(value="different")))
+    with pytest.raises(ValueError, match="different bytes"):
+        files.publish_private_model(path, value)
+
+
+def test_exact_retry_still_validates_a_constructed_model(tmp_path):
+    path = tmp_path / "outbox" / "record.json"
+    # Initial publication historically allows a BaseModel constructed without
+    # validation. Exact equality must not bypass the retry's schema validation.
+    value = StoredRecord.model_construct(value=123)
+    with pytest.warns(UserWarning):
+        files.publish_private_model(path, value)
+    with pytest.warns(UserWarning), pytest.raises(ValueError):
+        files.publish_private_model(path, value)
+
+
+def test_exact_retry_rejects_bytes_changed_by_schema_normalization(tmp_path):
+    class NormalizedRecord(StoredRecord):
+        @field_validator("value")
+        @classmethod
+        def normalized(cls, value):
+            return value.strip()
+
+    path = tmp_path / "outbox" / "record.json"
+    value = NormalizedRecord.model_construct(value=" padded ")
+    files.publish_private_model(path, value)
+    with pytest.raises(ValueError, match="stable canonical bytes"):
+        files.publish_private_model(path, value)
 
 
 def _unsafe_destination(path, kind):

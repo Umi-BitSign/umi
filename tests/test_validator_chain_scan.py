@@ -555,6 +555,26 @@ async def test_weights_set_event_without_account_is_attributed_from_nested_call_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["Initialization", "Finalization"])
+async def test_hook_weights_set_is_retained_without_inventing_an_origin(phase) -> None:
+    port = FakePort()
+    item = identity(552)
+    weights_set = event("SubtensorModule", "WeightsSet", [78, 7], extrinsic_index=None)
+    weights_set["phase"] = phase
+    add_block(port, item, [call("Timestamp", "set", [arg("now", 1)])], [weights_set, success()])
+
+    block = await scanner(port).decode_block(item)
+    observed = block.events[0]
+    assert observed.event == "WeightsSet"
+    assert observed.netuid == 78 and observed.mechanism_id == 0
+    assert observed.extrinsic_index is None and observed.account_id32 is None
+    with pytest.raises(ValidatorChainScanError, match="shadow_no_weight_assertion_failed"):
+        await scanner(port).decode_no_weight_interval(
+            (item,), start_block=552, end_block=552, validator_account=VALIDATOR
+        )
+
+
+@pytest.mark.asyncio
 async def test_unknown_or_incomplete_wrapper_decode_fails_closed() -> None:
     port = FakePort()
     item = identity(56)

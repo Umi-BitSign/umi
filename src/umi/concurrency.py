@@ -59,6 +59,36 @@ async def run_owned_thread(
     return await await_owned_task(task, on_cancel=on_cancel)
 
 
+async def run_until_stopped(
+    coroutine: Coroutine[Any, Any, _Result], stop: asyncio.Event
+) -> _Result | None:
+    """Request cancellation on stop, retaining ownership through native cleanup.
+
+    The operation must drain its own blocking work before propagating cancellation.
+    This introduces no elapsed-time cutoff and does not terminate a process.
+    """
+    if stop.is_set():
+        coroutine.close()
+        return None
+    work = asyncio.create_task(coroutine)
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait((work, stopping), return_when=asyncio.FIRST_COMPLETED)
+        if work in done:
+            return work.result()
+    finally:
+
+        async def drain():
+            work.cancel()
+            stopping.cancel()
+            await asyncio.gather(work, stopping, return_exceptions=True)
+
+        await await_owned_task(asyncio.create_task(drain()))
+    if not work.cancelled():
+        return work.result()
+    return None
+
+
 async def wait_for_owned(coroutine: Coroutine[Any, Any, _Result], *, timeout: float) -> _Result:
     """Cancel on timeout or caller cancellation, then drain the owned operation.
 

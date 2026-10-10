@@ -6,6 +6,7 @@ These assembly tests do not qualify an installed Linux service or chain effect.
 
 import asyncio
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,37 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
     h.save(h.path, b" " + canonical_json_bytes(h.config))
     with pytest.raises(ValueError, match="canonical"):
         boot.load_reward_coordinator_config(h.path)
+
+
+def test_proof_read_selection_preserves_existing_configuration_bytes(config_case):
+    h = config_case
+    original = canonical_json_bytes(h.config)
+    assert b'"runtime_proof_reads"' not in original
+    assert not boot.load_reward_coordinator_config(h.path).runtime_proof_reads
+    selected = h.config.model_copy(update={"runtime_proof_reads": True})
+    h.save(h.path, canonical_json_bytes(selected))
+    assert boot.load_reward_coordinator_config(h.path).runtime_proof_reads
+    assert (
+        canonical_json_bytes(selected.model_copy(update={"runtime_proof_reads": False})) == original
+    )
+    with pytest.raises(ValueError):
+        boot.RewardCoordinatorConfig.model_validate(
+            h.config.model_dump(by_alias=True) | {"runtime_proof_reads": "true"}
+        )
+
+
+def test_coordinator_history_capacity_matches_native_history_envelope(config_case):
+    original = config_case.config.model_dump(by_alias=True)
+    for maximum in [1024, 16 * 1024**3 + 1, 64 * 1024**3, 512 * 1024**3]:
+        selected = boot.RewardCoordinatorConfig.model_validate(
+            original | {"maximum_history_bytes": maximum}
+        )
+        assert selected.maximum_history_bytes == maximum
+    for maximum in [True, 1023, 512 * 1024**3 + 1]:
+        with pytest.raises(ValueError):
+            boot.RewardCoordinatorConfig.model_validate(
+                original | {"maximum_history_bytes": maximum}
+            )
 
 
 def test_direct_series_requires_read_only_coordinator_source(config_case, tmp_path):
@@ -155,20 +187,27 @@ def test_wallet_and_replication_stores_cannot_overlap(config_case):
             boot.RewardCoordinatorConfig.model_validate(config.model_dump(by_alias=True) | change)
 
 
+@pytest.mark.parametrize("proof_reads", [False, True])
 @pytest.mark.parametrize(
     "role,failure",
     [
         (role, failure)
         for role in ("coordinator", "reviewer")
-        for failure in (None, "key", "start", "run")
-    ]
-    + [("coordinator", "coverage"), ("coordinator", "coverage_exit")],
+        for failure in (None, "key", "start", "run", "coverage", "coverage_exit")
+    ],
 )
 async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
-    config_case, monkeypatch, role, failure
+    config_case, monkeypatch, role, failure, proof_reads
 ):
     h = config_case
-    config = h.config
+    config = h.config.model_copy(
+        update={
+            "runtime_proof_reads": proof_reads,
+            "maximum_history_bytes": 512 * 1024**3
+            if proof_reads
+            else h.config.maximum_history_bytes,
+        }
+    )
     if role == "reviewer":
         config = boot.RewardCoordinatorConfig.model_validate(
             config.model_dump(by_alias=True)
@@ -185,6 +224,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
 
     class Provider:
         def __init__(self, chain, policy, **kwargs):
+            assert kwargs["runtime_proof_reads"] is proof_reads
             self.config, self.policy = chain, policy
             self.started, self.closed = False, False
             providers.append(self)
@@ -239,6 +279,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     async def collect(self, stop, *, poll_seconds):
         collector_lifecycle.append("started")
         try:
+            assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             if failure == "coverage":
                 raise OSError("coverage failure")
             if failure == "coverage_exit":
@@ -249,6 +290,9 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
 
     async def reviewer(self, owner, stop, *, poll_seconds):
         await running(self.signer, owner.provider)
+        if failure in {"coverage", "coverage_exit"}:
+            await asyncio.Event().wait()
+        stop.set()
 
     monkeypatch.setattr(boot, "StandingRewardCoordinator", Coordinator)
     monkeypatch.setattr(boot.StandingRewardCoverageService, "run", collect)
@@ -284,6 +328,35 @@ def test_cli_failure_omits_exception_values(monkeypatch, capsys):
         cli.main(["check", "--config", "/not-a-config"])
     assert error.value.code == 1
     assert json.loads(capsys.readouterr().out) == dict(status="failed", error_type="ValueError")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+async def test_cli_signal_drains_reader_before_removing_handlers(monkeypatch, signum):
+    loop = asyncio.get_running_loop()
+    handlers, events = {}, []
+    config = object()
+
+    def remove(value):
+        assert events == ["reader-started", "reader-drained"]
+        del handlers[value]
+
+    async def run(selected, stop):
+        assert selected is config
+        events.append("reader-started")
+        handlers[signum]()
+        assert stop.is_set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("reader-drained")
+
+    monkeypatch.setattr(
+        loop, "add_signal_handler", lambda value, callback: handlers.update({value: callback})
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", remove)
+    monkeypatch.setattr(cli, "run_reward_coordinator", run)
+    await asyncio.wait_for(cli._run(config), 30)
+    assert not handlers and events == ["reader-started", "reader-drained"]
 
 
 def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():

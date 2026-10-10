@@ -556,6 +556,41 @@ async def test_readiness_capacity_and_seal_preserve_duplicate_recovery(api_case,
     assert (await post(s)).json() == first.json()
 
 
+def test_capacity_snapshot_does_not_take_the_queue_writer(api_case):
+    queue = api_case.c.queue
+    # A real compound mutex and SQLite writer stay owned while the advisory
+    # check reads the committed snapshot through another connection.
+    with queue.journal.locked(), queue.journal.transaction() as db:
+        before = db.total_changes
+        assert ServiceWorkAdmissionAPI._capacity(queue) == ("accepting", 4)
+        assert db.in_transaction and db.total_changes == before
+
+
+@pytest.mark.parametrize("fence", ["capacity", "sealed"])
+async def test_full_or_sealed_readiness_skips_byte_capacity_scan(api_case, monkeypatch, fence):
+    s = api_case
+    accepted = await post(s)
+    if fence == "capacity":
+        s.c.cfg = s.c.cfg.model_copy(update={"maximum_claims": 1})
+        restart(s)
+    else:
+        s.c.queue.seal(s.source, s.observed, expected_tip_sha256=history_tip(s.source.history))
+
+    def unexpected_scan(_db):
+        raise AssertionError("a full or sealed catalog needs no byte-capacity scan")
+
+    monkeypatch.setattr(s.c.queue.journal, "_capacity", unexpected_scan)
+    response = await ready(s)
+    assert response.status_code == 200 and not response.json()["ready"]
+    assert response.json()["reason_code"] == (
+        "capacity_exhausted" if fence == "capacity" else "sealed"
+    )
+    s.calls.clear()
+    assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == 503
+    assert not s.calls
+    assert (await post(s)).json() == accepted.json()
+
+
 async def test_closed_history_is_remembered_and_cannot_roll_back(api_case, chain):
     s = api_case
     first = await post(s)

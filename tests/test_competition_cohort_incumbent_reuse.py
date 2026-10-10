@@ -1,10 +1,12 @@
 """Native original orders, journals and boundary replay with synthetic sandbox calls."""
 
 import asyncio
+import threading
 
 import pytest
 
 from umi.competition_cohort_execution_journal import (
+    execution_step_key,
     incumbent_scope,
     step_count,
 )
@@ -51,6 +53,28 @@ async def finish(e, assignment):
         e.r.h.block += 1
         result = await executor.advance(assignment)
     return result
+
+
+async def test_started_snapshot_does_not_wait_for_uncommitted_execution(execution):
+    owner, job = execution.journal(), execution.job
+    assert owner._execution_started(job) is False
+    key = execution_step_key(job, 0)
+    entered, release = threading.Event(), threading.Event()
+
+    def writer():
+        with owner.journal.transaction() as db:
+            db.execute("INSERT INTO records VALUES ('step',?,?)", (key, b"{}"))
+            entered.set()
+            assert release.wait(60)
+
+    pending = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        assert await asyncio.wait_for(asyncio.to_thread(owner._execution_started, job), 10) is False
+    finally:
+        release.set()
+        await pending
+    assert owner._execution_started(job) is True
 
 
 def cursor_before_peer(e, peer_slot):

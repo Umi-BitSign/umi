@@ -432,9 +432,18 @@ class ServiceWorkAdmissionAPI:
 
     @staticmethod
     def _capacity(queue, archive_bytes=0):
-        with queue.journal.locked(), canonical_json_reuse(), queue.journal.transaction() as db:
+        # This is an advisory read, not a capacity reservation. The admission
+        # commit owns the writer and rechecks its actual allowance atomically.
+        # Readiness must not hold up dispatch/retirement writers or wait for them.
+        with canonical_json_reuse(), queue.journal.read_transaction() as db:
             catalog, _ = queue._catalog(db)
             count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
+            remaining = max(0, min(len(catalog.catalog.work), queue.config.maximum_claims) - count)
+            sealed = queue.journal.get("service_work_seal", queue.config.catalog_sha256, db=db)
+            if sealed is not None:
+                return "sealed", remaining
+            if not remaining:
+                return "capacity_exhausted", 0
             _, used, _ = queue.journal._capacity(db)
             seal_reserved = queue.journal._obligation(
                 db, "service_work_seal", queue.config.catalog_sha256
@@ -444,13 +453,9 @@ class ServiceWorkAdmissionAPI:
                 + (0 if seal_reserved else MAX_SERVICE_SEAL_BYTES)
                 + archive_bytes
             )
-            remaining = max(0, min(len(catalog.catalog.work), queue.config.maximum_claims) - count)
-            sealed = queue.journal.get("service_work_seal", queue.config.catalog_sha256, db=db)
             reason = (
-                "sealed"
-                if sealed is not None
-                else "capacity_exhausted"
-                if not remaining or queue.journal.maximum_bytes - used <= needed
+                "capacity_exhausted"
+                if queue.journal.maximum_bytes - used <= needed
                 else "accepting"
             )
             return reason, remaining
