@@ -131,6 +131,15 @@ class ServiceDispatchHost:
         )
         blocks = CompetitionTransportFinality(finality, source.transport)
 
+        async def observe(assignment: ServiceWorkAssignment):
+            # Input capture may advance beyond an otherwise age-valid cached
+            # registration observation. Require the current owned head after
+            # capturing the window, so persistence cannot repeatedly reject
+            # authority that predates this request's issuance.
+            return await authority.observe(
+                assignment, minimum_block=await blocks.finalized_head_height()
+            )
+
         async def inputs(assignment: ServiceWorkAssignment) -> ServiceRequestInputs:
             # Verify live authority before publishing private media. Capturing
             # the request window comes last, after a potentially slow upload.
@@ -193,7 +202,7 @@ class ServiceDispatchHost:
             lambda: ServiceWorkWorker(
                 transport,
                 inputs,
-                authority.observe,
+                observe,
                 peers.reviewers,
                 peers.retry,
                 self.sign,

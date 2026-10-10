@@ -12,6 +12,7 @@ from .competition_reward_coordinator_boot import (
     load_reward_coordinator_config,
     run_reward_coordinator,
 )
+from .concurrency import run_until_stopped
 from .open_competition import digest
 
 
@@ -39,7 +40,7 @@ async def _run(config):
     for value in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(value, stop.set)
     try:
-        await run_reward_coordinator(config, stop)
+        await run_until_stopped(run_reward_coordinator(config, stop), stop)
     finally:
         for value in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(value)

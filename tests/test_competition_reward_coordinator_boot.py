@@ -6,6 +6,7 @@ These assembly tests do not qualify an installed Linux service or chain effect.
 
 import asyncio
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -305,6 +306,35 @@ def test_cli_failure_omits_exception_values(monkeypatch, capsys):
         cli.main(["check", "--config", "/not-a-config"])
     assert error.value.code == 1
     assert json.loads(capsys.readouterr().out) == dict(status="failed", error_type="ValueError")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+async def test_cli_signal_drains_reader_before_removing_handlers(monkeypatch, signum):
+    loop = asyncio.get_running_loop()
+    handlers, events = {}, []
+    config = object()
+
+    def remove(value):
+        assert events == ["reader-started", "reader-drained"]
+        del handlers[value]
+
+    async def run(selected, stop):
+        assert selected is config
+        events.append("reader-started")
+        handlers[signum]()
+        assert stop.is_set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("reader-drained")
+
+    monkeypatch.setattr(
+        loop, "add_signal_handler", lambda value, callback: handlers.update({value: callback})
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", remove)
+    monkeypatch.setattr(cli, "run_reward_coordinator", run)
+    await asyncio.wait_for(cli._run(config), 30)
+    assert not handlers and events == ["reader-started", "reader-drained"]
 
 
 def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():

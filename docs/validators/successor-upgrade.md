@@ -350,6 +350,11 @@ revocation in that history does not erase the initial handoff. Historical replay
 uses the retained proofs and a fixed target block while catching up; it grants no
 current submission authority. The executor checks fresh control before signing.
 Cancellation drains owned signing work before releasing the writer locks.
+The standing supervisor and reward-reader CLI request cooperative cancellation
+when SIGTERM or SIGINT sets their stop event, including during initial history
+replay. The current owned operation and cleanup finish before process ownership
+is released; shutdown need not finish the remaining replay batch. This does not
+add a forced termination deadline or permit a replacement writer to overlap.
 
 While first-activation replay is pending, predecessor reconciliation publishes
 the same `umi-successor-host-status/1` reports as the ordinary supervisor.
@@ -827,6 +832,11 @@ recheck certified history and native registration/Axon proofs against the origin
 queue assignment. A valid closure is retained before execution is refused, so a
 stale history cannot reopen work. Supply renewable media/window inputs and
 terminal signing separately.
+After window capture, the configured dispatcher requires its registration
+observation to reach the current owned finalized head. An otherwise age-valid
+cached observation must not predate request issuance. A lagging provider keeps
+the work pending; the dispatcher neither backdates the request nor relaxes its
+current-authority check.
 
 Worker reports separate preparation waits for inputs, current authority, media
 delivery, retained request lineage, the issuance window and journal persistence.

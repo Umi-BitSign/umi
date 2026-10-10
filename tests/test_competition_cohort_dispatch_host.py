@@ -238,6 +238,46 @@ async def test_native_work_export_routes_only_selected_catalog(host):
         await h.respond(request.model_copy(update={"claim": claim}))
 
 
+@pytest.mark.parametrize("lagging", [False, True])
+async def test_dispatch_observation_refreshes_age_valid_registration_after_window(host, lagging):
+    h, s = host.open(), host.s
+    native = h.service.provider
+    cached = await native.collect()
+    minima = []
+
+    class CachedRegistration:
+        policy = native.policy
+
+        async def collect(self):
+            return cached
+
+        async def collect_at_least(self, block):
+            minima.append(block)
+            return cached if lagging else await native.collect()
+
+    h.service.finality = CachedRegistration()
+    worker = await h.worker(host.catalog)
+    original = canonical_json_bytes(s.body)
+    # The capture remains within its age budget while owned finality advances.
+    # A plain collect() would return authority older than a new request window.
+    head = cached.snapshot.block + 1
+    await s.move(head)
+    s.p.finality.head = head
+    if lagging:
+        with pytest.raises(OSError, match="precedes required origin"):
+            await worker.observation(s.c.assignment)
+    else:
+        source, capture = await worker.observation(s.c.assignment)
+        assert capture.snapshot.block == head
+        assert source == await s.history(s.c.assignment.round.cohort_sha256)
+    assert minima == [head]
+    assert (
+        canonical_json_bytes(worker.requests.latest(s.c.claim, worker.transport.evaluator))
+        == original
+    )
+    assert s.p.model.calls == 0 and s.signatures == 0
+
+
 async def test_recurring_dispatch_waits_for_inputs_then_drains(host):
     h, stop = host.open(), asyncio.Event()
     original = host.lifecycle._request_source
