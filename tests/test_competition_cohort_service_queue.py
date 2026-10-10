@@ -326,6 +326,39 @@ def test_retention_keeps_original_blocks_after_restart_without_review(queue_case
         c.queue.entries()
 
 
+def test_unchanged_retention_reuses_projection_but_new_claims_are_pinned(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    read = Mock(wraps=c.queue._raw_admission)
+    monkeypatch.setattr(c.queue, "_raw_admission", read)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    read.assert_not_called()
+    c.queue.admit(
+        *inputs(c, "Bob", 2),
+        c.h.source,
+        capture(401),
+        expected_tip_sha256=history_tip(c.h.source.history),
+    )
+    read.reset_mock()
+    assert c.queue.retained_registration_blocks() == frozenset({400, 401})
+    assert read.call_count == 2
+    read.reset_mock()
+    assert c.queue.retained_registration_blocks() == frozenset({400, 401})
+    read.assert_not_called()
+
+
+def test_retention_reuse_still_observes_new_conflict_hold(queue_case):
+    c = queue_case
+    value = admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    changed = value.model_copy(update={"ordinal": value.ordinal + 1})
+    with pytest.raises(ValueError):
+        c.queue.journal.put("service_admission", value.work_sha256, changed)
+    with pytest.raises(ValueError, match="conflict"):
+        c.queue.retained_registration_blocks()
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_empty_retention_does_not_require_catalog(queue_case, monkeypatch, installed):
     c = queue_case
@@ -347,6 +380,7 @@ def test_retention_rejects_changed_indexes_and_missing_admissions(queue_case, da
     c = queue_case
     admit(c)
     admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
     with c.queue.journal.transaction() as db:
         if damage in {"claim_key", "admission"}:
             db.execute(f"UPDATE service_claims SET {damage}=? WHERE ordinal=1", ("ff" * 32,))
@@ -364,6 +398,7 @@ def test_retention_rejects_changed_indexes_and_missing_admissions(queue_case, da
 def test_retention_checks_original_bindings_even_when_index_digest_matches(queue_case, damage):
     c = queue_case
     value = admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
     if damage == "predecessor":
         changed = value.model_copy(update={"predecessor_sha256": "ff" * 32})
     else:

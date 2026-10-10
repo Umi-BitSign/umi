@@ -479,6 +479,13 @@ and rolls back. Corruption, conflicting records, stale proofs and untrusted erro
 subclasses continue to hold collection. Routine pruning resumes on a successful
 pin projection.
 
+For an unchanged paid-service queue, the process reuses its checked registration
+pin set. Each lookup still reads the current catalog, claim indices, admission
+bytes and conflict holds in one snapshot; changed inputs rebuild the projection.
+This avoids reconstructing every accepted claim inside each registration save.
+The cache does not authorize work, substitute for admission review or survive a
+process restart.
+
 Before endpoint proof collection, the origin observer waits to reach the owned
 execution start height. After collection, a lagging authority observer may catch
 up within the configured operational read allowance. The retained capture is

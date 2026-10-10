@@ -16,7 +16,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .canonical_reuse import canonical_json_reuse
-from .competition_assignment_reuse import AssignmentVerificationReuse
+from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_evaluation import RecoverableEvaluationRound
@@ -75,6 +75,7 @@ class ServiceWorkQueue:
         if self.config.policy_sha256 != digest(self.policy):
             raise ValueError("service queue policy binding differs")
         self._parsed_records = AssignmentVerificationReuse(maximum_entries=1024)
+        self._retention_projection = AssignmentVerificationReuse(maximum_entries=1)
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -400,10 +401,13 @@ class ServiceWorkQueue:
 
         Registration persistence calls this while owning its database. Keep
         this projection local to the queue; full history and signature review
-        remains required by lookup, assignment, entries and sealing.
+        remains required by lookup, assignment, entries and sealing. Reuse the
+        checked projection only for unchanged records, indices and bindings.
         """
         with canonical_json_reuse(), self.journal.read_transaction() as db:
-            rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+            rows = db.execute(
+                "SELECT ordinal,claim_key,admission FROM service_claims ORDER BY ordinal"
+            ).fetchall()
             bodies = db.execute(
                 "SELECT count(*) FROM records WHERE kind='service_admission'"
             ).fetchone()[0]
@@ -412,11 +416,33 @@ class ServiceWorkQueue:
             if not rows:
                 return frozenset()
             catalog = self._catalog(db)[0].catalog
+
+            def records():
+                for ordinal, (stored_ordinal, _, _) in enumerate(rows, 1):
+                    if stored_ordinal != ordinal:
+                        raise ValueError("service retention ordinal prefix is incomplete")
+                    raw = self.journal.get_raw(
+                        "service_admission", service_work_key(catalog, ordinal), db=db
+                    )
+                    if raw is None:
+                        raise FileNotFoundError("accepted service admission is missing")
+                    yield raw
+
+            # Stream current native reads into a small fingerprint. No complete
+            # claim tree is copied on a hit; conflict holds, canonical bytes and
+            # owner indices still come from this same fresh read snapshot.
+            key = (
+                assignment_reuse_key(
+                    self.journal, "registration_retention", records(), self.config, self.policy, {}
+                ),
+                tuple(rows),
+            )
+            cached = self._retention_projection.lookup("blocks", key)
+            if cached is not None:
+                return frozenset(cached)
             blocks = set()
             previous = None
-            for ordinal, (stored_ordinal,) in enumerate(rows, 1):
-                if stored_ordinal != ordinal:
-                    raise ValueError("service retention ordinal prefix is incomplete")
+            for ordinal, _, _ in rows:
                 value = self._raw_admission(ordinal, db, catalog=catalog)
                 if (
                     value.catalog_sha256 != self.config.catalog_sha256
@@ -435,6 +461,7 @@ class ServiceWorkQueue:
                     raise ValueError("service retention changed original registration bindings")
                 blocks.add(value.observation.block)
                 previous = value
+            self._retention_projection.remember("blocks", key, tuple(sorted(blocks)))
             return frozenset(blocks)
 
     def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:
