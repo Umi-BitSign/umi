@@ -854,6 +854,14 @@ delivery, retained request lineage, the issuance window and journal persistence.
 elapsed times are operational diagnostics; they expose no work payloads and do
 not change request deadlines or authorize completion.
 
+`service_transport_pending` identifies a failed grant or retirement exchange by
+operation, miner hotkey, exact request-body digest and numeric HTTP status. A
+status of `0` means no HTTP response was available; `failure` distinguishes
+timeout, HTTP transport, operating-system and response-bound failures. Logs omit
+response bodies, headers, addresses and exception messages. A pending exchange
+does not authorize replacement work or establish an inference failure; the worker
+continues the original recovery and retirement procedure.
+
 Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
 It commits the fixed work, policy, cohort, authority and service terms without
 requiring the future roster, preparation block or incumbent. The series manifest

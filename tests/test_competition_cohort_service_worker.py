@@ -716,6 +716,97 @@ async def test_expired_unsent_service_reaches_retirement_lane(loop, monkeypatch)
     )
 
 
+async def test_transport_status_diagnostics_preserve_pending_work_and_hide_response(loop, caplog):
+    s, p = loop, loop.p
+    worker = s.worker()
+    body = await worker._prepare(s.c.assignment)
+    await worker._certificate(body)
+    slot = service_grant_slot(body)
+    original = canonical_json_bytes(body)
+    network = worker.transport.transport
+    logger = "umi.competition_cohort_service_transport"
+
+    class Unreadable(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("a failed response body must not be inspected for diagnostics")
+            yield b""  # pragma: no cover
+
+    def refused(status):
+        return httpx.MockTransport(
+            lambda request: httpx.Response(
+                status,
+                stream=Unreadable(),
+                headers={"X-Private-Diagnostic": "do-not-log-private-header"},
+            )
+        )
+
+    with caplog.at_level("WARNING", logger=logger):
+        for status in (413, 429, 503):
+            caplog.clear()
+            worker.transport.transport = refused(status)
+            outcome = await worker.transport.advance(slot, retire=False)
+            assert outcome.reason == "grant_pending" and outcome.response is None
+            assert worker.journal.get("service_grant_delivery", slot) is None
+            assert worker.journal.get("service_dispatch_intent", slot) is None
+            messages = [r.getMessage() for r in caplog.records if r.name == logger]
+            assert len(messages) == 1
+            assert "operation=grant" in messages[0] and f"http_status={status}" in messages[0]
+            assert "failure=http_status" in messages[0]
+            assert p.miner.hotkey_ss58 in messages[0]
+            assert "do-not-log-private-header" not in messages[0]
+            assert "https://" not in messages[0]
+
+        worker.transport.transport = network
+        outcome = await worker.transport.advance(slot, retire=False)
+        assert outcome.response is not None and outcome.retirement is None
+        assert p.model.calls == 1
+        for status in (429, 503):
+            caplog.clear()
+            worker.transport.transport = refused(status)
+            outcome = await worker.transport.advance(slot)
+            assert outcome.reason == "retirement_pending" and outcome.response is not None
+            assert worker.journal.get("service_retirement", slot) is None
+            messages = [r.getMessage() for r in caplog.records if r.name == logger]
+            assert len(messages) == 1
+            assert "operation=retirement" in messages[0] and f"http_status={status}" in messages[0]
+            assert p.model.calls == 1
+
+    worker.transport.transport = network
+    outcome = await worker.transport.advance(slot)
+    assert outcome.reason == "response_retained" and outcome.retirement is not None
+    assert canonical_json_bytes(worker.requests._body(slot)) == original
+    assert worker.journal.get("service_terminal", s.c.assignment.admission.work_sha256) is None
+    assert s.paths.count(TRANSLATE_PATH) == p.model.calls == 1
+
+
+async def test_transport_failure_diagnostics_never_copy_exception_messages(loop, caplog):
+    worker = loop.worker()
+    capture = await loop.origin(loop.c.assignment)
+    logger = "umi.competition_cohort_service_transport"
+    for error, failure in (
+        (httpx.ConnectError("https://private.example/bearer-secret"), "http_transport"),
+        (httpx.ReadTimeout("private-token"), "timeout"),
+        (OSError("private-host-path"), "os_error"),
+    ):
+
+        def fail(request, error=error):
+            raise error
+
+        worker.transport.transport = httpx.MockTransport(fail)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger=logger):
+            assert (
+                await worker.transport._exchange(
+                    capture, COHORT_GRANT_PATH, {"private_body": "private-payload"}, 1024
+                )
+                is None
+            )
+        messages = [r.getMessage() for r in caplog.records if r.name == logger]
+        assert len(messages) == 1 and f"failure={failure}" in messages[0]
+        assert "http_status=0" in messages[0]
+        assert "private" not in messages[0] and "bearer-secret" not in messages[0]
+
+
 @pytest.mark.parametrize("expired,retained_grant", [(False, True), (True, True), (True, False)])
 async def test_failed_grant_retry_does_not_block_expired_native_retirement(
     loop, monkeypatch, expired, retained_grant

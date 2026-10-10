@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import time
 from collections.abc import Awaitable, Callable
@@ -56,6 +57,7 @@ from .validator import (
 )
 
 ServiceOriginSource = Callable[[ServiceWorkAssignment], Awaitable[EndpointOriginCapture]]
+_LOG = logging.getLogger(__name__)
 
 
 class ServiceDispatchIntent(StrictProtocolModel):
@@ -137,6 +139,23 @@ class ServiceWorkTransport:
 
     async def _exchange(self, capture, path, value, maximum):
         body = canonical_json_bytes(value)
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        operation = {COHORT_GRANT_PATH: "grant", COHORT_RETIRE_PATH: "retirement"}.get(
+            path, "unknown"
+        )
+
+        def pending(*, http_status=0, failure="http_status"):
+            # Report only fixed labels and already public identities. Responses,
+            # exception messages, URLs and authentication headers stay private.
+            _LOG.warning(
+                "service_transport_pending operation=%s miner_hotkey=%s "
+                "body_sha256=%s http_status=%s failure=%s",
+                operation,
+                capture.hotkey,
+                body_sha256,
+                http_status,
+                failure,
+            )
 
         async def exchange():
             origin, host, sni = await _pinned_public_origin(
@@ -150,7 +169,7 @@ class ServiceWorkTransport:
                     "Content-Type": "application/json",
                     "Accept-Encoding": "identity",
                     "Host": host,
-                    REQUEST_BODY_SHA256_HEADER: hashlib.sha256(body).hexdigest(),
+                    REQUEST_BODY_SHA256_HEADER: body_sha256,
                 }
             )
             async with httpx.AsyncClient(
@@ -169,6 +188,7 @@ class ServiceWorkTransport:
                     if _header_size(reply.headers) > self.limits.maximum_http_header_bytes:
                         raise ValueError("service response header bound")
                     if reply.status_code != 200:
+                        pending(http_status=reply.status_code)
                         return None
                     return await _read_response_body(reply, maximum, prefix=bytearray())
                 finally:
@@ -176,7 +196,16 @@ class ServiceWorkTransport:
 
         try:
             return await wait_for_owned(exchange(), timeout=self.timeout)
-        except (OSError, httpx.HTTPError, asyncio.TimeoutError, ComponentResponseError):
+        except (OSError, httpx.HTTPError, asyncio.TimeoutError, ComponentResponseError) as error:
+            if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException)):
+                failure = "timeout"
+            elif isinstance(error, httpx.HTTPError):
+                failure = "http_transport"
+            elif isinstance(error, ComponentResponseError):
+                failure = "response_bound"
+            else:
+                failure = "os_error"
+            pending(failure=failure)
             return None
 
     async def _recover(self, grant, capture):
