@@ -50,6 +50,16 @@ Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
 
+Renewed controls do not require hashing every older staged package during cache
+lookup. The supervisor checks sealed metadata and compares the small control
+files first, then verifies the complete matching stage before reuse. All retained
+stages still count toward cache limits; this lookup neither deletes evidence nor
+extends a directive's authorization interval. A process-issued staged capability
+reuses its payload hashes only while the complete sealed file identities remain
+unchanged; content edits, permission changes and replacement files invalidate it.
+Activation still uses fresh owned chain observations and reports missing validator
+permission separately from insufficient remaining authorization time.
+
 While the chain weight interval is pending, an already stopped supervisor may
 reuse its completed transaction audit only within the same process and while the
 registry, weight journal and every audited sealed package remain unchanged.

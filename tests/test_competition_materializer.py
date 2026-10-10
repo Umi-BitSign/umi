@@ -268,6 +268,28 @@ async def test_new_owned_observation_can_veto_before_selection(case, fault):
     assert (case.item.source_root / "current").stat().st_ino == old
 
 
+@pytest.mark.parametrize(
+    "fault,reason",
+    [("permit", "validator_permit_absent"), ("headroom", "activation_headroom_insufficient")],
+)
+async def test_activation_hold_distinguishes_permit_and_headroom(case, fault, reason):
+    from umi.competition_progress import _failure_details
+
+    initial = case.mint()
+    old = (case.item.source_root / "current").stat().st_ino
+    if fault == "permit":
+        case.next_values["validator_permit"] = False
+    else:
+        directive = case.selection.signed.directive
+        case.next_values["block"] = (
+            directive.valid_through_block - directive.minimum_activation_headroom_blocks + 1
+        )
+    with pytest.raises(adapter.SuccessorMaterializerError) as raised:
+        await case.value.activate(case.selection, case.files, owned_observation=initial)
+    assert _failure_details(raised.value)[0]["reason_code"] == reason
+    assert (case.item.source_root / "current").stat().st_ino == old
+
+
 async def test_malformed_readonly_view_never_returns_authority_after_selection(case, monkeypatch):
     monkeypatch.setattr(adapter, "load_successor_worker_inputs", lambda: case.installation)
     with pytest.raises(ValueError):
