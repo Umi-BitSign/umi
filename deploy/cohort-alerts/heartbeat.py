@@ -7,6 +7,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,6 +94,43 @@ async def read_successor_journal(service):
         since="45min",
         maximum_entries=1000,
     )
+
+
+async def read_delivery_journal(service):
+    # Include the initial systemd messages so a new invocation with no completed
+    # pass is distinguishable from an unavailable journal. Raw text stays local.
+    return await _read_journal(service, pattern="", since="45min", maximum_entries=100)
+
+
+def delivery_healthy(service, invocation_id):
+    """Return a current invocation's delivery outcome, or None before its first pass."""
+    try:
+        lines = asyncio.run(read_delivery_journal(service)).splitlines()
+        for line in lines:
+            entry = json.loads(line)
+            if entry.get("_SYSTEMD_INVOCATION_ID") != invocation_id:
+                continue
+            try:
+                message = json.loads(entry.get("MESSAGE", ""))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(message, dict):
+                continue
+            status = message.get("status")
+            if status not in {
+                "artifact_delivery_current",
+                "artifact_delivery_pending",
+                "artifact_delivery_retry",
+            }:
+                continue
+            failed = message.get("failed_source_trees", 0)
+            if type(failed) is not int or failed < 0:
+                raise ValueError("invalid delivery report")
+            # Missing not-yet-produced inputs are normal during an open cohort.
+            return status != "artifact_delivery_retry" and failed == 0
+        return None
+    except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError) as error:
+        raise RuntimeError("delivery_status_unavailable") from error
 
 
 async def read_lifecycle_journal(service, cohort):
@@ -290,6 +328,7 @@ def heartbeat(
     storage_paths=None,
     lifecycle_cohorts=None,
     public_round_index_url=None,
+    delivery_services=(),
 ):
     if not services or len(services) > 20 or len(set(services)) != len(services):
         raise ValueError("invalid services")
@@ -305,6 +344,12 @@ def heartbeat(
         or not set(successor_services) <= set(services)
     ):
         raise ValueError("invalid successor services")
+    if (
+        len(delivery_services) > 10
+        or len(set(delivery_services)) != len(delivery_services)
+        or not set(delivery_services) <= set(services)
+    ):
+        raise ValueError("invalid delivery services")
     storage_paths = {} if storage_paths is None else storage_paths
     lifecycle_cohorts = {} if lifecycle_cohorts is None else lifecycle_cohorts
     if (
@@ -351,6 +396,8 @@ def heartbeat(
                     "SubState",
                     "-p",
                     "InvocationID",
+                    "-p",
+                    "ActiveEnterTimestampMonotonic",
                 ],
                 capture_output=True,
                 text=True,
@@ -371,6 +418,19 @@ def heartbeat(
             if re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
                 raise RuntimeError("service_status_unavailable")
             ok = successor_healthy(service, invocation)
+        if ok and service in delivery_services:
+            invocation = fields["InvocationID"]
+            if re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
+                raise RuntimeError("service_status_unavailable")
+            observed = delivery_healthy(service, invocation)
+            if observed is None:
+                started = fields.get("ActiveEnterTimestampMonotonic", "")
+                if not started.isdigit() or int(started) <= 0:
+                    raise RuntimeError("service_status_unavailable")
+                age_seconds = time.monotonic() - int(started) / 1_000_000
+                ok = 0 <= age_seconds < 45 * 60
+            else:
+                ok = observed
         states[service] = "running" if ok else "failed"
     result = {"schema": "umi-service-heartbeat/1", "services": states}
     if standing_services:
@@ -452,6 +512,7 @@ def main():
                 config.get("storage_paths", {}),
                 config.get("lifecycle_cohorts", {}),
                 config.get("public_round_index_url"),
+                config.get("delivery_services", []),
             )
         ).encode(),
         headers={

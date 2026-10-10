@@ -66,6 +66,17 @@ delay notifications.
    and check incident/recovery notification receipts. Confirm inbox delivery
    separately. Never stop validators to test the monitor.
 
+## Artifact delivery
+
+For immutable artifact-copy services, optionally list a subset of `services` in
+`delivery_services`. The sender reads only reports from the current systemd
+invocation and reports a retry or failed route as a failed service even while its
+process is running. A pending pass with only not-yet-produced source trees is
+normal. A new invocation has 45 minutes to finish its first pass; this is an
+alerting allowance and does not stop copying or change cohort deadlines. Journal
+query failures abort the heartbeat instead of fabricating a service outcome.
+No file paths, proof content or exception text are sent to the external monitor.
+
 ## Filesystem capacity
 
 `storage_paths` maps bounded public metric names to absolute local directories.

@@ -74,7 +74,9 @@ c = json.loads(pathlib.Path(p.parse_args().config).read_bytes())
 state = pathlib.Path(c['state_root'])
 with (state / 'supervisor-process.lock').open('r+b') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    (state / 'legacy-probe.json').write_text(json.dumps({'pid': os.getpid()}))
+    pending = state / ('legacy-probe.' + str(os.getpid()) + '.tmp')
+    pending.write_text(json.dumps({'pid': os.getpid()}))
+    pending.replace(state / 'legacy-probe.json')
     while True:
         time.sleep(1)
 """
@@ -112,7 +114,8 @@ with (state / 'supervisor-process.lock').open('r+b') as lock:
         release_identity=inputs.release_identity)
     selected_source = overlay.source_for(view)
     inputs.recheck()
-    (state / 'successor-probe.json').write_text(json.dumps({{
+    pending = state / ('successor-probe.' + str(os.getpid()) + '.tmp')
+    pending.write_text(json.dumps({{
         'pid': os.getpid(), 'receipt': anchor.receipt_sha256,
         'checkpoint': anchor.receipt.checkpoint_sha256,
         'hotkey': anchor.config.validator_hotkey, 'chain_submission_authorized': False,
@@ -120,6 +123,7 @@ with (state / 'supervisor-process.lock').open('r+b') as lock:
         'checkpoint_schema': anchor.recovery.schema_,
         'release_revision': inputs.release_identity.umi_revision,
     }}))
+    pending.replace(state / 'successor-probe.json')
     while True:
         time.sleep(1)
 """
