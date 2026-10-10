@@ -409,6 +409,117 @@ async def test_saturated_preparation_does_not_take_dispatch_capacity(loop, monke
         await worker._stop_tasks(task for _, task in active.values())
 
 
+@pytest.mark.parametrize("transport_phase", ["dispatch", "recovery"])
+async def test_same_miner_control_phases_do_not_block_transport(loop, monkeypatch, transport_phase):
+    worker = loop.worker(concurrency=2)
+    phases = (
+        "preparation",
+        "preparation",
+        transport_phase,
+        "recovery" if transport_phase == "dispatch" else "dispatch",
+        "certification",
+        "certification",
+    )
+    rows = [
+        SimpleNamespace(
+            work_sha256=str(i) * 64,
+            ordinal=i,
+            claim=loop.c.claim,
+        )
+        for i in range(1, len(phases) + 1)
+    ]
+    release = asyncio.Event()
+    started = []
+    monkeypatch.setattr(worker, "_batch", lambda **kwargs: rows)
+    monkeypatch.setattr(worker, "_advance_cursor", lambda _: None)
+    monkeypatch.setattr(worker, "_ready_stage", lambda row: phases[row.ordinal - 1])
+
+    async def advance(row, **kwargs):
+        started.append(row.ordinal)
+        await release.wait()
+        return "pending", "fixture_dependency_unavailable"
+
+    monkeypatch.setattr(worker, "_advance", advance)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.sleep(0)
+        # Preparation and certification cannot occupy this miner's transport
+        # slot. Dispatch and recovery still share one slot, and each control
+        # phase admits only one operation for this miner.
+        assert started == [1, 3, 5]
+        assert report["in_flight_phase_counts"] == {
+            "preparation": 1,
+            transport_phase: 1,
+            "certification": 1,
+        }
+        for _ in range(3):
+            await worker._rolling_poll(active)
+            assert len(active) == 3 and started == [1, 3, 5]
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+
+
+async def test_answered_work_certifies_while_same_miner_preparation_is_held(loop, monkeypatch):
+    s, c, p = loop, loop.c, loop.p
+    worker = s.worker(concurrency=1)
+    for reason in (
+        "request_prepared",
+        "request_certified",
+        "request_retirement_pending",
+        "retirement_retained",
+    ):
+        assert await worker._advance(c.assignment.admission, one_stage=True) == ("pending", reason)
+    assert p.model.calls == p.fetcher.calls == 1 and s.signs == 0
+
+    claim = c.claim.claim.model_copy(update={"nonce": "02" * 32})
+    signed = SignedServiceWorkClaim(claim=claim, signature=sign_object(claim, p.miner.wallet))
+    c.queue.admit(
+        signed,
+        c.assignment.admission.submission,
+        c.assignment.admission.participant,
+        p.e.r.h.source,
+        capture(p.finality.head),
+        expected_tip_sha256=history_tip(p.e.r.h.source.history),
+    )
+    waiting = c.queue.assignment(signed).admission
+    answered = c.assignment.admission
+    # The new request is next in the persisted scheduling order. A slow input
+    # source must not block native terminal signing for the already retired job.
+    worker._remember_turn(answered.ordinal)
+    entered, release = asyncio.Event(), asyncio.Event()
+    inputs = worker.inputs
+
+    async def held_inputs(assignment):
+        if assignment.admission.work_sha256 == waiting.work_sha256:
+            entered.set()
+            await release.wait()
+        return await inputs(assignment)
+
+    monkeypatch.setattr(worker, "inputs", held_inputs)
+    active = {}
+    try:
+        report = await worker._rolling_poll(active)
+        await asyncio.wait_for(entered.wait(), 60)
+        assert report["in_flight_phase_counts"] == {"preparation": 1, "certification": 1}
+        result = await asyncio.wait_for(asyncio.shield(active[answered.work_sha256][1]), 60)
+        assert result == ("completed", "terminal_retained", [])
+        value = worker.terminals.read(c.assignment)
+        assert value is not None
+        read_service_terminal(value, worker.terminals.objects, p.c.policy, p.transport_policy)
+        assert not release.is_set() and p.model.calls == p.fetcher.calls == s.signs == 1
+    finally:
+        release.set()
+        await worker._stop_tasks(task for _, task in active.values())
+    s.offline = True
+    assert await s.worker()._advance(answered, one_stage=True) == (
+        "completed",
+        "original_terminal_retained",
+    )
+    assert p.model.calls == p.fetcher.calls == s.signs == 1
+
+
 async def test_service_prepare_refreshes_inputs_after_mutex_contention(
     loop, monkeypatch, contention_error
 ):

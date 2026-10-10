@@ -42,6 +42,12 @@ from .protocol import Video
 from .sqlite_contention import is_sqlite_contention
 
 _RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
+_MINER_LANES = {
+    "preparation": "preparation",
+    "dispatch": "transport",
+    "recovery": "transport",
+    "certification": "certification",
+}
 
 
 @dataclass(frozen=True)
@@ -464,25 +470,34 @@ class ServiceWorkWorker:
                 del self._operation_lanes[work]
         if len(active) < len(lanes) * self.concurrency:
             rows = await self._local(partial(self._batch, advance=False, pending_only=True))
-            miners = {miner for miner, _ in active.values()}
+            occupied = {
+                (miner, _MINER_LANES[self._operation_lanes[work]])
+                for work, (miner, _) in active.items()
+            }
             last = max((row.ordinal for row in rows), default=None)
             for admission in await self._local(self._fair_order, rows):
                 if all(counts[lane] >= self.concurrency for lane in lanes):
                     break
                 miner = identity(admission.claim.claim.hotkey)
                 work = admission.work_sha256
-                if work in active or miner in miners:
+                if work in active:
                     continue
                 lane = await self._local(self._ready_stage, admission)
                 if lane == "completed":
                     continue
-                if counts[lane] >= self.concurrency:
+                slot = miner, _MINER_LANES[lane]
+                # Preparation yields before miner delivery, and certification
+                # uses a retained retirement or immutable terminal intent.
+                # Neither may block this miner's transport recovery. Dispatch
+                # and recovery still serialize against each other, and each
+                # control phase admits at most one operation for this miner.
+                if slot in occupied or counts[lane] >= self.concurrency:
                     continue
                 await self._local(self._remember_turn, admission.ordinal)
                 self._operation_lanes[work] = lane
                 counts[lane] += 1
                 active[work] = (miner, asyncio.create_task(perform(admission)))
-                miners.add(miner)
+                occupied.add(slot)
             if last is not None:
                 # Rotate past this inspected page; capacity-blocked work stays
                 # accepted and returns on the next complete cursor rotation.

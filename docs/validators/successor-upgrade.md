@@ -2017,8 +2017,12 @@ many total operations. Endpoint scheduling similarly bounds dispatch, recovery
 and retirement, and certification separately, with one additional discovery
 operation. An operation yields at a retained phase boundary before entering the
 next phase; these counts are not counts of miners actively performing inference.
-Paid work still runs at most one job per miner within its queue. Miner-side
-concurrency and active-window limits remain unchanged.
+Paid work permits one transport operation per miner within its queue: dispatch
+and response recovery/retirement share that slot. Request preparation and terminal
+certification each have a separate per-miner slot, so a slow new request cannot
+block already answered work. Preparation yields before delivery; certification
+uses retained retirement evidence or a terminal intent. Global phase capacities,
+miner-side concurrency and shared active-window limits remain unchanged.
 Terminal preparation retries local journal contention within the existing operation
 budget and recollects current authority after each wait. It retains the original
 response and retirement evidence without redispatching work. Invalid evidence and
