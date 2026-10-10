@@ -73,6 +73,10 @@ Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
 while a claim or another readiness probe owns the catalog's admission lock.
 It does not queue an HTTP request behind that long operation or cancel it.
 Only the ordinary fresh-input checks can return `ready: true`.
+Local capacity probes use a read-only journal snapshot, so they do not take the
+dispatch/retirement writer lock. Full or sealed catalogs return their hold without
+rescanning byte allowances. A new claim still rechecks capacity atomically when
+it commits; readiness does not reserve space or authorize an admission.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
 for capacity (bounded by the exporter timeout). A queued read rechecks that its
