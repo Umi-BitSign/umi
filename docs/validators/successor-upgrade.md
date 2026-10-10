@@ -810,6 +810,12 @@ queue assignment. A valid closure is retained before execution is refused, so a
 stale history cannot reopen work. Supply renewable media/window inputs and
 terminal signing separately.
 
+Worker reports separate preparation waits for inputs, current authority, media
+delivery, retained request lineage, the issuance window and journal persistence.
+`preparation_contention` identifies a retry after a busy journal. These names and
+elapsed times are operational diagnostics; they expose no work payloads and do
+not change request deadlines or authorize completion.
+
 Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
 It commits the fixed work, policy, cohort, authority and service terms without
 requiring the future roster, preparation block or incumbent. The series manifest

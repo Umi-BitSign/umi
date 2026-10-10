@@ -173,6 +173,34 @@ async def host(networked, tmp_path, monkeypatch):
         yield SimpleNamespace(open=open_host, catalog=catalog, s=s, lifecycle=lifecycle)
 
 
+async def test_configured_preparation_distinguishes_media_wait(host):
+    h, s = host.open(), host.s
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = h.clips
+
+    async def held(sha):
+        entered.set()
+        await release.wait()
+        return await original(sha)
+
+    h.clips = held
+    worker = await h.worker(host.catalog)
+    work = s.c.assignment.admission.work_sha256
+    worker._operation_stages[work] = ("starting", asyncio.get_running_loop().time())
+    task = asyncio.create_task(worker.inputs(s.c.assignment))
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        assert worker._operation_stages[work][0] == "preparation_media"
+        release.set()
+        fresh = await asyncio.wait_for(task, 120)
+        assert fresh.video == s.p.service_video and fresh.window == s.c.window
+        assert worker._operation_stages[work][0] == "preparation_window"
+    finally:
+        release.set()
+        await worker._stop_tasks((task,))
+        worker._operation_stages.pop(work, None)
+
+
 async def test_configured_dispatch_uses_native_votes_and_recovers_after_restart(host):
     h, s = host.open(), host.s
     assert h.timeout_seconds == h.config.operation_timeout_seconds == 2400

@@ -241,7 +241,16 @@ async def finish(s):
     raise AssertionError(reports)
 
 
-@pytest.mark.parametrize("stage", ["request_preparation", "request_certificate", "miner_transport"])
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "request_preparation",
+        "preparation_inputs",
+        "preparation_authority",
+        "request_certificate",
+        "miner_transport",
+    ],
+)
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_rolling_reports_native_wait_stage_without_private_work(
     loop, monkeypatch, stage, cancel
@@ -250,6 +259,8 @@ async def test_rolling_reports_native_wait_stage_without_private_work(
     entered, release = asyncio.Event(), asyncio.Event()
     owner, name = {
         "request_preparation": (worker, "_prepare"),
+        "preparation_inputs": (worker, "inputs"),
+        "preparation_authority": (worker, "observation"),
         "request_certificate": (worker, "_certificate"),
         "miner_transport": (worker.transport, "advance"),
     }[stage]

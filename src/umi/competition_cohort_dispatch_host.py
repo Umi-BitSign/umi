@@ -134,14 +134,18 @@ class ServiceDispatchHost:
         async def inputs(assignment: ServiceWorkAssignment) -> ServiceRequestInputs:
             # Verify live authority before publishing private media. Capturing
             # the request window comes last, after a potentially slow upload.
+            work = assignment.admission.work_sha256
+            worker._stage(work, "preparation_authority")
             await authority.observe(assignment)
             item = assignment.catalog.catalog.work[assignment.admission.ordinal - 1]
+            worker._stage(work, "preparation_media")
             video = await self.clips(item.video_sha256)
             permitted = self.config.request_window_miner_hotkeys
             miner = identity(assignment.admission.submission.submission.hotkey)
             if self.config.request_window_version == 2 and (
                 permitted is None or miner in {identity(key) for key in permitted}
             ):
+                worker._stage(work, "preparation_lineage")
                 latest = await run_private_state_operation(
                     requests.latest,
                     assignment.admission.claim,
@@ -149,11 +153,13 @@ class ServiceDispatchHost:
                     timeout=self.config.operation_timeout_seconds,
                 )
                 number = 1 if latest is None else latest.attempt_number + 1
+                worker._stage(work, "preparation_window")
                 height = await blocks.finalized_head_height()
                 window = await capture_cohort_attempt_window(
                     source.transport, blocks, height, assignment, number
                 )
             else:
+                worker._stage(work, "preparation_window")
                 height = await blocks.finalized_head_height()
                 window = await capture_request_window(source.transport, blocks, height)
             return ServiceRequestInputs(video=video, window=window)

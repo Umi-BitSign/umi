@@ -167,10 +167,14 @@ class ServiceWorkWorker:
     async def _prepare(self, assignment, *, parent=None, decision=None, retirement=None):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.transport.timeout
+        work = assignment.admission.work_sha256
         while True:
+            self._stage(work, "preparation_inputs")
             inputs = await self._call(self.inputs(assignment))
+            self._stage(work, "preparation_authority")
             source, capture = await self._call(self.observation(assignment))
             try:
+                self._stage(work, "preparation_persistence")
                 return await run_owned_thread(
                     partial(
                         self.requests.prepare,
@@ -192,6 +196,7 @@ class ServiceWorkWorker:
                 if remaining <= 0:
                     raise
                 # Never retry persistence with the same authority/head after a wait.
+                self._stage(work, "preparation_contention")
                 await asyncio.sleep(min(1.0, remaining))
 
     def _stage(self, work, name):
