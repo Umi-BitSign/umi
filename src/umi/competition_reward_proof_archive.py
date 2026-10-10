@@ -42,6 +42,8 @@ from .protocol import Hex32, StrictProtocolModel
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
 _MAX_PUBLISHED_OBJECTS = 4096
+_MAX_READ_OBJECTS = 4096
+_MAX_READ_BYTES = 32 * 1024**2
 Kind = Literal["history", "endpoint", "interval", "registration"]
 
 
@@ -91,6 +93,9 @@ class RewardProofArchive:
         self.root = Path(private_path(str(root)))
         self._published = OrderedDict()
         self._publication_lock = Lock()
+        self._read_objects = OrderedDict()
+        self._read_bytes = 0
+        self._read_lock = Lock()
         self._pid = os.getpid()
 
     @staticmethod
@@ -171,8 +176,45 @@ class RewardProofArchive:
             )
 
     def _bytes(self, sha: str, maximum: int) -> bytes:
+        path = self.root / "objects" / (checked_digest(sha) + ".json")
+        checked_size(maximum, MAX_EVIDENCE_BYTES)
+        if os.getpid() != self._pid:
+            # Inherited locks and verification receipts are not usable after fork.
+            return self._read_object(path, sha, maximum)
+        with self._read_lock:
+            prior = self._read_objects.pop(sha, None)
+            if prior is not None:
+                self._read_bytes -= len(prior[1])
+            stamp = self._object_stamp(path)
+            if prior is not None and prior[0] == stamp:
+                checked_size(len(prior[1]), maximum)
+                self._read_objects[sha] = prior
+                self._read_bytes += len(prior[1])
+                return prior[1]
+            verification_tick = _publication_clock_ns()
+            raw = self._read_object(path, sha, maximum)
+            # Reuse only verified bytes from an unchanged, private object whose
+            # ctime predates this read. Frames and native proofs are still checked.
+            if (
+                verification_tick is not None
+                and stamp[-1] < verification_tick
+                and len(raw) <= _MAX_READ_BYTES
+                and self._object_stamp(path) == stamp
+            ):
+                self._read_objects[sha] = (stamp, raw)
+                self._read_bytes += len(raw)
+                while (
+                    self._read_bytes > _MAX_READ_BYTES
+                    or len(self._read_objects) > _MAX_READ_OBJECTS
+                ):
+                    _, (_, removed) = self._read_objects.popitem(last=False)
+                    self._read_bytes -= len(removed)
+            return raw
+
+    @staticmethod
+    def _read_object(path: Path, sha: str, maximum: int) -> bytes:
         value = read_private_model(
-            self.root / "objects" / (checked_digest(sha) + ".json"),
+            path,
             _Bytes,
             maximum_bytes=2 * maximum + 1024,
         )

@@ -388,6 +388,13 @@ ancestry and timestamp bounds remain checked before issuing a historical result.
 Reading an archive later or receiving one from another process still requires
 the complete native replay; this reuse cannot authorize a current weight write.
 
+Within one process, the proof archive reuses up to 32 MiB of verified immutable
+object bytes across at most 4,096 objects. Each read checks the current private
+file and parent identity, permissions, size and timestamps, and applies the
+requesting consumer's byte limit. Changed files, failed reads, a new process or
+an unqualified filesystem clock require ordinary verification. Frames and native
+chain proofs are still validated; the byte cache cannot certify an allocation.
+
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
 the existing 16-connection control budget for history, votes and exports. Slow
@@ -443,6 +450,11 @@ admission checkpoint/capacity read. A later request reads current state again;
 neither completed results nor failures are cached. Cancelling one HTTP request
 drains its owned read without cancelling other readers. Registration and finality
 checks remain separate from this shared disk read.
+
+Published cohort history reads admission signatures, reconstructs the committed
+history and checks its genesis in one read-only snapshot. It does not replay the
+same history again just to export it; signature, fork and pending-decision checks
+still run before returning that history.
 
 After its first full replay, a prepared round is reused independently for each
 cohort within a bounded process-local cache. Reads use a consistent read-only

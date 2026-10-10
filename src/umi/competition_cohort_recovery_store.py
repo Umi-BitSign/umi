@@ -333,10 +333,10 @@ class CohortRecoveryStore:
             if row is None:
                 raise ValueError("cohort has no published admission")
             genesis = _decode(_PublishedGenesis, row[0], 64 * 1024)
-            binding, _, _ = self._load(cohort)
-            if genesis.genesis != binding.genesis:
+            history = self.read_history(cohort, genesis_signatures=genesis.signatures)
+            if genesis.genesis != history.genesis:
                 raise ValueError("published admission differs from the retained cohort")
-        return self.export_history(cohort, genesis_signatures=genesis.signatures)
+            return history
 
     def retain_source(self, cohort: str, value: StrictProtocolModel) -> str:
         """Retain decision input before reservation; consumers authenticate its meaning."""
