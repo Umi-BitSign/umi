@@ -1005,6 +1005,15 @@ types. Independent request closure and quality replay still determine completion
 and service credit. Preserve the queue and its worker binding across restart;
 changing the evaluator requires an authorized migration, not a configuration edit.
 
+The owner reuses successful validation of exact retained request and grant bytes
+within a process, with bounded memory. Finding the latest attempt checks its
+complete parent chain once, rather than repeating that walk for every earlier
+attempt. Each read still checks current journal
+conflicts, the accepted assignment and complete replacement ancestry. Changed
+bytes, policy, transport or journal identity require validation again; missing
+records remain missing. This reuse grants no current authority and does not
+change signed request clocks, reviewer quorum or reward eligibility.
+
 The endpoint cohort dispatcher and paid-service transport permit one durable
 retransmission of the same selected request when the signed policy allows at
 least two request transmissions and response bodies. Each checks for the sealed original response
