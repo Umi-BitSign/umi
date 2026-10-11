@@ -123,7 +123,9 @@ def review_service_request_current(body, policy, source: CohortOrderHistory, blo
         raise ValueError("service request authority predates admission or issuance")
 
 
-_historical_service_body_reuse = AssignmentVerificationReuse()
+# Retry parents have distinct exact bodies. Keep a bounded working set beyond
+# one catalog page while preserving the existing 64 MiB retained-value ceiling.
+_historical_service_body_reuse = AssignmentVerificationReuse(maximum_entries=512)
 
 
 @canonical_json_reuse()

@@ -202,6 +202,42 @@ def test_request_observer_closes_native_queues_and_retains_originals(request_own
     assert h.source.read(progress) == original
 
 
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+def test_stale_service_head_rejects_before_native_terminal_replay(request_owner, monkeypatch):
+    """Reproduce a capture becoming stale before the service inventory lease."""
+    from unittest.mock import Mock
+
+    from umi import competition_cohort_request_phase as phase
+    from umi.competition_round_journal import FinalizedHeadRegression
+
+    h = request_owner
+    first = h.block
+    h.sample()
+    before_close = first + h.duration - 1
+    while h.block < before_close:
+        assert h.sample(min(h.block + 300, before_close)).completion == "pending"
+    stale_block = h.block + 1
+    advanced_block = stale_block + 1
+    h.c.queue.journal.observe(advanced_block)
+    replay = Mock(wraps=phase.select_request_tail)
+    monkeypatch.setattr(phase, "select_request_tail", replay)
+    with pytest.raises(FinalizedHeadRegression) as raised:
+        h.sample(stale_block)
+    names = []
+    trace = raised.value.__traceback__
+    while trace is not None:
+        names.append(trace.tb_frame.f_code.co_name)
+        trace = trace.tb_next
+    assert replay.call_count == 0
+    assert "closure_inventory" in names and "seal_locked" not in names
+    assert h.c.queue.retained_seal() is None
+    with h.c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(advanced_block,)]
+    progress = h.sample(advanced_block)
+    assert progress.completion == "complete"
+    assert h.c.queue.retained_seal().accepted == h.b["service_seal"].accepted
+
+
 def test_request_window_restores_offline_time_before_sealing(request_owner):
     h = request_owner
     h.sample()

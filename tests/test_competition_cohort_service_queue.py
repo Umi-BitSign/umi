@@ -140,6 +140,47 @@ def admit(c, name="Alice", nonce=1, **kwargs):
     )
 
 
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(queue_case, monkeypatch):
+    from umi.competition_round_journal import FinalizedHeadRegression
+
+    c = queue_case
+    accepted = admit(c)
+    expected = c.queue.assignment(accepted.claim)
+    tip = history_tip(c.h.source.history)
+    replay = Mock(wraps=c.queue._read)
+    monkeypatch.setattr(c.queue, "_read", replay)
+    with pytest.raises(FinalizedHeadRegression), c.queue.closure_inventory(capture=capture(399)):
+        pytest.fail("stale capture reached inventory")
+    assert replay.call_count == 0
+    assert c.queue.retained_seal() is None
+    with c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(400,)]
+    with c.queue.closure_inventory(capture=capture(401)) as inventory:
+        assert inventory == (expected,)
+        with c.queue.journal.read_transaction() as db:
+            assert db.execute("SELECT block FROM highwater").fetchall() == [(400,)]
+        # Ordinary journal observations can advance during the compound lease.
+        # The existing final seal check must remain authoritative in that race.
+        c.queue.journal.observe(402)
+        with pytest.raises(FinalizedHeadRegression):
+            c.queue.seal_locked(c.h.source, capture(401), expected_tip_sha256=tip)
+    assert c.queue.retained_seal() is None
+    sealed = c.queue.seal(c.h.source, capture(402), expected_tip_sha256=tip)
+    c.queue.journal.observe(403)
+    # Retained immutable recovery keeps its historical semantics across restart.
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    with c.queue.closure_inventory(capture=capture(400)) as inventory:
+        assert inventory == (expected,)
+        assert c.queue.seal_locked(c.h.source, capture(400), expected_tip_sha256=tip) == sealed
+    with c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(403,)]
+    with c.queue.journal.transaction() as db:
+        db.execute("UPDATE records SET body=? WHERE kind='service_work_seal'", (b"{}",))
+    with c.queue.closure_inventory(capture=capture(400)), pytest.raises(ValueError):
+        c.queue.seal_locked(c.h.source, capture(400), expected_tip_sha256=tip)
+
+
 def precommit(c):
     raw = c.catalog.catalog.model_dump(mode="json", by_alias=True)
     raw.pop("round_sha256")

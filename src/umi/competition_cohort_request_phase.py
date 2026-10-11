@@ -402,7 +402,8 @@ class NativeRequestProgressSource:
                 seals = None
                 with ExitStack() as leases:
                     inventories = tuple(
-                        leases.enter_context(q.closure_inventory()) for q in self.queues
+                        leases.enter_context(q.closure_inventory(capture=capture))
+                        for q in self.queues
                     )
                     admissions_locked = True
                     tail = select_request_tail(

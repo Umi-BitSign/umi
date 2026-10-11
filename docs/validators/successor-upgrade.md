@@ -1071,6 +1071,16 @@ bytes, policy, transport or journal identity require validation again; missing
 records remain missing. This reuse grants no current authority and does not
 change signed request clocks, reviewer quorum or reward eligibility.
 
+Before replaying an unsealed paid queue for closure, the owner checks that its
+captured block still reaches the queue's retained finalized head. A stale capture
+returns to the coordinator for a fresh collection before full inventory replay.
+This precheck does not advance the journal head or replace the captured input.
+Sealing keeps its final monotonic check, and an existing immutable seal continues
+to recover through its original native evidence.
+Static service-body proof reuse retains up to 512 exact bodies, including retry
+parents, within its existing 64 MiB serialized-value budget. This does not bound
+total process memory or waive current authority and signature checks.
+
 The endpoint cohort dispatcher and paid-service transport permit one durable
 retransmission of the same selected request when the signed policy allows at
 least two request transmissions and response bodies. Each checks for the sealed original response

@@ -554,15 +554,28 @@ class ServiceWorkQueue:
             return self._retained_seal()
 
     @contextmanager
-    def closure_inventory(self):
+    def closure_inventory(self, *, capture: RegistrationCapture | None = None):
         """Hold admissions across native inventory review and conditional sealing.
 
         A cohort owner enters every catalog lease in catalog order before deciding
         whether its distinct-miner tail qualifies. Leaving without sealing does
-        not close admissions or alter accepted work.
+        not close admissions or alter accepted work. A supplied current capture
+        must still reach an unsealed queue's retained head before costly replay.
+        This read never advances that head or changes an immutable existing seal.
         """
         with self.journal.locked(), canonical_json_reuse():
             with self.journal.read_transaction() as db:
+                if (
+                    capture is not None
+                    and self.journal.get_raw("service_work_seal", self.config.catalog_sha256, db=db)
+                    is None
+                ):
+                    # Reuse the native monotonic check without writing a head.
+                    # The strict boundary parser validates the supplied block.
+                    # Seal presence is only a scheduling hint: seal_locked still
+                    # replays its complete retained evidence, or rechecks the
+                    # current head if another observer advances during replay.
+                    self.journal._observed_head(db, execution_boundary(capture).block)
                 rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
                 if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
                     raise ValueError("service accepted prefix has a missing ordinal")
