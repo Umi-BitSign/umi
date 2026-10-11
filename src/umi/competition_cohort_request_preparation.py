@@ -25,6 +25,18 @@ def _invoke_native(function, *args, **kwargs):
     return None, failure
 
 
+def _exit_native(context, exception_type, error, traceback):
+    try:
+        return context.__exit__(exception_type, error, traceback)
+    finally:
+        if error is not None and selected_memory() is not None:
+            # Python 3.10 contextlib can attach the native generator's frame
+            # to an incoming cancellation even when __exit__ returns normally.
+            # Restore its caller traceback before releasing the native graph;
+            # _invoke_native still compacts any new cleanup failure.
+            error.__traceback__ = traceback
+
+
 @asynccontextmanager
 async def prepared_request_thread(context):
     """Yield one sampler while its native context owns thread-bound resources.
@@ -85,7 +97,7 @@ async def prepared_request_thread(context):
             try:
                 if entered.done() and not entered.cancelled() and entered.exception() is None:
                     await await_owned_task(
-                        asyncio.create_task(invoke(context.__exit__, *sys.exc_info()))
+                        asyncio.create_task(invoke(_exit_native, context, *sys.exc_info()))
                     )
             finally:
                 # An escaped, disabled sampler must not retain the native

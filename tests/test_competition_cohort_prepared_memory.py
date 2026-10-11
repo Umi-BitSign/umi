@@ -173,6 +173,50 @@ async def test_live_preparation_cancellation_holds_grant_until_native_cleanup(st
         await asyncio.gather(pending, return_exceptions=True)
 
 
+async def test_native_exit_traceback_releases_graph_before_grant_close(stage):
+    references, releases = [], []
+
+    class Graph:
+        pass
+
+    class Native:
+        def __init__(self):
+            self.graph = Graph()
+            references.append(weakref.ref(self.graph))
+
+        def __enter__(self):
+            record_graph_release(memory._active.get(), references, releases)
+            return self.sample
+
+        def sample(self, _capture):
+            return 7
+
+        def __exit__(self, exception_type, error, traceback):
+            assert exception_type is asyncio.CancelledError
+            # Reproduce Python 3.10 contextlib's retention on every supported
+            # interpreter: cleanup returns normally, but the incoming error
+            # now owns this frame and its native graph through self.
+            try:
+                raise error.with_traceback(traceback)
+            except asyncio.CancelledError:
+                return False
+
+    cancellation = asyncio.CancelledError("capture cancelled")
+    with bind(stage):
+        async with memory.memory_operation_context(
+            operation="requests_observe", cohort=C5, phase="requests"
+        ):
+            prepared = prepared_request_thread(Native())
+            await prepared.__aenter__()
+            # Drive the throw directly so newer async contextlib cannot repair
+            # the exception's traceback after our native cleanup returns.
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await prepared.gen.athrow(cancellation)
+    assert caught.value is cancellation
+    assert releases == [[True]]
+    assert references[0]() is None
+
+
 async def test_fresh_preparation_charges_one_evidence_budget_across_enter_and_sample(stage):
     closed = []
     first = b"[" + b",".join([b"1"] * 70) + b"]"

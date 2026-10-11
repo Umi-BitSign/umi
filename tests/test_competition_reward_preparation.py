@@ -3030,7 +3030,10 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
         maximum_package_bytes=8 * 1024**2,
         maximum_witness_bytes=1024**2,
     )
-    original = file_module.publish_private_model
+    publisher = (
+        "publish_aggregate_model" if interrupt_after == "packages" else "publish_private_model"
+    )
+    original = getattr(file_module, publisher)
     interrupted = False
 
     def lost_reply(path, *args, **kwargs):
@@ -3040,7 +3043,7 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
             interrupted = True
             raise OSError("publication reply lost")
 
-    monkeypatch.setattr(file_module, "publish_private_model", lost_reply)
+    monkeypatch.setattr(file_module, publisher, lost_reply)
     with pytest.raises(OSError, match="reply lost"):
         module.retain_standing_reward_inputs(
             files,

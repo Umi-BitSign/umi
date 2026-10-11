@@ -53,7 +53,7 @@ from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
 from umi.competition_cohort_request_closure import PendingRequestClosure, build_request_closure
 from umi.competition_cohort_request_files import RequestCompletionFiles
-from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
+from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
 from umi.competition_cohort_request_review import RequestProgressReviewer
 from umi.competition_cohort_request_start import REST_MS
 from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS
@@ -470,10 +470,22 @@ async def certify_requests(o, app, root, monkeypatch, signatures, admission_prob
     original = await h.provider.review_archive(opening, raw, metadata)
     assert 0 <= h.timestamp - original.timestamp_ms < MINIMUM_REQUEST_OPEN_MS
 
-    async def ready(self, state, capture):
-        return h.ready
+    async def readiness(self, state):
+        nonce = "a" * 32
+        return nonce, RequestReadiness(
+            schema="umi-cohort-request-readiness/1",
+            nonce=nonce,
+            policy_sha256=digest(h.intake.policy),
+            cohort_sha256=state.cohort_sha256,
+            recovery_tip_sha256=state.tip_sha256,
+            catalog_sha256s=tuple(digest(c.catalog) for c in self.source.catalogs),
+            observation=execution_boundary(h.capture(h.block)),
+            ready=h.ready,
+        )
 
-    monkeypatch.setattr(LiveRequestPhaseObserver, "_ready", ready)
+    # Both direct and prepared observations validate the same readiness response.
+    # Replace only its external fetch, preserving native freshness/binding checks.
+    monkeypatch.setattr(LiveRequestPhaseObserver, "_fetch_readiness", readiness)
     for name in ("Charlie", "Dave"):
         config = CohortProgressSignerConfig(
             schema="umi-cohort-progress-signer-config/1",
