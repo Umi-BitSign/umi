@@ -3,7 +3,6 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-import httpx
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
@@ -21,6 +20,8 @@ from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_model_static_review import verify_standing_review_policy
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
 from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
+from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
+from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import _disjoint
@@ -63,6 +64,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     review_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+    phase_review_budget: PhaseReviewBudget | None = None
     service_signing: ServiceReviewConfig | None = None
     admission_signing: CohortAdmissionSignerConfig | None = None
     model_signing: ModelReviewConfig | None = None
@@ -77,6 +79,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         value = handler(self)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
+        if self.phase_review_budget is None:
+            value.pop("phase_review_budget", None)
         if self.maximum_aggregate_evidence_bytes is None:
             value.pop("maximum_aggregate_evidence_bytes", None)
         if self.service_signing is None:
@@ -154,6 +158,12 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selection(self):
+        checked_budget(
+            self.phase_review_budget,
+            self.policy,
+            self.request_evidence_bytes,
+            signing_seconds=self.signing.signing_timeout_seconds,
+        )
         if self.schema_ in (
             "umi-cohort-phase-review-service/1",
             "umi-cohort-phase-review-service/2",
@@ -267,16 +277,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             or self.eligible_tracks != tuple(sorted(set(self.eligible_tracks)))
         ):
             raise ValueError("phase review service changes its selected authority or scope")
-        url = httpx.URL(self.owner_origin)
-        if (
-            url.scheme != "https"
-            or not url.host
-            or url.userinfo
-            or url.query
-            or url.fragment
-            or url.path not in ("", "/")
-        ):
-            raise ValueError("phase review owner must be an explicit HTTPS origin")
+        private_review_origin(self.owner_origin)
         secrets = tuple(
             Path(p)
             for p in (

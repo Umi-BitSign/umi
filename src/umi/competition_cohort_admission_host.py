@@ -46,6 +46,7 @@ from .competition_cohort_request_review_http import request_review_routes
 from .competition_cohort_request_rule_api import request_tail_adoption_owner_routes
 from .competition_cohort_request_rule_reservation import request_tail_reservation_routes
 from .competition_cohort_review_boot import _token
+from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_cohort_service_export import service_work_routes
 from .competition_cohort_window_http import LocalWindowClient, window_routes
@@ -89,6 +90,7 @@ class AdmissionOwnerConfig(StrictProtocolModel):
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
     maximum_aggregate_evidence_bytes: AggregateEvidenceCapacity | None = None
+    phase_review_budget: PhaseReviewBudget | None = None
     windows: WindowOwnerConfig | None = None
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
@@ -98,6 +100,8 @@ class AdmissionOwnerConfig(StrictProtocolModel):
         value = handler(self)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
+        if self.phase_review_budget is None:
+            value.pop("phase_review_budget", None)
         if self.maximum_aggregate_evidence_bytes is None:
             value.pop("maximum_aggregate_evidence_bytes", None)
         if self.windows is None:
@@ -137,6 +141,14 @@ class AdmissionOwnerConfig(StrictProtocolModel):
         return self
 
     def check_policy(self, policy):
+        checked_budget(
+            self.phase_review_budget,
+            policy,
+            self.request_evidence_bytes,
+            reviewers=len(self.reviewers),
+        )
+        for peer in self.reviewers:
+            checked_budget(peer.phase_review_budget, policy, self.request_evidence_bytes)
         groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
         keys = {identity(p.signer) for p in self.reviewers}
         if (
@@ -223,6 +235,11 @@ async def admission_owner_app(
             else None
         )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
+        phase_export_timeout_seconds = (
+            c.phase_review_budget.export_seconds
+            if c.phase_review_budget is not None
+            else review_timeout_seconds
+        )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
         if requests_stage_policy() is not None:
             app.add_middleware(
@@ -251,7 +268,7 @@ async def admission_owner_app(
             sign,
             publish_archive=None if lifecycle is None else lifecycle.proofs.publish,
             maximum_bytes=c.maximum_export_bytes,
-            timeout_seconds=review_timeout_seconds,
+            timeout_seconds=phase_export_timeout_seconds,
         )
         app.include_router(intake_review_routes(app.state.intake_review_exporter, token=token))
         app.include_router(
@@ -261,7 +278,7 @@ async def admission_owner_app(
                     c.owner_hotkey,
                     sign,
                     maximum_bytes=c.maximum_export_bytes,
-                    timeout_seconds=review_timeout_seconds,
+                    timeout_seconds=phase_export_timeout_seconds,
                 ),
                 token=token,
             )

@@ -150,8 +150,11 @@ The service-admission host polls private `model-reviews/<model-sha256>.json`
 inputs and publishes retained `ModelAcceptanceIntent` records under the
 competition store's `model-acceptance-proposals/<cohort>/<submission>.json`.
 Service-admission host version 2 selects `model_review_peers`, each with an
-evaluator hotkey, HTTPS origin, private `token_file` and request timeout. Its
-recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
+evaluator hotkey, private review origin, private `token_file` and request timeout.
+Use HTTPS across hosts or the explicit literal-loopback HTTP transport described
+in the [private reviewer configuration](../validators/successor-upgrade.md).
+Shared token files must retain matching signer and origin bindings across peer
+lists. The recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
 retains each response in the original intake ledger and forms a certificate
 only from independent policy groups. A disconnected peer leaves that entry
 pending while other peers and entries continue. Restart reuses collected votes

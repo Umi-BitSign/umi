@@ -2,6 +2,7 @@
 
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_intake import CohortIntakeBinding
+from .competition_cohort_review_budget import check_review_seconds
 from .open_competition import CompetitionPolicy, identity
 from .protocol import canonical_json_bytes
 
@@ -15,8 +16,7 @@ def review_export_limits(
         check_aggregate_evidence_bytes(maximum_bytes)
     elif type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= 512 * 1024**2:
         raise ValueError("phase review export capacity is outside bounds")
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
-        raise ValueError("phase review timeout is outside bounds")
+    check_review_seconds(timeout_seconds)
 
 
 def review_selection(

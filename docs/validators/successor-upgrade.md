@@ -668,8 +668,8 @@ For remote delivery, explicitly install `intake_review_routes` on a private host
 API and use `IntakeReviewHTTPClient` at the reviewer. The route is
 `POST /internal/cohorts/intake-review`; it requires a private bearer credential,
 bounds request size and allows one export at a time. The client accepts a
-configured HTTPS origin, refuses redirects and bounds received bytes. Both ends
-drain cancelled operations before releasing capacity. The public intake API does
+configured private review origin, refuses redirects and bounds received bytes.
+Both ends drain cancelled operations before releasing capacity. The public intake API does
 not enable this route or load a wallet. The enclosing host must supply its
 approved export signer, private transport credential and original registration
 archive delivery. The owner's signature authenticates local service observations;
@@ -735,8 +735,8 @@ Earlier versions keep their original canonical bytes.
 Select the full standing series,
 manifest, competition policy, all cohort/authority bindings, named evaluator
 hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
-trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
-and separate signing, chain, promotion, input and proof-import directories.
+trusted owner hotkey and private review origin. Configure explicit resource
+capacities and separate signing, chain, promotion, input and proof-import directories.
 Keep the key and both credentials outside those directories.
 
 The service loads the named unlocked hotkey using the existing mode-`0400`
@@ -744,14 +744,82 @@ key-file reader. `owner_token_file` and `vote_token_file` are distinct, root-own
 mode-`0400` or `0440` files containing a 32–256 character bearer token, optionally
 followed by one newline. Grant the service account read access through its
 private group when using `0440`. The listener binds only to `127.0.0.1` or `::1`
-on the selected port. Put it behind the deployment's private HTTPS proxy and
-configure the coordinator's `PhaseVotePeer` with the vote credential. Keep the
-owner export credential separate. The HTTP client verifies TLS, disables
-environment proxies and never follows redirects.
+on the selected port. Configure the coordinator's `PhaseVotePeer` with the vote
+credential and keep the owner export credential separate.
+
+Private review origins support HTTPS or direct HTTP to a cohosted listener.
+Direct HTTP must explicitly name `http://127.0.0.1:PORT` or `http://[::1]:PORT`,
+with a port from 1 through 65535 and an optional trailing `/`. Hostnames,
+alternative address spellings, credentials, queries, fragments and other paths
+are rejected for HTTP. Select the address family and port actually bound by the
+native listener. Other hosts require the deployment's private HTTPS proxy; its
+response budget must cover the complete native operation, including export and
+independent replay. The private clients disable environment proxies and never
+follow redirects. HTTPS retains certificate verification. Both transports retain
+bearer authentication, byte bounds and all native signature and authority checks.
+Public readiness and miner origins retain their separate validation rules.
+
+When changing a cohosted deployment to direct HTTP, update the reviewer's
+`owner_origin` and the coordinator's reviewer origins together. A token file
+shared by `model_review_peers` and `admission_owner.reviewers` must name the same
+signer and exact origin in both lists; update any endpoint reviewer copies as
+well. Check the complete configuration before selection. Keep the original
+series, authority, signer, signed clocks and state directories. Transport changes
+reopen the existing journals and reuse completed votes without reissuing evidence.
+
 Unavailable phase exports report `phase_owner_http_STATUS` in bounded failure
 details. Use the numeric HTTP status to distinguish authentication, validation,
 owner availability and proxy failures; response bodies, credentials and private
 URLs are excluded. The failure remains retryable and authorizes no phase change.
+
+For aggregate phase reviews, select the same optional `phase_review_budget` on
+the admission owner, each reviewer service and its coordinator peer. This local
+`umi-cohort-phase-review-budget/1` profile pins `policy_sha256`, the policy's
+`evaluation_runtime_sha256`, and `maximum_aggregate_evidence_bytes`. Set explicit
+positive integer allowances in seconds for `export_seconds`, `replay_seconds`,
+`authority_seconds`, `signing_seconds`, `transport_seconds` and
+`vote_queue_seconds`, plus `export_queue_slots` covering all selected reviewers.
+Choose them from retained timings on the selected hosts at the aggregate
+capacity and intended concurrency. Signed inference and snapshot-age limits do
+not describe aggregate proof-replay throughput. The profile is an operating
+allowance, not evidence of resource qualification or a completion-time promise.
+
+The owner uses `export_seconds` for its complete export operation. A reviewer
+allows `export_queue_slots * export_seconds + transport_seconds` for each owner
+exchange. Progress voting includes two full exchanges and replays; decision
+voting includes three. Each vote adds the selected authority, signing and signer
+queue allowances. The coordinator adds another queue and transport allowance to
+cover the route semaphore, which precedes the reviewer's operation timer.
+`replay_seconds` includes parsing, native replay and evidence checks associated
+with one read; `authority_seconds` covers additional proof and current-authority
+work. `signing_seconds` must cover the configured native signing timeout.
+Allow for admission queues, response transfer and host contention in the
+selected components. Finite allowances do not bound an uncontrolled backlog;
+operate with the selected concurrency and investigate repeated queue growth.
+
+Before cutover, the deployment adapter must call
+`competition_cohort_review_preflight.validate_selected_phase_review_path(owner, reviewer)`
+for every selected voting reviewer candidate. An available reviewer outside the
+owner's selected quorum uses `validate_reviewer_export_path(owner, reviewer)`;
+that check does not add a voting peer or claim to validate its incoming vote
+path. Preserve the owner's existing quorum selection. The complete check compares exact selected
+identities, policy/runtime/capacity, export and complete-vote budgets and direct
+loopback listener bindings. Managed HTTPS paths additionally require explicit
+`owner_proxy_seconds` and `vote_proxy_seconds` from the actual managed proxy
+configuration. Missing proxy timeouts do not establish unlimited responses.
+Validate those settings against the proxy's supported behavior and test the
+complete path; a configuration comparison does not establish live readiness.
+The reviewer `check` command reports effective deadlines but cannot qualify
+other hosts or their proxies.
+
+Omitting the profile preserves historical canonical configuration bytes and
+legacy timeout behavior. Selecting it changes only phase export and phase vote
+allowances; ordinary readiness, model, service, chain and signing limits retain
+their explicit selections. Existing owner/reviewer journals, authority, state
+directories and signed cohort clocks remain in place. Timed-out owned native
+work drains before its lock is released, so a late HTTP 503 can occur after the
+nominal deadline. A retry reuses a completed durable vote; interrupted review
+before signing intent must still complete its independent checks.
 
 Deliver these canonical private files under `inputs_directory`:
 
@@ -915,7 +983,7 @@ For automatic admission review, select `umi-cohort-service-admission-host/4`
 and its `admission_owner` configuration (`umi-cohort-admission-owner/1`). Set a
 private process-lock `directory`, `owner_hotkey`, `owner_key_file`,
 `export_token_file`, and loopback `listen_host`/`listen_port`. Each `reviewers`
-entry supplies an authorized signer, an explicit HTTPS origin, a private
+entry supplies an authorized signer, an explicit private review origin, a private
 `token_file` and a bounded request timeout. The reviewer set must cover the
 policy's independent control-group quorum. Keep all these paths disjoint from
 the intake, finality, queue and model stores; owner-export and reviewer-vote
@@ -925,9 +993,9 @@ when model participation is enabled.
 The intake service starts the private listener and one recurring admission
 worker per reviewer, and drains them before closing its finality provider.
 Expose only the authenticated admission-history, intake-review and
-preparation-review routes to the selected reviewers through the private HTTPS
-proxy. The listener never binds a public interface. Reviewers independently
-verify the original registration proofs in their configured proof inboxes.
+preparation-review routes to the selected reviewers through direct same-host
+HTTP or the private HTTPS proxy. The listener never binds a public interface.
+Reviewers independently verify the original registration proofs in their configured proof inboxes.
 Configure proof replication separately; a signed owner export does not replace
 those proofs. An unavailable peer cannot stop another peer's loop. Restart
 reuses retained votes and certificates without operator resubmission.
@@ -1169,7 +1237,7 @@ not cached. Miners independently verify the response using their pinned owner
 and replay phase authority. Their startup configuration is documented in the
 [miner model guide](../miners/model.md).
 
-Configure `ServiceVotePeer` for each independent reviewer's HTTPS origin and vote
+Configure `ServiceVotePeer` for each independent reviewer's private origin and vote
 credential. Pass `ServiceWorkPeerReviews.reviewers` and `.retry` to the recurring
 service worker. Request votes remain in its original queue; partial retry votes
 and certificates are retained there before acknowledgement. A restarted worker

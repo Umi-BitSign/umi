@@ -135,7 +135,12 @@ class LifecycleHost:
         self.declaration_bytes = owner.maximum_export_bytes
         self.maximum_bytes = owner.request_evidence_bytes
         self.request_replay_bytes = owner.request_replay_bytes
-        self.timeout_seconds = min(peer.timeout_seconds for peer in owner.reviewers)
+        self.readiness_timeout_seconds = min(peer.timeout_seconds for peer in owner.reviewers)
+        self.timeout_seconds = (
+            owner.phase_review_budget.export_seconds
+            if owner.phase_review_budget is not None
+            else self.readiness_timeout_seconds
+        )
 
     def _peers(self, phase):
         owner = self.service.config.admission_owner
@@ -149,6 +154,7 @@ class LifecycleHost:
                 phase=phase,
                 token=credential,
                 timeout_seconds=peer.timeout_seconds,
+                budget=peer.phase_review_budget,
             )
             for peer, credential in zip(owner.reviewers, self.credentials, strict=True)
         )
@@ -166,7 +172,7 @@ class LifecycleHost:
         live = LiveIntakePhaseObserver(
             phase,
             self.config.public_origin,
-            timeout_seconds=self.timeout_seconds,
+            timeout_seconds=self.readiness_timeout_seconds,
         )
         return CohortPhaseDriver(
             CertifiedPhaseObserver(live, self._peers("intake"), self.policy),
@@ -280,7 +286,7 @@ class LifecycleHost:
             source,
             self.config.public_origin,
             client=self.client,
-            timeout_seconds=self.timeout_seconds,
+            timeout_seconds=self.readiness_timeout_seconds,
             opening_clock=partial(self._request_opening_clock, source),
         )
         publisher = CohortRequestSettlementPublisher(

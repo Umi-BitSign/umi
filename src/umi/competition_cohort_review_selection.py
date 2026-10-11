@@ -47,8 +47,13 @@ class SelectedPhaseReviewer:
     ):
         self.config, self.provider = config, provider
         self.policy, self.cohorts = config.policy, config.signing.cohorts
+        phase_export_timeout = (
+            config.phase_review_budget.export_exchange_seconds
+            if config.phase_review_budget is not None
+            else config.review_timeout_seconds
+        )
         common = dict(
-            maximum_bytes=config.maximum_export_bytes, timeout_seconds=config.review_timeout_seconds
+            maximum_bytes=config.maximum_export_bytes, timeout_seconds=phase_export_timeout
         )
         args = (provider, self.cohorts, config.owner_hotkey)
         self.intake = RemoteIntakeProgressReviewer(
@@ -72,7 +77,7 @@ class SelectedPhaseReviewer:
             config.owner_origin,
             token=token,
             maximum_bytes=config.request_evidence_bytes,
-            timeout_seconds=config.review_timeout_seconds,
+            timeout_seconds=phase_export_timeout,
         )
         self.archive = archive
         self.adoption = RequestTailAdoptionReviewer(
@@ -153,7 +158,11 @@ class SelectedPhaseReviewer:
             transport=transport,
             maximum_sample_gap_blocks=c.maximum_sample_gap_blocks,
             maximum_bytes=c.request_evidence_bytes,
-            timeout_seconds=c.review_timeout_seconds,
+            timeout_seconds=(
+                c.phase_review_budget.export_exchange_seconds
+                if c.phase_review_budget is not None
+                else c.review_timeout_seconds
+            ),
         )
 
     async def _select(self, progress):

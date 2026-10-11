@@ -18,10 +18,12 @@ from typing import Annotated, Generic, Literal, Protocol, TypeVar
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from starlette.types import Receive, Scope, Send
 
+from .competition_cohort_review_budget import PhaseReviewBudget
 from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_limits
+from .competition_cohort_review_origin import private_review_origin
 from .competition_progress import _failure_details
 from .concurrency import wait_for_owned
 from .host_memory_admission import HostMemoryAdmission
@@ -49,19 +51,18 @@ class CohortReviewPeerConfig(StrictProtocolModel):
     origin: Annotated[str, Field(min_length=1, max_length=2048)]
     token_file: Directory
     timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+    phase_review_budget: PhaseReviewBudget | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if self.phase_review_budget is None:
+            value.pop("phase_review_budget", None)
+        return value
 
     @model_validator(mode="after")
     def endpoint(self):
-        url = httpx.URL(self.origin)
-        if (
-            url.scheme != "https"
-            or not url.host
-            or url.userinfo
-            or url.query
-            or url.fragment
-            or url.path not in ("", "/")
-        ):
-            raise ValueError("cohort reviewer must be a configured HTTPS origin")
+        private_review_origin(self.origin)
         return self
 
 
@@ -278,7 +279,7 @@ def phase_review_routes(
 
 
 class PhaseReviewHTTPClient(Generic[RequestT]):
-    """One configured HTTPS owner; redirects cannot forward its private token."""
+    """One configured private origin; redirects cannot forward its token."""
 
     def __init__(
         self,
@@ -294,16 +295,7 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
     ):
         review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=aggregate_evidence)
         _request_limit(maximum_request_bytes)
-        url = httpx.URL(origin)
-        if (
-            url.scheme != "https"
-            or not url.host
-            or url.userinfo
-            or url.query
-            or url.fragment
-            or url.path not in ("", "/")
-        ):
-            raise ValueError("phase review requires a configured HTTPS origin")
+        url = private_review_origin(origin)
         self.client, self.url = client, str(url.copy_with(path=path))
         self.token = _credential(token)
         self.maximum_bytes, self.timeout_seconds = maximum_bytes, timeout_seconds

@@ -98,6 +98,29 @@ def configured(h, root):
     )
 
 
+def test_peer_origin_migration_preserves_shared_token_bindings(lifecycle, tmp_path):
+    config = configured(lifecycle, tmp_path / "host")
+    peers = config.admission_owner.reviewers
+    config = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(config.model_copy(update={"model_review_peers": peers}))
+    )
+    original_paths = config.stores()
+    local = tuple(
+        peer.model_copy(update={"origin": f"http://127.0.0.1:{19578 + index}"})
+        for index, peer in enumerate(peers)
+    )
+    owner = config.admission_owner.model_copy(update={"reviewers": local})
+    inconsistent = config.model_copy(update={"admission_owner": owner})
+    with pytest.raises(ValueError, match="conflicting identities or origins"):
+        inconsistent.stores()
+    migrated = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(inconsistent.model_copy(update={"model_review_peers": local}))
+    )
+    assert migrated.stores() == original_paths
+    assert canonical_json_bytes(migrated.series) == canonical_json_bytes(config.series)
+    assert migrated.lifecycle == config.lifecycle
+
+
 @pytest.fixture
 async def host(lifecycle, tmp_path, monkeypatch):
     h = lifecycle

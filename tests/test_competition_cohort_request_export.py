@@ -179,8 +179,9 @@ def test_pending_request_rejects_roster_not_certified_by_preparation(remote):
 
 
 @pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
+@pytest.mark.parametrize("loopback_restart", [False, True])
 async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vote(
-    remote, chain_config, tmp_path, monkeypatch
+    remote, chain_config, tmp_path, monkeypatch, loopback_restart
 ):
     from pathlib import Path
     from types import SimpleNamespace
@@ -297,10 +298,12 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
             fields={"proof": b"proof", "metadata": b"metadata"},
         )
 
+    peer_origin = "https://reviewer.example"
+
     def peer(client):
         return PhaseVotePeer(
             client,
-            "https://reviewer.example",
+            peer_origin,
             policy=policy,
             cohorts=config.signing.cohorts,
             signer=config.signing.signer,
@@ -337,6 +340,13 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
     h.block += 100_000
     for folder, key, _ in selections:
         (inputs / folder / (key + ".json")).unlink()
+    if loopback_restart:
+        original_signing = canonical_json_bytes(config.signing)
+        original_series = canonical_json_bytes(config.series)
+        config = config.model_copy(update={"owner_origin": "http://127.0.0.1:18090"})
+        peer_origin = "http://127.0.0.1:19579"
+        assert canonical_json_bytes(config.signing) == original_signing
+        assert canonical_json_bytes(config.series) == original_series
     async with (
         boot.phase_review_app(config) as app,
         client_type(transport=httpx.ASGITransport(app=app)) as client,
@@ -482,7 +492,10 @@ async def test_request_export_capacity_and_cancellation_preserve_completion(remo
     assert drained.is_set() and h.remote_calls == []
 
 
-async def test_native_controller_recovers_remote_request_vote_after_long_delay(remote, tmp_path):
+@pytest.mark.parametrize("loopback", [False, True])
+async def test_native_controller_recovers_remote_request_vote_after_long_delay(
+    remote, tmp_path, loopback
+):
     h = remote
     complete = h.window()
     owner, reviewer = FastAPI(), FastAPI()
@@ -514,11 +527,13 @@ async def test_native_controller_recovers_remote_request_vote_after_long_delay(r
             httpx.AsyncClient(transport=httpx.ASGITransport(app=reviewer)) as reviewer_client,
         ):
             h.remote.fetch = RequestReviewHTTPClient(
-                owner_client, "https://owner.example", token="owner-private-token" * 3
+                owner_client,
+                "http://127.0.0.1:18090" if loopback else "https://owner.example",
+                token="owner-private-token" * 3,
             )
             peer = PhaseVotePeer(
                 reviewer_client,
-                "https://reviewer.example",
+                "http://127.0.0.1:19579" if loopback else "https://reviewer.example",
                 policy=policy,
                 cohorts=h.intake.config.cohorts,
                 signer=wallet("Dave").hotkey.ss58_address,
