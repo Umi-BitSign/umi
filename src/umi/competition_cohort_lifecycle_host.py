@@ -110,7 +110,9 @@ class LifecycleHost:
         self.gate = SeriesRequestStart(
             c.request_start, service.config.series, self.provider, service.history
         )
-        self.files = RequestCompletionFiles(Path(c.request_completion_directory))
+        self.files = RequestCompletionFiles(
+            Path(c.request_completion_directory), maximum_bytes=owner.request_replay_bytes
+        )
         self.proofs = SettlementRegistrationFiles(
             self.provider, inbox=self.root / "proof-inbox", outbox=Path(c.proof_export_directory)
         )
@@ -120,7 +122,9 @@ class LifecycleHost:
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
-        self.maximum_bytes = owner.maximum_export_bytes
+        self.declaration_bytes = owner.maximum_export_bytes
+        self.maximum_bytes = owner.request_evidence_bytes
+        self.request_replay_bytes = owner.request_replay_bytes
         self.timeout_seconds = min(peer.timeout_seconds for peer in owner.reviewers)
 
     def _peers(self, phase):
@@ -173,7 +177,7 @@ class LifecycleHost:
         prepared = read_private_model(
             Path(c.sources.round_directory) / (cohort + ".json"),
             PreparedCohortRound,
-            maximum_bytes=self.maximum_bytes,
+            maximum_bytes=self.declaration_bytes,
         )
         if prepared.roster.round.cohort_sha256 != cohort:
             raise ValueError("request owner prepared round changed its cohort")
@@ -231,6 +235,8 @@ class LifecycleHost:
             partial_source=partial(self.files.partial, prepared.roster),
             inventory_source=partial(self.files.inventories, prepared.roster),
             publish_inventory_cutoff=publish_inventory_cutoff,
+            maximum_observation_bytes=self.request_replay_bytes,
+            maximum_replay_bytes=self.request_replay_bytes,
             maximum_sample_gap_blocks=self.service.config.admission_owner.maximum_sample_gap_blocks,
         )
 

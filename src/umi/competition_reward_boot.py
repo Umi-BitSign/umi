@@ -16,6 +16,7 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_resources import CompetitionChainResources
+from .competition_cohort_capacity import AggregateEvidenceCapacity
 from .competition_cohort_direct_model_review import (
     DirectModelArtifactReviewer,
     DirectModelReviewSourceConfig,
@@ -102,7 +103,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_history_bytes: HistoryCapacity
     maximum_coverage_bytes: Capacity
     maximum_reader_bytes: Capacity
-    maximum_package_bytes: ObjectCapacity
+    maximum_package_bytes: AggregateEvidenceCapacity
     maximum_promotion_bytes: ObjectCapacity
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity

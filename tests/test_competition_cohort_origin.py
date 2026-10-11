@@ -695,8 +695,10 @@ async def test_invalid_retained_highwater_does_not_trigger_origin_recollection(
         return source
 
     monkeypatch.setattr(service.authority, "history", concurrent_history)
-    with pytest.raises(ValueError, match="finalized head regressed"):
+    with pytest.raises(ValueError, match="round finalized head is invalid") as error:
         await service.collect(p.e.assignment)
+    # Corruption must not enter the retryable legitimate-head-advancement path.
+    assert type(error.value) is ValueError
     assert calls == 4
     with p.e.journal().journal.transaction() as db:
         assert db.execute("SELECT block FROM highwater ORDER BY block").fetchall() == [
@@ -796,8 +798,10 @@ async def test_invalid_assignment_highwater_does_not_retry_authority(endpoint, m
         return capture
 
     monkeypatch.setattr(service.authority.provider, "collect", invalid_collect)
-    with pytest.raises(ValueError, match="finalized head regressed"):
+    with pytest.raises(ValueError, match="round finalized head is invalid") as error:
         await service.collect(p.e.assignment)
+    # Corruption must not enter the retryable legitimate-head-advancement path.
+    assert type(error.value) is ValueError
     assert calls == 1 and p.resolutions == []
 
 

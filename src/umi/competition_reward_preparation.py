@@ -16,6 +16,7 @@ from typing import Literal
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import OwnedCompetitionChainObservation
+from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
@@ -114,9 +115,12 @@ class StandingRewardPreparation:
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
         model_artifacts: DirectModelSettlementVerifier | None = None,
     ):
-        for bound in (maximum_promotion_bytes, maximum_package_bytes):
-            if type(bound) is not int or not 1024 <= bound <= MAX_CONFIGURED_PRIVATE_BYTES:
-                raise ValueError("reward preparation byte bound is invalid")
+        check_aggregate_evidence_bytes(maximum_package_bytes)
+        if (
+            type(maximum_promotion_bytes) is not int
+            or not 1024 <= maximum_promotion_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
+        ):
+            raise ValueError("reward preparation byte bound is invalid")
         if digest(promotion_store.policy) != digest(reader.policy):
             raise ValueError("reward preparation promotion store belongs to another policy")
         self.reader, self.promotion_store = reader, promotion_store

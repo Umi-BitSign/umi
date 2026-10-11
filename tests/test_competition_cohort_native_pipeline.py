@@ -458,6 +458,10 @@ async def certify_requests(o, app, root, monkeypatch, signatures):
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
+    selected = o.config.admission_owner
+    assert source.replay_bytes == source.observation_bytes == selected.request_replay_bytes
+    assert app.state.lifecycle.files.maximum_bytes == selected.request_replay_bytes
+    assert app.state.lifecycle.maximum_bytes == selected.request_evidence_bytes
     state, _ = node.controller.store.status(h.cohort)
     opening = source.request_opening(state)
     raw, metadata = await h.provider.retained_archive(opening)
@@ -510,6 +514,7 @@ def evaluator_config(o, name, root):
         owner_hotkey=o.config.admission_owner.owner_hotkey,
         owner_origin="https://owner.example",
         review_timeout_seconds=30,
+        request_replay_bytes=o.config.admission_owner.request_replay_bytes,
         benchmark=BenchmarkHostConfig(
             schema="umi-cohort-benchmark-host/1",
             directory=str(root / "host"),
@@ -567,6 +572,26 @@ async def test_accepted_model_reaches_native_reward_package(
         chain_config,
         interrupt=interrupt,
         mixed=mixed,
+    )
+
+
+async def test_explicit_aggregate_budget_through_native_request_settlement_and_reward(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    owner = host.config.admission_owner.model_copy(
+        update={"maximum_aggregate_evidence_bytes": 1024**3}
+    )
+    host.config = host.config.model_copy(update={"admission_owner": owner})
+    host.service.config = host.config
+    await run_pipeline(
+        host,
+        scenario,
+        runtime,
+        tmp_path,
+        monkeypatch,
+        chain_config,
+        interrupt=False,
+        mixed=True,
     )
 
 

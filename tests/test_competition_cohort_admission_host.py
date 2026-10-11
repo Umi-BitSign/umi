@@ -398,3 +398,19 @@ async def test_shutdown_bounds_control_drain_and_retains_owned_writes(owned, mon
             await asyncio.gather(request, return_exceptions=True)
     async with boot.admission_owner_app(o.config, o.preparation, o.h.archive.reviewer):
         pass
+
+
+async def test_owner_request_aggregate_override_preserves_original_selection(owned):
+    old = owned.config
+    original = canonical_json_bytes(old)
+    assert b"maximum_aggregate_evidence_bytes" not in original
+    assert old.request_replay_bytes == 256 * 1024**2
+    changed = boot.AdmissionOwnerConfig.model_validate(
+        old.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": 1024**3}
+    )
+    assert changed.request_evidence_bytes == changed.request_replay_bytes == 1024**3
+    assert changed.maximum_export_bytes == old.maximum_export_bytes
+    assert changed.reviewers == old.reviewers and changed.directory == old.directory
+    restored = changed.model_dump(by_alias=True)
+    restored.pop("maximum_aggregate_evidence_bytes")
+    assert canonical_json_bytes(boot.AdmissionOwnerConfig.model_validate(restored)) == original

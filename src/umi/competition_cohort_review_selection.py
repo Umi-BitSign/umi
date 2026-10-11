@@ -63,7 +63,11 @@ class SelectedPhaseReviewer:
             **common,
         )
         self.request_fetch = RequestReviewHTTPClient(
-            client, config.owner_origin, token=token, **common
+            client,
+            config.owner_origin,
+            token=token,
+            maximum_bytes=config.request_evidence_bytes,
+            timeout_seconds=config.review_timeout_seconds,
         )
         self.archive = archive
 
@@ -115,7 +119,7 @@ class SelectedPhaseReviewer:
             catalogs=catalogs,
             transport=transport,
             maximum_sample_gap_blocks=c.maximum_sample_gap_blocks,
-            maximum_bytes=c.maximum_export_bytes,
+            maximum_bytes=c.request_evidence_bytes,
             timeout_seconds=c.review_timeout_seconds,
         )
 

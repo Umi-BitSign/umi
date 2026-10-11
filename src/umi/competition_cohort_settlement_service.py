@@ -10,6 +10,7 @@ from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
+from .competition_cohort_aggregate_files import read_aggregate_model
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
     CohortProgressIntent,
@@ -296,7 +297,7 @@ class CohortSettlementService:
         try:
             package = await run_owned_thread(
                 partial(
-                    read_private_model,
+                    read_aggregate_model,
                     path,
                     SettlementInputPackage,
                     maximum_bytes=self.config.maximum_package_bytes,

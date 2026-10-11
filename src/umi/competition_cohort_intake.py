@@ -25,6 +25,7 @@ from pydantic import Field, model_validator
 from .canonical_reuse import canonical_json_reuse
 from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
+from .competition_cohort_capacity import MAX_AGGREGATE_EVIDENCE_BYTES
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake_records import (
@@ -425,7 +426,7 @@ class CohortIntake:
         self._allowed(cohort)
         if (
             type(maximum_bytes) is not int
-            or not 1 <= maximum_bytes <= 512 * 1024**2
+            or not 1 <= maximum_bytes <= MAX_AGGREGATE_EVIDENCE_BYTES
             or type(maximum_records) is not int
             or not 1 <= maximum_records <= 65536
         ):

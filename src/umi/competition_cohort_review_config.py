@@ -9,6 +9,11 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_chain import CompetitionChainConfig
 from .competition_cohort_admission_journal import CohortAdmissionSignerConfig
 from .competition_cohort_benchmark_host import BenchmarkHostConfig
+from .competition_cohort_capacity import (
+    LEGACY_AGGREGATE_REPLAY_BYTES,
+    AggregateEvidenceCapacity,
+    request_evidence_bytes,
+)
 from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_endpoint_host import EndpointHostConfig
 from .competition_cohort_intake import CohortIntakeBinding
@@ -53,6 +58,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
     listen_port: Annotated[int, Field(ge=1024, le=65535)]
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
+    maximum_aggregate_evidence_bytes: AggregateEvidenceCapacity | None = None
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     review_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
@@ -66,6 +72,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.maximum_aggregate_evidence_bytes is None:
+            value.pop("maximum_aggregate_evidence_bytes", None)
         if self.service_signing is None:
             value.pop("service_signing", None)
         if self.admission_signing is None:
@@ -79,6 +87,18 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         if self.direct_model_review is None:
             value.pop("direct_model_review", None)
         return value
+
+    @property
+    def request_evidence_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, self.maximum_export_bytes
+        )
+
+    @property
+    def request_replay_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, LEGACY_AGGREGATE_REPLAY_BYTES
+        )
 
     def stores(self) -> tuple[Path, ...]:
         return tuple(

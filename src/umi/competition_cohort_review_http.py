@@ -154,8 +154,9 @@ class PhaseReviewHTTPClient(Generic[RequestT]):
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
         maximum_request_bytes: int = MAX_REQUEST_BYTES,
+        aggregate_evidence: bool = False,
     ):
-        review_export_limits(maximum_bytes, timeout_seconds)
+        review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=aggregate_evidence)
         _request_limit(maximum_request_bytes)
         url = httpx.URL(origin)
         if (

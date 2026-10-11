@@ -167,7 +167,9 @@ class BenchmarkHost:
             maximum_rounds=65536,
             maximum_bytes=c.maximum_state_bytes,
         )
-        self.files = RequestCompletionFiles(Path(c.request_export_directory))
+        self.files = RequestCompletionFiles(
+            Path(c.request_export_directory), maximum_bytes=config.request_replay_bytes
+        )
         self.exporter = RequestExportWorker(
             (self.execution,), provider, sign, self.files, self.journal, batch_size=c.batch_size
         )

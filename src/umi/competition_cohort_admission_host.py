@@ -25,6 +25,11 @@ from .competition_cohort_admission_http import (
     admission_history_routes,
 )
 from .competition_cohort_admission_worker import CohortAdmissionWorker
+from .competition_cohort_capacity import (
+    LEGACY_AGGREGATE_REPLAY_BYTES,
+    AggregateEvidenceCapacity,
+    request_evidence_bytes,
+)
 from .competition_cohort_dispatch_host import start_service_dispatch
 from .competition_cohort_history_http import CohortHistoryExporter, cohort_history_routes
 from .competition_cohort_intake_export import IntakeReviewExporter
@@ -74,14 +79,29 @@ class AdmissionOwnerConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
+    maximum_aggregate_evidence_bytes: AggregateEvidenceCapacity | None = None
     windows: WindowOwnerConfig | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.maximum_aggregate_evidence_bytes is None:
+            value.pop("maximum_aggregate_evidence_bytes", None)
         if self.windows is None:
             value.pop("windows", None)
         return value
+
+    @property
+    def request_evidence_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, self.maximum_export_bytes
+        )
+
+    @property
+    def request_replay_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, LEGACY_AGGREGATE_REPLAY_BYTES
+        )
 
     def stores(self):
         return tuple(

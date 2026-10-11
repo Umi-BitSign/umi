@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
+from .competition_cohort_capacity import AggregateEvidenceCapacity
 from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_execution_journal import CohortExecutionConfig
 from .competition_cohort_intake import CohortIntakeConfig
@@ -71,7 +72,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     proof_export_directory: Directory
     exchange_inbox: Directory
     exchange_outbox: Directory
-    maximum_package_bytes: ObjectCapacity
+    maximum_package_bytes: AggregateEvidenceCapacity
     maximum_promotion_bytes: ObjectCapacity
     maximum_state_bytes: Annotated[int, Field(ge=1024 * 1024, le=16 * 1024**3)]
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5

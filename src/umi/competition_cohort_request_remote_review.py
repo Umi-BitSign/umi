@@ -62,7 +62,7 @@ class RemoteRequestProgressReviewer:
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
     ):
-        review_export_limits(maximum_bytes, timeout_seconds)
+        review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=True)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
             raise ValueError("request export sampling gap is outside bounds")
         self.policy, self.cohorts, self.owner = review_selection(provider.policy, cohorts, owner)

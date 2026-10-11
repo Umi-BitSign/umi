@@ -83,7 +83,7 @@ class RequestReviewExporter:
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
     ):
-        review_export_limits(maximum_bytes, timeout_seconds)
+        review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=True)
         self.source, self.owner, self.sign = source, identity(owner), sign
         if self.owner not in {identity(e.hotkey) for e in source.intake.policy.evaluators}:
             raise ValueError("request export owner is outside the configured evaluator set")

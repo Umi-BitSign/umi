@@ -15,6 +15,11 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
+from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
+from .competition_cohort_capacity import (
+    LEGACY_AGGREGATE_REPLAY_BYTES,
+    check_aggregate_evidence_bytes,
+)
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import (
     MAX_ARCHIVE_OBJECT_BYTES,
@@ -40,18 +45,16 @@ from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_store import CompetitionStore
 from .open_competition import CompetitionPolicy, EvaluationSuite, digest
 from .policy import ScoringPolicy
-from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_PACKAGE_OBJECTS = 65536
-DEFAULT_PACKAGE_BYTES = 256 * 1024**2
+DEFAULT_PACKAGE_BYTES = LEGACY_AGGREGATE_REPLAY_BYTES
 DecisionSource = Callable[[str], CohortDecisionInput]
 PulseSource = Callable[[int], RetainedRevealPulse]
 
 
 def _check_bound(maximum_bytes: int) -> None:
-    if type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= MAX_CONFIGURED_PRIVATE_BYTES:
-        raise ValueError("reward package byte bound is invalid")
+    check_aggregate_evidence_bytes(maximum_bytes)
 
 
 class RewardIntakeRef(StrictProtocolModel):
@@ -410,7 +413,7 @@ def publish_reward_package(
 ) -> None:
     """Atomically retain exact private bytes; this is not proof of qualification."""
     _check_bound(maximum_bytes)
-    publish_private_model(path, package, maximum_bytes=maximum_bytes)
+    publish_aggregate_model(path, package, maximum_bytes=maximum_bytes)
 
 
 def load_reward_package(
@@ -424,7 +427,7 @@ def load_reward_package(
 ) -> CohortRewardAllocation:
     """Load a retained replica and fully replay it, without a coordinator call."""
     _check_bound(maximum_bytes)
-    package = read_private_model(path, CohortRewardPackage, maximum_bytes=maximum_bytes)
+    package = read_aggregate_model(path, CohortRewardPackage, maximum_bytes=maximum_bytes)
     return replay_reward_package(
         package,
         policy,

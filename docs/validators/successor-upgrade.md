@@ -945,6 +945,40 @@ proofs before the settlement history becomes visible. Pending files, proofs or
 votes retry without replacing original decisions. Each cohort has its own
 control connection and loop; a waiting cohort does not stop another cohort.
 
+Select aggregate evidence capacity for the complete request-to-reward path.
+Set `admission_owner.maximum_aggregate_evidence_bytes` and each phase reviewer's
+`maximum_aggregate_evidence_bytes` to the same qualified budget, and use that
+budget for every settlement and standing reward service's
+`maximum_package_bytes`. The accepted aggregate configuration range is 1 KiB through 2 GiB; qualify
+the selected budget on its actual hosts before treating it as operational.
+The request owner uses its selection for completion-file replay, native closure,
+signed export and HTTP response capacity; reviewers use theirs for terminal
+publication, HTTP reception and independent native replay. Settlement input
+assembly, package files and downstream reward replay use the package selection.
+Include signed envelope, original participation records and service observations
+when measuring the required capacity: the sum of raw endpoint objects alone is
+a lower bound. Leave room for retained replacement ancestry and later evidence.
+
+Omitting the new request setting preserves the existing `maximum_export_bytes`
+selection, the original 256 MiB local replay/completion-file limits, and historical
+configuration serialization. That existing field still
+controls intake/preparation exports and source declarations. The aggregate
+selection does not enlarge individual 16 MiB endpoint objects, ordinary private
+files, promotion records, witnesses, record counts or local journal quotas.
+Signed policy, plans, clocks, cutoff evidence and directory bindings remain the
+same. Changing a completion-file budget makes its private verification cache
+miss and requires native replay of the retained originals.
+
+Before changing services, validate every selected configuration with the target
+runtime, compare the complete path's explicit budgets, and qualify its peak
+memory and disk use with the configured replay concurrency. Run the native
+request export/reviewer and settlement/reward tests at that budget. The isolated
+`tests/benchmark_cohort_aggregate_memory.py` checks actual aggregate bytes above
+the older 256 MiB and 512 MiB ceilings; it uses synthetic content and does not
+certify a cohort. Increasing a capacity does not assert that the full cohort
+will fit, pass independent replay, or meet a latency target. Retain the original
+service state and exact signed evidence when updating only these local limits.
+
 Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
 in the owner process. It requires the version-five selections and a `dispatch`
 object with schema `umi-cohort-service-dispatch-config/1`. Configure `origins`

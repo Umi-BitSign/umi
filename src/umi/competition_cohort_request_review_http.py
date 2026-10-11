@@ -26,5 +26,6 @@ class RequestReviewHTTPClient(PhaseReviewHTTPClient[RequestReviewRequest]):
             token=token,
             path=PATH,
             maximum_bytes=maximum_bytes,
+            aggregate_evidence=True,
             timeout_seconds=timeout_seconds,
         )

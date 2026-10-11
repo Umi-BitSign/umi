@@ -91,6 +91,11 @@ def _byte_bound(maximum_bytes: int | None) -> int:
 
 def _read_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
     maximum_bytes = _byte_bound(maximum_bytes)
+    return _read_bounded_private_bytes(path, maximum_bytes=maximum_bytes)
+
+
+def _read_bounded_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
+    """Read with a caller-validated capacity; all private file checks still apply."""
     private_path(str(path))
     ensure_private_directory(path.parent)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -144,6 +149,11 @@ def publish_private_model(
     path: Path, value: BaseModel, *, maximum_bytes: int | None = None
 ) -> None:
     maximum_bytes = _byte_bound(maximum_bytes)
+    _publish_bounded_private_model(path, value, maximum_bytes=maximum_bytes)
+
+
+def _publish_bounded_private_model(path: Path, value: BaseModel, *, maximum_bytes: int) -> None:
+    """Publish with a caller-validated capacity and unchanged ownership/durability."""
     raw = canonical_json_bytes(value)
     if len(raw) > maximum_bytes:
         raise ValueError("evaluator output exceeds its byte bound")
@@ -168,7 +178,7 @@ def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: 
         # bytes prove canonical equality without serializing the retained object
         # twice more. Retain schema validation: callers can supply a constructed
         # model that skipped validation, or a model with mutated nested content.
-        if _read_private_bytes(path, maximum_bytes=maximum_bytes) != raw:
+        if _read_bounded_private_bytes(path, maximum_bytes=maximum_bytes) != raw:
             raise ValueError("evaluator outbox already contains different bytes")
         retained = type(value).model_validate_json(raw)
         if canonical_json_bytes(retained) != raw:

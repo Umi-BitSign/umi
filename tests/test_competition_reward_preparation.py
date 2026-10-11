@@ -5295,3 +5295,51 @@ async def test_settlement_file_reviewer_loop_recovers_after_missing_proof(settle
         h.receiver.outbox, request, wallet("Dave").hotkey.ss58_address
     ).exists()
     assert sum(v for (name, _), v in h.signatures.items() if name == "Dave") == 1
+
+
+async def test_native_reward_package_uses_dedicated_aggregate_file_and_replay_budget(
+    native_package, tmp_path
+):
+    from umi.competition_cohort_reward_package import load_reward_package, publish_reward_package
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p = native_package
+    maximum = 1024**3
+    files = StandingRewardFiles(
+        tmp_path / "aggregate-reward",
+        maximum_package_bytes=maximum,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    assert files.package(digest(p.package)) == p.package
+    path = tmp_path / "aggregate-settlement" / "package.json"
+    publish_reward_package(path, p.package, maximum_bytes=maximum)
+    selected = dict(
+        expected_package_sha256=digest(p.package),
+        expected_cohort_sha256=p.requirement.cohort_sha256,
+        expected_tip_sha256=tip(p.package.inputs.history),
+        current_block=2**53 - 1,
+        expected_terms_sha256=p.requirement.terms_sha256,
+        expected_catalog_sha256s=p.requirement.catalog_sha256s,
+        maximum_promotion_bytes=1_000_000,
+    )
+    assert (
+        load_reward_package(
+            path,
+            p.store.policy,
+            p.store,
+            p.package.inputs.history,
+            maximum_bytes=maximum,
+            **selected,
+        )
+        == p.allocation
+    )
+    with pytest.raises(ValueError, match="input exceeds"):
+        load_reward_package(
+            path,
+            p.store.policy,
+            p.store,
+            p.package.inputs.history,
+            maximum_bytes=1024,
+            **selected,
+        )

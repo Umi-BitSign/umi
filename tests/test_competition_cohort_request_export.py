@@ -123,8 +123,10 @@ def replay(h, value):
 
 
 @pytest.mark.parametrize("completion", ["pending", "fenced_pending", "complete"])
-async def test_remote_request_export_matches_native_owner(remote, completion):
+@pytest.mark.parametrize("aggregate_bytes", [64 * 1024**2, 1024**3])
+async def test_remote_request_export_matches_native_owner(remote, completion, aggregate_bytes):
     h = remote
+    h.source.replay_bytes = h.exporter.maximum_bytes = h.remote.maximum_bytes = aggregate_bytes
     if completion == "pending":
         progress = h.sample()
     else:
@@ -141,7 +143,10 @@ async def test_remote_request_export_matches_native_owner(remote, completion):
     app.include_router(request_review_routes(h.exporter, token="owner-private-token" * 3))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
         h.remote.fetch = RequestReviewHTTPClient(
-            client, "https://owner.example", token="owner-private-token" * 3
+            client,
+            "https://owner.example",
+            token="owner-private-token" * 3,
+            maximum_bytes=aggregate_bytes,
         )
         assert await h.remote.review(progress) == h.source.read(progress).record
         vote = await h.remote_signer().attest(progress)

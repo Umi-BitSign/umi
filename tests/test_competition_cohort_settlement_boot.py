@@ -494,3 +494,12 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
     assert ("export_drained" in events) == (failure != "construction")
     assert ("preparation_started" in events) == (failure != "construction")
     assert ("preparation_drained" in events) == (failure != "construction")
+
+
+def test_package_aggregate_budget_does_not_raise_promotion_limit(selected):
+    original = selected.config.model_dump(by_alias=True)
+    changed = SettlementServiceConfig.model_validate(original | {"maximum_package_bytes": 1024**3})
+    assert changed.maximum_package_bytes == 1024**3
+    assert changed.maximum_promotion_bytes == selected.config.maximum_promotion_bytes
+    with pytest.raises(ValueError):
+        SettlementServiceConfig.model_validate(original | {"maximum_promotion_bytes": 1024**3})

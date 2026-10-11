@@ -6,6 +6,7 @@ evidence before retaining a decision or asking any evaluator to sign it.
 
 from pathlib import Path
 
+from .competition_cohort_aggregate_files import read_aggregate_model
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
@@ -29,7 +30,7 @@ from .competition_reward_opportunity import (
 )
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .open_competition import CompetitionPolicy, digest
-from .private_files import private_path, read_private_model
+from .private_files import private_path
 from .protocol import canonical_json_bytes
 
 
@@ -92,7 +93,7 @@ class StandingRewardOffers:
                 activation=predecessor,
             )
         try:
-            package = read_private_model(
+            package = read_aggregate_model(
                 self.settlements / (cohort + ".json"),
                 CohortRewardPackage,
                 maximum_bytes=self.files.maximum_package_bytes,
