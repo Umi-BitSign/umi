@@ -134,7 +134,10 @@ async def test_live_observer_forwards_native_opening_without_changing_readiness(
     seen = []
     opening = object()
     state, observed = object(), object()
-    source = NS(observe=lambda s, c, **kw: seen.append((s, c, kw)) or "progress")
+    source = NS(
+        seal_fenced=lambda s, c: seen.append(("fence", s, c)),
+        observe=lambda s, c, **kw: seen.append((s, c, kw)) or "progress",
+    )
 
     async def clock(s):
         assert s is state
@@ -149,7 +152,10 @@ async def test_live_observer_forwards_native_opening_without_changing_readiness(
 
     monkeypatch.setattr(live, "_ready", ready)
     assert await live(state, observed) == "progress"
-    assert seen == [(state, observed, {"serving": False, "opened": opening})]
+    assert seen == [
+        ("fence", state, observed),
+        (state, observed, {"serving": False, "opened": opening}),
+    ]
 
 
 @pytest.mark.asyncio

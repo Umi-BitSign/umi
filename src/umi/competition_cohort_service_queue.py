@@ -8,6 +8,7 @@ The host must authenticate its phase/proof sources and serialize its lifecycle.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -48,12 +49,13 @@ from .competition_cohort_service_work import (
     verify_service_claim,
 )
 from .competition_execution import execution_boundary
-from .competition_round_journal import RecordReservation, RoundJournal
+from .competition_round_journal import FinalizedHeadRegression, RecordReservation, RoundJournal
 from .open_competition import CompetitionPolicy, SignedSubmission, digest
 from .private_files import Directory, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_ADMISSION_BYTES = 2 * 1024**2
+logger = logging.getLogger(__name__)
 
 
 class ServiceQueueBackpressure(ValueError):
@@ -575,7 +577,18 @@ class ServiceWorkQueue:
                     # Seal presence is only a scheduling hint: seal_locked still
                     # replays its complete retained evidence, or rechecks the
                     # current head if another observer advances during replay.
-                    self.journal._observed_head(db, execution_boundary(capture).block)
+                    block = execution_boundary(capture).block
+                    try:
+                        self.journal._observed_head(db, block)
+                    except FinalizedHeadRegression as error:
+                        logger.info(
+                            "cohort_service_head_regression catalog=%s "
+                            "stage=inventory_precheck capture_block=%s highwater_block=%s",
+                            self.config.catalog_sha256,
+                            block,
+                            error.retained_block,
+                        )
+                        raise
                 rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
                 if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
                     raise ValueError("service accepted prefix has a missing ordinal")
@@ -634,13 +647,23 @@ class ServiceWorkQueue:
                 current_block=boundary.block,
             )
             self._reserve_seal()
-            remember_order_history(
-                self.journal,
-                {catalog.catalog.cohort_sha256: catalog.catalog.authority_sha256},
-                self.policy,
-                source,
-                boundary.block,
-            )
+            try:
+                remember_order_history(
+                    self.journal,
+                    {catalog.catalog.cohort_sha256: catalog.catalog.authority_sha256},
+                    self.policy,
+                    source,
+                    boundary.block,
+                )
+            except FinalizedHeadRegression as error:
+                logger.info(
+                    "cohort_service_head_regression catalog=%s "
+                    "stage=seal_history capture_block=%s highwater_block=%s",
+                    key,
+                    boundary.block,
+                    error.retained_block,
+                )
+                raise
             # Hold the lifecycle lock through export and the final immutable
             # seal. Partial exports are harmless; no acceptance can interleave.
             with self.journal.transaction() as db:

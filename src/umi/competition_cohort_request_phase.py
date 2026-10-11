@@ -70,7 +70,7 @@ from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_terminal import ServiceWorkTerminals
 from .competition_cohort_service_work import SignedServiceWorkCatalog
-from .competition_execution import ExecutionBoundary
+from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistration
 from .competition_round_journal import RoundJournal
 from .open_competition import CompetitionPolicy, digest, identity
@@ -331,6 +331,39 @@ class NativeRequestProgressSource:
             )
             return sources[opened.evidence_sha256].observation
 
+    def _seal_queues_locked(self, state, capture, history, decisions, fence, tail_fence):
+        """Finish a validated fence while every catalog's admission lease is held."""
+        first_fence = fence.observation if fence is not None else tail_fence.observation
+        if execution_boundary(capture).block < first_fence.block:
+            raise ValueError("request queue capture precedes its admission fence")
+        owner_history = CohortOrderHistory(history=history, decisions=decisions)
+        values = tuple(
+            q.seal_locked(owner_history, capture, expected_tip_sha256=state.tip_sha256)
+            for q in self.queues
+        )
+        if any(s.observation.block < first_fence.block for s in values):
+            raise ValueError("request queue was sealed before its admission fence")
+        return values
+
+    def seal_fenced(self, state, capture: RegistrationCapture) -> None:
+        """Finish an existing native fence before readiness can age this capture.
+
+        This uses the coordinator's unchanged observation and never selects a
+        new cutoff. Full terminal replay and independent closure review remain
+        necessary before complete progress or a phase transition is possible.
+        """
+        self.epoch.identity()
+        with self.intake._connection() as (db, store):
+            history, decisions, sources, restored, prior = self._state(store, state)
+            fence = self._fence(db, self._availability(store), state, restored, prior)
+            tail_fence = self._tail_fence(state, history, sources)
+            if fence is None and tail_fence is None:
+                return
+            with ExitStack() as leases:
+                for queue in self.queues:
+                    leases.enter_context(queue.journal.locked())
+                self._seal_queues_locked(state, capture, history, decisions, fence, tail_fence)
+
     def observe(
         self,
         state,
@@ -367,14 +400,11 @@ class NativeRequestProgressSource:
             )
             if ordinary_ready or tail_ready:
                 captured = ReplayObjectCollector(self._source, self.replay_bytes)
-                records = tuple(self.intake._records(db, history))
                 common = dict(
                     decision_source=sources.__getitem__,
-                    intake_records=records,
                     expected_tip_sha256=state.tip_sha256,
                     current_block=service.observation.block,
                 )
-                orders = tuple(self.orders())
                 by_catalog = {
                     q.config.catalog_sha256: owner
                     for q, owner in zip(self.queues, self.services, strict=True)
@@ -400,12 +430,28 @@ class NativeRequestProgressSource:
                 # inventory, threshold decision and seals. A nonqualifying tail
                 # leaves admissions open, including while dispatch is unavailable.
                 seals = None
+
+                def seal_queues():
+                    return self._seal_queues_locked(
+                        state, capture, history, decisions, fence, tail_fence
+                    )
+
                 with ExitStack() as leases:
                     inventories = tuple(
                         leases.enter_context(q.closure_inventory(capture=capture))
                         for q in self.queues
                     )
                     admissions_locked = True
+                    # A validated durable fence has already closed admissions.
+                    # Finish that original seal before the expensive terminal
+                    # replay can age its capture. The native monotonic check
+                    # remains in seal_locked, and every closure input below is
+                    # still replayed before complete progress can be retained.
+                    fenced_seals = (
+                        seal_queues() if fence is not None or tail_fence is not None else None
+                    )
+                    common["intake_records"] = tuple(self.intake._records(db, history))
+                    orders = tuple(self.orders())
                     tail = select_request_tail(
                         roster=self.roster,
                         orders=orders,
@@ -441,18 +487,7 @@ class NativeRequestProgressSource:
                             tail_fence = tail
                             if self.publish_inventory_cutoff is not None:
                                 self.publish_inventory_cutoff(tail_fence)
-                        owner_history = CohortOrderHistory(history=history, decisions=decisions)
-                        seals = tuple(
-                            q.seal_locked(
-                                owner_history, capture, expected_tip_sha256=state.tip_sha256
-                            )
-                            for q in self.queues
-                        )
-                        first_fence = (
-                            fence.observation if fence is not None else tail_fence.observation
-                        )
-                        if any(s.observation.block < first_fence.block for s in seals):
-                            raise ValueError("request queue was sealed before its admission fence")
+                        seals = fenced_seals if fenced_seals is not None else seal_queues()
                 admissions_locked = False
                 if seals is not None:
                     for seal in seals:

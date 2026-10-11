@@ -49,6 +49,11 @@ class RecordReservation:
 class FinalizedHeadRegression(ValueError):
     """A valid observation is older than this journal's retained high water."""
 
+    def __init__(self, message, *, capture_block=None, retained_block=None):
+        super().__init__(message)
+        self.capture_block = capture_block
+        self.retained_block = retained_block
+
 
 class RoundJournal:
     """Bounded immutable records and durable conflict holds, shared by both roles."""
@@ -950,7 +955,9 @@ class RoundJournal:
         ):
             raise ValueError("round finalized head is invalid")
         if old and old[0][0] > block:
-            raise FinalizedHeadRegression("round finalized head regressed")
+            raise FinalizedHeadRegression(
+                "round finalized head regressed", capture_block=block, retained_block=old[0][0]
+            )
         return None if not old else old[0][0]
 
     def observe(self, block: int) -> None:

@@ -1077,6 +1077,13 @@ returns to the coordinator for a fresh collection before full inventory replay.
 This precheck does not advance the journal head or replace the captured input.
 Sealing keeps its final monotonic check, and an existing immutable seal continues
 to recover through its original native evidence.
+When an original admission fence is already retained, the request observer
+validates that fence and finishes native queue sealing on the coordinator's
+unchanged capture before awaiting readiness or replaying terminal evidence.
+This does not select a new cutoff: complete progress still requires the full
+native closure and independent review. Head-regression logs identify the
+inventory precheck or seal-history stage, catalog, capture block and retained
+highwater without exposing private paths or evidence.
 Static service-body proof reuse retains up to 512 exact bodies, including retry
 parents, within its existing 64 MiB serialized-value budget. This does not bound
 total process memory or waive current authority and signature checks.

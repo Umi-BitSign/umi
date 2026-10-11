@@ -90,6 +90,10 @@ class LiveRequestPhaseObserver:
             return False
 
     async def __call__(self, state, capture):
+        # An existing admission fence is already authoritative. Finish its
+        # native queue seal on the unchanged coordinator capture before network
+        # readiness or original-clock retrieval can delay that observation.
+        await run_owned_thread(self.source.seal_fenced, state, capture)
         serving = await self._ready(state, capture)
         options = {}
         if self.opening_clock is not None:

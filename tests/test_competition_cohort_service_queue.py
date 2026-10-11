@@ -141,10 +141,13 @@ def admit(c, name="Alice", nonce=1, **kwargs):
 
 
 @pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
-def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(queue_case, monkeypatch):
+def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(
+    queue_case, monkeypatch, caplog
+):
     from umi.competition_round_journal import FinalizedHeadRegression
 
     c = queue_case
+    caplog.set_level("INFO", logger="umi.competition_cohort_service_queue")
     accepted = admit(c)
     expected = c.queue.assignment(accepted.claim)
     tip = history_tip(c.h.source.history)
@@ -152,6 +155,7 @@ def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(queue_c
     monkeypatch.setattr(c.queue, "_read", replay)
     with pytest.raises(FinalizedHeadRegression), c.queue.closure_inventory(capture=capture(399)):
         pytest.fail("stale capture reached inventory")
+    assert "stage=inventory_precheck capture_block=399 highwater_block=400" in caplog.text
     assert replay.call_count == 0
     assert c.queue.retained_seal() is None
     with c.queue.journal.read_transaction() as db:
@@ -165,6 +169,7 @@ def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(queue_c
         c.queue.journal.observe(402)
         with pytest.raises(FinalizedHeadRegression):
             c.queue.seal_locked(c.h.source, capture(401), expected_tip_sha256=tip)
+    assert "stage=seal_history capture_block=401 highwater_block=402" in caplog.text
     assert c.queue.retained_seal() is None
     sealed = c.queue.seal(c.h.source, capture(402), expected_tip_sha256=tip)
     c.queue.journal.observe(403)

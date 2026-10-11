@@ -238,6 +238,122 @@ def test_stale_service_head_rejects_before_native_terminal_replay(request_owner,
     assert h.c.queue.retained_seal().accepted == h.b["service_seal"].accepted
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+@pytest.mark.parametrize("fence_kind", ["ordinary", "tail"])
+async def test_retained_fence_seals_before_delayed_readiness_and_replay(
+    request_owner, monkeypatch, fence_kind
+):
+    from umi import competition_cohort_request_phase as phase
+    from umi.competition_cohort_order_signer import CohortOrderHistory
+    from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
+    from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS
+    from umi.competition_cohort_service_api import ServiceWorkAdmissionAPI
+    from umi.competition_historical_registration import HistoricalRegistration
+    from umi.competition_round_journal import FinalizedHeadRegression
+    from umi.protocol import canonical_json_bytes
+
+    h = request_owner
+    opened = HistoricalRegistration(
+        None, h.source.request_opening(h.state), SimpleNamespace(block_number=h.block), 1000
+    )
+
+    def observed():
+        value = capture(h.block)
+        value.provenance["timestamp_ms"] = 1000 + MINIMUM_REQUEST_OPEN_MS
+        return value
+
+    native_seal = h.c.queue.seal_locked
+
+    def interrupt_seal(*args, **kwargs):
+        raise OSError("interrupted before native sealing")
+
+    # Preparation cannot invent a cutoff or close admissions before selection.
+    h.source.seal_fenced(h.state, observed())
+    assert h.c.queue.retained_seal() is None
+    monkeypatch.setattr(h.c.queue, "seal_locked", interrupt_seal)
+    with pytest.raises(OSError, match="before native sealing"):
+        if fence_kind == "ordinary":
+            h.window()
+        else:
+            h.source.observe(h.state, observed(), serving=False, opened=opened)
+    kind = "request_window_fence" if fence_kind == "ordinary" else "request_tail_fence"
+    original_fence = h.source.journal.get(kind, h.state.tip_sha256)
+    assert original_fence is not None and h.c.queue.retained_seal() is None
+    monkeypatch.setattr(h.c.queue, "seal_locked", native_seal)
+
+    # A malformed retained fence is not authority to create an immutable seal.
+    with h.source.journal.transaction() as db:
+        db.execute("UPDATE records SET body=? WHERE kind=?", (b"{}", kind))
+    with pytest.raises(ValueError):
+        h.source.seal_fenced(h.state, observed())
+    assert h.c.queue.retained_seal() is None
+    with h.source.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind=?", (canonical_json_bytes(original_fence), kind)
+        )
+
+    h.source = h.reopen()
+    h.block += 1
+    current = observed()
+    # The preparation path keeps the original monotonic refusal for stale input.
+    h.c.queue.journal.observe(h.block)
+    with pytest.raises(FinalizedHeadRegression):
+        h.source.seal_fenced(h.state, capture(h.block - 1))
+    assert h.c.queue.retained_seal() is None
+    stages = []
+    select = phase.select_request_tail
+
+    def replay(**kwargs):
+        result = select(**kwargs)
+        stages.append("replay")
+        h.c.queue.journal.observe(h.block + 2)
+        return result
+
+    monkeypatch.setattr(phase, "select_request_tail", replay)
+
+    with h.intake._connection() as (_, store):
+        history, decisions, _, _, _ = h.source._state(store, h.state)
+    current_history = CohortOrderHistory(history=history, decisions=decisions)
+
+    async def ready(state, supplied):
+        assert state == h.state and supplied is current
+        stages.append("readiness")
+        # The actual admission API writer owns the compound lease and can
+        # advance while readiness awaits network. The coordinator's original
+        # capture remains unchanged through the complete native observation.
+        await run_owned_thread(
+            ServiceWorkAdmissionAPI._remember,
+            h.c.queue,
+            current_history,
+            capture(h.block + 1),
+        )
+        return fence_kind == "ordinary"
+
+    async def clock(state):
+        assert state == h.state
+        stages.append("opening_clock")
+        return opened if fence_kind == "tail" else None
+
+    live = LiveRequestPhaseObserver(
+        h.source, "https://owner.example", client=None, opening_clock=clock
+    )
+    monkeypatch.setattr(live, "_ready", ready)
+    progress = await live(h.state, current)
+    assert stages == ["readiness", "opening_clock", "replay"]
+    assert progress.completion == "complete"
+    assert progress.observed_at_block == current.snapshot.block
+    seal = h.c.queue.retained_seal()
+    assert seal.observation.block == h.block
+    assert seal.accepted == h.b["service_seal"].accepted
+    assert h.source.journal.get(kind, h.state.tip_sha256) == original_fence
+    with h.c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(h.block + 2,)]
+    native = h.source.read(progress)
+    h.source = h.reopen()
+    assert h.source.read(progress) == native
+
+
 def test_request_window_restores_offline_time_before_sealing(request_owner):
     h = request_owner
     h.sample()
