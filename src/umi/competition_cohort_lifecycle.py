@@ -29,6 +29,7 @@ from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCoh
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
+from .competition_work_progress import await_progress
 from .host_memory_runtime import authorize_memory
 from .open_competition import CompetitionPolicy, Signature
 from .protocol import canonical_json_bytes
@@ -209,7 +210,11 @@ class CohortLifecycleService:
         self.stage = "progress_review"
         self.last_progress = progress
         self._log_lifecycle("phase_progress_review_started")
-        result = await driver.observer.attest(progress)
+        result = await await_progress(
+            driver.observer.attest(progress),
+            stage=progress.phase + "_progress_quorum",
+            cohort=self.cohort,
+        )
         self._log_lifecycle("phase_progress_review_completed")
         return result
 
@@ -220,7 +225,11 @@ class CohortLifecycleService:
         driver = await self._driver(transition.phase)
         self.stage = "decision_certification"
         self._log_lifecycle("phase_decision_review_started")
-        result = await driver.observer.certify(transition, evidence)
+        result = await await_progress(
+            driver.observer.certify(transition, evidence),
+            stage=transition.phase + "_decision_quorum",
+            cohort=self.cohort,
+        )
         self._log_lifecycle("phase_decision_review_completed")
         return result
 
@@ -230,7 +239,9 @@ class CohortLifecycleService:
         self._remember_state(self.controller.store.status(self.cohort)[0])
         self.stage = "history_publication"
         self._log_lifecycle("history_publication_started")
-        await self.publish_history(history)
+        await await_progress(
+            self.publish_history(history), stage="lifecycle_history_publication", cohort=self.cohort
+        )
         if any(t.transition.operation == "revoke" for t in history.transitions):
             return
         for signed in history.transitions:

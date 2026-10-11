@@ -4,6 +4,8 @@ Finality and inference are fixture boundaries. Admission, phase closure, all
 quality signatures, bundle hashes and model selection use native consumers.
 """
 
+import json
+import logging
 from fractions import Fraction
 
 import pytest
@@ -285,15 +287,23 @@ def test_same_model_cannot_shop_for_different_quality_observations(model_case):
 
 
 @pytest.mark.parametrize("model_case", [("equal", 2)], indirect=True)
-def test_pending_competitor_is_never_dropped_to_make_a_sole_entrant(model_case):
+def test_pending_competitor_is_never_dropped_to_make_a_sole_entrant(model_case, caplog):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     _, _, manifest, accepted, _ = model_case
     with pytest.raises(PendingModelAward, match="entire sealed"):
         award(model_case, acceptances=accepted[:1])
+    with pytest.raises(PendingModelAward, match="entire sealed"):
+        award(model_case, acceptances=(*accepted, accepted[-1]))
     with pytest.raises(ValueError, match="exact certified roster"):
         award(
             model_case,
             manifest=manifest.model_copy(update={"participants": manifest.participants[:1]}),
         )
+    assert not any(
+        json.loads(record.message).get("stage") == "certification_model_artifacts"
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    )
 
 
 @pytest.mark.parametrize(
@@ -326,13 +336,33 @@ def test_even_signed_artifact_acceptance_cannot_change_original_entry(model_case
         award(model_case, acceptances=(changed,))
 
 
-def test_missing_local_artifact_blocks_award_and_restores_without_new_quality(model_case, tmp_path):
+def test_missing_local_artifact_blocks_award_and_restores_without_new_quality(
+    model_case, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     with pytest.raises(FileNotFoundError):
         award(model_case, archive=tmp_path / "unavailable-archive")
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("stage") == "certification_model_artifacts"
+    ]
+    assert events[-1]["state"] == "interrupted"
+    assert events[-1]["percent"] < 100 and events[-1]["eta_seconds"] is None
+    caplog.clear()
     result = award(model_case)
     b = model_case[0]
     late = reviewer(b, current_block=2**53 - 1)
     assert canonical_json_bytes(award(model_case, review=late)) == canonical_json_bytes(result)
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("stage") == "certification_model_artifacts"
+    ]
+    assert events[-1]["state"] == "completed"
+    assert events[-1]["percent"] == 100 and events[-1]["eta_seconds"] == 0
 
 
 def test_settlement_verifier_allows_direct_candidate_without_local_archive(model_case):

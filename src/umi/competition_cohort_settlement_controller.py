@@ -37,6 +37,7 @@ from .competition_cohort_settlement_signing import (
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
+from .competition_work_progress import await_progress
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import Signature, digest, identity, verify_signature
 from .protocol import canonical_json_bytes
@@ -99,19 +100,23 @@ class CohortSettlementPhases:
         }
         owner = copy.copy(self.owner)
         owner.decisions = decisions.__getitem__
-        reviewed = await run_owned_thread(
-            partial(
-                SettlementPhaseReview,
-                owner,
-                batch.inputs,
-                batch.intake,
-                observation=observation,
-                expected_tip_sha256=state.tip_sha256,
-                current_block=observation.block,
-                quality_votes=batch.quality_votes,
-                service_votes=batch.service_votes,
-                proposed_progress=proposed_progress,
-            )
+        reviewed = await await_progress(
+            run_owned_thread(
+                partial(
+                    SettlementPhaseReview,
+                    owner,
+                    batch.inputs,
+                    batch.intake,
+                    observation=observation,
+                    expected_tip_sha256=state.tip_sha256,
+                    current_block=observation.block,
+                    quality_votes=batch.quality_votes,
+                    service_votes=batch.service_votes,
+                    proposed_progress=proposed_progress,
+                )
+            ),
+            stage=state.phase + "_native_review",
+            cohort=self.cohort,
         )
         if self.store.status(self.cohort)[0] != state:
             raise RuntimeError("settlement history changed during native review")
@@ -129,12 +134,20 @@ class CohortSettlementPhases:
                     # Authenticate the configured proposer's original vote;
                     # this envelope is not a quorum completion certificate.
                     request = AttestedCohortPhaseProgress(progress=body, signatures=(local,))
-                    vote = await wait_for_owned(
-                        peer.progress(request, review.observation), timeout=self.signer.timeout
+                    vote = await await_progress(
+                        wait_for_owned(
+                            peer.progress(request, review.observation), timeout=self.signer.timeout
+                        ),
+                        stage=review.progress.phase + "_peer_progress_vote",
+                        cohort=self.cohort,
                     )
                 else:
-                    vote = await wait_for_owned(
-                        peer.transition(body, evidence), timeout=self.signer.timeout
+                    vote = await await_progress(
+                        wait_for_owned(
+                            peer.transition(body, evidence), timeout=self.signer.timeout
+                        ),
+                        stage=review.progress.phase + "_peer_decision_vote",
+                        cohort=self.cohort,
                     )
                 if identity(vote.hotkey) != identity(peer.hotkey):
                     raise ValueError("settlement peer changed its selected signer")

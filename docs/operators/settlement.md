@@ -7,6 +7,40 @@
 - [Independent settlement signing](#open-competition-settlement-signing)
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
+- [Work progress and ETA logs](#work-progress-and-eta-logs)
+
+## Work progress and ETA logs
+
+The intake owner, phase reviewer, settlement service and reward runtime emit
+`umi-competition-work-progress/1` JSON through `umi.competition.progress`. Each
+record identifies a process, a fresh `work_id`, the cohort and a named `stage`.
+Request review also identifies its review attempt and read cycle. Restarted work
+gets a new identity; logs are diagnostics and do not replace retained votes or
+create a replay checkpoint.
+
+Finite substages report `completed`, `total`, `unit`, `percent`,
+`elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
+item returns successfully. Preparation and intake count original participation
+proofs and registration observations; reference release counts committed inputs;
+quality review counts participants and paid terminals; model certification counts
+model artifacts; package construction and verification count evidence objects.
+An exhausted substage reaches 100%. A failed or interrupted attempt keeps its
+completed count and does not claim completion.
+
+ETA uses the elapsed time and the completed work rate for that substage. It is
+`null` until there is enough completed work to estimate a rate. Uneven object
+sizes or expensive remaining inputs can change the estimate. Counted validation
+steps with different costs deliberately retain a `null` ETA. Owner exports,
+quorum votes, native review workers and history publication emit waiting
+heartbeats with a `null` ETA: an external dependency has no measured finish time.
+Those waits retain their native timeouts, cancellation and drain behavior.
+
+Report the stage name with every percentage and ETA. Separate nested substages
+and repeated replays; do not add their percentages or describe a completed
+object inventory as completed certification. Use the native certified phase
+history, verified reward package and finalized chain observation to establish
+those milestones. These log records explicitly carry
+`certification_authority: false`.
 
 ## Recoverable cohort model awards
 

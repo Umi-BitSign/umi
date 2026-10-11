@@ -22,6 +22,7 @@ from .competition_cohort_service_terminal import SignedServiceTerminal
 from .competition_endpoint_content import decrypt_endpoint_content
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_scoring import score_single_reference
+from .competition_work_progress import progress_items
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse
 from .open_competition import EvaluationSuite, Hotkey, digest, validate_suite_profile
@@ -94,7 +95,12 @@ class ServiceReferenceReveal(StrictProtocolModel):
 def _committed_references(catalogs, objects):
     references = {}
     for catalog in catalogs:
-        for item in catalog.catalog.work:
+        for item in progress_items(
+            catalog.catalog.work,
+            stage="reference_committed_inputs",
+            unit="references",
+            cohort=catalog.catalog.cohort_sha256,
+        ):
             ref = ServiceReference.model_validate_json(
                 read_endpoint_object(objects, item.reference_sha256)
             )
@@ -289,7 +295,12 @@ def replay_closed_service_quality(
     references = _committed_references(expected_catalogs, objects)
     outcomes = []
     for catalog_closure in closure.catalogs:
-        for key in catalog_closure.terminals:
+        for key in progress_items(
+            catalog_closure.terminals,
+            stage="quality_paid_service_terminals",
+            unit="terminals",
+            cohort=roster.round.cohort_sha256,
+        ):
             terminal = SignedServiceTerminal.model_validate_json(
                 read_endpoint_object(objects, key)
             ).terminal

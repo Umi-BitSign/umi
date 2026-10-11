@@ -46,6 +46,7 @@ from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_store import CompetitionStore
+from .competition_work_progress import progress_items
 from .host_memory_request_bounds import (
     check_stage_json,
     stage_bounds,
@@ -327,7 +328,12 @@ def prepare_reward_package(
         ),
         objects=tuple(
             RewardPackageObject(sha256=k, value=json.loads(v))
-            for k, v in sorted(captured.values.items())
+            for k, v in progress_items(
+                sorted(captured.values.items()),
+                stage="reward_package_serialization",
+                unit="objects",
+                cohort=digest(inputs.history.plan),
+            )
         ),
     )
     if canonical_json_size(package) > maximum_bytes:
@@ -414,11 +420,24 @@ def _replay_detached_reward_package(
         or digest(package.inputs.history.plan) != expected_cohort_sha256
     ):
         raise ValueError("reward package differs from selected identity or policy")
-    inventory = {o.sha256: canonical_json_bytes(o.value) for o in package.objects}
+    inventory = {
+        o.sha256: canonical_json_bytes(o.value)
+        for o in progress_items(
+            package.objects,
+            stage="reward_package_inventory",
+            unit="objects",
+            cohort=expected_cohort_sha256,
+        )
+    }
     source = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
     # Check every declared object, including those missing from a replay traversal.
-    for key in inventory:
-        read_endpoint_object(inventory.__getitem__, key)
+    for item in progress_items(
+        package.objects,
+        stage="reward_package_object_integrity",
+        unit="objects",
+        cohort=expected_cohort_sha256,
+    ):
+        read_endpoint_object(inventory.__getitem__, item.sha256)
     pulse_refs = {p.round: p.pulse_sha256 for p in package.pulses}
     used_pulses: set[int] = set()
     original_decisions = {

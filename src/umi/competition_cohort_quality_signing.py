@@ -13,6 +13,7 @@ from .competition_cohort_quality import ClosedParticipantQuality, ClosedQualityR
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_cohort_request_terminal import SignedRequestTerminal
 from .competition_round_journal import RoundJournal
+from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import Signature, digest, identity, verify_signature
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -209,7 +210,12 @@ def review_quality_manifest(
     ) != tuple(p.submission_sha256 for p in review.closure.participants):
         raise ValueError("quality manifest must cover the exact certified roster")
     results = []
-    for member in manifest.participants:
+    for member in progress_items(
+        manifest.participants,
+        stage="quality_participant_certificates",
+        unit="participants",
+        cohort=review.roster.round.cohort_sha256,
+    ):
         certificate = CertifiedClosedQuality.model_validate_json(
             read_endpoint_object(review.objects, member.certificate_sha256)
         )

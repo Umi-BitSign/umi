@@ -36,6 +36,7 @@ from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_closure import CohortServiceRequestClosure
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
@@ -242,7 +243,15 @@ def replay_request_export(
     keys = tuple(o.sha256 for o in exported.objects)
     if keys != tuple(sorted(set(keys))):
         raise ValueError("request export objects must be unique and ordered")
-    values = {o.sha256: canonical_json_bytes(o.value) for o in exported.objects}
+    values = {
+        o.sha256: canonical_json_bytes(o.value)
+        for o in progress_items(
+            exported.objects,
+            stage="request_export_objects",
+            unit="objects",
+            cohort=progress.cohort_sha256,
+        )
+    }
 
     def read(key: str) -> bytes:
         if key not in values:

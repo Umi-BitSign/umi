@@ -8,6 +8,8 @@ signing and chain submission are not qualified here.
 
 import asyncio
 import hashlib
+import json
+import logging
 import os
 import threading
 from dataclasses import replace
@@ -4951,11 +4953,13 @@ async def test_reference_review_rejects_incomplete_or_changed_inputs(
 async def test_native_settlement_controller_resumes_original_votes_after_peer_outage(
     settlement_signing_case,
     offline_stage,
+    caplog,
 ):
     """No phase-completion helper after reveal: native review/signing/controller."""
     from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
 
     h = settlement_signing_case
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     h.fail = offline_stage
     controller = h.coordinator()
     with pytest.raises(SettlementPhaseQuorumPending):
@@ -4990,6 +4994,26 @@ async def test_native_settlement_controller_resumes_original_votes_after_peer_ou
     assert result.package.benchmark == h.c.native.package.benchmark
     assert result.package.service == h.c.native.package.service
     assert h.c.b["service_case"].p.model.calls == 1
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == "umi.competition.progress"
+        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
+    ]
+    for phase in ("evidence", "review", "certification"):
+        for suffix in ("native_review", "peer_progress_vote", "peer_decision_vote"):
+            completed = [
+                e
+                for e in events
+                if e["stage"] == phase + "_" + suffix and e["state"] == "completed"
+            ]
+            assert completed, (phase, suffix)
+            assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in completed)
+            assert all(e["cohort_sha256"] == h.cohort for e in completed)
+    interrupted = [e for e in events if e["state"] == "interrupted"]
+    suffix = "progress" if offline_stage == "progress" else "decision"
+    assert any(e["stage"] == "evidence_peer_" + suffix + "_vote" for e in interrupted)
+    assert all(e["percent"] < 100 and e["eta_seconds"] is None for e in interrupted)
 
 
 async def test_settlement_phase_signing_rejects_changed_body_and_drains_cancellation(

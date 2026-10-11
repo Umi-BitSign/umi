@@ -1,6 +1,7 @@
 """Certified original observations, untimed content, and recoverable score votes."""
 
 import json
+import logging
 from fractions import Fraction
 
 import pytest
@@ -104,9 +105,10 @@ async def certificates_for(b, review, tmp_path):
 
 
 async def test_complete_certified_quality_preserves_all_participants_and_assigned_runs(
-    closed, tmp_path
+    closed, tmp_path, caplog
 ):
     b = closed
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     review = reviewer(b)
     certificates = await certificates_for(b, review, tmp_path)
     manifest = build_quality_manifest(review, certificates.get)
@@ -125,6 +127,16 @@ async def test_complete_certified_quality_preserves_all_participants_and_assigne
         assert not result.chain_submission_authorized
     assert not manifest.service_credit_authorized and not manifest.chain_submission_authorized
     assert outcomes == review_quality_manifest(manifest, review)
+    completed = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == "umi.competition.progress"
+        and json.loads(r.message).get("stage") == "quality_participant_certificates"
+        and json.loads(r.message).get("state") == "completed"
+    ]
+    assert completed
+    assert all(e["completed"] == e["total"] == len(outcomes) for e in completed)
+    assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in completed)
 
 
 async def test_missing_certificate_or_roster_entry_cannot_be_silently_dropped(closed, tmp_path):

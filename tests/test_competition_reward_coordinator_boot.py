@@ -6,6 +6,7 @@ These assembly tests do not qualify an installed Linux service or chain effect.
 
 import asyncio
 import json
+import logging
 import signal
 import subprocess
 import sys
@@ -72,6 +73,15 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
     h.save(h.path, b" " + canonical_json_bytes(h.config))
     with pytest.raises(ValueError, match="canonical"):
         boot.load_reward_coordinator_config(h.path)
+
+
+def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys):
+    logger = logging.getLogger("umi.competition.progress")
+    before = (logger.level, logger.propagate, tuple(logger.handlers))
+    with cli._logs():
+        logger.info("work_progress completed=1 total=2")
+    assert capsys.readouterr().err.count("work_progress completed=1 total=2") == 1
+    assert (logger.level, logger.propagate, tuple(logger.handlers)) == before
 
 
 def test_proof_read_selection_preserves_existing_configuration_bytes(config_case):

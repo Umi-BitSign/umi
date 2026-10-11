@@ -31,6 +31,7 @@ from .competition_cohort_request_phase import RequestProgressReviewRecord
 from .competition_cohort_request_rule_api import require_adoption
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
+from .competition_work_progress import review_scope
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import (
     CompetitionPolicy,
@@ -125,7 +126,8 @@ class CohortProgressSigner:
                 _intent, signature = await run_owned_thread(self._saved, kind, slot, body)
                 if signature is not None:
                     return signature
-                reviewed = await review()
+                with review_scope(kind, body.cohort_sha256, reads=0):
+                    reviewed = await review()
                 expected = {"body": body.model_dump(mode="json", by_alias=True), "review": reviewed}
                 # Original reviewed observations remain in the owned intake and
                 # historical archive. The signing journal pins that exact review.

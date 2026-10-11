@@ -35,6 +35,7 @@ from .competition_cohort_roster import (
     verify_recoverable_roster_membership,
 )
 from .competition_execution import ExecutionBoundary
+from .competition_work_progress import progress_items
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -184,7 +185,12 @@ def review_request_closure(
             required_unfinished_hotkeys=unfinished_request_miners(closure, roster),
         )
     catalog = None
-    for participant in (*closure.participants, *closure.skipped):
+    for participant in progress_items(
+        (*closure.participants, *closure.skipped),
+        stage="closure_benchmark_entries",
+        unit="selected_entries",
+        cohort=roster.round.cohort_sha256,
+    ):
         retained = members[participant.submission_sha256]
         incomplete = isinstance(participant, SkippedRequestParticipant)
         if incomplete and participant.order_sha256 is None:

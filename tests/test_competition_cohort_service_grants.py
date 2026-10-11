@@ -6,6 +6,8 @@ request bodies or response envelopes.
 """
 
 import hashlib
+import json
+import logging
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2121,8 +2123,9 @@ async def test_service_allocation_signing_failure_capacity_and_self_review(
     "receipt_scenario", ["extensions", "standing", "model-awards"], indirect=True
 )
 async def test_native_reward_allocation_replays_lost_commit_without_new_head(
-    service_quality_inputs, tmp_path, monkeypatch
+    service_quality_inputs, tmp_path, monkeypatch, caplog
 ):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     from umi.competition_artifacts import preserve_bundle
     from umi.competition_cohort_capacity import MAX_AGGREGATE_EVIDENCE_BYTES
     from umi.competition_cohort_quality import ClosedQualityReview
@@ -2406,6 +2409,29 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
                 package, b["policy"], reopened, certified, maximum_bytes=limit, **selection
             )
             == result
+        )
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == "umi.competition.progress"
+        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
+    ]
+    for stage in (
+        "reward_package_serialization",
+        "reward_package_inventory",
+        "reward_package_object_integrity",
+        "reference_committed_inputs",
+        "quality_paid_service_terminals",
+    ):
+        completed = [e for e in events if e["stage"] == stage and e["state"] == "completed"]
+        assert completed, stage
+        assert all(e["completed"] == e["total"] > 0 for e in completed)
+        assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in completed)
+        assert all(e["certification_authority"] is False for e in completed)
+    if uses_model_award:
+        assert any(
+            e["stage"] == "certification_model_artifacts" and e["state"] == "completed"
+            for e in events
         )
 
     # Original decision inputs must travel with the archive; the callback only

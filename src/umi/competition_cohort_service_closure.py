@@ -25,6 +25,7 @@ from .competition_cohort_service_seal import ServiceWorkSeal, sealed_service_ass
 from .competition_cohort_service_terminal import SignedServiceTerminal, read_service_terminal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary
+from .competition_work_progress import progress_items
 from .open_competition import CompetitionPolicy, digest, identity
 from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -185,7 +186,12 @@ def review_service_request_closure(
             identity(by_work[k].admission.submission.submission.hotkey) for k in skipped
         )
         partial_work = set()
-        for key in ref.paid_partials or ():
+        for key in progress_items(
+            ref.paid_partials or (),
+            stage="closure_paid_partials",
+            unit="paid_items",
+            cohort=roster.round.cohort_sha256,
+        ):
             signed, assignment, fence, source = read_paid_partial(
                 key,
                 objects,
@@ -225,7 +231,12 @@ def review_service_request_closure(
             ):
                 raise ValueError("paid partial belongs to another request history")
         completed = []
-        for terminal_sha in ref.terminals:
+        for terminal_sha in progress_items(
+            ref.terminals,
+            stage="closure_paid_terminals",
+            unit="paid_items",
+            cohort=roster.round.cohort_sha256,
+        ):
             signed = SignedServiceTerminal.model_validate_json(
                 read_endpoint_object(objects, terminal_sha)
             )

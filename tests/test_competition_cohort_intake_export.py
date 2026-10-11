@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -209,11 +211,27 @@ async def test_owner_history_rejects_replayed_or_modified_export(remote, fault):
         await reader(digest(h.history.plan))
 
 
-async def test_remote_native_proof_review_matches_owner_and_retains_offline_vote(remote):
+async def test_remote_native_proof_review_matches_owner_and_retains_offline_vote(remote, caplog):
     h = remote
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     before = len(h.archive.chain.verifier.checked)
     result = await h.reviewer.review(h.result.progress)
     assert result == h.exporter.source.read(h.result.progress).record
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == "umi.competition.progress"
+        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
+    ]
+    exports = [
+        e for e in events if e["stage"] == "intake_owner_export" and e["state"] == "completed"
+    ]
+    assert len(exports) == 2
+    assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in exports)
+    assert all(e["cohort_sha256"] == h.result.progress.cohort_sha256 for e in exports)
+    assert any(
+        e["stage"] == "intake_registration_archives" and e["state"] == "completed" for e in events
+    )
     assert len(h.archive.chain.verifier.checked) > before
     assert len(h.requests) == 2 and h.requests[0].challenge != h.requests[1].challenge
     vote = await h.signer().attest(h.result.progress)
