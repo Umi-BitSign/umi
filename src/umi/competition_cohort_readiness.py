@@ -25,7 +25,7 @@ from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, histor
 from .competition_cohort_intake_phase import CohortIntakePhaseObserver, NativeIntakeProgress
 from .competition_cohort_recovery import CohortRecoveryState
 from .competition_execution import ExecutionBoundary, execution_boundary
-from .concurrency import run_owned_thread
+from .host_memory_runtime import run_memory_thread
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
@@ -192,7 +192,7 @@ class LiveIntakePhaseObserver:
         if state.phase != "intake":
             raise ValueError("live intake observer cannot observe another phase")
         serving = await self._ready(state, capture)
-        return await run_owned_thread(
+        return await run_memory_thread(
             partial(
                 self.phase.observe,
                 state.cohort_sha256,
@@ -206,6 +206,6 @@ class LiveIntakePhaseObserver:
         self, state: CohortRecoveryState, capture: RegistrationCapture
     ) -> CohortAvailabilityObservation | None:
         serving = await self._ready(state, capture)
-        return await run_owned_thread(
+        return await run_memory_thread(
             partial(self.phase.sample_service, state, capture, serving=serving)
         )

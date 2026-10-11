@@ -19,6 +19,7 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
+from .host_memory_runtime import HostMemoryAdmissionSelection
 from .open_competition import CompetitionPolicy, Hotkey, Track, digest, identity
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -81,9 +82,13 @@ class SettlementServiceConfig(StrictProtocolModel):
     request_export_directory: Directory | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         if self.original_sources is None:
             value.pop("original_sources", None)
         if self.request_export_directory is None:

@@ -15,7 +15,10 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
+from .aggregate_json import DetachedInventoryItem
+from .canonical_stream import canonical_json_size
 from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
+from .competition_cohort_aggregate_model import AggregateProtocolModel
 from .competition_cohort_capacity import (
     LEGACY_AGGREGATE_REPLAY_BYTES,
     check_aggregate_evidence_bytes,
@@ -81,12 +84,12 @@ class RewardReplayInputs(StrictProtocolModel):
     history: CohortRecoveryHistory
 
 
-class RewardPackageObject(StrictProtocolModel):
+class RewardPackageObject(StrictProtocolModel, DetachedInventoryItem):
     sha256: Hex32
     value: JsonValue
 
 
-class CohortRewardPackage(StrictProtocolModel):
+class CohortRewardPackage(AggregateProtocolModel):
     schema_: Literal["umi-cohort-reward-package/1"] = Field(alias="schema")
     policy_sha256: Hex32
     inputs: RewardReplayInputs
@@ -310,12 +313,60 @@ def prepare_reward_package(
             for k, v in sorted(captured.values.items())
         ),
     )
-    if len(canonical_json_bytes(package)) > maximum_bytes:
+    if canonical_json_size(package) > maximum_bytes:
         raise ValueError("reward package including metadata exceeds its bound")
     return package
 
 
 def replay_reward_package(
+    package: CohortRewardPackage,
+    policy: CompetitionPolicy,
+    promotion_store: CompetitionStore,
+    current_history: CohortRecoveryHistory,
+    *,
+    expected_package_sha256: str,
+    expected_cohort_sha256: str,
+    expected_tip_sha256: str,
+    current_block: int,
+    expected_terms_sha256: str,
+    expected_catalog_sha256s: tuple[str, ...],
+    maximum_promotion_bytes: int,
+    maximum_bytes: int = DEFAULT_PACKAGE_BYTES,
+    current_decision_source: DecisionSource | None = None,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
+) -> CohortRewardAllocation:
+    """Detach caller content before replaying any mutable nested protocol values."""
+    snapshot = _validated_reward_snapshot(package, maximum_bytes)
+    return _replay_detached_reward_package(
+        snapshot,
+        policy,
+        promotion_store,
+        current_history,
+        expected_package_sha256=expected_package_sha256,
+        expected_cohort_sha256=expected_cohort_sha256,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+        expected_terms_sha256=expected_terms_sha256,
+        expected_catalog_sha256s=expected_catalog_sha256s,
+        maximum_promotion_bytes=maximum_promotion_bytes,
+        maximum_bytes=maximum_bytes,
+        current_decision_source=current_decision_source,
+        verify_model_artifact=verify_model_artifact,
+    )
+
+
+def _validated_reward_snapshot(
+    package: CohortRewardPackage, maximum_bytes: int
+) -> CohortRewardPackage:
+    """Own one validated snapshot; do not retain its temporary canonical bytes."""
+    _check_bound(maximum_bytes)
+    raw = canonical_json_bytes(package)
+    if len(raw) > maximum_bytes:
+        raise ValueError("reward package exceeds its byte bound")
+    return CohortRewardPackage.model_validate_json(raw)
+
+
+def _replay_detached_reward_package(
     package: CohortRewardPackage,
     policy: CompetitionPolicy,
     promotion_store: CompetitionStore,
@@ -340,10 +391,6 @@ def replay_reward_package(
     """
     _check_bound(maximum_bytes)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    raw = canonical_json_bytes(package)
-    if len(raw) > maximum_bytes:
-        raise ValueError("reward package exceeds its byte bound")
-    package = CohortRewardPackage.model_validate_json(raw)
     if (
         digest(package) != expected_package_sha256
         or package.policy_sha256 != digest(policy)

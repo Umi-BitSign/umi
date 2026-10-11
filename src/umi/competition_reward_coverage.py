@@ -11,6 +11,7 @@ from typing import Literal
 
 from .competition_cohort_reward_allocation import CohortRewardProjection, project_reward_allocation
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_reward_coverage_prepared import RetainedCoveragePackage, prepare_retained_coverage
 from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility_archive import (
     OwnedHistoricalRewardEligibility,
@@ -84,7 +85,7 @@ def validate_reward_coverage(
 
 async def review_reward_coverage(
     preparation: StandingRewardPreparation,
-    package: CohortRewardPackage,
+    package: CohortRewardPackage | RetainedCoveragePackage,
     *,
     eligibility: OwnedHistoricalRewardEligibility,
     history: OwnedRewardControlHistory,
@@ -111,8 +112,15 @@ async def review_reward_coverage(
     hotkey = subject.registrations[subject.validator_uid].hotkey
     if identity(hotkey) not in {identity(k) for k in reader.series.validators}:
         raise ValueError("reward coverage validator is not designated by the series")
-    prepared = await preparation.prepare_historical(
-        package, control=eligibility.control, history=history, source=source
+    prepare = prepare_retained_coverage if type(package) is RetainedCoveragePackage else None
+    prepared = (
+        await prepare(
+            preparation, package, control=eligibility.control, history=history, source=source
+        )
+        if prepare is not None
+        else await preparation.prepare_historical(
+            package, control=eligibility.control, history=history, source=source
+        )
     )
     preparation._authority()
     preparation._check_prepared(prepared)

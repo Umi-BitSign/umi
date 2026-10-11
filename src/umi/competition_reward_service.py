@@ -41,6 +41,7 @@ from .competition_reward_series_handoff import StandingRewardPredecessorOpportun
 from .competition_reward_standing_handoff import hold_standing_reward_handoff
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task, run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import digest
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -125,6 +126,7 @@ async def _run_executor(executor, stop, limits, coverage):
             execution.result()
 
 
+@memory_operation
 async def _prepare_first(preparation, provider, history, packages, decisions, height, maximum):
     if height < history.first_block:
         return None

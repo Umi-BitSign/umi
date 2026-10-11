@@ -27,6 +27,7 @@ from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import ModelBundle, digest, identity, model_content_digest, verify_signature
 from .private_files import ensure_private_directory, private_path, read_private_model
 
@@ -135,6 +136,7 @@ class SettlementArtifactPreparation:
         verify_recovery_quorum(admission, request.admission.signatures, self.policy)
         return RecoverableRosterParticipant(record=record, admission=request.admission), certificate
 
+    @memory_operation
     async def _prepare(self, key: str, path: Path) -> None:
         if key.startswith("local/"):
             bundle = await run_owned_thread(

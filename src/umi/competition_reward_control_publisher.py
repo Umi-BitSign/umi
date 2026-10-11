@@ -39,6 +39,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader, validate_control_history
 from .competition_weights import BittensorCompetitionWeightTransport
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .host_memory_runtime import run_memory_thread
 from .open_competition import digest, identity
 from .private_files import lock_private_file
 from .protocol import canonical_json_bytes
@@ -150,6 +151,7 @@ class StandingControlPublisher:
                 package = self.files.package(activation.package_sha256)
                 if digest(package.allocation) != activation.allocation_sha256:
                     raise ValueError("delivered package differs from control allocation")
+                del package  # Release before the next prefix item is decoded.
 
     async def _observed(self, prefix):
         state = await collect_control_signing_state(self.provider, self.hotkey)
@@ -237,7 +239,7 @@ class StandingControlPublisher:
     async def _step(self, decisions):
         prefix = verify_reward_decisions(self.series, self.reader.policy, decisions)
         wanted = digest(prefix[-1].decision)
-        await run_owned_thread(self._delivered, prefix)
+        await run_memory_thread(self._delivered, prefix)
         pending = await run_owned_thread(self.journal.pending)
         if pending is not None:
             await self._recover(pending, prefix)

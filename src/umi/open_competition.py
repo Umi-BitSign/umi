@@ -68,6 +68,11 @@ def identity(hotkey: str) -> str:
 
 def digest(value: StrictProtocolModel) -> str:
     """Bind object type, network and all fields through the canonical body."""
+    from .canonical_stream import canonical_json_sha256
+    from .competition_cohort_aggregate_model import AggregateProtocolModel
+
+    if isinstance(value, AggregateProtocolModel):
+        return canonical_json_sha256(value, b"umi-open-competition-v1\0")
     return hashlib.sha256(b"umi-open-competition-v1\0" + canonical_json_bytes(value)).hexdigest()
 
 

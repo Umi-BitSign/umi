@@ -32,6 +32,7 @@ from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_execution import ExecutionBoundary
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import digest
 from .private_files import private_path, publish_private_model
 from .protocol import canonical_json_bytes
@@ -79,6 +80,7 @@ class CohortRequestSettlementPublisher:
             },
         )
 
+    @memory_operation
     async def __call__(self, history: CohortRecoveryHistory) -> None:
         if digest(history.plan) != self.source.cohort:
             raise ValueError("request publication belongs to another cohort")

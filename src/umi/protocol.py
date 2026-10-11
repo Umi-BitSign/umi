@@ -16,8 +16,9 @@ import rfc8785
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from .canonical_aggregate import AggregateStreamModel
 from .canonical_reuse import canonical_dumps
-from .canonical_stream import canonical_json_matches
+from .canonical_stream import aggregate_json_bytes, canonical_json_matches
 from .scoring import grapheme_clusters, normalize_text
 
 PROTOCOL_VERSION = "umi-asl/0.1"
@@ -312,6 +313,8 @@ class GroundTruthPayload(StrictProtocolModel):
 def canonical_json_bytes(value: BaseModel | Any) -> bytes:
     """Return RFC 8785 canonical JSON bytes for a model or JSON-compatible value."""
 
+    if isinstance(value, AggregateStreamModel):
+        return aggregate_json_bytes(value)
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", by_alias=True)
     return canonical_dumps(value)

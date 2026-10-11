@@ -123,7 +123,13 @@ class ServiceWorkReader:
 
 
 def service_work_routes(exporter: ServiceWorkExporter, *, token: str):
-    return phase_review_routes(exporter, token=token, path=PATH, request_model=ServiceWorkLookup)
+    return phase_review_routes(
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=PATH,
+        request_model=ServiceWorkLookup,
+    )
 
 
 class ServiceWorkHTTPClient(PhaseReviewHTTPClient[ServiceWorkLookup]):

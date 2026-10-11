@@ -7,7 +7,13 @@ PATH = "/internal/cohorts/intake-review"
 
 
 def intake_review_routes(exporter: IntakeReviewExporter, *, token: str):
-    return phase_review_routes(exporter, token=token, path=PATH, request_model=IntakeReviewRequest)
+    return phase_review_routes(
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=PATH,
+        request_model=IntakeReviewRequest,
+    )
 
 
 class IntakeReviewHTTPClient(PhaseReviewHTTPClient[IntakeReviewRequest]):

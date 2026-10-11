@@ -54,6 +54,7 @@ from .competition_reward_service import _stop_task
 from .competition_service_supervision import drain_server_requests
 from .concurrency import await_owned_task, run_owned_thread
 from .config import Limits
+from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
 from .policy import scoring_policy_hash
@@ -82,9 +83,13 @@ class AdmissionOwnerConfig(StrictProtocolModel):
     maximum_aggregate_evidence_bytes: AggregateEvidenceCapacity | None = None
     windows: WindowOwnerConfig | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         if self.maximum_aggregate_evidence_bytes is None:
             value.pop("maximum_aggregate_evidence_bytes", None)
         if self.windows is None:
@@ -149,6 +154,14 @@ async def admission_owner_app(
     lease = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, lease)
+        resources.enter_context(
+            memory_runtime(
+                c.host_memory_admission,
+                maximum_aggregate_bytes=max(
+                    c.maximum_export_bytes, c.request_evidence_bytes, c.request_replay_bytes
+                ),
+            )
+        )
         token = _token(c.export_token_file)
         credentials = tuple(_token(p.token_file) for p in c.reviewers)
         if token in credentials:

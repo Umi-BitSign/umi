@@ -545,6 +545,7 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert kwargs["predecessor_approval_sha256"] == candidate.predecessor_approval_sha256
         predecessor = kwargs["predecessor"]
         coverage = kwargs["predecessor_coverage"]
+        assert coverage._package_guard is kwargs["coverage"]._package_guard
         assert type(predecessor) is StandingRewardPredecessorOpportunity
         assert predecessor.coverage is coverage
         assert predecessor.successor == candidate.series

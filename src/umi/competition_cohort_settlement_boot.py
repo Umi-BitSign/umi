@@ -19,12 +19,16 @@ from .competition_cohort_request_inventory import RequestInventoryCutoff
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
-from .competition_cohort_settlement_service import CohortSettlementService
+from .competition_cohort_settlement_service import (
+    CohortSettlementService,
+    SettlementSeriesScheduler,
+)
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_reward_service import _close_provider, _stop_task
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, sign_object
 from .private_files import ensure_private_directory, lock_private_file, read_private_model
@@ -96,6 +100,15 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
     descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, descriptor)
+        memory = resources.enter_context(
+            memory_runtime(
+                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+            )
+        )
+        if memory is not None and {digest(p) for p in config.series.cohorts} != {
+            signal.cohort_sha256 for signal in memory.policy.settlement_signals
+        }:
+            raise ValueError("settlement series differs from host admission cohort groups")
         provider = HistoricalRegistrationProvider(config.chain, config.policy)
         resources.push_async_callback(_close_provider, provider)
         key = await run_owned_thread(
@@ -199,7 +212,10 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             )
         preparation = SettlementArtifactPreparation(config, promotion, direct_by_cohort)
         await provider.start()
-        tasks = [asyncio.create_task(node.run(stop)) for node in nodes]
+        scheduler = SettlementSeriesScheduler(
+            nodes, ordered_cohorts=tuple(digest(plan) for plan in config.series.cohorts)
+        )
+        tasks = [asyncio.create_task(scheduler.run(stop))]
         tasks.append(asyncio.create_task(preparation.run(stop)))
         if exports is not None:
             tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))

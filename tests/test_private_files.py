@@ -31,18 +31,20 @@ def test_publication_exact_retry_preserves_inode_and_conflict_preserves_bytes(tm
     assert not list(path.parent.glob(".pending-*"))
 
 
-def test_exact_retry_compares_current_bytes_without_repeated_canonical_checks(
-    tmp_path, monkeypatch
-):
+def test_exact_retry_compares_current_bytes_with_only_one_buffered_encoding(tmp_path, monkeypatch):
     path = tmp_path / "outbox" / "record.json"
     value = StoredRecord(value="retained")
     files.publish_private_model(path, value)
 
-    def unexpected_serialization(*args):
-        raise AssertionError("exact bytes already establish canonical equality")
+    encode, calls = files.canonical_json_bytes, []
 
-    monkeypatch.setattr(files, "canonical_json_matches", unexpected_serialization)
+    def counted(value):
+        calls.append(type(value))
+        return encode(value)
+
+    monkeypatch.setattr(files, "canonical_json_bytes", counted)
     files.publish_private_model(path, value)
+    assert calls == [StoredRecord]
     path.write_bytes(canonical_json_bytes(StoredRecord(value="different")))
     with pytest.raises(ValueError, match="different bytes"):
         files.publish_private_model(path, value)

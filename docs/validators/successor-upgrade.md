@@ -979,6 +979,15 @@ certify a cohort. Increasing a capacity does not assert that the full cohort
 will fit, pass independent replay, or meet a latency target. Retain the original
 service state and exact signed evidence when updating only these local limits.
 
+Settlement services retain the original private input file and its natively
+verified digest after replay. They release the full parsed package between ticks
+and replicate the exact retained bytes when publishing to peers. Keep the
+original file available: a matching outbox copy does not replace it. Missing or
+changed originals remain pending and must be restored from their verified
+replica; never rebuild them from a different input selection. This reduces
+resident copies but does not by itself bound concurrent aggregate replay.
+
+
 Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
 in the owner process. It requires the version-five selections and a `dispatch`
 object with schema `umi-cohort-service-dispatch-config/1`. Configure `origins`
@@ -2182,3 +2191,23 @@ and entries, and changes to the recipient, policy, process or journal
 materialization require verification again. It does not retain an authority,
 terminal decision or permission to execute; current journal and history checks
 remain required by the execution worker.
+
+Request reviewers release the first full evidence object inventory before proof
+RPC waits and the second owner fetch. A canonical protocol digest pins the entire
+first export; the second response must pass its own signature, challenge and
+native replay checks and match both that digest and the compact replay result.
+This retains both independent observations while avoiding two resident export
+graphs during the second replay.
+
+Settlement retains its native input inventory while its current phase is pending,
+so repeated polls reuse completed replay. Reference inputs are released before
+scoring inputs are constructed. After the coordinator durably publishes its
+native reward package and selected history, it releases the inventory, native
+reviews and phase closures. A terminal reviewer retains only authenticated
+request checks and recovery of its already signed vote deliveries; it never
+creates a new vote for a closed phase. Revocation, failed initialization and
+cooperative shutdown also release native state after owned work drains. Original
+input files, identity records, result journals and signing journals remain
+mandatory for restart. These lifetime boundaries do not themselves prove an RSS
+limit; host admission must reserve active inventories across pending polls and
+account for all simultaneously selected cohorts and other consumers.

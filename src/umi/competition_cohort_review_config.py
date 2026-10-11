@@ -26,6 +26,7 @@ from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
+from .host_memory_runtime import HostMemoryAdmissionSelection
 from .open_competition import CompetitionPolicy, Hotkey, Track, digest, identity
 from .private_files import Directory, private_path
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -69,9 +70,13 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     endpoint: EndpointHostConfig | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         if self.maximum_aggregate_evidence_bytes is None:
             value.pop("maximum_aggregate_evidence_bytes", None)
         if self.service_signing is None:

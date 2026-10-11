@@ -26,7 +26,8 @@ from .competition_cohort_reward_allocation import (
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
-    replay_reward_package,
+    _replay_detached_reward_package,
+    _validated_reward_snapshot,
 )
 from .competition_reward_control import (
     OwnedRewardControlObservation,
@@ -58,7 +59,6 @@ from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
 from .open_competition import digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
-from .protocol import canonical_json_bytes
 from .signed_extrinsic import verify_mortal_call
 
 
@@ -240,10 +240,7 @@ class StandingRewardPreparation:
         self, package: CohortRewardPackage, activation: RewardActivation, block: int
     ) -> PreparedStandingReward:
         requirement = self.manifest.requirement(activation.cohort_sha256)
-        raw = canonical_json_bytes(package)
-        if len(raw) > self.maximum_package_bytes:
-            raise ValueError("reward package exceeds its byte bound")
-        package = CohortRewardPackage.model_validate_json(raw)
+        package = _validated_reward_snapshot(package, self.maximum_package_bytes)
         if (
             digest(package) != activation.package_sha256
             or digest(package.allocation) != activation.allocation_sha256
@@ -262,7 +259,7 @@ class StandingRewardPreparation:
             # successful review cannot backdate their validity.
             if block >= retained.reviewed_at_block:
                 return retained
-        allocation = replay_reward_package(
+        allocation = _replay_detached_reward_package(
             package,
             self.reader.policy,
             self.promotion_store,

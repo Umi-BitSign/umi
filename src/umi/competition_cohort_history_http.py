@@ -97,7 +97,12 @@ class CohortHistoryExporter:
 
 def cohort_history_routes(exporter: CohortHistoryExporter, *, token: str):
     return phase_review_routes(
-        exporter, token=token, path=PATH, request_model=CohortHistoryRequest, concurrency=4
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=PATH,
+        request_model=CohortHistoryRequest,
+        concurrency=4,
     )
 
 

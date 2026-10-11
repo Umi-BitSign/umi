@@ -25,6 +25,7 @@ from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_recovery import CohortRecoveryState, CohortRecoveryTransition
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -78,6 +79,7 @@ class NativePreparationProgressSource:
     def __init__(self, owner: CohortPreparation):
         self.owner, self.intake = owner, owner.queue.intake
 
+    @memory_operation
     async def sample(
         self, state: CohortRecoveryState, capture: RegistrationCapture
     ) -> CohortPhaseProgress:

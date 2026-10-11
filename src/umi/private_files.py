@@ -181,7 +181,7 @@ def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: 
         if _read_bounded_private_bytes(path, maximum_bytes=maximum_bytes) != raw:
             raise ValueError("evaluator outbox already contains different bytes")
         retained = type(value).model_validate_json(raw)
-        if canonical_json_bytes(retained) != raw:
+        if not canonical_json_matches(retained, raw):
             raise ValueError("evaluator input must have stable canonical bytes")
         return
     fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)

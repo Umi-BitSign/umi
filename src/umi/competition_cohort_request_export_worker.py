@@ -30,6 +30,7 @@ from .competition_execution import execution_boundary
 from .competition_progress import _failure_details
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task, run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import Signature, digest, identity
 from .protocol import canonical_json_bytes
 
@@ -203,6 +204,7 @@ class RequestExportWorker:
             self.files.publish_inventory, signed, assignment, manifest, collected
         )
 
+    @memory_operation
     async def _export(self, owner, slot, block):
         objects = JournalEndpointObjects(owner.journal)
         retained = await run_owned_thread(owner.journal.get, "request_terminal", slot)

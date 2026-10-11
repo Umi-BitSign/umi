@@ -51,6 +51,7 @@ from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
 from .concurrency import await_owned_task
+from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -115,9 +116,13 @@ class StandingRewardBootConfig(StrictProtocolModel):
     predecessor_eligibility: RewardEligibilityRuntime | None = None
     predecessor_approval_sha256: Hex32 | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def omit_successor_inputs(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         for name in (
             "direct_model_review",
             "predecessor_series",
@@ -342,6 +347,11 @@ async def run_installed_standing_rewards(
         export_archive=exported,
     )
     async with AsyncExitStack() as constructing:
+        constructing.enter_context(
+            memory_runtime(
+                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+            )
+        )
         providers = {}
         for chain, policy, locations in (
             (config.chain, config.policy, CompetitionChainResources.from_config(config.chain)),
@@ -363,6 +373,7 @@ async def run_installed_standing_rewards(
             providers[sha] = provider
             constructing.push_async_callback(_close_provider, provider)
         current = providers[digest(config.chain)]
+        coverage_package_guard = asyncio.Lock()
         collection = StandingRewardCoverageService(
             provider=current,
             journal=coverage,
@@ -371,6 +382,7 @@ async def run_installed_standing_rewards(
             files=files,
             profile=config.eligibility,
             maximum_history_blocks=config.service.maximum_history_blocks,
+            package_guard=coverage_package_guard,
         )
         predecessor = None
         predecessor_coverage = None
@@ -417,6 +429,7 @@ async def run_installed_standing_rewards(
                 files=files,
                 profile=config.predecessor_eligibility,
                 maximum_history_blocks=config.service.maximum_history_blocks,
+                package_guard=coverage_package_guard,
             )
             predecessor = StandingRewardPredecessorOpportunity(
                 successor=config.series,

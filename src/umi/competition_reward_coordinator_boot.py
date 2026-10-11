@@ -53,6 +53,7 @@ from .competition_reward_service import StandingRewardServiceLimits, _close_prov
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, sign_object
 from .private_files import (
@@ -107,9 +108,13 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def omit_direct_model_review(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         for name in (
             "direct_model_review",
             "predecessor_series",
@@ -234,6 +239,11 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
     descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, descriptor)
+        resources.enter_context(
+            memory_runtime(
+                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+            )
+        )
         if config.role == "coordinator":
             # Series journals are disjoint, but the control hotkey has one
             # mutable chain slot. Keep one host-wide publisher across series.
@@ -293,6 +303,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         )
         resources.push_async_callback(_close_provider, provider)
         rule = opportunity_rule(config.manifest, config.series, config.policy)
+        coverage_package_guard = asyncio.Lock()
         coverage = StandingRewardCoverageService(
             provider=provider,
             history=history,
@@ -300,6 +311,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             files=files,
             profile=config.eligibility,
             maximum_history_blocks=config.service.maximum_history_blocks,
+            package_guard=coverage_package_guard,
             journal=RewardCoverageJournal(
                 root / "coverage",
                 rule,
@@ -346,6 +358,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 files=files,
                 profile=config.predecessor_eligibility,
                 maximum_history_blocks=config.service.maximum_history_blocks,
+                package_guard=coverage_package_guard,
                 journal=RewardCoverageJournal(
                     old_root / "coverage",
                     old_rule,

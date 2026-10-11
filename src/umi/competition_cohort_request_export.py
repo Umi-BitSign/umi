@@ -14,6 +14,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_stream import canonical_json_size
+from .competition_cohort_aggregate_model import AggregateProtocolModel
 from .competition_cohort_availability import (
     CohortAvailabilityObservation,
     unavailable_service_blocks,
@@ -46,7 +48,7 @@ class RequestReviewRequest(StrictProtocolModel):
     progress: CohortPhaseProgress
 
 
-class RequestReviewExport(StrictProtocolModel):
+class RequestReviewExport(AggregateProtocolModel):
     schema_: Literal["umi-request-review-export/1"] = Field(alias="schema")
     record: RequestProgressReviewRecord
     history: CohortRecoveryHistory
@@ -62,13 +64,13 @@ class RequestReviewExport(StrictProtocolModel):
     objects: Annotated[tuple[RewardPackageObject, ...], Field(max_length=65536)]
 
 
-class RequestReviewResponse(StrictProtocolModel):
+class RequestReviewResponse(AggregateProtocolModel):
     schema_: Literal["umi-request-review-response/1"] = Field(alias="schema")
     challenge: Hex32
     evidence: RequestReviewExport
 
 
-class SignedRequestReviewResponse(StrictProtocolModel):
+class SignedRequestReviewResponse(AggregateProtocolModel):
     response: RequestReviewResponse
     signature: Signature
 
@@ -138,7 +140,10 @@ class RequestReviewExporter:
                 for k, raw in sorted(captured.values.items())
             ),
         )
-        if len(canonical_json_bytes(result)) > self.maximum_bytes:
+        # The result owns the validated JSON inventory. Raw collector bytes are
+        # no longer needed during aggregate size checks, signing or delivery.
+        del captured
+        if canonical_json_size(result) > self.maximum_bytes:
             raise OSError("request export exceeds capacity; preserve and retry")
         return result
 

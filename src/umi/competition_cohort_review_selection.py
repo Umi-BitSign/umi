@@ -17,6 +17,7 @@ from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_operation
 from .open_competition import digest
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import read_private_model
@@ -134,8 +135,10 @@ class SelectedPhaseReviewer:
             return await run_owned_thread(partial(self._requests, progress.cohort_sha256))
         raise ValueError("phase vote is outside configured phases")
 
+    @memory_operation
     async def review(self, progress):
         return await (await self._select(progress)).review(progress)
 
+    @memory_operation
     async def decision(self, transition, evidence):
         return await (await self._select(evidence.progress.progress)).decision(transition, evidence)

@@ -301,9 +301,21 @@ budgets. Replay limits are part of retained configuration bindings; establish
 the larger profile in newly staged state or use a separately reviewed migration.
 Do not overwrite an existing journal's bound configuration or delete its state.
 
-Byte envelopes are not process memory limits. Evidence is parsed, canonicalized
-and replayed repeatedly, and request timeouts still apply. Qualify full-sized
-structured evidence on the intended host, including concurrent model workloads,
+Aggregate package and request-export canonicalization traverses object inventories
+one typed object at a time, including signed response envelopes. Domain checks,
+size checks, digests and exact-byte comparisons use that same traversal. Plain
+aggregate JSON parsing validates inventory objects individually, then applies the
+original tuple constraints and aggregate validators through an operation-private
+parser. The shared model schema remains unchanged. Unsupported schemas and input
+forms retain the ordinary full-document parser. Private publication retries still
+validate the complete retained schema, and reward preparation retains a detached
+input snapshot while replay is active. No signed
+bytes, evidence limits or validation requirements change.
+
+Byte envelopes are not process memory limits. A caller model, its canonical bytes
+and a validated snapshot can coexist; metadata and one serialized object also
+need memory. Evidence is still replayed, and request timeouts still apply. Qualify
+full-sized structured evidence on the intended host, including concurrent model workloads,
 before relying on a larger profile for settlement timing or memory headroom.
 
 <a id="open-competition-settlement-preparation--output-and-retry-behavior"></a>
@@ -1235,3 +1247,95 @@ restart or host migration. Configure durable replication of original model
 artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward
 certification.
+
+Installed reward coverage collectors retain an owner-bound native preparation
+result after successful historical replay, and release the full package graph.
+Every uncached endpoint still verifies eligibility and complete native control
+history. An earlier block reloads and replays the original package, and direct
+model artifact checks keep their existing refresh behavior. The current and
+predecessor collectors share one process-local guard across loading and replay;
+cancellation drains owned work before releasing it. Other reward consumers and
+other processes require separate memory admission. This does not establish the
+whole-host memory envelope by itself.
+
+
+### Host memory admission
+
+The admission owner, independent phase reviewer, settlement service, reward
+coordinator and standing reward writer accept an optional `host_memory_admission`
+selection with `policy_path` and the exact policy-file `policy_sha256`. The optional
+`host_identity_path` defaults to `/etc/machine-id`. An omitted
+selection preserves existing canonical configuration bytes. Select the same
+qualified host policy in every co-resident aggregate consumer; enabling one
+consumer alone does not establish a host-wide capacity bound.
+
+Provision the `umi-host-memory-admission/2` policy and its empty lock files on
+persistent root-owned storage. The policy binds the host's `/etc/machine-id`,
+namespace directory, group and every file's device/inode. The directory is mode
+0750, files are mode 0400 or 0440, and ancestors cannot be writable by the service
+accounts. Root-owned service configuration selects the policy's exact bytes.
+Every participating service account must be able to read the same inode bindings
+from its own mount namespace. Preserve these files across unattended reboot;
+replacing a file requires a deliberate policy/configuration cutover after draining
+all existing consumers. No runtime creates or rewrites this namespace.
+
+A containerized writer may have its own `/etc/machine-id`. Preserve that local
+identity and provide a separate read-only bind of the host identity, for example
+`BindReadOnlyPaths=/etc/machine-id:/run/umi-host-machine-id`, then select
+`host_identity_path: /run/umi-host-machine-id` in its bootstrap configuration.
+Bind the shared immutable policy directory into the same namespace. The selected
+identity path must be absolute, root owned and immutable; it must hash to the
+policy's host identity. Verify the actual writer account sees the same slot inodes
+and selected host identity as the ordinary services while retaining its own local
+identity. A host-account test alone does not establish this namespace binding.
+
+Reservations cover separate owner-export, transient-operation and retained
+settlement capacity. An owner response keeps its reservation through bounded
+ASGI sends. A reviewer can hold transient capacity while fetching an owner export,
+so those lanes must remain independent. Reward opportunity and peer-vote waits
+run outside package admission. Complete local operations drain owned threads
+before releasing capacity, including on cancellation. Error boundaries replace
+native exceptions with bounded diagnostic copies before releasing their rejected
+input graphs. Never pass an admitted operation's full native graph to work that
+outlives its reservation.
+
+Each settlement role runs one native cohort at a time, in the approved series
+order. A missing earlier authenticated handoff or mandatory original remains a
+barrier; later cohorts cannot occupy that role's native slot while it waits.
+Coordinator and reviewer have independent slots and may resume at different
+cohorts. Completed cohorts continue repairing their exact input replicas,
+certified histories and already signed votes using bounded delivery operations.
+Their separate serial maintenance task can run while a later native worker is
+busy. Per-cohort exclusion prevents maintenance and native replay from changing
+the same cohort concurrently. Input and output aggregate digests run in owned
+workers under the native reservation; they do not block the event loop.
+An authenticated terminal-history extension keeps its original certification
+prefix and does not reload the full input inventory.
+
+If a completed coordinator's generated reward package disappears, its scheduler
+releases the later cohort's graph and reservation after owned work drains, then
+replays the earlier cohort from its original journals and files. A missing
+mandatory input is restored in place; it is never regenerated as a shortcut.
+Recovery detected during an active tick waits for that tick to drain. Shutdown
+drains both the native and compact maintenance tasks before closing their stores.
+Changed original bytes or a changed certification prefix refuse progress. A
+process restart authenticates each earlier cohort again before proceeding, so
+file counts, cohort numbers and elapsed time never establish completion.
+
+Select reservations from measurements of the exact supported runtime and maximum
+aggregate capacity. `maximum_aggregate_bytes` must cover each consumer's effective
+configuration. `background_reservation_bytes` explicitly covers persistent native
+selections, bounded history/vote/model/order buffers and future allocations that
+do not own a slot. Logical object release does not imply that Python returned its
+resident pages to the operating system.
+
+Startup requires current available memory above the unchanged 24 GiB floor plus
+all slot reservations and background allowance. Each serialized grant rechecks
+current available memory against the floor, background allowance, candidate
+reservation and the full reservations of all occupied slots. This deliberately
+charges occupied work again even when it is already resident. Qualification must
+therefore include this conservative envelope, retained allocator memory, all
+configured concurrent consumers and downstream owner work. A policy fitting only
+the sum of isolated peaks can block its own dependencies. Verify startup, steady
+state, replica restart and recovery under the actual account/mount/cgroup limits
+before cutover; do not infer these bounds from aggregate file sizes alone.

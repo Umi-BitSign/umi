@@ -16,7 +16,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_stream import canonical_json_size
 from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
+from .competition_cohort_aggregate_model import AggregateProtocolModel
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_endpoint_archive import (
     MAX_ARCHIVE_OBJECT_BYTES,
@@ -43,10 +45,10 @@ from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
 from .open_competition import CompetitionPolicy, digest
 from .policy import scoring_policy_hash
-from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .protocol import Hex32, canonical_json_bytes
 
 
-class SettlementInputPackage(StrictProtocolModel):
+class SettlementInputPackage(AggregateProtocolModel):
     # Version 2 carries complete committed originals for reference certification.
     # Version 1 keeps its existing post-reveal semantics and canonical bytes.
     schema_: Literal["umi-settlement-input-package/1", "umi-settlement-input-package/2"] = Field(
@@ -239,7 +241,7 @@ def prepare_settlement_inputs(
             for k, v in sorted(captured.values.items())
         ),
     )
-    if len(canonical_json_bytes(package)) > maximum_bytes:
+    if canonical_json_size(package) > maximum_bytes:
         raise ValueError("settlement inputs including metadata exceed their byte bound")
     return package
 
@@ -262,6 +264,7 @@ def replay_settlement_inputs(
     if len(raw) > maximum_bytes:
         raise ValueError("settlement input package exceeds its byte bound")
     package = SettlementInputPackage.model_validate_json(raw)
+    del raw
     original = package.inputs.history
     if (
         digest(package) != expected_package_sha256

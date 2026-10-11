@@ -585,3 +585,62 @@ async def test_remote_review_retains_outage_compensation_before_request_closure(
     with pytest.raises(ValueError, match="service history"):
         replay(h, shortened)
     assert await h.remote_signer().attest(complete)
+
+
+async def test_request_review_releases_export_before_proofs_and_second_read(remote, monkeypatch):
+    import gc
+    import weakref
+
+    h = remote
+    progress = h.window()
+    read = h.remote._read
+    archive = h.remote.archive
+    references = []
+    reads = 0
+
+    def released():
+        gc.collect()
+        assert all(reference() is None for reference in references)
+
+    async def tracked_read(selected):
+        nonlocal reads
+        released()
+        exported, native = await read(selected)
+        references.append(weakref.ref(exported))
+        references.extend(weakref.ref(obj) for obj in exported.objects)
+        reads += 1
+        return exported, native
+
+    async def checked_archive(observation):
+        released()
+        return await archive(observation)
+
+    monkeypatch.setattr(h.remote, "_read", tracked_read)
+    monkeypatch.setattr(h.remote, "archive", checked_archive)
+    assert await h.remote.review(progress) == h.source.read(progress).record
+    assert reads == 2
+    released()
+
+
+async def test_request_review_rejects_changed_repeat_even_when_native_result_matches(
+    remote, monkeypatch
+):
+    h = remote
+    progress = h.window()
+    read = h.remote._read
+    reads = 0
+
+    async def changed_repeat(selected):
+        nonlocal reads
+        exported, native = await read(selected)
+        reads += 1
+        if reads == 2:
+            # Exercise the independent full-export comparison after both real
+            # native replays; compact review equality alone is insufficient.
+            exported = exported.model_copy(update={"transport_sha256": "ab" * 32})
+        return exported, native
+
+    monkeypatch.setattr(h.remote, "_read", changed_repeat)
+    with pytest.raises(OSError, match="changed during independent review"):
+        await h.remote_signer().attest(progress)
+    assert reads == 2 and h.remote_calls == []

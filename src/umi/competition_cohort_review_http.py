@@ -12,15 +12,20 @@ import hmac
 import json
 import logging
 import sqlite3
-from typing import Annotated, Generic, Protocol, TypeVar
+import traceback
+from collections.abc import Callable
+from typing import Annotated, Generic, Literal, Protocol, TypeVar
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import Field, model_validator
+from starlette.types import Receive, Scope, Send
 
 from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_limits
 from .competition_progress import _failure_details
 from .concurrency import wait_for_owned
+from .host_memory_admission import HostMemoryAdmission
+from .host_memory_runtime import selected_memory
 from .open_competition import Hotkey
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -76,6 +81,79 @@ def _credential(value: str) -> str:
     return value
 
 
+def _discard_error_frames(error: BaseException) -> None:
+    # A ValidationError can own its rejected input independently of traceback
+    # locals. Break completed error chains before replacing the HTTP boundary;
+    # the original error then dies when its except suite ends.
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+        traceback.clear_frames(current.__traceback__)
+        current.__traceback__ = current.__cause__ = current.__context__ = None
+
+
+class _OwnedReviewResponse(Response):
+    """Retain capacity until ASGI finishes sending and this owner drops bytes."""
+
+    def __init__(
+        self,
+        content: bytes,
+        capacity: asyncio.Semaphore,
+        release: Callable[[], None] | None = None,
+    ):
+        super().__init__(
+            content, media_type="application/json", headers={"cache-control": "no-store"}
+        )
+        self._capacity: asyncio.Semaphore | None = capacity
+        self._release: Callable[[], None] | None = release or capacity.release
+
+    def _close(self) -> None:
+        self.body = b""
+        self._capacity = None
+        release, self._release = getattr(self, "_release", None), None
+        if release is not None:
+            release()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status_code,
+                    "headers": self.raw_headers,
+                }
+            )
+            # Uvicorn may queue an entire body in its transport before send()
+            # returns. Bounded chunks preserve flow control; the full source
+            # buffer remains leased until the final ASGI send completes.
+            for offset in range(0, len(self.body), 64 * 1024):
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": self.body[offset : offset + 64 * 1024],
+                        "more_body": True,
+                    }
+                )
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except BaseException as error:
+            # A failed send frame may retain its message. Clear completed
+            # frames before release; this frame retains only self, whose body
+            # is explicitly dropped below, and bounded wire chunks.
+            _discard_error_frames(error)
+            raise
+        finally:
+            self._close()
+
+    def __del__(self):
+        # An unstarted response may be abandoned by middleware. Its last
+        # reference still owns the buffer and therefore also owns the lease.
+        self._close()
+
+
 def phase_review_routes(
     exporter: PhaseReviewExporter[RequestT],
     *,
@@ -84,7 +162,16 @@ def phase_review_routes(
     request_model: type[RequestT],
     maximum_request_bytes: int = MAX_REQUEST_BYTES,
     concurrency: int = 1,
+    admission: HostMemoryAdmission | None = None,
+    admission_lane: Literal["owner_export", "transient"] | None = None,
 ) -> APIRouter:
+    # This transport also serves reviewer vote routes. Only explicitly marked
+    # owner exports take the reserved owner lane; otherwise a reviewer would
+    # occupy that lane while waiting for its owner's response.
+    if admission is None and admission_lane is not None:
+        admission = selected_memory()
+    if admission is not None and exporter.maximum_bytes > admission.policy.maximum_aggregate_bytes:
+        raise ValueError("owner export exceeds its qualified host aggregate capacity")
     _request_limit(maximum_request_bytes)
     if type(concurrency) is not int or not 1 <= concurrency <= 8:
         raise ValueError("phase review concurrency must be between 1 and 8")
@@ -107,7 +194,18 @@ def phase_review_routes(
                 raw.extend(part)
             return bytes(raw)
 
-        acquired = False
+        acquired, transferred, lease = False, False, None
+        output = b""
+
+        def release():
+            nonlocal acquired, lease
+            if lease is not None:
+                lease.close()
+                lease = None
+            if acquired:
+                acquired = False
+                capacity.release()
+
         try:
             # Exporters already bound their own operation to timeout_seconds.
             # Let concurrent reviewers queue behind that bounded operation;
@@ -120,12 +218,14 @@ def phase_review_routes(
                 value = request_model.model_validate_json(raw)
             except ValueError as error:
                 raise HTTPException(422, "invalid phase review request") from error
+            if admission is not None:
+                lease = await admission.acquire(admission_lane or "owner_export")
             output = await wait_for_owned(exporter.respond(value), timeout=exporter.timeout_seconds)
             if type(output) is not bytes or len(output) > exporter.maximum_bytes:
                 raise ValueError("phase export response exceeds its byte bound")
-            return Response(
-                output, media_type="application/json", headers={"cache-control": "no-store"}
-            )
+            response = _OwnedReviewResponse(output, capacity, release)
+            transferred = True
+            return response
         except (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as error:
             logger.warning(
                 "phase_review_unavailable path=%s error_type=%s details=%s",
@@ -133,10 +233,17 @@ def phase_review_routes(
                 type(error).__name__,
                 json.dumps(_failure_details(error), separators=(",", ":")),
             )
-            raise HTTPException(503, "phase review unavailable; retry unchanged") from error
+            _discard_error_frames(error)
+        except BaseException as error:
+            _discard_error_frames(error)
+            raise
         finally:
-            if acquired:
-                capacity.release()
+            if not transferred:
+                output = b""
+                release()
+        # Do not attach the native exception: schema errors may retain rejected
+        # aggregate graphs even after their completed traceback frames clear.
+        raise HTTPException(503, "phase review unavailable; retry unchanged") from None
 
     return router
 

@@ -77,7 +77,11 @@ class AdmissionHistoryExporter:
 
 def admission_history_routes(exporter: AdmissionHistoryExporter, *, token: str):
     return phase_review_routes(
-        exporter, token=token, path=HISTORY_PATH, request_model=CohortHistoryRequest
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=HISTORY_PATH,
+        request_model=CohortHistoryRequest,
     )
 
 

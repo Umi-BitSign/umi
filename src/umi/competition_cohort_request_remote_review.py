@@ -6,6 +6,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from functools import partial
 
+from .canonical_stream import canonical_json_matches
 from .competition_cohort_admission_review import review_cohort_participation
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -103,8 +104,9 @@ class RemoteRequestProgressReviewer:
             raise ValueError("request response exceeds its byte bound")
         signed = SignedRequestReviewResponse.model_validate_json(raw)
         response, signature = signed.response, signed.signature
-        if canonical_json_bytes(signed) != raw or identity(signature.hotkey) != self.owner:
+        if not canonical_json_matches(signed, raw) or identity(signature.hotkey) != self.owner:
             raise ValueError("request response is not canonical or changes its selected owner")
+        del raw
         verify_signature(response, signature)
         exported = response.evidence
         if (
@@ -115,6 +117,7 @@ class RemoteRequestProgressReviewer:
             raise ValueError(
                 "request response changes its challenge, progress or approved authority"
             )
+        del signed, response, signature
         replay = await run_owned_thread(
             partial(
                 replay_request_export,
@@ -131,6 +134,12 @@ class RemoteRequestProgressReviewer:
 
     async def review(self, progress: CohortPhaseProgress) -> RequestProgressReviewRecord:
         exported, original = await self._read(progress)
+        # Pin the complete canonical evidence before releasing its large object
+        # graph. Both independent reads still perform full native replay; the
+        # digest also detects changes outside the compact native review result.
+        exported_sha256 = digest(exported)
+        records, seals = exported.records, exported.seals
+        del exported
         observations = [
             original.record.service.observation,
             *(d.observation for d in original.decisions),
@@ -144,7 +153,7 @@ class RemoteRequestProgressReviewer:
             observations.append(original.tail.selected_observation)
         seal = self.roster.intake_seal
         if progress.completion == "complete":
-            observations.extend([seal.observation, *(s.observation for s in exported.seals)])
+            observations.extend([seal.observation, *(s.observation for s in seals)])
         checked = {}
         for observation in observations:
             key = digest(observation)
@@ -171,7 +180,7 @@ class RemoteRequestProgressReviewer:
         if progress.completion == "complete":
             if checked[digest(seal.observation)].snapshot != seal.snapshot:
                 raise ValueError("request roster seal changed its original registration")
-            for record in exported.records:
+            for record in records:
                 proof = await self.archive(record.observation)
                 await review_cohort_participation(
                     canonical_json_bytes(record),
@@ -184,7 +193,7 @@ class RemoteRequestProgressReviewer:
         if execution_boundary(await self.provider.collect()).block < progress.observed_at_block:
             raise ValueError("request completion is ahead of owned finality")
         repeated, replay = await self._read(progress)
-        if repeated != exported or replay != original:
+        if digest(repeated) != exported_sha256 or replay != original:
             raise OSError("request history changed during independent review")
         return original.record
 

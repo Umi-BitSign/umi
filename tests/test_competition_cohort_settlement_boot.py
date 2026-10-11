@@ -33,6 +33,23 @@ from .test_competition_reward_boot import series_case as series_case
 from .test_open_competition import wallet
 
 
+class LifecycleScheduler:
+    """Substitute scheduler work to test boot ownership, not cohort progress."""
+
+    def __init__(self, nodes, *, ordered_cohorts):
+        assert len(nodes) == len(ordered_cohorts)
+        self.nodes = nodes
+
+    async def run(self, stop):
+        tasks = [asyncio.create_task(node.run(stop)) for node in self.nodes]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @pytest.fixture
 def selected(inputs, tmp_path):
     v = inputs.value
@@ -236,6 +253,7 @@ async def test_settlement_boot_owns_keys_locks_and_drains_children(selected, mon
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
     monkeypatch.setattr(boot, "load_named_hotkey", key)
     monkeypatch.setattr(boot, "CohortSettlementService", Node)
+    monkeypatch.setattr(boot, "SettlementSeriesScheduler", LifecycleScheduler)
     if failure == "stop":
         await boot.run_settlement_service(config, stop)
     else:
@@ -481,6 +499,7 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
     monkeypatch.setattr(boot, "load_named_hotkey", lambda *args: wallet("Charlie"))
     monkeypatch.setattr(boot, "CohortSettlementService", Node)
+    monkeypatch.setattr(boot, "SettlementSeriesScheduler", LifecycleScheduler)
     monkeypatch.setattr(boot, "RequestExportWorker", Exports)
     monkeypatch.setattr(boot, "SettlementArtifactPreparation", Preparation)
     if failure:

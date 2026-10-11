@@ -41,6 +41,7 @@ from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPendin
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
+from .host_memory_runtime import memory_operation, run_memory_thread
 from .open_competition import Signature, digest
 from .protocol import canonical_json_bytes
 
@@ -129,7 +130,28 @@ class StandingRewardDecisionReviewer:
                 raise RewardReviewPending from None
             history = progress.history
         control = await p.history.review_control(p.provider, height)
-        package, opportunity = None, None
+        opportunity = None
+        if body.activation is not None:
+            if body.sequence == 1 and type(p.handoff) is StandingRewardHandoffPlan:
+                opportunity = await p.predecessor.review(
+                    body.activation, observed_at_block=body.observed_at_block
+                )
+            elif body.sequence > 1:
+                # A peer can first join at a later cohort. Recover its selected
+                # predecessor before the opportunity reader looks it up locally.
+                objects = {digest(item.decision): canonical_json_bytes(item) for item in prefix}
+                selected = await run_owned_thread(
+                    p.reader.review_history, control, objects.__getitem__, history
+                )
+                if selected.selection.decision_sha256 != body.predecessor_sha256:
+                    raise ValueError("reward opportunity does not extend the proved predecessor")
+                opportunity = await self.opportunity(body.activation)
+        return await self._review_package(body, prefix, control, history, opportunity)
+
+    @memory_operation
+    async def _review_package(self, body, prefix, control, history, opportunity):
+        p = self
+        package = None
         if body.activation is not None:
             package = await run_owned_thread(p.files.package, body.activation.package_sha256)
             if p.model_artifacts is not None and package.allocation.model_award is not None:
@@ -146,20 +168,6 @@ class StandingRewardDecisionReviewer:
                 await p.model_artifacts.ensure_all(
                     participants, package.allocation.model_award.acceptances
                 )
-            if body.sequence == 1 and type(p.handoff) is StandingRewardHandoffPlan:
-                opportunity = await p.predecessor.review(
-                    body.activation, observed_at_block=body.observed_at_block
-                )
-            elif body.sequence > 1:
-                # A peer can first join at a later cohort. Recover its selected
-                # predecessor before the opportunity reader looks it up locally.
-                objects = {digest(item.decision): canonical_json_bytes(item) for item in prefix}
-                selected = await run_owned_thread(
-                    p.reader.review_history, control, objects.__getitem__, history
-                )
-                if selected.selection.decision_sha256 != body.predecessor_sha256:
-                    raise ValueError("reward opportunity does not extend the proved predecessor")
-                opportunity = await self.opportunity(body.activation)
         return await run_owned_thread(
             partial(
                 review_reward_decision,
@@ -247,6 +255,7 @@ class StandingRewardCoordinator:
                 package = self.readback.package(activation.package_sha256)
                 if digest(package.allocation) != activation.allocation_sha256:
                     raise ValueError("independent package readback changes its allocation")
+                del package  # Release before the next prefix item is decoded.
 
     async def step(self) -> RewardCoordinationProgress:
         async with self.serial:
@@ -263,7 +272,7 @@ class StandingRewardCoordinator:
             await self.signer.publish(sequence - 1, p.files, p.files.package)
             self.phase = "readback_inputs"
             try:
-                await run_owned_thread(self._readback, prefix)
+                await run_memory_thread(self._readback, prefix)
             except FileNotFoundError:
                 return RewardCoordinationProgress(
                     "delivery_pending", sequence - 1, digest(prefix[-1].decision)
@@ -297,7 +306,7 @@ class StandingRewardCoordinator:
             activation = None
             if sequence:
                 cohort = digest(p.series.cohorts[sequence - 1])
-                activation = await run_owned_thread(self.offers, cohort, prefix)
+                activation = await run_memory_thread(self.offers, cohort, prefix)
                 if activation is None:
                     return RewardCoordinationProgress("allocation_pending", sequence)
                 activation = RewardActivation.model_validate_json(canonical_json_bytes(activation))

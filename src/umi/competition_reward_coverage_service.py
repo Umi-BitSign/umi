@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 from contextlib import suppress
+from functools import partial
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -61,6 +62,7 @@ class StandingRewardCoverageService:
         files: StandingRewardFiles,
         profile: RewardEligibilityRuntime,
         maximum_history_blocks: int = 64,
+        package_guard: asyncio.Lock | None = None,
     ):
         checked_size(maximum_history_blocks, 4096)
         reader = preparation.reader
@@ -81,6 +83,7 @@ class StandingRewardCoverageService:
         self._completed: dict[str, VerifiedRewardOpportunity] = {}
         self._opportunities: dict[str, VerifiedRewardOpportunity] = {}
         self._lock = asyncio.Lock()
+        self._package_guard = package_guard if package_guard is not None else asyncio.Lock()
 
     async def _selection(self, height):
         try:
@@ -132,13 +135,14 @@ class StandingRewardCoverageService:
         self._target = None
 
     async def _source(self, activation):
-        package = await run_owned_thread(self.files.package, activation.package_sha256)
         return NativeRewardCoverageSource(
             provider=self.provider,
             journal=self.journal,
             history=self.history,
             preparation=self.preparation,
-            package=package,
+            package_loader=partial(self.files.package, activation.package_sha256),
+            package_sha256=activation.package_sha256,
+            package_guard=self._package_guard,
             decisions=self.files.decision,
             profile=self.profile,
             maximum_history_blocks=self.maximum_history_blocks,

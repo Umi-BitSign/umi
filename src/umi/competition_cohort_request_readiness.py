@@ -10,7 +10,7 @@ from pydantic import Field
 
 from .competition_client import validate_intake_origin
 from .competition_execution import ExecutionBoundary, execution_boundary
-from .concurrency import run_owned_thread
+from .host_memory_runtime import run_memory_thread
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
@@ -93,17 +93,17 @@ class LiveRequestPhaseObserver:
         # An existing admission fence is already authoritative. Finish its
         # native queue seal on the unchanged coordinator capture before network
         # readiness or original-clock retrieval can delay that observation.
-        await run_owned_thread(self.source.seal_fenced, state, capture)
+        await run_memory_thread(self.source.seal_fenced, state, capture)
         serving = await self._ready(state, capture)
         options = {}
         if self.opening_clock is not None:
             options["opened"] = await self.opening_clock(state)
-        return await run_owned_thread(
+        return await run_memory_thread(
             partial(self.source.observe, state, capture, serving=serving, **options)
         )
 
     async def sample_service(self, state, capture):
         serving = await self._ready(state, capture)
-        return await run_owned_thread(
+        return await run_memory_thread(
             partial(self.source.sample_service, state, capture, serving=serving)
         )
