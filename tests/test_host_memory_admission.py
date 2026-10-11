@@ -36,6 +36,8 @@ def provisioned(tmp_path, monkeypatch):
     monkeypatch.setattr(admission, "_directory", directory_check)
     root = tmp_path / "capacity"
     root.mkdir(mode=0o750)
+    # CLI tests may leave a private umask; provision the exact selected mode.
+    root.chmod(0o750)
     monkeypatch.setattr(admission, "_available_memory", lambda: 24 * 1024**3 + 100000)
     slots = []
     for lane, role in (
