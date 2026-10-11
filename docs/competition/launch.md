@@ -90,8 +90,9 @@ cohort or authorize its evidence to be discarded.
   work. If every original miner remains unfinished, requests stay open.
   Benchmark and accepted paid-work miners count in one union; multiple entries,
   cases or retries cannot enlarge the denominator or make a miner complete while
-  its other original work remains unfinished. C5 retains the 10% rule. Later
-  cohorts with a legacy plan may adopt the completed-miner rule through a separate
+  its other original work remains unfinished. Legacy plans retain the 10% rule
+  until adoption is certified. A legacy plan with `original_plan.sequence > 5`
+  may adopt the completed-miner rule through a separate
   quorum-signed `adopt_request_tail_rule` transition while still in intake or
   preparation. This appends to the original history; it preserves the signed
   plan, accepted submissions, authority and storage bindings. An upgrade alone

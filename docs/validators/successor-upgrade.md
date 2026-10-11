@@ -1070,12 +1070,12 @@ changed originals remain pending and must be restored from their verified
 replica; never rebuild them from a different input selection. This reduces
 resident copies but does not by itself bound concurrent aggregate replay.
 
-For an original legacy-plan cohort after C5, the existing owner can append the
+For a legacy plan with `original_plan.sequence > 5`, the existing owner can append the
 12-hour completed-miner rule while the cohort is in intake or preparation. Deploy
 recovery transition `/3` and authenticated rule resolution to every history
 consumer first. The signed plan, authority, retained participation and directory
 bindings stay in place. This migration remains necessary while an admitted
-legacy-plan cohort after C5 needs the rule; new plans select it directly with
+eligible legacy-plan cohort needs the rule; new plans select it directly with
 plan `/4`. Keep its historical decoder while a retained cohort or reward package
 contains an adoption transition.
 
@@ -1113,7 +1113,8 @@ The request and response models live in
 open another process's journal. Confirm the adoption certificate through the
 normal authenticated history export before starting requests. An unsigned
 proposal, local reservation or partial vote set has no authority to change the
-rule. C5 cannot use this adoption operation. Adoption after requests have opened
+rule. Plans with `original_plan.sequence <= 5` cannot use this adoption operation.
+Adoption after requests have opened
 is refused, and the original certified request opening remains the sole clock
 for the 12-hour threshold.
 
@@ -1180,8 +1181,8 @@ finishes that fence before awaiting readiness or the opening proof. A suspended
 probe cannot delay the existing seal. Fence presence is only a scheduling hint;
 full native history and fence verification still precede sealing. Progress retained
 for quorum review keeps its exact observation across restarts; it does not fetch new
-readiness, recapture finality or reset the opening clock. This applies to C6 and
-later cohorts while preserving existing C5 fences and every signed opening clock.
+readiness, recapture finality or reset the opening clock. This scheduling preserves
+existing authenticated fences and every signed opening clock across supported cohorts.
 
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,
