@@ -1,7 +1,10 @@
 """Aggregate budgets do not widen individual objects or ordinary private files."""
 
+import httpx
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
+from umi.competition_cohort_admission_host import AdmissionOwnerConfig
 from umi.competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
 from umi.competition_cohort_capacity import (
     MAX_AGGREGATE_EVIDENCE_BYTES,
@@ -9,7 +12,15 @@ from umi.competition_cohort_capacity import (
     request_evidence_bytes,
 )
 from umi.competition_cohort_endpoint_archive import MAX_ARCHIVE_OBJECT_BYTES
+from umi.competition_cohort_request_files import RequestCompletionFiles
+from umi.competition_cohort_request_review_http import RequestReviewHTTPClient
+from umi.competition_cohort_review_config import PhaseReviewServiceConfig
+from umi.competition_cohort_review_export import review_export_limits
 from umi.competition_cohort_reward_package import ReplayObjectCollector
+from umi.competition_cohort_settlement_config import SettlementServiceConfig
+from umi.competition_reward_boot import StandingRewardBootConfig
+from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
+from umi.competition_reward_files import StandingRewardFiles
 from umi.open_competition import digest
 from umi.private_files import MAX_CONFIGURED_PRIVATE_BYTES, publish_private_model
 from umi.protocol import StrictProtocolModel, canonical_json_bytes
@@ -17,6 +28,52 @@ from umi.protocol import StrictProtocolModel, canonical_json_bytes
 
 class Aggregate(StrictProtocolModel):
     payload: str
+
+
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        (AdmissionOwnerConfig, "maximum_aggregate_evidence_bytes"),
+        (PhaseReviewServiceConfig, "maximum_aggregate_evidence_bytes"),
+        (SettlementServiceConfig, "maximum_package_bytes"),
+        (StandingRewardBootConfig, "maximum_package_bytes"),
+        (RewardCoordinatorConfig, "maximum_package_bytes"),
+    ],
+)
+def test_complete_path_config_accepts_four_gib_and_refuses_one_byte_more(model, field):
+    maximum = 4 * 1024**3
+    adapter = TypeAdapter(model.model_fields[field].rebuild_annotation())
+    assert adapter.validate_python(maximum) == maximum
+    with pytest.raises(ValidationError):
+        adapter.validate_python(maximum + 1)
+
+
+async def test_four_gib_request_transport_and_package_bounds_without_large_allocation(tmp_path):
+    maximum = 4 * 1024**3
+    assert check_aggregate_evidence_bytes(maximum) == maximum
+    review_export_limits(maximum, 2400, aggregate_evidence=True)
+    with pytest.raises(ValueError, match="aggregate evidence capacity"):
+        review_export_limits(maximum + 1, 2400, aggregate_evidence=True)
+    async with httpx.AsyncClient(trust_env=False) as connection:
+        client = RequestReviewHTTPClient(
+            connection, "https://owner.example", token="x" * 32, maximum_bytes=maximum
+        )
+        assert client.maximum_bytes == maximum
+        with pytest.raises(ValueError, match="aggregate evidence capacity"):
+            RequestReviewHTTPClient(
+                connection, "https://owner.example", token="x" * 32, maximum_bytes=maximum + 1
+            )
+    files = RequestCompletionFiles(tmp_path / "completion", maximum_bytes=maximum)
+    assert files.maximum_bytes == maximum
+    rewards = StandingRewardFiles(
+        tmp_path / "reward", maximum_package_bytes=maximum, maximum_witness_bytes=1024
+    )
+    assert rewards.maximum_package_bytes == maximum
+    collector = ReplayObjectCollector(lambda _: pytest.fail("no source read"), maximum)
+    assert collector.used == 0
+    path, value = tmp_path / "package.json", Aggregate(payload="original")
+    publish_aggregate_model(path, value, maximum_bytes=maximum)
+    assert read_aggregate_model(path, Aggregate, maximum_bytes=maximum) == value
 
 
 @pytest.mark.parametrize("bound", [True, 0, 1023, MAX_AGGREGATE_EVIDENCE_BYTES + 1])

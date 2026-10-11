@@ -400,15 +400,16 @@ async def test_shutdown_bounds_control_drain_and_retains_owned_writes(owned, mon
         pass
 
 
-async def test_owner_request_aggregate_override_preserves_original_selection(owned):
+@pytest.mark.parametrize("maximum", [1024**3, 4 * 1024**3])
+async def test_owner_request_aggregate_override_preserves_original_selection(owned, maximum):
     old = owned.config
     original = canonical_json_bytes(old)
     assert b"maximum_aggregate_evidence_bytes" not in original
     assert old.request_replay_bytes == 256 * 1024**2
     changed = boot.AdmissionOwnerConfig.model_validate(
-        old.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": 1024**3}
+        old.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": maximum}
     )
-    assert changed.request_evidence_bytes == changed.request_replay_bytes == 1024**3
+    assert changed.request_evidence_bytes == changed.request_replay_bytes == maximum
     assert changed.maximum_export_bytes == old.maximum_export_bytes
     assert changed.reviewers == old.reviewers and changed.directory == old.directory
     restored = changed.model_dump(by_alias=True)

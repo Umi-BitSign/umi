@@ -1168,15 +1168,18 @@ def test_cli_enables_numeric_retirement_diagnostics(
     )
 
 
-def test_request_aggregate_override_preserves_legacy_config_and_other_phase_limits(selected):
+@pytest.mark.parametrize("maximum", [1024**3, 4 * 1024**3])
+def test_request_aggregate_override_preserves_legacy_config_and_other_phase_limits(
+    selected, maximum
+):
     original = canonical_json_bytes(selected.config)
     assert b"maximum_aggregate_evidence_bytes" not in original
     assert selected.config.request_evidence_bytes == selected.config.maximum_export_bytes
     assert selected.config.request_replay_bytes == 256 * 1024**2
     changed = PhaseReviewServiceConfig.model_validate(
-        selected.config.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": 1024**3}
+        selected.config.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": maximum}
     )
-    assert changed.request_evidence_bytes == changed.request_replay_bytes == 1024**3
+    assert changed.request_evidence_bytes == changed.request_replay_bytes == maximum
     assert changed.maximum_export_bytes == selected.config.maximum_export_bytes
     assert changed.maximum_promotion_bytes == selected.config.maximum_promotion_bytes
     restored = changed.model_dump(by_alias=True)

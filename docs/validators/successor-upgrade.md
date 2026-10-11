@@ -949,7 +949,7 @@ Select aggregate evidence capacity for the complete request-to-reward path.
 Set `admission_owner.maximum_aggregate_evidence_bytes` and each phase reviewer's
 `maximum_aggregate_evidence_bytes` to the same qualified budget, and use that
 budget for every settlement and standing reward service's
-`maximum_package_bytes`. The accepted aggregate configuration range is 1 KiB through 2 GiB; qualify
+`maximum_package_bytes`. The accepted aggregate configuration range is 1 KiB through 4 GiB; qualify
 the selected budget on its actual hosts before treating it as operational.
 The request owner uses its selection for completion-file replay, native closure,
 signed export and HTTP response capacity; reviewers use theirs for terminal

@@ -1,6 +1,6 @@
 """Local aggregate evidence capacity, separate from signed policy and object limits.
 
-The aggregate configuration ceiling is 2 GiB; each selected deployment budget
+The aggregate configuration ceiling is 4 GiB; each selected deployment budget
 requires separate complete-path and resource qualification.
 Hosts select one explicit budget across the request-to-reward path; changing
 capacity never changes the selected policy, signed clocks or source identities.
@@ -10,7 +10,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-MAX_AGGREGATE_EVIDENCE_BYTES = 2 * 1024**3
+MAX_AGGREGATE_EVIDENCE_BYTES = 4 * 1024**3
 LEGACY_AGGREGATE_REPLAY_BYTES = 256 * 1024**2
 AggregateEvidenceCapacity = Annotated[int, Field(ge=1024, le=MAX_AGGREGATE_EVIDENCE_BYTES)]
 
