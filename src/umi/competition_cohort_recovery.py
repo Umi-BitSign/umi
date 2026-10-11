@@ -46,7 +46,10 @@ PHASES: tuple[Phase, ...] = (
     "certification",
     "first_admission",
 )
-RecoveryOperation = Literal["extend", "close_phase", "revoke"]
+RecoveryOperation = Literal["extend", "close_phase", "revoke", "adopt_request_tail_rule"]
+RequestTailRule = Literal[
+    "original_request_12h_at_most_tenth/1", "original_request_12h_with_completed_miner/1"
+]
 
 
 class PhaseTarget(StrictProtocolModel):
@@ -105,6 +108,7 @@ class RecoverableCohortPlan(StrictProtocolModel):
         "umi-recoverable-cohort-plan/1",
         "umi-recoverable-cohort-plan/2",
         "umi-recoverable-cohort-plan/3",
+        "umi-recoverable-cohort-plan/4",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     launch_sha256: Hex32
@@ -115,6 +119,7 @@ class RecoverableCohortPlan(StrictProtocolModel):
     eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)] | None = None
     service_pool_bps: Bps | None = None
     model_delivery: ModelDeliveryProfile | None = None
+    request_tail_rule: Literal["original_request_12h_with_completed_miner/1"] | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
@@ -125,6 +130,8 @@ class RecoverableCohortPlan(StrictProtocolModel):
             value.pop("service_pool_bps", None)
         if self.model_delivery is None:
             value.pop("model_delivery", None)
+        if self.request_tail_rule is None:
+            value.pop("request_tail_rule", None)
         return value
 
     @model_validator(mode="after")
@@ -138,7 +145,9 @@ class RecoverableCohortPlan(StrictProtocolModel):
             raise ValueError("cohort-specific tracks and reward split must be selected together")
         selected = has_tracks and has_pool
         if (self.schema_ != "umi-recoverable-cohort-plan/1") != selected:
-            raise ValueError("cohort-specific tracks and reward split require plan version 2 or 3")
+            raise ValueError(
+                "cohort-specific tracks and reward split require plan version 2 or later"
+            )
         if selected:
             expected = tuple(
                 track
@@ -150,12 +159,38 @@ class RecoverableCohortPlan(StrictProtocolModel):
             )
             if self.eligible_tracks != expected:
                 raise ValueError("cohort tracks differ from its nonzero reward pools")
-        explicit_delivery = self.schema_ == "umi-recoverable-cohort-plan/3"
         model_enabled = selected and "model" in self.eligible_tracks
+        explicit_delivery = self.schema_ == "umi-recoverable-cohort-plan/3" or (
+            self.schema_ == "umi-recoverable-cohort-plan/4" and model_enabled
+        )
         if explicit_delivery != (self.model_delivery is not None):
             raise ValueError("plan version 3 requires an explicit model delivery profile")
         if explicit_delivery and not model_enabled:
             raise ValueError("model delivery requires the model track")
+        if (self.schema_ == "umi-recoverable-cohort-plan/4") != (
+            self.request_tail_rule is not None
+        ):
+            raise ValueError("plan version 4 requires its explicit request tail rule")
+        return self
+
+
+def cohort_request_tail_rule(plan: RecoverableCohortPlan) -> RequestTailRule:
+    """Resolve only the original signed plan; legacy clocks and bytes stay intact."""
+    plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
+    return plan.request_tail_rule or "original_request_12h_at_most_tenth/1"
+
+
+class CohortRequestTailAdoption(StrictProtocolModel):
+    """Quorum adoption keeps the already admitted plan's exact identity."""
+
+    schema_: Literal["umi-cohort-request-tail-adoption/1"] = Field(alias="schema")
+    original_plan: RecoverableCohortPlan
+    rule: Literal["original_request_12h_with_completed_miner/1"]
+
+    @model_validator(mode="after")
+    def legacy_successor(self) -> Self:
+        if self.original_plan.sequence <= 5 or self.original_plan.request_tail_rule is not None:
+            raise ValueError("request tail adoption requires a legacy cohort after C5")
         return self
 
 
@@ -303,9 +338,11 @@ class CohortRecoveryGenesis(StrictProtocolModel):
 
 
 class CohortRecoveryTransition(StrictProtocolModel):
-    schema_: Literal["umi-cohort-recovery-transition/1", "umi-cohort-recovery-transition/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-cohort-recovery-transition/1",
+        "umi-cohort-recovery-transition/2",
+        "umi-cohort-recovery-transition/3",
+    ] = Field(alias="schema")
     cohort_sha256: Hex32
     authority_sha256: Hex32
     sequence: Annotated[int, Field(ge=1, le=2**53 - 1)]
@@ -317,17 +354,35 @@ class CohortRecoveryTransition(StrictProtocolModel):
     evidence_sha256: Hex32
     targets: Targets
     request_tail_sha256: Hex32 | None = None
+    request_tail_adoption: CohortRequestTailAdoption | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if self.request_tail_sha256 is None:
             value.pop("request_tail_sha256", None)
+        if self.request_tail_adoption is None:
+            value.pop("request_tail_adoption", None)
         return value
+
+    @property
+    def requires_progress_evidence(self) -> bool:
+        return self.operation in {"extend", "close_phase"}
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
         _targets(self.targets)
+        adoption = self.request_tail_adoption is not None
+        if adoption != (self.schema_ == "umi-cohort-recovery-transition/3") or adoption != (
+            self.operation == "adopt_request_tail_rule"
+        ):
+            raise ValueError("request tail adoption requires its explicit transition version")
+        if adoption and (
+            self.phase not in {"intake", "preparation"}
+            or digest(self.request_tail_adoption.original_plan) != self.cohort_sha256
+            or digest(self.request_tail_adoption) != self.evidence_sha256
+        ):
+            raise ValueError("request tail adoption differs from original pre-request cohort")
         tail = self.request_tail_sha256 is not None
         if tail != (self.schema_ == "umi-cohort-recovery-transition/2"):
             raise ValueError("request tail transition requires its explicit evidence version")
@@ -361,6 +416,14 @@ class CohortRecoveryState(StrictProtocolModel):
     not_before_block: Block
     phase: Phase | Literal["complete", "revoked"]
     targets: Targets
+    request_tail_rule: Literal["original_request_12h_with_completed_miner/1"] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.request_tail_rule is None:
+            value.pop("request_tail_rule", None)
+        return value
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
@@ -487,7 +550,7 @@ def _revised_targets(
         # The target of the closed phase remains historical; completion time is
         # separately recorded, rather than backdating it to the old target.
         shift, first = max(0, observed_at_block - target), index + 1
-    elif operation == "revoke":
+    elif operation in {"revoke", "adopt_request_tail_rule"}:
         shift, first = 0, len(PHASES)
     else:
         raise ValueError("unsupported cohort recovery operation")
@@ -506,6 +569,7 @@ def propose_recovery_transition(
     evidence_sha256: str,
     extension_blocks: int | None = None,
     request_tail_sha256: str | None = None,
+    request_tail_adoption: CohortRequestTailAdoption | None = None,
 ) -> CohortRecoveryTransition:
     """Pure proposal. Reserve exact bytes durably before asking authorities to sign."""
     state = CohortRecoveryState.model_validate_json(canonical_json_bytes(state))
@@ -534,15 +598,33 @@ def propose_recovery_transition(
         )
     if operation != "extend" and extension_blocks is not None:
         raise ValueError("only an extension specifies additional blocks")
+    if (operation == "adopt_request_tail_rule") != (request_tail_adoption is not None):
+        raise ValueError("request tail adoption requires its original plan and selected rule")
+    if request_tail_adoption is not None:
+        request_tail_adoption = CohortRequestTailAdoption.model_validate_json(
+            canonical_json_bytes(request_tail_adoption)
+        )
+        if (
+            not isinstance(authority, StandingCohortRecoveryAuthority)
+            or state.phase not in {"intake", "preparation"}
+            or state.request_tail_rule is not None
+            or digest(request_tail_adoption.original_plan) != state.cohort_sha256
+            or digest(request_tail_adoption) != evidence_sha256
+        ):
+            raise ValueError("request tail adoption is unavailable or conflicts with history")
     if request_tail_sha256 is not None and (
         operation != "close_phase" or state.phase != "requests"
     ):
         raise ValueError("request tail only authorizes request closure")
     return CohortRecoveryTransition(
         schema=(
-            "umi-cohort-recovery-transition/1"
-            if request_tail_sha256 is None
-            else "umi-cohort-recovery-transition/2"
+            "umi-cohort-recovery-transition/3"
+            if request_tail_adoption is not None
+            else (
+                "umi-cohort-recovery-transition/1"
+                if request_tail_sha256 is None
+                else "umi-cohort-recovery-transition/2"
+            )
         ),
         cohort_sha256=state.cohort_sha256,
         authority_sha256=state.authority_sha256,
@@ -557,6 +639,7 @@ def propose_recovery_transition(
             state, authority, operation, observed_at_block, extension_blocks, request_tail_sha256
         ),
         request_tail_sha256=request_tail_sha256,
+        request_tail_adoption=request_tail_adoption,
     )
 
 
@@ -583,6 +666,7 @@ def apply_recovery_transition(
         evidence_sha256=transition.evidence_sha256,
         extension_blocks=transition.extension_blocks,
         request_tail_sha256=transition.request_tail_sha256,
+        request_tail_adoption=transition.request_tail_adoption,
     )
     if transition != expected:
         raise ValueError("recovery decision forks history or changes an unauthorized phase")
@@ -603,4 +687,9 @@ def apply_recovery_transition(
         not_before_block=state.not_before_block,
         phase=phase,
         targets=transition.targets,
+        request_tail_rule=(
+            transition.request_tail_adoption.rule
+            if transition.request_tail_adoption is not None
+            else state.request_tail_rule
+        ),
     )

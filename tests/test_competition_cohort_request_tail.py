@@ -10,11 +10,13 @@ from umi.competition_cohort_request_tail import (
     MINIMUM_REQUEST_OPEN_MS,
     RequestTailObservation,
     original_request_miners,
+    review_request_tail,
     verify_request_tail_clock,
 )
 from umi.competition_historical_registration import HistoricalRegistration
 from umi.open_competition import identity
 
+from .test_competition_cohort_request_tail_owner import hard_tail, inventory
 from .test_competition_execution import boundary
 from .test_open_competition import wallet
 
@@ -42,6 +44,43 @@ def test_at_most_tenth_distinct_original_miner_threshold(miners, unfinished):
 def test_more_than_tenth_remain_pending(miners, unfinished):
     with pytest.raises(ValueError, match="at most ten"):
         tail(miners=miners, unfinished=unfinished)
+
+
+def test_hard_rule_observation_requires_a_complete_original_miner():
+    value = tail(miners=10).model_dump(by_alias=True)
+    value["rule"] = "original_request_12h_with_completed_miner/1"
+    value["unfinished_hotkeys"] = value["original_hotkeys"]
+    with pytest.raises(ValueError, match="completed original miner"):
+        RequestTailObservation.model_validate(value)
+    value["unfinished_hotkeys"] = value["original_hotkeys"][:-1]
+    assert len(RequestTailObservation.model_validate(value).unfinished_hotkeys) == 9
+
+
+@pytest.mark.parametrize("new_plan", [False, True])
+def test_independent_tail_review_requires_the_original_signed_rule(monkeypatch, new_plan):
+    args = inventory(monkeypatch)
+    if new_plan:
+        hard_tail(args)
+    value = tail()
+    if not new_plan:
+        value = value.model_copy(update={"rule": "original_request_12h_with_completed_miner/1"})
+    # Rule mismatch is independent of history authentication (covered by the
+    # native adoption suite); this focused test supplies the verified selection.
+    from umi.competition_cohort_recovery import cohort_request_tail_rule
+
+    monkeypatch.setattr(
+        "umi.competition_cohort_request_tail.authenticated_request_tail_rule",
+        lambda history, policy: cohort_request_tail_rule(history.plan),
+    )
+    with pytest.raises(ValueError, match="original signed cohort plan"):
+        review_request_tail(
+            value,
+            roster=None,
+            history=SimpleNamespace(plan=args["plan"]),
+            policy=None,
+            decision_source=None,
+            observation=value.observation,
+        )
 
 
 @pytest.mark.parametrize("elapsed", [0, MINIMUM_REQUEST_OPEN_MS - 1])

@@ -134,7 +134,7 @@ class NativePreparationProgressSource:
             decisions = tuple(
                 store.source(cohort, s.transition.evidence_sha256, CohortDecisionInput)
                 for s in history.transitions
-                if s.transition.operation != "revoke"
+                if s.transition.requires_progress_evidence
             )
             sources = {digest(d): d for d in decisions}
             state, restored, prior = replay_cohort_decisions(

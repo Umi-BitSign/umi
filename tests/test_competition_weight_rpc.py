@@ -9,6 +9,7 @@ import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus, PayloadTooBig
 from websockets.http11 import Response
+from websockets.protocol import State
 
 from umi.competition_weight_rpc import WeightProofRpc
 from umi.validator_chain import BittensorRawJsonRpc, ValidatorChainError
@@ -45,6 +46,7 @@ def sockets(monkeypatch):
         def __init__(self, kwargs):
             self.kwargs = kwargs
             self.closed = False
+            self.state = State.OPEN
             self.busy = False
             self.request = None
 
@@ -53,6 +55,7 @@ def sockets(monkeypatch):
 
         async def __aexit__(self, *args):
             self.closed = True
+            self.state = State.CLOSED
 
         async def send(self, raw):
             assert not self.closed and not self.busy

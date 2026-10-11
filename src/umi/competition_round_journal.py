@@ -306,19 +306,20 @@ class RoundJournal:
         return version
 
     @contextmanager
-    def read_transaction(self) -> Iterator[sqlite3.Connection]:
+    def read_transaction(self, *, wait: bool = True) -> Iterator[sqlite3.Connection]:
         """Read one current snapshot without reserving SQLite's writer slot.
 
         Authorization that reads and then mutates state must keep using
         ``transaction``. This connection cannot write or repair schema fences.
         Conflict holds and generation markers are read afresh on every call.
+        Advisory probes can set ``wait=False`` to refuse SQLite contention promptly.
         """
         self._check_files()
         db = sqlite3.connect(
             self.path.resolve().as_uri() + "?mode=ro",
             uri=True,
             isolation_level=None,
-            timeout=5,
+            timeout=5 if wait else 0,
         )
         try:
             db.execute("PRAGMA query_only=ON")

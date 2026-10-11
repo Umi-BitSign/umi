@@ -316,7 +316,7 @@ def replay_settlement_inputs(
     original_decisions = {
         item.transition.evidence_sha256
         for item in original.transitions
-        if item.transition.operation != "revoke"
+        if item.transition.requires_progress_evidence
     }
     if not original_decisions <= inventory.keys():
         raise ValueError("settlement inputs lack original decision evidence")

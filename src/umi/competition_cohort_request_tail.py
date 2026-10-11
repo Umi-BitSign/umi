@@ -13,6 +13,8 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_coordinator import CohortDecisionInput
+from .competition_cohort_recovery import RequestTailRule
+from .competition_cohort_request_rule import authenticated_request_tail_rule
 from .competition_execution import ExecutionBoundary
 from .competition_historical_registration import HistoricalRegistration
 from .open_competition import digest, identity
@@ -24,7 +26,7 @@ Timestamp = Annotated[int, Field(ge=1, le=2**53 - 1)]
 
 class RequestTailObservation(StrictProtocolModel):
     schema_: Literal["umi-cohort-request-tail-observation/1"] = Field(alias="schema")
-    rule: Literal["original_request_12h_at_most_tenth/1"] = "original_request_12h_at_most_tenth/1"
+    rule: RequestTailRule = "original_request_12h_at_most_tenth/1"
     opened_observation: ExecutionBoundary
     opened_timestamp_ms: Timestamp
     observation: ExecutionBoundary
@@ -49,8 +51,14 @@ class RequestTailObservation(StrictProtocolModel):
                 raise ValueError("request tail miner identities must be unique and ordered")
         if not set(self.unfinished_hotkeys) <= set(self.original_hotkeys):
             raise ValueError("request tail includes an unselected unfinished miner")
-        if len(self.unfinished_hotkeys) * 10 > len(self.original_hotkeys):
+        if self.rule == "original_request_12h_at_most_tenth/1" and (
+            len(self.unfinished_hotkeys) * 10 > len(self.original_hotkeys)
+        ):
             raise ValueError("request tail permits at most ten percent unfinished")
+        if self.rule == "original_request_12h_with_completed_miner/1" and (
+            len(self.unfinished_hotkeys) == len(self.original_hotkeys)
+        ):
+            raise ValueError("twelve-hour request tail requires a completed original miner")
         if (self.selected_observation is None) != (self.selected_timestamp_ms is None):
             raise ValueError("request tail selection boundary requires its timestamp")
         selected = self.selected_observation or self.observation
@@ -87,6 +95,7 @@ def review_request_tail(
     *,
     roster,
     history,
+    policy,
     decision_source,
     observation: ExecutionBoundary,
     required_unfinished_hotkeys: Iterable[str] = (),
@@ -101,6 +110,8 @@ def review_request_tail(
     signature; downstream consumers require that certified closure unchanged.
     """
     tail = RequestTailObservation.model_validate_json(canonical_json_bytes(tail))
+    if tail.rule != authenticated_request_tail_rule(history, policy):
+        raise ValueError("request tail rule differs from the original signed cohort plan")
     opened = next(
         (
             item.transition

@@ -133,7 +133,7 @@ def scenario(recovery, policy):
         policy_sha256=digest(policy),
         cohort_sha256=digest(plan),
         intake_closure_sha256=tip(history),
-        sequence=5,
+        sequence=plan.sequence,
         suite_sha256=digest(suite),
         incumbent_model_sha256="b2" * 32,
         runtime_sha256=policy.evaluation_runtime_sha256,

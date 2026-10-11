@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from umi.competition_chain import RegistrationCapture
+from umi.competition_cohort_recovery import PHASES, PhaseTarget, RecoverableCohortPlan
 from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS
 from umi.competition_cohort_request_tail_owner import select_request_tail
 from umi.competition_historical_registration import HistoricalRegistration
@@ -42,6 +43,17 @@ def inventory(
         "umi.competition_cohort_request_tail_owner.execution_boundary", lambda c: boundary(2000)
     )
     return dict(
+        plan=RecoverableCohortPlan(
+            schema="umi-recoverable-cohort-plan/1",
+            policy_sha256="a1" * 32,
+            launch_sha256="a2" * 32,
+            sequence=5,
+            suite_sha256="a3" * 32,
+            not_before_block=200,
+            initial_targets=tuple(
+                PhaseTarget(phase=p, target_block=300 + 90 * i) for i, p in enumerate(PHASES)
+            ),
+        ),
         roster=roster,
         orders=orders,
         terminals=lambda order, evaluator: (
@@ -125,6 +137,74 @@ def test_unselected_paid_miner_cannot_expand_threshold(monkeypatch):
     )
     with pytest.raises(ValueError, match="outside"):
         select_request_tail(**args)
+
+
+def hard_tail(args, *, sequence=6):
+    args["plan"] = RecoverableCohortPlan.model_validate(
+        args["plan"].model_dump(by_alias=True)
+        | {
+            "schema": "umi-recoverable-cohort-plan/4",
+            "sequence": sequence,
+            "eligible_tracks": ("endpoint",),
+            "service_pool_bps": 10000,
+            "request_tail_rule": "original_request_12h_with_completed_miner/1",
+        }
+    )
+    return args
+
+
+@pytest.mark.parametrize("sequence", [6, 7, 11, 2**32 - 1])
+def test_hard_tail_waits_for_one_original_miner_without_restarting_clock(monkeypatch, sequence):
+    args = hard_tail(
+        inventory(monkeypatch, miners=10, benchmark_missing=tuple(range(10))), sequence=sequence
+    )
+    args["capture"].provenance["timestamp_ms"] += 36_000_000
+    assert select_request_tail(**args) is None
+    args["terminals"] = lambda order, evaluator: (
+        object() if order.order.submission.submission.entry == 0 else None
+    )
+    result = select_request_tail(**args)
+    assert len(result.unfinished_hotkeys) == 9
+    assert result.opened_timestamp_ms == 1000
+    assert result.observed_timestamp_ms == 1000 + MINIMUM_REQUEST_OPEN_MS + 36_000_000
+    assert result.rule == "original_request_12h_with_completed_miner/1"
+
+
+def test_one_complete_entry_cannot_hide_the_same_miners_other_obligations(monkeypatch):
+    args = hard_tail(
+        inventory(
+            monkeypatch, miners=10, duplicate_entry=True, benchmark_missing=tuple(range(1, 11))
+        )
+    )
+    assert select_request_tail(**args) is None
+    args["terminals"] = lambda order, evaluator: (
+        object() if order.order.submission.submission.entry in (0, 10) else None
+    )
+    assert len(select_request_tail(**args).unfinished_hotkeys) == 9
+
+
+def test_paid_and_benchmark_union_must_leave_one_original_miner_complete(monkeypatch):
+    args = hard_tail(inventory(monkeypatch, miners=10, paid_missing=tuple(range(10))))
+    assert select_request_tail(**args) is None
+    args["service_terminals"] = lambda assignment: (
+        object() if assignment.admission.submission.submission.entry == 0 else None
+    )
+    assert len(select_request_tail(**args).unfinished_hotkeys) == 9
+
+
+def test_new_rule_uses_exact_original_twelve_hour_boundary(monkeypatch):
+    args = hard_tail(inventory(monkeypatch, miners=10, benchmark_missing=tuple(range(9))))
+    args["capture"].provenance["timestamp_ms"] -= 1
+    assert select_request_tail(**args) is None
+    args["capture"].provenance["timestamp_ms"] += 1
+    assert len(select_request_tail(**args).unfinished_hotkeys) == 9
+
+
+def test_single_miner_waits_until_its_complete_result(monkeypatch):
+    args = hard_tail(inventory(monkeypatch, miners=1, benchmark_missing=(0,)))
+    assert select_request_tail(**args) is None
+    args["terminals"] = lambda *_: object()
+    assert select_request_tail(**args).unfinished_hotkeys == ()
 
 
 @pytest.mark.asyncio

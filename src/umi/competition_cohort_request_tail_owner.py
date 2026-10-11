@@ -1,5 +1,7 @@
 """Select a bounded request tail from original native owner inventories."""
 
+from .competition_cohort_recovery import cohort_request_tail_rule
+from .competition_cohort_request_rule import authenticated_request_tail_rule
 from .competition_cohort_request_tail import (
     MINIMUM_REQUEST_OPEN_MS,
     RequestTailObservation,
@@ -12,6 +14,7 @@ from .open_competition import digest, identity
 
 def select_request_tail(
     *,
+    plan,
     roster,
     orders,
     terminals,
@@ -23,6 +26,7 @@ def select_request_tail(
     opened,
     capture,
     accepted_assignments=None,
+    history=None,
 ):
     """Only explicit owner absence qualifies; proof or storage failures propagate.
 
@@ -32,6 +36,13 @@ def select_request_tail(
     """
     if opened is None:
         return None
+    if history is not None and history.plan != plan:
+        raise ValueError("request tail history differs from its original plan")
+    rule = (
+        cohort_request_tail_rule(plan)
+        if history is None
+        else authenticated_request_tail_rule(history, policy)
+    )
     timestamp = capture.provenance.get("timestamp_ms")
     if type(timestamp) is not int or type(opened.timestamp_ms) is not int:
         raise ValueError("request tail selection requires native timestamps")
@@ -72,10 +83,13 @@ def select_request_tail(
         if service_terminals(assignment) is None:
             unfinished.add(identity(assignment.admission.submission.submission.hotkey))
     original = original_request_miners(roster, assignments)
-    if len(unfinished) * 10 > len(original):
+    if rule == "original_request_12h_at_most_tenth/1" and len(unfinished) * 10 > len(original):
+        return None
+    if rule == "original_request_12h_with_completed_miner/1" and len(unfinished) == len(original):
         return None
     return RequestTailObservation(
         schema="umi-cohort-request-tail-observation/1",
+        rule=rule,
         opened_observation=opened.original,
         opened_timestamp_ms=opened.timestamp_ms,
         observation=execution_boundary(capture),

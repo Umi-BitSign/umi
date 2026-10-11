@@ -20,6 +20,7 @@ from .competition_cohort_request_closure import (
 )
 from .competition_cohort_request_progress import certified_request_prefix
 from .competition_cohort_request_tail import review_request_tail
+from .competition_cohort_service_partial import read_paid_partial
 from .competition_cohort_service_seal import ServiceWorkSeal, sealed_service_assignments
 from .competition_cohort_service_terminal import SignedServiceTerminal, read_service_terminal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
@@ -34,12 +35,15 @@ class ServiceCatalogClosure(StrictProtocolModel):
     seal_sha256: Hex32
     terminals: Annotated[tuple[Hex32, ...], Field(max_length=8192)]
     skipped_work: Annotated[tuple[Hex32, ...], Field(max_length=8192)] | None = None
+    paid_partials: Annotated[tuple[Hex32, ...], Field(max_length=8192)] | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if self.skipped_work is None:
             value.pop("skipped_work", None)
+        if self.paid_partials is None:
+            value.pop("paid_partials", None)
         return value
 
     @model_validator(mode="after")
@@ -48,13 +52,19 @@ class ServiceCatalogClosure(StrictProtocolModel):
             sorted(set(self.skipped_work))
         ):
             raise ValueError("skipped service work must be unique and ordered")
+        if self.paid_partials is not None and self.paid_partials != tuple(
+            sorted(set(self.paid_partials))
+        ):
+            raise ValueError("paid partial inventory must be unique and ordered")
         return self
 
 
 class CohortServiceRequestClosure(StrictProtocolModel):
-    schema_: Literal["umi-cohort-request-closure/2", "umi-cohort-request-closure/4"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cohort-request-closure/2",
+        "umi-cohort-request-closure/4",
+        "umi-cohort-request-closure/5",
+    ] = Field(alias="schema")
     benchmark_closure_sha256: Hex32
     recovery_tip_sha256: Hex32
     observation: ExecutionBoundary
@@ -63,9 +73,14 @@ class CohortServiceRequestClosure(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selected_version(self):
-        tail = self.schema_ == "umi-cohort-request-closure/4"
+        tail = self.schema_ != "umi-cohort-request-closure/2"
         if any((c.skipped_work is not None) != tail for c in self.catalogs):
             raise ValueError("service closure version differs from explicit skipped inventory")
+        partial = self.schema_ == "umi-cohort-request-closure/5"
+        if any((c.paid_partials is not None) != partial for c in self.catalogs):
+            raise ValueError("service closure version differs from signed paid partial inventory")
+        if partial and not any(c.paid_partials for c in self.catalogs):
+            raise ValueError("paid partial closure requires an authenticated partial original")
         return self
 
 
@@ -98,7 +113,7 @@ def review_service_request_closure(
     benchmark = CohortRequestClosure.model_validate_json(
         read_endpoint_object(objects, closure.benchmark_closure_sha256)
     )
-    tail = closure.schema_ == "umi-cohort-request-closure/4"
+    tail = closure.schema_ != "umi-cohort-request-closure/2"
     if tail != (benchmark.schema_ == "umi-cohort-request-closure/3"):
         raise ValueError("service closure version differs from its benchmark disposition")
     if (
@@ -169,6 +184,46 @@ def review_service_request_closure(
         unfinished.update(
             identity(by_work[k].admission.submission.submission.hotkey) for k in skipped
         )
+        partial_work = set()
+        for key in ref.paid_partials or ():
+            signed, assignment, fence, source = read_paid_partial(
+                key,
+                objects,
+                policy,
+                transport,
+                request_interval=(opened, closure.observation.block),
+            )
+            work = signed.inventory.work_sha256
+            selected = benchmark.tail.selected_observation or benchmark.tail.observation
+            if work not in skipped or work in partial_work or by_work[work] != assignment:
+                raise ValueError("paid partial repeats or substitutes skipped accepted work")
+            partial_work.add(work)
+            if (
+                fence.recovery_tip_sha256 != closure.recovery_tip_sha256
+                or fence.catalog_sha256s != expected
+                or fence.tail.observation != selected
+                or fence.tail.opened_observation != benchmark.tail.opened_observation
+                or fence.tail.opened_timestamp_ms != benchmark.tail.opened_timestamp_ms
+                or fence.tail.original_hotkeys != benchmark.tail.original_hotkeys
+                or fence.tail.observed_timestamp_ms
+                != (benchmark.tail.selected_timestamp_ms or benchmark.tail.observed_timestamp_ms)
+            ):
+                raise ValueError("paid partial changed the fixed selected admission fence")
+            review_request_tail(
+                fence.tail,
+                roster=roster,
+                history=history,
+                policy=policy,
+                decision_source=decision_source,
+                observation=selected,
+            )
+            if (
+                source.history.authority != history.authority
+                or source.history.plan != history.plan
+                or source.history.transitions
+                != history.transitions[: len(source.history.transitions)]
+            ):
+                raise ValueError("paid partial belongs to another request history")
         completed = []
         for terminal_sha in ref.terminals:
             signed = SignedServiceTerminal.model_validate_json(
@@ -207,6 +262,7 @@ def review_service_request_closure(
             benchmark.tail,
             roster=roster,
             history=history,
+            policy=policy,
             decision_source=decision_source,
             observation=closure.observation,
             unfinished_hotkeys=unfinished,

@@ -95,7 +95,7 @@ class CohortSettlementPhases:
         decisions = {
             item.transition.evidence_sha256: self.owner.decisions(item.transition.evidence_sha256)
             for item in batch.inputs.history.transitions
-            if item.transition.operation != "revoke"
+            if item.transition.requires_progress_evidence
         }
         owner = copy.copy(self.owner)
         owner.decisions = decisions.__getitem__

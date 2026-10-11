@@ -178,6 +178,7 @@ def review_request_closure(
             closure.tail,
             roster=roster,
             history=history,
+            policy=policy,
             decision_source=decision_source,
             observation=closure.observation,
             required_unfinished_hotkeys=unfinished_request_miners(closure, roster),

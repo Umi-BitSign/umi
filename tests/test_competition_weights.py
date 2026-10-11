@@ -12,6 +12,7 @@ from fractions import Fraction
 from types import SimpleNamespace
 
 import pytest
+from websockets.protocol import State
 
 from umi.competition_chain_state import (
     FinalizedCompetitionWeightProvider,
@@ -1743,6 +1744,7 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
 
     class Connection:
         closed = False
+        state = State.OPEN
         request = None
 
         async def __aenter__(self):
@@ -1750,6 +1752,7 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
 
         async def __aexit__(self, *args):
             self.closed = True
+            self.state = State.CLOSED
 
         async def send(self, raw):
             assert not self.closed

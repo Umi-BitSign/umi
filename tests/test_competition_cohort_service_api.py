@@ -23,6 +23,7 @@ from umi.competition_cohort_intake import (
     CohortIntakeConfig,
     history_tip,
 )
+from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS, RequestTailObservation
 from umi.competition_cohort_roster import verify_recoverable_roster_membership
 from umi.competition_cohort_service_api import (
     PATH,
@@ -30,6 +31,7 @@ from umi.competition_cohort_service_api import (
     prepared_service_roster,
     service_admission_routes,
 )
+from umi.competition_cohort_service_fence import ServiceTailAdmissionFence, ServiceTailFenceBinding
 from umi.competition_cohort_service_queue import MAX_ADMISSION_BYTES, ServiceWorkQueue
 from umi.competition_cohort_service_work import (
     MAX_CLAIM_BYTES,
@@ -42,14 +44,15 @@ from umi.competition_execution import execution_boundary
 from umi.competition_historical_registration import HistoricalRegistrationProvider
 from umi.competition_round_journal import RecordReservation
 from umi.concurrency import run_owned_thread
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, identity, sign_object
+from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_chain import chain as chain
 from .test_competition_chain import chain_config as chain_config
 from .test_competition_cohort_order_signer import source_for
 from .test_competition_cohort_recovery import signatures
-from .test_competition_cohort_service_queue import admit, inputs
+from .test_competition_cohort_service_queue import admit, capture, inputs
 from .test_competition_cohort_service_queue import base_policy as base_policy
 from .test_competition_cohort_service_queue import harness as harness
 from .test_competition_cohort_service_queue import legacy_scenario as legacy_scenario
@@ -550,7 +553,9 @@ async def test_readiness_capacity_and_seal_preserve_duplicate_recovery(api_case,
     assert not status.json()["ready"]
     assert status.json()["reason_code"] == ("sealed" if fence == "sealed" else "capacity_exhausted")
     s.calls.clear()
-    assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == 503
+    assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == (
+        409 if fence == "sealed" else 503
+    )
     assert not s.calls  # No fresh proof/history work can create capacity.
     s.offline = {"history", "capture", "roster", "archive"}
     assert (await post(s)).json() == first.json()
@@ -586,7 +591,9 @@ async def test_full_or_sealed_readiness_skips_byte_capacity_scan(api_case, monke
         "capacity_exhausted" if fence == "capacity" else "sealed"
     )
     s.calls.clear()
-    assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == 503
+    assert (await post(s, inputs(s.c, nonce=2)[0])).status_code == (
+        409 if fence == "sealed" else 503
+    )
     assert not s.calls
     assert (await post(s)).json() == accepted.json()
 
@@ -1163,3 +1170,182 @@ async def test_second_readiness_does_not_queue_or_cancel_the_first(api_case):
         release.set()
         completed = await first
     assert completed.json()["ready"] is True
+
+
+def publish_admission_tail(s, tmp_path):
+    """Native private fence fixture; synthetic clocks do not establish real finality."""
+    directory = tmp_path / "admission-tail"
+    binding = ServiceTailFenceBinding(
+        schema="umi-private-service-tail-fence-binding/1",
+        directory=str(directory),
+        cohort_sha256=s.c.catalog.catalog.cohort_sha256,
+        policy_sha256=s.c.cfg.policy_sha256,
+    )
+    s.c.queue.bind_tail_admission_fence(binding)
+    tail = RequestTailObservation(
+        schema="umi-cohort-request-tail-observation/1",
+        opened_observation=execution_boundary(capture(s.observed.snapshot.block - 1)),
+        opened_timestamp_ms=1000,
+        observation=execution_boundary(s.observed),
+        observed_timestamp_ms=1000 + MINIMUM_REQUEST_OPEN_MS,
+        original_hotkeys=tuple(
+            sorted(
+                {
+                    identity(p.record.request.signed_submission.submission.hotkey)
+                    for p in s.roster.participants
+                }
+            )
+        ),
+        unfinished_hotkeys=(),
+    )
+    fence = ServiceTailAdmissionFence(
+        schema="umi-private-service-tail-admission-fence/1",
+        cohort_sha256=binding.cohort_sha256,
+        policy_sha256=binding.policy_sha256,
+        recovery_tip_sha256=history_tip(s.source.history),
+        catalog_sha256s=(s.c.cfg.catalog_sha256,),
+        tail=tail,
+    )
+    path = directory / "tail.json"
+    publish_private_model(path, fence, maximum_bytes=128 * 1024)
+    return path
+
+
+async def test_tail_closed_precedes_busy_and_preserves_accepted_receipt(api_case, tmp_path):
+    s = api_case
+    accepted = await post(s)
+    assert accepted.status_code == 200
+    retained = s.c.queue.lookup(inputs(s.c)[0])
+    original = canonical_json_bytes(retained)
+    fence = publish_admission_tail(s, tmp_path)
+    fence_bytes = fence.read_bytes()
+    restart(s)
+    s.offline = {"capture", "history", "roster", "archive"}
+    async with s.api.serial[s.c.cfg.catalog_sha256]:
+        status = await asyncio.wait_for(ready(s), 2)
+        assert status.status_code == 200
+        assert status.json()["reason_code"] == "tail_fenced"
+        assert status.json()["new_claims_closed"] and not status.json()["ready"]
+        refused = await asyncio.wait_for(post(s, inputs(s.c, nonce=2)[0]), 2)
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == {
+            "reason_code": "admission_closed",
+            "closure_reason": "tail_fenced",
+            "retryable": False,
+            "accepted_claim_recovery": True,
+        }
+        assert refused.headers["cache-control"] == "no-store"
+        duplicate = await asyncio.wait_for(post(s), 2)
+        assert duplicate.content == accepted.content
+        assert not s.calls and s.api.serial[s.c.cfg.catalog_sha256].locked()
+    assert s.c.queue.entries() == (retained,)
+    assert canonical_json_bytes(s.c.queue.lookup(inputs(s.c)[0])) == original
+    assert fence.read_bytes() == fence_bytes
+    assert s.c.queue.retained_seal() is None
+
+
+async def test_tail_closed_retains_missing_archive_recovery(api_case, tmp_path):
+    s = api_case
+    accepted = prior_admission_without_archive(s)
+    publish_admission_tail(s, tmp_path)
+    restart(s)
+    s.offline = {"capture", "history", "roster"}
+    result = await post(s)
+    assert result.status_code == 200
+    assert result.json()["admission_sha256"] == digest(accepted)
+    assert set(s.calls) == {"archive"}
+    assert s.c.queue.entries() == (accepted,)
+
+
+async def test_tail_fence_between_preflight_and_commit_refuses_new_claim(
+    api_case, tmp_path, monkeypatch
+):
+    s = api_case
+    commit = s.api._commit
+
+    def fenced_commit(*args):
+        publish_admission_tail(s, tmp_path)
+        return commit(*args)
+
+    monkeypatch.setattr(s.api, "_commit", fenced_commit)
+    refused = await post(s)
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["closure_reason"] == "tail_fenced"
+    assert set(s.calls) == {"capture", "history", "roster", "archive"}
+    assert_no_admission_or_archive(s)
+
+
+async def test_acceptance_between_lookup_and_fence_still_recovers(api_case, tmp_path, monkeypatch):
+    s = api_case
+    closed = s.api._closed
+    accepted = []
+
+    def accepted_then_fenced(queue):
+        # Simulate another native owner committing after the first lookup, then
+        # publishing the cohort fence. Its accepted claim must not become a409.
+        accepted.append(prior_admission_without_archive(s))
+        publish_admission_tail(s, tmp_path)
+        return closed(queue)
+
+    monkeypatch.setattr(s.api, "_closed", accepted_then_fenced)
+    s.offline = {"capture", "history", "roster"}
+    result = await post(s)
+    assert result.status_code == 200
+    assert result.json()["admission_sha256"] == digest(accepted[0])
+    assert s.c.queue.entries() == tuple(accepted)
+    assert set(s.calls) == {"archive"}
+
+
+@pytest.mark.parametrize("damage", ["cohort", "catalog", "canonical", "permissions"])
+async def test_unverifiable_tail_is_transient_refusal_not_permanent_closure(
+    api_case, tmp_path, damage
+):
+    s = api_case
+    path = publish_admission_tail(s, tmp_path)
+    raw = path.read_bytes()
+    if damage == "permissions":
+        path.chmod(0o644)
+    elif damage == "canonical":
+        path.write_bytes(raw + b"\n")
+    else:
+        body = json.loads(raw)
+        body["cohort_sha256" if damage == "cohort" else "catalog_sha256s"] = (
+            "f0" * 32 if damage == "cohort" else ["f0" * 32]
+        )
+        path.write_bytes(canonical_json_bytes(body))
+    async with s.api.serial[s.c.cfg.catalog_sha256]:
+        status = await asyncio.wait_for(ready(s), 2)
+        assert status.json()["reason_code"] == "queue_unavailable"
+        assert not status.json()["ready"] and "new_claims_closed" not in status.json()
+        refused = await asyncio.wait_for(post(s), 2)
+        assert refused.status_code == 503
+    assert not s.calls
+    assert_no_admission_or_archive(s)
+
+
+async def test_busy_readiness_never_waits_for_sqlite_snapshot(api_case):
+    s = api_case
+    # This is the isolated fixture journal. Real SQLite exclusive ownership
+    # would expose both the five-second snapshot wait and the API retry budget.
+    with sqlite3.connect(s.c.queue.journal.path, isolation_level=None) as db:
+        db.execute("BEGIN EXCLUSIVE")
+        try:
+            async with s.api.serial[s.c.cfg.catalog_sha256]:
+                result = await asyncio.wait_for(ready(s), 2)
+                assert result.json()["reason_code"] == "queue_unavailable"
+                assert not result.json()["ready"]
+                assert not s.calls
+        finally:
+            db.rollback()
+    assert (await ready(s)).json()["ready"]
+
+
+async def test_malformed_seal_never_claims_permanent_closure(api_case):
+    s = api_case
+    s.c.queue.journal.put("service_work_seal", s.c.cfg.catalog_sha256, {"invalid": True})
+    result = await ready(s)
+    assert result.json()["reason_code"] == "queue_unavailable"
+    assert not result.json()["ready"] and "new_claims_closed" not in result.json()
+    assert (await post(s)).status_code == 503
+    assert not s.calls
+    assert_no_admission_or_archive(s)

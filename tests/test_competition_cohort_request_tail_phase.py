@@ -116,12 +116,15 @@ async def test_automatic_tail_preserves_completion_and_independent_clock_across_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", ["legacy", "hard12h"], indirect=True)
 async def test_tail_closes_uncompensated_unavailable_window_and_resumes_initial_fence(
     remote, monkeypatch, tmp_path
 ):
     h = remote
     original_read = h.source.terminals
-    targets = h.b["orders"][-2:]
+    hard = h.b["history"].plan.request_tail_rule is not None
+    targets = h.b["orders"] if hard else h.b["orders"][-2:]
+    elapsed = MINIMUM_REQUEST_OPEN_MS + (36_000_000 if hard else 0)
     withheld = {digest(order) for order in targets}
     partials = {
         digest(order.order.submission.submission): tuple(
@@ -159,7 +162,7 @@ async def test_tail_closes_uncompensated_unavailable_window_and_resumes_initial_
     opened = HistoricalRegistration(None, opening, SimpleNamespace(block_number=h.block), 1000)
     clocks = {digest(opening): 1000}
 
-    def sample(*, elapsed=MINIMUM_REQUEST_OPEN_MS):
+    def sample(*, elapsed=elapsed):
         observed = capture(h.block)
         observed.provenance["timestamp_ms"] = 1000 + elapsed
         clocks[digest(execution_boundary(observed))] = 1000 + elapsed
@@ -167,7 +170,7 @@ async def test_tail_closes_uncompensated_unavailable_window_and_resumes_initial_
 
     assert sample(elapsed=MINIMUM_REQUEST_OPEN_MS - 1).completion == "pending"
     assert h.c.queue.retained_seal() is None
-    # Two out of eleven identities cannot close admission, even after twelve hours.
+    # Legacy waits for at most one; the new rule waits while every miner is unfinished.
     h.block += 1
     assert sample().completion == "pending"
     assert h.c.queue.retained_seal() is None
@@ -225,14 +228,14 @@ async def test_tail_closes_uncompensated_unavailable_window_and_resumes_initial_
     h.source = h.reopen()
     connect()
     h.block += 1
-    progress = sample(elapsed=MINIMUM_REQUEST_OPEN_MS + 1000)
+    progress = sample(elapsed=elapsed + 1000)
     native = h.source.read(progress)
     assert progress.completion == "complete"
     assert native.record.fence is None and native.record.tail_fence is not None
     assert not native.record.service.serving
     target = next(t.target_block for t in h.state.targets if t.phase == "requests")
     assert progress.observed_at_block < target + progress.unavailable_blocks
-    assert len(native.tail.unfinished_hotkeys) == 1
+    assert len(native.tail.unfinished_hotkeys) == (10 if hard else 1)
     assert native.record.tail_fence.model_dump(mode="json", by_alias=True) == retained_fence
     assert published_cutoffs and all(tail == native.record.tail_fence for tail in published_cutoffs)
 
@@ -241,7 +244,7 @@ async def test_tail_closes_uncompensated_unavailable_window_and_resumes_initial_
     h.source = h.reopen()
     connect()
     h.block += 1
-    progress = sample(elapsed=MINIMUM_REQUEST_OPEN_MS + 2000)
+    progress = sample(elapsed=elapsed + 2000)
     final = h.source.read(progress)
     assert final.tail.unfinished_hotkeys == ()
     assert final.record.tail_fence == native.record.tail_fence

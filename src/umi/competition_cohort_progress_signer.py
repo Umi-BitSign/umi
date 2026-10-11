@@ -22,8 +22,13 @@ from .competition_cohort_coordinator import (
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_intake_review import IntakeProgressReviewRecord
 from .competition_cohort_preparation_phase import PreparationProgressReviewRecord
-from .competition_cohort_recovery import SignedCohortRecoveryTransition, verify_recovery_quorum
+from .competition_cohort_recovery import (
+    CohortRecoveryTransition,
+    SignedCohortRecoveryTransition,
+    verify_recovery_quorum,
+)
 from .competition_cohort_request_phase import RequestProgressReviewRecord
+from .competition_cohort_request_rule_api import require_adoption
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -142,6 +147,9 @@ class CohortProgressSigner:
 
     @log_phase("cohort_decision_vote")
     async def certify(self, transition, evidence: CohortDecisionInput):
+        transition = CohortRecoveryTransition.model_validate_json(canonical_json_bytes(transition))
+        if not transition.requires_progress_evidence:
+            raise ValueError("ordinary phase signing requires a progress-backed transition")
         evidence = CohortDecisionInput.model_validate_json(canonical_json_bytes(evidence))
 
         async def review():
@@ -156,6 +164,18 @@ class CohortProgressSigner:
 
         # At most one transition per predecessor, even across a lost reply or
         # concurrent proposal. Progress samples may advance before reservation.
+        slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
+        return await self._vote("phase_decision", slot, transition, review)
+
+    async def certify_request_tail_adoption(self, transition):
+        transition = require_adoption(transition)
+        if transition.cohort_sha256 not in {c.cohort_sha256 for c in self.config.cohorts}:
+            raise ValueError("request-rule vote is outside configured cohorts")
+
+        async def review():
+            return await self.reviewer.adoption(transition)
+
+        # Ordinary closure and policy adoption cannot both consume this tip.
         slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
         return await self._vote("phase_decision", slot, transition, review)
 

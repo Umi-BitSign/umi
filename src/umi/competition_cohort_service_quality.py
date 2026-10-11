@@ -345,7 +345,7 @@ def replay_closed_service_quality(
             )
     return ClosedServiceQuality(
         schema="umi-cohort-service-quality/2"
-        if closure.schema_ == "umi-cohort-request-closure/4"
+        if closure.schema_ != "umi-cohort-request-closure/2"
         else "umi-cohort-service-quality/1",
         terms_sha256=digest(terms),
         request_closure_sha256=digest(closure),

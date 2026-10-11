@@ -80,11 +80,14 @@ def intake_readiness(
         )
         if observation.block < state.observed_at_block:
             raise ValueError("intake finality predates its published history")
+        _, pending = store.status(cohort)
         if state.phase != "intake":
             reason = "phase_closed"
         elif observation.block < state.not_before_block:
             reason = "before_start"
-        elif intake._seal(db, history, history_tip(history)) is not None:
+        elif (
+            pending is not None and pending.operation == "adopt_request_tail_rule"
+        ) or intake._seal(db, history, history_tip(history)) is not None:
             reason = "fenced"
         elif (
             db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]

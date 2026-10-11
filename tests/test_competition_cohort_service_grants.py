@@ -1589,37 +1589,50 @@ def rebuild_service_closure(b, **changes):
     return build_service_request_closure(**arguments)
 
 
-async def test_native_terminal_read_recovers_after_restart_without_fresh_work(service):
+@pytest.mark.parametrize("allow_partial", [False, True])
+async def test_native_terminal_read_recovers_after_restart_without_fresh_work(
+    service, allow_partial
+):
     from umi.competition_cohort_service_terminal import ServiceWorkTerminals
 
     c, p = service, service.p
     owner = ServiceWorkTerminals(ServiceWorkRequests(c.queue, p.transport_policy))
     assert owner.read(c.assignment) is None
-    assert owner.read(c.assignment, preserve_completed=True) is None
+    assert owner.read(c.assignment, preserve_completed=True, allow_partial=allow_partial) is None
     with owner.journal.locked():
-        assert owner.read_locked(c.assignment, preserve_completed=True) is None
+        assert (
+            owner.read_locked(c.assignment, preserve_completed=True, allow_partial=allow_partial)
+            is None
+        )
     assert p.model.calls == p.fetcher.calls == 0
     owner, response, retirement, source, observation = await terminal_response(c)
     owner.journal.put("service_retirement", service_grant_slot(c.grant.body), retirement)
     with pytest.raises(FileNotFoundError, match="recovery and certification"):
-        owner.read(c.assignment, preserve_completed=True)
+        owner.read(c.assignment, preserve_completed=True, allow_partial=allow_partial)
     owner.journal.put("service_response", service_grant_slot(c.grant.body), response)
     with pytest.raises(FileNotFoundError, match="fencing and certification"):
-        owner.read(c.assignment, preserve_completed=True)
+        owner.read(c.assignment, preserve_completed=True, allow_partial=allow_partial)
     intent = owner.prepare(
         service_grant_slot(c.grant.body), response, retirement, source, observation
     )
     assert owner.read(c.assignment) is None  # An unsigned intent is still pending.
     with pytest.raises(FileNotFoundError, match="terminal certification"):
-        owner.read(c.assignment, preserve_completed=True)
+        owner.read(c.assignment, preserve_completed=True, allow_partial=allow_partial)
     signed = owner.retain(intent, sign_object(intent, p.validator))
     restarted = ServiceWorkTerminals(
         ServiceWorkRequests(ServiceWorkQueue(c.cfg, p.c.policy), p.transport_policy)
     )
     assert restarted.read(c.assignment) == signed
-    assert restarted.read(c.assignment, preserve_completed=True) == signed
+    assert (
+        restarted.read(c.assignment, preserve_completed=True, allow_partial=allow_partial) == signed
+    )
     with restarted.journal.locked():
-        assert restarted.read_locked(c.assignment, preserve_completed=True) == signed
+        assert (
+            restarted.read_locked(
+                c.assignment, preserve_completed=True, allow_partial=allow_partial
+            )
+            == signed
+        )
     assert p.model.calls == p.fetcher.calls == 1
     changed = c.assignment.model_copy(update={"previous": c.assignment.admission})
     # This predecessor is already invalid at the original admission boundary,

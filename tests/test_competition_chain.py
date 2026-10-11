@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from websockets.protocol import State
 
 from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_chain import (
@@ -965,6 +966,7 @@ def pooled_sockets(monkeypatch):
     class Socket:
         def __init__(self):
             self.busy = False
+            self.state = State.OPEN
 
         async def send(self, request):
             assert not self.busy
@@ -997,6 +999,7 @@ def pooled_sockets(monkeypatch):
         async def __aexit__(self, *args):
             await asyncio.sleep(0)
             self.closed = True
+            self.socket.state = State.CLOSED
 
     def connect(endpoint, **kwargs):
         assert kwargs["max_size"] in (2048, 17 * 1024**2, 33 * 1024**2, 1024**2)

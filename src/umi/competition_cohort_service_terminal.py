@@ -52,6 +52,10 @@ class SignedServiceTerminal(StrictProtocolModel):
     signature: Signature
 
 
+class PendingServiceTerminal(FileNotFoundError):
+    """Locally certifiable or response-recovery work must retain its credit path."""
+
+
 def review_service_terminal(
     terminal: ServiceTerminal,
     objects: EndpointObjectSource,
@@ -154,14 +158,24 @@ class ServiceWorkTerminals:
         self.objects = JournalEndpointObjects(self.journal)
 
     def read(
-        self, assignment: ServiceWorkAssignment, *, preserve_completed: bool = False
+        self,
+        assignment: ServiceWorkAssignment,
+        *,
+        preserve_completed: bool = False,
+        allow_partial: bool = False,
     ) -> SignedServiceTerminal | None:
         """Recover the original terminal and any interrupted immutable export."""
         with self.journal.locked():
-            return self.read_locked(assignment, preserve_completed=preserve_completed)
+            return self.read_locked(
+                assignment, preserve_completed=preserve_completed, allow_partial=allow_partial
+            )
 
     def read_locked(
-        self, assignment: ServiceWorkAssignment, *, preserve_completed: bool = False
+        self,
+        assignment: ServiceWorkAssignment,
+        *,
+        preserve_completed: bool = False,
+        allow_partial: bool = False,
     ) -> SignedServiceTerminal | None:
         """Read while the caller holds the queue's compound inventory lease."""
         assignment = review_service_assignment(assignment, self.policy)
@@ -172,7 +186,7 @@ class ServiceWorkTerminals:
         raw = self.journal.get("service_terminal", work)
         if raw is None:
             if preserve_completed:
-                self._require_unperformed(owned)
+                self.incomplete_locked(owned, allow_partial=allow_partial)
             return None
         signed = SignedServiceTerminal.model_validate_json(canonical_json_bytes(raw))
         intent = self.journal.get("service_terminal_intent", work)
@@ -186,8 +200,12 @@ class ServiceWorkTerminals:
         self.objects.put(signed)
         return signed
 
-    def _require_unperformed(self, assignment: ServiceWorkAssignment) -> None:
-        """Signed paid responses must finish fencing/certification, never become skips."""
+    def incomplete_locked(self, assignment: ServiceWorkAssignment, *, allow_partial=False):
+        """Replay incomplete originals while the caller owns the compound lease.
+
+        A response without retirement can become signed partial evidence. Any
+        certifiable response or terminal intent still requires local completion.
+        """
         intent = self.journal.get("service_terminal_intent", assignment.admission.work_sha256)
         if intent is not None:
             grant = review_service_terminal(
@@ -198,7 +216,7 @@ class ServiceWorkTerminals:
             )
             if grant.body.assignment != assignment:
                 raise ValueError("pending service certification changed its accepted assignment")
-            raise FileNotFoundError("completed service work awaits terminal certification")
+            raise PendingServiceTerminal("completed service work awaits terminal certification")
         selected = self.journal.get("service_work_evaluator", assignment.admission.work_sha256)
         if selected is None:
             return
@@ -239,19 +257,27 @@ class ServiceWorkTerminals:
                 evaluator_hotkey=body.evaluator_hotkey,
             )
             if retired.receipt.response_sha256 is not None and response is None:
-                raise FileNotFoundError(
+                raise PendingServiceTerminal(
                     "completed service response awaits recovery and certification"
                 )
         if response is None:
             return
-        verify_recovered_response(
+        response = verify_recovered_response(
             RecoveredEndpointResponse.model_validate_json(canonical_json_bytes(response)),
             request=body.request,
             validator_hotkey=body.evaluator_hotkey,
             miner_hotkey=assignment.admission.submission.submission.hotkey,
             limits=Limits.from_policy(self.requests.transport),
         )
-        raise FileNotFoundError("completed service response awaits fencing and certification")
+        if retirement is None and allow_partial:
+            return grant, response
+        if (
+            retirement is not None
+            and retired.receipt.response_sha256
+            != hashlib.sha256(bytes.fromhex(response.envelope_hex)).hexdigest()
+        ):
+            raise ValueError("retained service response differs from signed retirement")
+        raise PendingServiceTerminal("completed service response awaits fencing and certification")
 
     def prepare(self, slot, response=None, retirement=None, source=None, observation=None):
         body = self.requests._body(slot)

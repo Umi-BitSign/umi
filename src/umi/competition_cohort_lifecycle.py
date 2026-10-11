@@ -11,7 +11,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from .competition_chain import RegistrationCapture
@@ -20,6 +20,7 @@ from .competition_cohort_coordinator import (
     CohortDecisionInput,
     CohortRecoveryCoordinator,
     HistoryPublisher,
+    ProgressPreparation,
     RecoveryFinality,
 )
 from .competition_cohort_history import CohortRecoveryHistory
@@ -44,6 +45,7 @@ class CohortPhaseDriver:
     observer: CertifiedPhaseObserver
     publish_closed: HistoryPublisher | None = None
     sample_service: ServiceSampler | None = None
+    prepare_progress: ProgressPreparation | None = None
 
 
 class CohortLifecycleService:
@@ -58,6 +60,7 @@ class CohortLifecycleService:
         phases: Mapping[Phase, Callable[[], Awaitable[CohortPhaseDriver]]],
         *,
         request_start: SeriesRequestStart | None = None,
+        before_tick: Callable[[], Awaitable[None]] | None = None,
     ):
         if set(phases) != set(PHASES):
             raise ValueError("cohort lifecycle requires intake, preparation and request runtimes")
@@ -67,6 +70,7 @@ class CohortLifecycleService:
         ):
             raise ValueError("request start gate differs from its lifecycle owner")
         self.request_start = request_start
+        self.before_tick = before_tick
         self.publish_history = publish_history
         self.drivers: dict[Phase, CohortPhaseDriver] = {}
         self.last_report = None
@@ -85,6 +89,7 @@ class CohortLifecycleService:
             self._certify,
             self._publish,
             sample_progress=self._sample,
+            prepare_progress=self._prepare,
             attest_progress=self._attest,
         )
         history, state, _, _ = self.controller._history()
@@ -95,7 +100,10 @@ class CohortLifecycleService:
             (item.target_block for item in state.targets if item.phase == state.phase), None
         )
         for transition in reversed(history.transitions):
-            if transition.transition.phase != "preparation":
+            if (
+                transition.transition.phase != "preparation"
+                or not transition.transition.requires_progress_evidence
+            ):
                 continue
             evidence = self.controller.store.source(
                 self.cohort, transition.transition.evidence_sha256, CohortDecisionInput
@@ -154,12 +162,35 @@ class CohortLifecycleService:
             self.drivers[phase] = driver
         return self.drivers[phase]
 
+    @asynccontextmanager
+    async def _prepare(self, state):
+        authorize_memory("requests_lifecycle", state.cohort_sha256, state.phase)
+        self._remember_state(state)
+        driver = await self._driver(state.phase)
+        if driver.prepare_progress is None:
+
+            async def sample(capture):
+                return await self._sample(state, capture)
+
+            yield sample
+        else:
+            self.stage = "progress_preparation"
+            async with driver.prepare_progress(state) as prepared:
+
+                async def sample(capture):
+                    self.stage = "progress_sampling"
+                    return self._remember_progress(state, await prepared(capture))
+
+                yield sample
+
     async def _sample(self, state, capture):
         authorize_memory("requests_lifecycle", state.cohort_sha256, state.phase)
         self._remember_state(state)
         driver = await self._driver(state.phase)
         self.stage = "progress_sampling"
-        progress = await driver.observer.sample(state, capture)
+        return self._remember_progress(state, await driver.observer.sample(state, capture))
+
+    def _remember_progress(self, state, progress):
         if (
             progress.phase != state.phase
             or progress.cohort_sha256 != self.cohort
@@ -217,6 +248,8 @@ class CohortLifecycleService:
 
     async def tick(self) -> dict:
         async with self.serial:
+            if self.before_tick is not None:
+                await self.before_tick()
             history, state, _, _ = self.controller._history()
             self._remember_state(state)
             if state.phase == "preparation" and self.request_start is not None:

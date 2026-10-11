@@ -86,11 +86,18 @@ def endpoint_inputs(original, scenario, miner_name):
 
 async def closure_fixture(original, tmp_path, *, prepared=None):
     b = make_round(original, include_outcomes=False) if prepared is None else prepared
-    b["history"] = b["history"].model_copy(update={"transitions": b["history"].transitions[:2]})
+    opened = next(
+        i for i, item in enumerate(b["history"].transitions) if item.transition.phase == "requests"
+    )
+    b["history"] = b["history"].model_copy(
+        update={"transitions": b["history"].transitions[:opened]}
+    )
     source = CohortOrderHistory(
         history=b["history"],
         decisions=tuple(
-            b["decisions"][t.transition.evidence_sha256] for t in b["history"].transitions
+            b["decisions"][t.transition.evidence_sha256]
+            for t in b["history"].transitions
+            if t.transition.requires_progress_evidence
         ),
     )
     objects, orders, terminals, owners, endpoint_archives = {}, [], {}, {}, {}

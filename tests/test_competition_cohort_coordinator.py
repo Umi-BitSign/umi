@@ -485,3 +485,82 @@ def test_slow_cohort_does_not_block_other_cohorts_and_stop_joins_tasks():
         assert cancelled.is_set()
 
     asyncio.run(run())
+
+
+async def test_prepared_progress_keeps_one_capture_and_restarts_without_preparing(harness):
+    from contextlib import asynccontextmanager
+
+    from umi.competition_cohort_coordinator import CohortProgressIntent
+
+    h = harness
+    h.complete = True
+    h.block = h.state.targets[0].target_block
+    calls, captures = [], []
+    fail_attest = True
+    collect = h.collect
+
+    async def capture():
+        calls.append("capture")
+        result = await collect()
+        captures.append(result)
+        return result
+
+    h.collect = capture
+
+    async def sample(state, captured):
+        pytest.fail("prepared observation must use its attempt-local sampler")
+
+    @asynccontextmanager
+    async def prepare(state):
+        assert not captures
+        calls.append("prepare")
+        h.block += 7
+
+        async def prepared(captured):
+            assert captured is captures[0]
+            calls.append("sample")
+            return (await h.observe(state, captured)).progress
+
+        try:
+            yield prepared
+        finally:
+            calls.append("release")
+
+    async def attest(progress):
+        if fail_attest:
+            raise OSError("reviewer unavailable after preparation")
+        return AttestedCohortPhaseProgress(progress=progress, signatures=signatures(progress))
+
+    def coordinator():
+        return CohortRecoveryCoordinator(
+            h.store,
+            h.cohort,
+            h.policy,
+            h.genesis_signatures,
+            h,
+            None,
+            h.certify,
+            h.publish,
+            sample_progress=sample,
+            prepare_progress=prepare,
+            attest_progress=attest,
+        )
+
+    initial_state = h.state
+    with pytest.raises(OSError, match="reviewer unavailable"):
+        await coordinator().tick()
+    assert calls == ["prepare", "capture", "sample", "release"]
+    intent = h.store.progress_intent(h.cohort, initial_state.tip_sha256, CohortProgressIntent)
+    assert intent.observation == execution_boundary(captures[0])
+    assert intent.progress.observed_at_block == captures[0].snapshot.block
+    h.restart()
+    h.block += 10000
+    h.fail_collect = True
+    fail_attest = False
+    await coordinator().tick()
+    assert h.state.phase == "preparation"
+    assert calls == ["prepare", "capture", "sample", "release"]
+    assert h.collects == 1
+    evidence = h.store.source(h.cohort, h.attempts[-1].evidence_sha256, CohortDecisionInput)
+    assert evidence.observation == intent.observation
+    assert evidence.progress.progress == intent.progress

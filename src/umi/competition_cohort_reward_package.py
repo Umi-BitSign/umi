@@ -424,7 +424,7 @@ def _replay_detached_reward_package(
     original_decisions = {
         signed.transition.evidence_sha256
         for signed in package.inputs.history.transitions
-        if signed.transition.operation != "revoke"
+        if signed.transition.requires_progress_evidence
     }
     if not original_decisions <= inventory.keys():
         raise ValueError("reward package lacks original cohort decisions")

@@ -54,7 +54,7 @@ class CohortHistoryExporter:
                 {
                     t.transition.evidence_sha256
                     for t in history.transitions
-                    if t.transition.operation != "revoke"
+                    if t.transition.requires_progress_evidence
                 }
             )
             decisions, size = [], len(canonical_json_bytes(history))

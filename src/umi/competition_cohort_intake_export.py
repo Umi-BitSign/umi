@@ -160,7 +160,7 @@ class IntakeReviewExporter:
                 decisions=tuple(
                     store.source(cohort, t.transition.evidence_sha256, CohortDecisionInput)
                     for t in native.history.transitions
-                    if t.transition.operation != "revoke"
+                    if t.transition.requires_progress_evidence
                 ),
                 services=tuple(services),
                 seal=native.seal,
@@ -230,7 +230,7 @@ def replay_intake_export(
     expected = {
         t.transition.evidence_sha256
         for t in history.transitions
-        if t.transition.operation != "revoke"
+        if t.transition.requires_progress_evidence
     }
     if len(decisions) != len(exported.decisions) or set(decisions) != expected:
         raise ValueError("intake export needs every original decision exactly once")

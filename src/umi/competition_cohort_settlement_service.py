@@ -30,6 +30,7 @@ from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_closure import CohortRequestClosure
 from .competition_cohort_request_inventory import request_inventory_observations
 from .competition_cohort_request_tail import verify_request_tail_clock
+from .competition_cohort_service_partial import paid_partial_observations
 from .competition_cohort_settlement import CohortSettlement
 from .competition_cohort_settlement_assembly import assemble_settlement_inputs
 from .competition_cohort_settlement_config import SettlementServiceConfig
@@ -268,6 +269,7 @@ class CohortSettlementService:
         if tail.selected_observation is not None:
             observations.append(tail.selected_observation)
         observations.extend(request_inventory_observations(benchmark, data.objects))
+        observations.extend(paid_partial_observations(data.inputs.closure, data.objects))
         checked = {}
         for observation in observations:
             key = digest(observation)
@@ -345,7 +347,7 @@ class CohortSettlementService:
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
         state, _ = self.store.status(self.cohort)
         reference = state.phase == "reference_reveal"
@@ -544,7 +546,7 @@ class CohortSettlementService:
         sources = tuple(
             self._decisions(t.transition.evidence_sha256)
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         )
         await run_owned_thread(
             partial(
@@ -727,7 +729,7 @@ class CohortSettlementService:
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
             for t in batch.inputs.history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
         owner = copy.copy(self.phases.owner)
         owner.decisions = decisions.__getitem__

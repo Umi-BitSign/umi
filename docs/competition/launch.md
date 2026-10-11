@@ -80,13 +80,25 @@ cohort or authorize its evidence to be discarded.
 
 - Every phase is journaled and replayable. A coordinator, evaluator or validator
   outage leaves unfinished work pending and resumes it from retained evidence.
-- Request closure has an automatic miner-tail rule. Once at least 12 hours have
-  elapsed from the original certified request opening, unfinished work can be
-  recorded as skipped when at most 10% of distinct original selected
-  miner identities remain unfinished. Benchmark and accepted paid-work miners
-  count in one union; multiple entries, cases or retries cannot enlarge the
-  denominator. Existing cohorts use their original opening, without a new grace
-  period after an upgrade. The independently certified tail disposition can
+- Request closure follows the original signed cohort plan and any authenticated
+  pre-request rule adoption. Once at
+  least 12 hours have elapsed from its certified request opening, plans `/1`
+  through `/3` permit skipping unfinished work when at most 10% of the original
+  selected miner identities remain unfinished. Plan `/4` explicitly selects
+  `original_request_12h_with_completed_miner/1`: after the same 12 hours, closure
+  may proceed once at least one original miner has completed all its selected
+  work. If every original miner remains unfinished, requests stay open.
+  Benchmark and accepted paid-work miners count in one union; multiple entries,
+  cases or retries cannot enlarge the denominator or make a miner complete while
+  its other original work remains unfinished. C5 retains the 10% rule. Later
+  cohorts with a legacy plan may adopt the completed-miner rule through a separate
+  quorum-signed `adopt_request_tail_rule` transition while still in intake or
+  preparation. This appends to the original history; it preserves the signed
+  plan, accepted submissions, authority and storage bindings. An upgrade alone
+  never changes the rule. Adoption during requests or later is refused.
+  The 12-hour clock always uses the original certified request opening, with no
+  new grace period after the first completion, restart or upgrade.
+  The independently certified tail disposition can
   close an unavailable or uncompensated request window; original outage records
   and signed deadlines remain intact. The owner seals the exact accepted paid
   inventory only after this threshold qualifies. Before sealing individual
@@ -95,6 +107,11 @@ cohort or authorize its evidence to be discarded.
   retains this directory binding: keep the file and directory with the existing
   journals during recovery or migration. A crash between publication and sealing
   still refuses fresh claims; accepted duplicate claims remain recoverable.
+  Before signing a new plan `/4`, deploy compatible plan and tail decoders to
+  the coordinator, independent reviewers, miners and settlement/reward consumers.
+  Legacy-plan adoption also requires recovery transition `/3` support in every
+  history consumer before publishing its certificate. Preserve historical
+  decoders while original cohorts and reward packages still require them.
 - Independent reviewers verify the original and closing chain timestamps, exact
   original inventory, genuine completed terminals and explicit skipped
   dispositions before certifying closure. Completed assignments and earned paid
@@ -114,6 +131,21 @@ cohort or authorize its evidence to be discarded.
   signed snapshot for unchanged work, so a stalled cohort does not accumulate
   new inventory signatures or files on every poll. The cutoff request is
   advisory; it never authorizes closure or substitutes for independent quorum.
+- An authenticated paid response whose miner retirement remains unavailable can
+  use an evaluator-signed no-credit partial inventory after the same fixed
+  cutoff. The inventory binds the exact accepted assignment, grant, response,
+  selected evaluator, admission fence and later finalized snapshot. Native
+  phase and settlement reviewers replay its proof and preserve every original
+  in the portable reward package. A matching response-retirement pair, terminal
+  signing intent or earned terminal retains its ordinary certification path.
+  Missing referenced bytes remain pending; they never establish absence.
+  Partial paid work has no measured score or credit, and no retirement is
+  synthesized. Closure fixes the certified package; later originals cannot
+  rewrite it or authorize retroactive compensation.
+  This path requires service closure schema `/5` support in the owner, workers,
+  independent reviewers and settlement/reward consumers before selection.
+  Existing `/2` and `/4` closures retain their original canonical bytes and all
+  upgrades preserve the original journals, cutoff file and directory bindings.
 - The previous certified reward row remains effective until a newer cohort is
   certified and activated.
 - A five-hour rest starts after request closure is certified. The next cohort

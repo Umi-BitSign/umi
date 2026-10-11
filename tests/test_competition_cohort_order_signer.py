@@ -43,7 +43,7 @@ def source_for(b, history):
         {
             t.transition.evidence_sha256
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
     )
     return CohortOrderHistory(history=history, decisions=tuple(b["decisions"][k] for k in keys))

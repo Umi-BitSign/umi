@@ -118,6 +118,7 @@ class CohortRequestSettlementPublisher:
                     owner.cohort, t.transition.evidence_sha256, CohortDecisionInput
                 )
                 for t in history.transitions
+                if t.transition.requires_progress_evidence
             }
             progress = decisions[closed.evidence_sha256].progress.progress
             record = RequestProgressReviewRecord.model_validate_json(
@@ -162,7 +163,11 @@ class CohortRequestSettlementPublisher:
             reviewed = replay_request_completion(
                 record,
                 prefix,
-                tuple(decisions[t.transition.evidence_sha256] for t in prefix.transitions),
+                tuple(
+                    decisions[t.transition.evidence_sha256]
+                    for t in prefix.transitions
+                    if t.transition.requires_progress_evidence
+                ),
                 policy=owner.intake.policy,
                 roster=owner.roster,
                 catalogs=owner.catalogs,
@@ -189,7 +194,9 @@ class CohortRequestSettlementPublisher:
                 objects.retain(seal)
             initial = history.model_copy(update={"transitions": history.transitions[: index + 1]})
             observations = [
-                decisions[t.transition.evidence_sha256].observation for t in initial.transitions
+                decisions[t.transition.evidence_sha256].observation
+                for t in initial.transitions
+                if t.transition.requires_progress_evidence
             ]
             observations.extend(reviewed.inventory_observations)
             if benchmark.tail is not None and benchmark.tail.selected_observation is not None:
@@ -198,7 +205,9 @@ class CohortRequestSettlementPublisher:
                 CohortOrderHistory(
                     history=initial,
                     decisions=tuple(
-                        decisions[t.transition.evidence_sha256] for t in initial.transitions
+                        decisions[t.transition.evidence_sha256]
+                        for t in initial.transitions
+                        if t.transition.requires_progress_evidence
                     ),
                 ),
                 objects.values,

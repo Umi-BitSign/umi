@@ -79,14 +79,15 @@ Service claim commits wait through local mutex contention without changing the
 retained signed request. Each retry recollects owned history, capture and proof
 inputs; it does not reuse a stale head. Validation or I/O failures still hold the
 claim, cancellation drains owned work, and duplicate recovery makes no new claim.
-Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
-while a claim or another readiness probe owns the catalog's admission lock.
-It does not queue an HTTP request behind that long operation or cancel it.
+Paid-service readiness checks the native permanent admission fence before
+reporting `admission_busy` for a held catalog lock. A valid seal or durable cohort
+tail fence returns `ready: false`, `new_claims_closed: true`, and reason `sealed`
+or `tail_fenced`. Accepted claims remain recoverable. A busy operation or an
+unavailable snapshot is a transient hold; corrupt or mismatched fence evidence
+returns `queue_unavailable`, never a verified closure. Snapshot probes neither
+wait for SQLite contention nor take the dispatch/retirement writer lock. They do
+not cancel the operation holding the catalog, reserve space or authorize work.
 Only the ordinary fresh-input checks can return `ready: true`.
-Local capacity probes use a read-only journal snapshot, so they do not take the
-dispatch/retirement writer lock. Full or sealed catalogs return their hold without
-rescanning byte allowances. A new claim still rechecks capacity atomically when
-it commits; readiness does not reserve space or authorize an admission.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
 for capacity (bounded by the exporter timeout). A queued read rechecks that its
@@ -893,9 +894,16 @@ bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
 the claim nonce on retry. The queue commits the accepted claim and original proof
 bytes together before acknowledging it; insufficient capacity accepts no new work.
 Accepted duplicates recover without live RPC, history or preparation calls.
-New claims check the local full/sealed queue fence before collecting owner
-history, registration proofs or the roster. The admission commit still rechecks
-capacity atomically; the local check never grants execution or reward authority.
+New claims check the local admission fence before waiting for another claim or
+collecting owner history, registration proofs or the roster. An authenticated
+seal or durable cohort tail fence returns HTTP409 with detail
+`reason_code: admission_closed`, `closure_reason: sealed` or `tail_fenced`,
+`retryable: false`, and `accepted_claim_recovery: true`. Repeating a never-accepted
+claim cannot reopen admission. Exact accepted receipts, including a concurrent
+acceptance committed before the fence, still recover first. Capacity and owner
+input holds retain HTTP503. The native admission commit rechecks the fence and
+capacity atomically; these status responses do not change original cutoff clocks,
+accepted evidence, earned credit, certification or reward authority.
 `GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
 checks current admission inputs and capacity. This is admission readiness only;
 the request-phase service clock must also check actual dispatch. Readiness,
@@ -945,6 +953,13 @@ proofs before the settlement history becomes visible. Pending files, proofs or
 votes retry without replacing original decisions. Each cohort has its own
 control connection and loop; a waiting cohort does not stop another cohort.
 
+Request-tail adoption and plan `/4` work with `host_memory_admission` omitted.
+When a host selects memory admission, request preparation, native sampling and
+cleanup share one transient grant. Cancellation drains the owned work before
+releasing it. The request-tail rule does not require a requests-only memory
+policy, a new measurement gate or a settlement hold; ordinary settlement remains
+enabled.
+
 Select aggregate evidence capacity for the complete request-to-reward path.
 Set `admission_owner.maximum_aggregate_evidence_bytes` and each phase reviewer's
 `maximum_aggregate_evidence_bytes` to the same qualified budget, and use that
@@ -987,6 +1002,52 @@ changed originals remain pending and must be restored from their verified
 replica; never rebuild them from a different input selection. This reduces
 resident copies but does not by itself bound concurrent aggregate replay.
 
+For an original legacy-plan cohort after C5, the existing owner can append the
+12-hour completed-miner rule while the cohort is in intake or preparation. Deploy
+recovery transition `/3` and authenticated rule resolution to every history
+consumer first. The signed plan, authority, retained participation and directory
+bindings stay in place. This migration remains necessary while an admitted
+legacy-plan cohort after C5 needs the rule; new plans select it directly with
+plan `/4`. Keep its historical decoder while a retained cohort or reward package
+contains an adoption transition.
+
+To enable the owner control routes, set
+`lifecycle.request_tail_operator_token_file` to a dedicated root-controlled
+private credential file. Its token must differ from owner exports and reviewer
+votes. With this field omitted, these owner mutation routes are absent. Keep
+them on the existing private listener and restrict proxy access to the operator.
+The typed routes under `/internal/cohorts/request-tail-adoption` are:
+
+1. `POST /prepare`: `RequestTailAdoptionPrepare` pins the selected series,
+   cohort and current predecessor. The existing lifecycle owner captures native
+   finality and returns an unsigned `RequestTailAdoptionProposal`.
+2. `POST /reserve`: submit that exact proposal. The owner refuses a changed tip,
+   conflicting reservation, sealed intake or observation older than a retained participation.
+   Intake durably gates new receipts before the control journal reserves the
+   same transition. Accepted exact retries continue to work. A restart or lost
+   acknowledgement reconciles the same reservation before ordinary phase work.
+3. `POST /vote` on each configured reviewer: send the reserved proposal using
+   its reviewer credential. Each reviewer fetches challenge-bound owner history,
+   replays the original authority and phases, checks native finality and confirms
+   the history again. It then requests a fresh owner-signed proof at
+   `POST /reservation` using the export credential. The proof binds a fresh
+   challenge, exact transition and history to matching durable reservations in
+   both owner journals; a prior response cannot be replayed. Votes share the
+   ordinary phase decision slot, so a reviewer cannot sign adoption and closure
+   for the same predecessor.
+4. Assemble the exact votes with `assemble_request_tail_adoption`; it checks the
+   original policy quorum. `POST /commit` accepts `RequestTailAdoptionCommit`
+   only for the owner's exact reservation and publishes through the ordinary
+   history path. Retry these same bytes after an interrupted acknowledgement.
+
+The request and response models live in
+`umi.competition_cohort_request_rule_api`; the helper does not load a wallet or
+open another process's journal. Confirm the adoption certificate through the
+normal authenticated history export before starting requests. An unsigned
+proposal, local reservation or partial vote set has no authority to change the
+rule. C5 cannot use this adoption operation. Adoption after requests have opened
+is refused, and the original certified request opening remains the sole clock
+for the 12-hour threshold.
 
 Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
 in the owner process. It requires the version-five selections and a `dispatch`
@@ -1030,6 +1091,29 @@ dispatch readiness route. Missing, stale or mismatched responses count as
 unavailable request time. Do not substitute a static success response or ordinary
 HTTP health check. The lifecycle remains pending until native work and delivered
 terminals satisfy closure; it does not start evaluator processes itself.
+
+A progress attempt without a retained fence finishes driver setup and dispatch
+readiness, retrieves the original opening proof, and prepares the accepted
+inventory under admission leases before collecting its finalized observation.
+One owned thread retains native preparation, sampling and cleanup across that
+collection. The sampler is single-use and cannot outlive its context. Readiness
+must match the eventual capture and nonce before it can establish availability.
+The native owner holds those admission leases through collection and closure replay;
+transient admission contention remains retryable. Intake remains available to
+registration-retention callbacks during collection. Native history authenticates
+under intake ownership after capture, with admission leases still held. These
+leases release on collection failure or cancellation. They do not themselves
+close admissions: the native request-window or qualified-tail decision must still
+select a cutoff. If opening-proof retrieval fails, an already-authenticated fence
+may finish sealing at this attempt's observation, but no new cutoff or progress
+is selected and the original error remains retryable. When a native fence is
+already present, the attempt instead captures finality once and authenticates and
+finishes that fence before awaiting readiness or the opening proof. A suspended
+probe cannot delay the existing seal. Fence presence is only a scheduling hint;
+full native history and fence verification still precede sealing. Progress retained
+for quorum review keeps its exact observation across restarts; it does not fetch new
+readiness, recapture finality or reset the opening clock. This applies to C6 and
+later cohorts while preserving existing C5 fences and every signed opening clock.
 
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,
@@ -1120,11 +1204,10 @@ returns to the coordinator for a fresh collection before full inventory replay.
 This precheck does not advance the journal head or replace the captured input.
 Sealing keeps its final monotonic check, and an existing immutable seal continues
 to recover through its original native evidence.
-When an original admission fence is already retained, the request observer
-validates that fence and finishes native queue sealing on the coordinator's
-unchanged capture before awaiting readiness or replaying terminal evidence.
-This does not select a new cutoff: complete progress still requires the full
-native closure and independent review. Head-regression logs identify the
+Signed paid partial inventory is read under the original admission leases after
+the native seal is established. Pending partial evidence keeps closure pending
+without reopening admissions; complete progress still requires the full native
+closure and independent review. Head-regression logs identify the
 inventory precheck or seal-history stage, catalog, capture block and retained
 highwater without exposing private paths or evidence.
 Static service-body proof reuse retains up to 512 exact bodies, including retry
@@ -1943,6 +2026,13 @@ transport category such as `timeout` or `connection_closed`. Inspect every
 provider entry: a rate-limit refusal from the last fallback does not establish
 why the authenticated primary failed. Reports omit remote text, headers and
 credentials. These diagnostics do not change fallback or proof-validation rules.
+
+Persistent proof connections are reused only while their WebSocket state is
+open. A socket closed during an idle period is discarded before the next read,
+which opens a connection with the same endpoint and method-specific limits. A
+disconnect during a request follows the existing provider fallback; without
+backups, that read fails and a later collection opens a fresh connection. This
+does not add request retries or change proof validation or collection timeouts.
 
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 

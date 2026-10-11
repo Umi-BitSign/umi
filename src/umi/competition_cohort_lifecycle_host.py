@@ -15,7 +15,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_serializer
 
 from .competition_client import validate_intake_origin
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
@@ -68,6 +68,14 @@ class LifecycleHostConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     sample_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
+    request_tail_operator_token_file: Directory | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if self.request_tail_operator_token_file is None:
+            value.pop("request_tail_operator_token_file", None)
+        return value
 
     _origin = field_validator("public_origin")(validate_intake_origin)
 
@@ -287,6 +295,7 @@ class LifecycleHost:
             CertifiedPhaseObserver(live, self._peers("requests"), self.policy),
             publisher,
             live.sample_service,
+            live.prepare,
         )
 
     async def respond(self, request):
@@ -339,6 +348,20 @@ class LifecycleHost:
         # Missing sources after a lost import acknowledgement are repaired.
         for decision in original.decisions:
             store.retain_source(cohort, decision)
+
+        adoption_compatible = plan.sequence > 5 and plan.schema_ != "umi-recoverable-cohort-plan/4"
+
+        async def reconcile_request_tail_adoption():
+            # Intake gates receipts first. Resume exact bytes after a crash
+            # between that native reservation and control-journal acknowledgement.
+            pending = await run_owned_thread(
+                self.service.intake.pending_request_tail_adoption, cohort
+            )
+            if pending is not None:
+                store.reserve_exact(pending)
+
+        if adoption_compatible:
+            await reconcile_request_tail_adoption()
         node = CohortLifecycleService(
             store,
             cohort,
@@ -352,6 +375,7 @@ class LifecycleHost:
                 "requests": partial(self._requests, cohort),
             },
             request_start=self.gate,
+            before_tick=reconcile_request_tail_adoption if adoption_compatible else None,
         )
         self.nodes[cohort] = node
         return node

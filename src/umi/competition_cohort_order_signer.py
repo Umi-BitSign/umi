@@ -66,7 +66,7 @@ class CohortOrderHistory(StrictProtocolModel):
         wanted = {
             s.transition.evidence_sha256
             for s in self.history.transitions
-            if s.transition.operation != "revoke"
+            if s.transition.requires_progress_evidence
         }
         if len(values) != len(self.decisions) or set(values) != wanted:
             raise ValueError("order history requires exactly its original decision inputs")

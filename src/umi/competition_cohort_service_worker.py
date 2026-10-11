@@ -28,6 +28,7 @@ from .competition_cohort_service_grant import (
     ServiceRequestBody,
     service_grant_slot,
 )
+from .competition_cohort_service_partial import ServicePaidPartialInventory, ServicePaidPartials
 from .competition_cohort_service_terminal import ServiceTerminal, ServiceWorkTerminals
 from .competition_cohort_service_transport import ServiceWorkTransport
 from .competition_cohort_service_work import ServiceWorkAssignment
@@ -65,7 +66,7 @@ ServiceRetry = Callable[
     [ServiceMinerGrant, SignedEndpointRetirementReceipt],
     Awaitable[SignedCohortEndpointCaseDecision],
 ]
-ServiceResultSign = Callable[[ServiceTerminal], Awaitable[Signature]]
+ServiceResultSign = Callable[[ServiceTerminal | ServicePaidPartialInventory], Awaitable[Signature]]
 
 
 class ServiceWorkWorker:
@@ -92,6 +93,7 @@ class ServiceWorkWorker:
         self.queue, self.journal = self.requests.queue, self.requests.journal
         self.inputs, self.observation, self.retry, self.sign = inputs, observation, retry, sign
         self.terminals = ServiceWorkTerminals(self.requests)
+        self.partials = ServicePaidPartials(self.terminals)
         known = {identity(e.hotkey): e.control_group for e in self.requests.policy.evaluators}
         self.reviewers = {identity(k): v for k, v in reviewers.items()}
         self.reviewer_keys = {identity(k): k for k in reviewers}
@@ -240,6 +242,28 @@ class ServiceWorkWorker:
                 # miner work or extend an old observation while waiting.
                 await asyncio.sleep(min(1.0, remaining))
 
+    async def _prepare_partial(self, assignment):
+        retained = await self._local(self.partials.prepare, assignment)
+        if retained is not None:
+            return retained
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.transport.timeout
+        while True:
+            source, capture = await self._call(self.observation(assignment))
+            try:
+                return await run_owned_thread(
+                    self.partials.prepare, assignment, source, execution_boundary(capture)
+                )
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # A new inventory cannot reuse a stale pre-contention head.
+                # Existing intents above always recover their original clock.
+                await asyncio.sleep(min(1.0, remaining))
+
     def _ready_stage(self, admission):
         """Scheduling hints only; each stage still authenticates its native inputs."""
         work = admission.work_sha256
@@ -295,6 +319,19 @@ class ServiceWorkWorker:
             self._stage(work, "terminal_preparation")
             terminal = await self._local(self.terminals.prepare, slot)
         else:
+            # After the fixed admission cutoff an unavailable miner need not
+            # provide retirement for an authenticated no-credit inventory.
+            partial = None
+            fence = await self._local(self.queue._tail_admission_fence)
+            if fence is not None:
+                partial = await self._prepare_partial(assignment)
+            if partial is not None:
+                self._stage(work, "paid_partial_signing")
+                retained = await self._local(self.partials.retained, partial)
+                if retained is None:
+                    signature = await self._call(self.sign(partial))
+                    await self._local(self.partials.retain, partial, signature)
+                return "pending", "paid_partial_retained"
             self._stage(work, "request_certificate")
             had_grant = await self._local(self.journal.get, "service_grant", slot)
             grant = await self._certificate(body)

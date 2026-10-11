@@ -20,6 +20,7 @@ from .competition_cohort_service_closure import (
     ServiceCatalogClosure,
     review_service_request_closure,
 )
+from .competition_cohort_service_partial import SignedServicePaidPartialInventory
 from .competition_cohort_service_seal import ServiceWorkSeal, sealed_service_assignments
 from .competition_cohort_service_terminal import SignedServiceTerminal
 from .competition_cohort_service_work import ServiceWorkAssignment, SignedServiceWorkCatalog
@@ -49,6 +50,8 @@ def build_service_request_closure(
     intake_records: Iterable[tuple[str, bytes]],
     expected_tip_sha256: str,
     current_block: int,
+    partial_source: Callable[[ServiceWorkAssignment], SignedServicePaidPartialInventory | None]
+    | None = None,
 ) -> CohortServiceRequestClosure:
     """Gather every accepted terminal, then replay the complete native closure.
 
@@ -75,7 +78,7 @@ def build_service_request_closure(
     for catalog, seal in zip(catalogs, seals, strict=True):
         if read_endpoint_object(objects, digest(seal)) != canonical_json_bytes(seal):
             raise ValueError("request completion changed an owner seal")
-        terminals, skipped = [], []
+        terminals, skipped, partials = [], [], []
         for assignment in sealed_service_assignments(
             seal, objects, policy, catalog=catalog, round_=roster.round
         ):
@@ -83,6 +86,10 @@ def build_service_request_closure(
             if terminal is None:
                 pending.append(assignment.admission.work_sha256)
                 skipped.append(assignment.admission.work_sha256)
+                if tail and partial_source is not None:
+                    partial = partial_source(assignment)
+                    if partial is not None:
+                        partials.append(digest(partial))
                 continue
             terminal = SignedServiceTerminal.model_validate_json(canonical_json_bytes(terminal))
             if terminal.terminal.work_sha256 != assignment.admission.work_sha256:
@@ -94,12 +101,20 @@ def build_service_request_closure(
                 seal_sha256=digest(seal),
                 terminals=tuple(terminals),
                 skipped_work=tuple(sorted(skipped)) if tail else None,
+                paid_partials=tuple(sorted(partials)) if partials else None,
             )
         )
     if pending and not tail:
         raise PendingServiceRequestClosure(tuple(pending))
+    has_partials = any(c.paid_partials for c in completed)
+    if has_partials:
+        completed = [
+            c.model_copy(update={"paid_partials": c.paid_partials or ()}) for c in completed
+        ]
     closure = CohortServiceRequestClosure(
-        schema="umi-cohort-request-closure/4" if tail else "umi-cohort-request-closure/2",
+        schema="umi-cohort-request-closure/5"
+        if has_partials
+        else ("umi-cohort-request-closure/4" if tail else "umi-cohort-request-closure/2"),
         benchmark_closure_sha256=digest(benchmark),
         recovery_tip_sha256=benchmark.recovery_tip_sha256,
         observation=benchmark.observation,

@@ -32,6 +32,7 @@ from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_queue import (
     MAX_ADMISSION_BYTES,
     ServiceQueueBackpressure,
+    ServiceQueueClosed,
     ServiceWorkQueue,
 )
 from .competition_cohort_service_seal import MAX_SERVICE_SEAL_BYTES
@@ -358,6 +359,14 @@ class ServiceWorkAdmissionAPI:
         # inputs. Native lookup still verifies identity and journal conflicts;
         # a missing archive takes the serialized repair path below.
         admission = await self._local(queue.lookup, signed)
+        if admission is None:
+            closed = await run_owned_thread(self._closed, queue)
+            if closed is not None:
+                # A concurrent acceptance can commit between our first lookup
+                # and fence publication. Recover that exact record before refusing.
+                admission = await self._local(queue.lookup, signed)
+                if admission is None:
+                    raise ServiceQueueClosed(closed)
         if admission is not None:
             try:
                 await self._local(self.archives[catalog].read, admission)
@@ -373,6 +382,8 @@ class ServiceWorkAdmissionAPI:
                 # fence before collecting fresh owner inputs; accepted retries
                 # still recover first, and the commit rechecks capacity atomically.
                 reason, _ = await self._local(self._capacity, queue)
+                if reason in ("sealed", "tail_fenced"):
+                    raise ServiceQueueClosed(reason)
                 if reason != "accepting":
                     raise ServiceQueueBackpressure("service queue has no unreserved claim capacity")
                 _, source, capture, roster = await self._current(queue)
@@ -431,17 +442,24 @@ class ServiceWorkAdmissionAPI:
         }
 
     @staticmethod
+    def _closed(queue):
+        # A native snapshot can verify a durable fence while another operation
+        # owns the catalog mutex. Never retry or wait for the writer here.
+        with canonical_json_reuse(), queue.journal.read_transaction(wait=False) as db:
+            return queue._admission_closed(db)
+
+    @staticmethod
     def _capacity(queue, archive_bytes=0):
         # This is an advisory read, not a capacity reservation. The admission
         # commit owns the writer and rechecks its actual allowance atomically.
         # Readiness must not hold up dispatch/retirement writers or wait for them.
-        with canonical_json_reuse(), queue.journal.read_transaction() as db:
+        with canonical_json_reuse(), queue.journal.read_transaction(wait=False) as db:
             catalog, _ = queue._catalog(db)
             count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
             remaining = max(0, min(len(catalog.catalog.work), queue.config.maximum_claims) - count)
-            sealed = queue.journal.get("service_work_seal", queue.config.catalog_sha256, db=db)
-            if sealed is not None:
-                return "sealed", remaining
+            closed = queue._admission_closed(db)
+            if closed is not None:
+                return closed, remaining
             if not remaining:
                 return "capacity_exhausted", 0
             _, used, _ = queue.journal._capacity(db)
@@ -471,6 +489,15 @@ class ServiceWorkAdmissionAPI:
             "service_credit_authorized": False,
             "chain_submission_authorized": False,
         }
+        try:
+            closed = await run_owned_thread(self._closed, queue)
+        except _UNAVAILABLE as error:
+            result["reason_code"] = "queue_unavailable"
+            report_admission_failure("service_readiness", "queue_unavailable", error)
+            return result
+        if closed is not None:
+            result.update(reason_code=closed, new_claims_closed=True)
+            return result
         # Readiness must not queue behind a long admission or another probe.
         # Reporting a hold leaves that owned operation and its generous budget
         # intact; only the normal unlocked path can establish fresh readiness.
@@ -480,9 +507,11 @@ class ServiceWorkAdmissionAPI:
         async with self.serial[catalog]:
             try:
                 result["reason_code"] = "queue_unavailable"
-                reason, remaining = await self._local(self._capacity, queue)
+                reason, remaining = await run_owned_thread(self._capacity, queue)
                 result.update(reason_code=reason, remaining_claims=remaining)
                 if reason != "accepting":
+                    if reason in ("sealed", "tail_fenced"):
+                        result["new_claims_closed"] = True
                     return result
                 result["reason_code"] = "owner_inputs_unavailable"
                 _, source, capture, _ = await self._current(queue)
@@ -492,11 +521,13 @@ class ServiceWorkAdmissionAPI:
                 await run_owned_thread(_check_archive, capture.snapshot, boundary, raw, metadata)
                 result["reason_code"] = "owner_inputs_unavailable"
                 await self._unchanged(queue, source)
-                reason, remaining = await self._local(
+                reason, remaining = await run_owned_thread(
                     self._capacity, queue, len(raw) + len(metadata) + 128
                 )
                 result.update(reason_code=reason, remaining_claims=remaining)
                 if reason != "accepting":
+                    if reason in ("sealed", "tail_fenced"):
+                        result["new_claims_closed"] = True
                     return result
                 result.update(
                     ready=True,
@@ -585,6 +616,17 @@ def service_admission_routes(api: ServiceWorkAdmissionAPI) -> APIRouter:
             raise HTTPException(409, "claim belongs to another selected catalog")
         try:
             return await api.admit(catalog, signed)
+        except ServiceQueueClosed as error:
+            raise HTTPException(
+                409,
+                {
+                    "reason_code": "admission_closed",
+                    "closure_reason": error.reason,
+                    "retryable": False,
+                    "accepted_claim_recovery": True,
+                },
+                headers={"Cache-Control": "no-store"},
+            ) from error
         except _UNAVAILABLE as error:
             report_admission_failure("service_claim", "admit", error)
             raise HTTPException(503, "service admission unavailable; retry unchanged") from error

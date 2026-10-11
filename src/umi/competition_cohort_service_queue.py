@@ -63,6 +63,18 @@ class ServiceQueueBackpressure(ValueError):
     """No claim was accepted. A duplicate accepted claim still recovers."""
 
 
+class ServiceQueueClosed(ServiceQueueBackpressure):
+    """New claims are permanently closed; exact accepted claims still recover."""
+
+    def __init__(self, reason: Literal["sealed", "tail_fenced"]):
+        self.reason = reason
+        super().__init__(
+            "service queue is sealed to new claims"
+            if reason == "sealed"
+            else "service queue has its durable cohort tail fence"
+        )
+
+
 class ServiceWorkQueueConfig(StrictProtocolModel):
     schema_: Literal["umi-cohort-service-work-queue-config/1"] = Field(alias="schema")
     directory: Directory
@@ -317,12 +329,9 @@ class ServiceWorkQueue:
                     ):
                         raise ValueError("accepted claim nonce was reused with changed inputs")
                     return value
-                if self.journal.get("service_work_seal", self.config.catalog_sha256, db=db):
-                    raise ServiceQueueBackpressure("service queue is sealed to new claims")
-                if self._tail_admission_fence(db) is not None:
-                    raise ServiceQueueBackpressure(
-                        "service queue has its durable cohort tail fence"
-                    )
+                closed = self._admission_closed(db)
+                if closed is not None:
+                    raise ServiceQueueClosed(closed)
                 count = db.execute("SELECT COUNT(*) FROM service_claims").fetchone()[0]
                 previous = None if count == 0 else self._read(count, db)
             catalog, round_ = self._catalog()
@@ -525,6 +534,22 @@ class ServiceWorkQueue:
                 raise ValueError("tail admission binding differs from original cohort or policy")
             self.journal.put("service_tail_fence_binding", self.config.catalog_sha256, binding)
 
+    def _admission_closed(self, db) -> Literal["sealed", "tail_fenced"] | None:
+        """Read the native immutable closure disposition, without reserving a claim.
+
+        The caller owns its transaction. Corruption or changed bindings refuse the
+        read; they must not be reported as a verified permanent closure.
+        """
+        raw = self.journal.get("service_work_seal", self.config.catalog_sha256, db=db)
+        if raw is not None:
+            sealed = ServiceWorkSeal.model_validate_json(canonical_json_bytes(raw))
+            if sealed.catalog_sha256 != self.config.catalog_sha256:
+                raise ValueError("service admission seal differs from the selected catalog")
+            return "sealed"
+        if self._tail_admission_fence(db) is not None:
+            return "tail_fenced"
+        return None
+
     def _tail_admission_fence(self, db=None) -> ServiceTailAdmissionFence | None:
         raw = self.journal.get("service_tail_fence_binding", self.config.catalog_sha256, db=db)
         if raw is None:
@@ -568,34 +593,38 @@ class ServiceWorkQueue:
         This read never advances that head or changes an immutable existing seal.
         """
         with self.journal.locked(), canonical_json_reuse():
-            with self.journal.read_transaction() as db:
-                if (
-                    capture is not None
-                    and self.journal.get_raw("service_work_seal", self.config.catalog_sha256, db=db)
-                    is None
-                ):
-                    # Reuse the native monotonic check without writing a head.
-                    # The strict boundary parser validates the supplied block.
-                    # Seal presence is only a scheduling hint: seal_locked still
-                    # replays its complete retained evidence, or rechecks the
-                    # current head if another observer advances during replay.
-                    block = execution_boundary(capture).block
-                    try:
-                        self.journal._observed_head(db, block)
-                    except FinalizedHeadRegression as error:
-                        logger.info(
-                            "cohort_service_head_regression catalog=%s "
-                            "stage=inventory_precheck capture_block=%s highwater_block=%s",
-                            self.config.catalog_sha256,
-                            block,
-                            error.retained_block,
-                        )
-                        raise
-                rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
-                if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
-                    raise ValueError("service accepted prefix has a missing ordinal")
-                assignments = tuple(self._assignment(self._read(row[0], db), db) for row in rows)
-            yield assignments
+            yield self.closure_inventory_locked(capture=capture)
+
+    def closure_inventory_locked(self, *, capture: RegistrationCapture | None = None):
+        """Read the same checked inventory while the caller owns the admission lease."""
+        with self.journal.read_transaction() as db:
+            if (
+                capture is not None
+                and self.journal.get_raw("service_work_seal", self.config.catalog_sha256, db=db)
+                is None
+            ):
+                # Reuse the native monotonic check without writing a head.
+                # The strict boundary parser validates the supplied block.
+                # Seal presence is only a scheduling hint: seal_locked still
+                # replays its complete retained evidence, or rechecks the
+                # current head if another observer advances during replay.
+                block = execution_boundary(capture).block
+                try:
+                    self.journal._observed_head(db, block)
+                except FinalizedHeadRegression as error:
+                    logger.info(
+                        "cohort_service_head_regression catalog=%s "
+                        "stage=inventory_precheck capture_block=%s highwater_block=%s",
+                        self.config.catalog_sha256,
+                        block,
+                        error.retained_block,
+                    )
+                    raise
+            rows = db.execute("SELECT ordinal FROM service_claims ORDER BY ordinal").fetchall()
+            if tuple(r[0] for r in rows) != tuple(range(1, len(rows) + 1)):
+                raise ValueError("service accepted prefix has a missing ordinal")
+            assignments = tuple(self._assignment(self._read(row[0], db), db) for row in rows)
+        return assignments
 
     def _retained_seal(self) -> ServiceWorkSeal | None:
         old = self.journal.get("service_work_seal", self.config.catalog_sha256)

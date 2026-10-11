@@ -46,6 +46,7 @@ from .endpoint_retirement import (
 )
 from .miner_admission import MinerAdmissionError
 from .open_competition import digest, identity
+from .private_state_wait import run_private_state_operation
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import (
     ComponentResponseError,
@@ -124,6 +125,18 @@ class ServiceWorkTransport:
             grant_sha256=digest(grant),
             miner_hotkey=grant.body.assignment.admission.submission.submission.hotkey,
             evaluator_hotkey=grant.body.evaluator_hotkey,
+        )
+
+    def _retain_inventory_record(self, kind, slot, value):
+        # Closure snapshots and transport originals share the native compound
+        # lease. A response/retirement cannot appear halfway through an absence
+        # classification while the owner believes that inventory is stable.
+        with self.journal.locked():
+            self.journal.put(kind, slot, value)
+
+    async def _retain_inventory(self, kind, slot, value):
+        await run_private_state_operation(
+            self._retain_inventory_record, kind, slot, value, timeout=self.timeout
         )
 
     async def _capture(self, grant):
@@ -221,8 +234,7 @@ class ServiceWorkTransport:
             transport=self.transport,
         )
         if result.response is not None:
-            await run_owned_thread(
-                self.journal.put,
+            await self._retain_inventory(
                 "service_response",
                 service_grant_slot(grant.body),
                 result.response,
@@ -398,9 +410,7 @@ class ServiceWorkTransport:
                         except ValueError:
                             response = None
                         if response is not None:
-                            await run_owned_thread(
-                                self.journal.put, "service_response", slot, response
-                            )
+                            await self._retain_inventory("service_response", slot, response)
             if response is None:
                 response = await self._recover(grant, capture)
             if not retire:
@@ -431,7 +441,7 @@ class ServiceWorkTransport:
             if response is None:
                 return ServiceTransportOutcome("retired_response_pending")
         self._agrees(retired, response)
-        await run_owned_thread(self.journal.put, "service_retirement", slot, retired)
+        await self._retain_inventory("service_retirement", slot, retired)
         return await self._retired_outcome(grant, response, retired)
 
     async def _retired_outcome(self, grant, response, retired):

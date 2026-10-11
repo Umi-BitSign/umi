@@ -161,7 +161,7 @@ def replay_preparation_export(
     expected = {
         t.transition.evidence_sha256
         for t in exported.history.transitions
-        if t.transition.operation != "revoke"
+        if t.transition.requires_progress_evidence
     }
     if len(decisions) != len(exported.decisions) or set(decisions) != expected:
         raise ValueError("preparation export needs every original decision exactly once")

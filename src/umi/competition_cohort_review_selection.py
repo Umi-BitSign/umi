@@ -3,6 +3,7 @@
 from functools import partial
 from pathlib import Path
 
+from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_intake_export import RemoteIntakeProgressReviewer
 from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
 from .competition_cohort_preparation_export import RemotePreparationProgressReviewer
@@ -10,6 +11,8 @@ from .competition_cohort_preparation_review_http import PreparationReviewHTTPCli
 from .competition_cohort_recovery import cohort_tracks, verify_cohort_service_pool
 from .competition_cohort_request_remote_review import RemoteRequestProgressReviewer
 from .competition_cohort_request_review_http import RequestReviewHTTPClient
+from .competition_cohort_request_rule_api import RequestTailAdoptionReviewer
+from .competition_cohort_request_rule_reservation import RequestTailReservationReader
 from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_quality import ServiceTerms
@@ -72,6 +75,28 @@ class SelectedPhaseReviewer:
             timeout_seconds=config.review_timeout_seconds,
         )
         self.archive = archive
+        self.adoption = RequestTailAdoptionReviewer(
+            config.series,
+            self.policy,
+            provider,
+            CohortHistoryReader(
+                config.owner_hotkey,
+                CohortHistoryHTTPClient(
+                    client,
+                    config.owner_origin,
+                    token=token,
+                    timeout_seconds=config.review_timeout_seconds,
+                ),
+                timeout_seconds=config.review_timeout_seconds,
+            ),
+            RequestTailReservationReader(
+                client,
+                config.owner_origin,
+                token=token,
+                owner=config.owner_hotkey,
+                timeout_seconds=config.review_timeout_seconds,
+            ),
+        )
 
     @bounded_stage_declarations
     def _requests(self, cohort: str) -> RemoteRequestProgressReviewer:

@@ -28,6 +28,7 @@ from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_phase_vote_http import phase_vote_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_request_probe import evaluator_request_readiness_routes
+from .competition_cohort_request_rule_api import request_tail_adoption_vote_routes
 from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_selection import SelectedPhaseReviewer
@@ -170,6 +171,14 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             )
         models = None
         direct_artifacts = None
+        app.include_router(
+            request_tail_adoption_vote_routes(
+                signer,
+                config.series,
+                token=vote_token,
+                timeout_seconds=config.review_timeout_seconds,
+            )
+        )
         for phase in ("intake", "preparation", "requests"):
             app.include_router(
                 phase_vote_routes(

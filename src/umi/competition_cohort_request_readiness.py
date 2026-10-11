@@ -2,6 +2,7 @@
 
 import asyncio
 import secrets
+from contextlib import asynccontextmanager
 from functools import partial
 from typing import Annotated, Literal
 
@@ -9,8 +10,9 @@ import httpx
 from pydantic import Field
 
 from .competition_client import validate_intake_origin
+from .competition_cohort_request_preparation import prepared_request_thread
 from .competition_execution import ExecutionBoundary, execution_boundary
-from .host_memory_runtime import run_memory_thread
+from .host_memory_runtime import authorize_memory, memory_operation_context, run_memory_thread
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel
 
@@ -43,7 +45,7 @@ class LiveRequestPhaseObserver:
         self.client, self.timeout = client, timeout_seconds
         self.opening_clock = opening_clock
 
-    async def _ready(self, state, capture):
+    async def _fetch_readiness(self, state):
         nonce = secrets.token_hex(16)
 
         async def fetch():
@@ -71,23 +73,82 @@ class LiveRequestPhaseObserver:
 
         try:
             result = await asyncio.wait_for(fetch(), timeout=self.timeout)
-            local = execution_boundary(capture)
-            return result is not None and (
-                result.ready
-                and result.nonce == nonce
-                and result.policy_sha256 == digest(self.source.intake.policy)
-                and result.cohort_sha256 == state.cohort_sha256
-                and result.recovery_tip_sha256 == state.tip_sha256
-                and result.catalog_sha256s == tuple(digest(c.catalog) for c in self.source.catalogs)
-                and abs(result.observation.block - local.block) <= self.source.gap
-                and (
-                    result.observation.block != local.block
-                    or (result.observation.block_hash, result.observation.state_root)
-                    == (local.block_hash, local.state_root)
-                )
-            )
+            return nonce, result
         except (httpx.HTTPError, OSError, ValueError, asyncio.TimeoutError):
-            return False
+            return nonce, None
+
+    def _ready_at(self, state, capture, nonce, result):
+        local = execution_boundary(capture)
+        return result is not None and (
+            result.ready
+            and result.nonce == nonce
+            and result.policy_sha256 == digest(self.source.intake.policy)
+            and result.cohort_sha256 == state.cohort_sha256
+            and result.recovery_tip_sha256 == state.tip_sha256
+            and result.catalog_sha256s == tuple(digest(c.catalog) for c in self.source.catalogs)
+            and abs(result.observation.block - local.block) <= self.source.gap
+            and (
+                result.observation.block != local.block
+                or (result.observation.block_hash, result.observation.state_root)
+                == (local.block_hash, local.state_root)
+            )
+        )
+
+    async def _ready(self, state, capture):
+        return self._ready_at(state, capture, *await self._fetch_readiness(state))
+
+    @asynccontextmanager
+    async def prepare(self, state):
+        authorize_memory("requests_observe", state.cohort_sha256, state.phase, lane="transient")
+        if await run_memory_thread(
+            self.source.has_fence_hint,
+            state,
+            operation="requests_seal_fenced",
+            cohort=state.cohort_sha256,
+            phase=state.phase,
+        ):
+            # Preserve the retained-fence path: one coordinator capture, then
+            # full native fence authentication/sealing before network probes.
+            # The presence hint never authorizes a cutoff or a phase advance.
+            active, used = True, False
+
+            async def sample(capture):
+                nonlocal used
+                if not active or used:
+                    raise RuntimeError("prepared request observation is no longer available")
+                used = True
+                return await self(state, capture)
+
+            try:
+                yield sample
+            finally:
+                active = False
+            return
+        readiness = await self._fetch_readiness(state)
+        options = {}
+        opening_failure = None
+        if self.opening_clock is not None:
+            try:
+                options["opened"] = await self.opening_clock(state)
+            except Exception as error:
+                # A retained fence can finish without a new opening proof.
+                # Keep this error local to the attempt and select no new cutoff.
+                opening_failure = error
+        async with (
+            memory_operation_context(
+                operation="requests_observe", cohort=state.cohort_sha256, phase=state.phase
+            ),
+            prepared_request_thread(self.source.prepare(state)) as native,
+        ):
+
+            async def sample(capture):
+                if opening_failure is not None:
+                    await native(capture, serving=False, seal_only=True)
+                    raise opening_failure
+                serving = self._ready_at(state, capture, *readiness)
+                return await native(capture, serving=serving, **options)
+
+            yield sample
 
     async def __call__(self, state, capture):
         # An existing admission fence is already authoritative. Finish its

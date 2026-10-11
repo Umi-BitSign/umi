@@ -148,7 +148,7 @@ class SettlementReviewExchange:
         expected = {
             t.transition.evidence_sha256
             for t in request.history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
         if len(decisions) != len(request.decisions) or set(decisions) != expected:
             raise ValueError("settlement request needs every original decision exactly once")
@@ -186,7 +186,7 @@ class SettlementReviewExchange:
             decisions=tuple(
                 self.phases.owner.decisions(t.transition.evidence_sha256)
                 for t in history.transitions
-                if t.transition.operation != "revoke"
+                if t.transition.requires_progress_evidence
             ),
         )
 

@@ -8,7 +8,7 @@ is no implicit reentrancy or sharing between concurrent children.
 from __future__ import annotations
 
 import traceback
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
@@ -191,6 +191,39 @@ def memory_operation(function=None, *, operation=None, scope=None, requests_stag
         raise failure from None
 
     return admitted
+
+
+@asynccontextmanager
+async def memory_operation_context(*, operation, cohort=None, phase=None):
+    """Keep a transient grant through preparation, owned work and native cleanup.
+
+    The yielded context is not a transferable lease. Its owned worker must
+    compact native failures before handing them across the async context
+    boundary; __aexit__ otherwise retains the original rejected input graph.
+    Drain work and discard its results before leaving this scope.
+    """
+    controller = selected_memory()
+    if controller is None:
+        yield
+        return
+    selected_scope = {"cohort": cohort, "phase": phase}
+    if getattr(controller, "requests_stage", False):
+        controller.authorize(operation, **selected_scope, lane="transient")
+    inherited = _active.get()
+    if inherited is not None and not inherited.closed:
+        raise RuntimeError("nested host memory operation would wait on its own capacity")
+    lease = await (
+        controller.acquire("transient", operation=operation, **selected_scope)
+        if getattr(controller, "requests_stage", False)
+        else controller.acquire("transient")
+    )
+    token = _active.set(lease)
+    try:
+        with stage_evidence_budget():
+            yield
+    finally:
+        lease.close()
+        _active.reset(token)
 
 
 async def run_memory_thread(function, *args, operation=None, cohort=None, phase=None):

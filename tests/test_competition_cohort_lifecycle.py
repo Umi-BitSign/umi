@@ -1085,3 +1085,41 @@ async def test_selected_request_start_gate_survives_lifecycle_restart(lifecycle,
         await service.tick()
     assert h.request_entered.is_set()
     assert max(h.calls.values()) == 1
+
+
+async def test_driver_and_attempt_preparation_finish_before_progress_capture(lifecycle):
+    from contextlib import asynccontextmanager
+
+    h = lifecycle
+    service = h.reopen()
+    factory = service.factories["intake"]
+    stages = []
+
+    async def delayed_driver():
+        native = await factory()
+        h.block += 2
+        stages.append("driver")
+
+        @asynccontextmanager
+        async def prepare(state):
+            h.block += 2
+            stages.append("prepare")
+
+            async def sample(capture):
+                assert capture.snapshot.block == h.block
+                stages.append("sample")
+                return await native.observer.sample(state, capture)
+
+            try:
+                yield sample
+            finally:
+                stages.append("release")
+
+        return CohortPhaseDriver(
+            native.observer, sample_service=native.sample_service, prepare_progress=prepare
+        )
+
+    service.factories["intake"] = delayed_driver
+    assert (await service.tick())["status"] == "waiting_phase_progress"
+    assert stages == ["driver", "prepare", "sample", "release"]
+    assert service.last_progress.observed_at_block == h.block
