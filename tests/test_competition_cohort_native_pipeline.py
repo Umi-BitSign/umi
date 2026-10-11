@@ -56,6 +56,7 @@ from umi.competition_cohort_request_files import RequestCompletionFiles
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
 from umi.competition_cohort_request_review import RequestProgressReviewer
 from umi.competition_cohort_request_start import REST_MS
+from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
@@ -74,6 +75,7 @@ from .cohort_native_service_fixture import (
     SERVICE_SHA,
     NativeService,
     admit_endpoint,
+    fixture_issuance_timestamp,
     media,
     transport_policy,
 )
@@ -111,6 +113,13 @@ def model_request(scenario, model, *, sequence, block):
 
 def precommit_model_inventory(h):
     h.transport = transport_policy()
+    # Use one clock for intake, request opening and the signed drand fixture.
+    # Eleven hours leaves room for the explicit ten-hour outage while these
+    # ordinary-completion cases remain below the separately tested tail cutoff.
+    h.first_request_not_before_unix_ms = (
+        fixture_issuance_timestamp(h.transport) - 11 * 60 * 60 * 1000
+    )
+    h.timestamp = h.first_request_not_before_unix_ms - 1_000_000
     h.terms = ServiceTerms(
         schema="umi-cohort-service-terms/1",
         policy_sha256=digest(h.intake.policy),
@@ -449,6 +458,11 @@ async def certify_requests(o, app, root, monkeypatch, signatures):
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
+    state, _ = node.controller.store.status(h.cohort)
+    opening = source.request_opening(state)
+    raw, metadata = await h.provider.retained_archive(opening)
+    original = await h.provider.review_archive(opening, raw, metadata)
+    assert 0 <= h.timestamp - original.timestamp_ms < MINIMUM_REQUEST_OPEN_MS
 
     async def ready(self, state, capture):
         return h.ready
@@ -674,6 +688,7 @@ async def run_pipeline(
                     gate["not_before_unix_ms"] - gate["chain_timestamp_ms"]
                     == h.provider.config.maximum_head_age_ms + REST_MS
                 )
+            h.block += 1
             h.timestamp = gate["not_before_unix_ms"] + h.provider.config.maximum_future_skew_ms
             await lifecycle.tick()
             assert lifecycle.controller.store.status(h.cohort)[0].phase == "requests"
@@ -729,6 +744,7 @@ async def run_pipeline(
         if interrupt:
             # Ten hours at nominal block cadence, with no owner or renewer.
             h.block += 3000
+            h.timestamp += 10 * 60 * 60 * 1000
             o.outages.add("owner.example")
             for name in nodes:
                 nodes[name] = evaluator(name)

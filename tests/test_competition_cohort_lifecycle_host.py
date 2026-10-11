@@ -83,7 +83,9 @@ def configured(h, root):
             request_start=RequestStartConfig(
                 schema="umi-cohort-request-start-config/1",
                 directory=str(root / "rest"),
-                first_cohort_not_before_unix_ms=2_000_000,
+                first_cohort_not_before_unix_ms=getattr(
+                    h, "first_request_not_before_unix_ms", 2_000_000
+                ),
             ),
             request_completion_directory=str(root / "completion"),
             settlement_history_directory=str(root / "closed"),
@@ -100,7 +102,7 @@ def configured(h, root):
 async def host(lifecycle, tmp_path, monkeypatch):
     h = lifecycle
     c = configured(h, tmp_path / "host")
-    h.timestamp = 1_000_000
+    h.timestamp = getattr(h, "timestamp", 1_000_000)
     h.provider.config = SimpleNamespace(maximum_head_age_ms=120_000, maximum_future_skew_ms=30_000)
     collect = h.provider.collect
 

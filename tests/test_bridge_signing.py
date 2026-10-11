@@ -339,8 +339,10 @@ async def test_proven_account_cannot_be_rebound_to_another_signer(case):
 async def test_cancelled_execution_drains_before_the_next_capture(case, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     original = case.executor.execute
+    executions = []
 
     def execute(*args):
+        executions.append(args)
         entered.set()
         assert release.wait(5)
         return original(*args)
@@ -365,7 +367,11 @@ async def test_cancelled_execution_drains_before_the_next_capture(case, monkeypa
         with pytest.raises(asyncio.CancelledError):
             await first
         assert (await second).nonce == 7
-        assert len(case.executed) == 2
+        # Both captures execute under the drained lease and recheck code proof;
+        # unchanged Wasm needs only one pure metadata subprocess execution.
+        assert len(executions) == 2
+        assert len(case.executed) == 1
+        assert sum("storage_key" in claim for claim in case.proofs) == 2
     finally:
         release.set()
         await asyncio.gather(*[t for t in (first, second) if t is not None], return_exceptions=True)

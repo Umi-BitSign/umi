@@ -363,7 +363,7 @@ def test_request_observer_waits_for_service_terminal_without_repeating_work(requ
 def test_interrupted_request_closure_resumes_native_work(request_owner, monkeypatch, stage):
     h = request_owner
     owner = h.c.queue if stage == "queue" else h.source.journal
-    method = "seal" if stage == "queue" else "put"
+    method = "seal_locked" if stage == "queue" else "put"
     original = getattr(owner, method)
     interrupted = False
 
@@ -381,6 +381,7 @@ def test_interrupted_request_closure_resumes_native_work(request_owner, monkeypa
     monkeypatch.setattr(owner, method, fail)
     with pytest.raises(OSError, match="acknowledgement"):
         h.window()
+    assert interrupted
     seal = h.c.queue.retained_seal()
     assert seal is not None
     h.source = h.reopen()

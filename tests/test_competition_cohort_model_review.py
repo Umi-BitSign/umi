@@ -381,24 +381,38 @@ async def test_configured_owner_service_collects_model_votes(
         raise AssertionError("no serving work in this artifact review test")
 
     service = ServiceAdmissionHost(cfg, r.owner.intake, store, r.capture, archive)
-    original = service.poll_once
+    # The recurring host reconciles independent stores concurrently. Observe
+    # each selected component instead of the manual one-cycle convenience API.
+    components = {"catalogs": "_poll_catalogs", "models": "_poll_models"}
+    if delivery:
+        components["legacy_uploads"] = "_poll_legacy_uploads"
+    reports = {}
+    for component, method in components.items():
+        original = getattr(service, method)
 
-    async def one_cycle():
-        report = await original()
-        assert report["model_acceptance"]["entries_exported"] == 1
-        assert (report["model_delivery"] is not None) == delivery
-        if delivery:
-            assert report["model_delivery"]["models_pending"] == 0
-        stop.set()
-        return report
+        async def one_cycle(component=component, original=original):
+            report = await original()
+            if component == "models":
+                assert report["entries_exported"] == 1
+            elif component == "legacy_uploads":
+                assert report["models_pending"] == 0
+            reports[component] = report
+            if reports.keys() == components.keys():
+                stop.set()
+            return report
+
+        monkeypatch.setattr(service, method, one_cycle)
 
     # Reviewers already own their artifact archive. Copy the preserved fixture
     # back as independent reviewer input after selecting the owner's destination.
     import shutil
 
     shutil.copytree(store.directory / "model-reward-artifacts", r.owner.archive)
-    monkeypatch.setattr(service, "poll_once", one_cycle)
-    await service.run(stop)
+    try:
+        await asyncio.wait_for(service.run(stop), 30)
+    finally:
+        stop.set()
+    assert reports.keys() == components.keys()
     assert (
         len(service.models.owner.retained(r.cohort, digest(r.subs[0])).certificate.signatures) == 2
     )

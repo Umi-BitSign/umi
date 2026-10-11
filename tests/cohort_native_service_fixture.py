@@ -44,7 +44,7 @@ from umi.policy import ScoringPolicy, ValidatorRegistryEntry, scoring_policy_has
 from umi.private_files import publish_private_model
 from umi.protocol import Video, canonical_json_bytes
 from umi.validator_chain import FinalizedSnapshotRef
-from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS
+from umi.window import QUICKNET_GENESIS_MS, QUICKNET_PERIOD_MS, ceil_div
 
 from .test_competition_dispatch import dispatch_legacy_policy
 from .test_drand import ROUND, pulse_record
@@ -77,6 +77,20 @@ def transport_policy():
             dispatch_legacy_policy().model_copy(update={"validator_registry": list(registry)})
         )
     )
+
+
+def fixture_issuance_timestamp(transport):
+    """Place the whole cohort clock before the one authenticated fixture pulse."""
+    clock = transport.clock
+    selection = ROUND - sum(
+        ceil_div(seconds, 3)
+        for seconds in (
+            clock.issue_allowance_seconds,
+            clock.response_window_seconds,
+            clock.reveal_margin_seconds,
+        )
+    )
+    return QUICKNET_GENESIS_MS + (selection - 1) * QUICKNET_PERIOD_MS
 
 
 async def admit_endpoint(o, scenario):
@@ -222,6 +236,8 @@ class NativeService:
             block_byte=f"{0x41 + cohort_index:02x}",
             timestamp_ms=QUICKNET_GENESIS_MS + (schedule.selection_round - 1) * QUICKNET_PERIOD_MS,
         )
+        assert issuance.timestamp_ms == fixture_issuance_timestamp(transport)
+        assert issuance.timestamp_ms >= h.timestamp  # Never rewind the cohort clock.
         self.blocks = FinalizedPort(
             head=issuance.height,
             blocks={announcement.height: announcement, issuance.height: issuance},
