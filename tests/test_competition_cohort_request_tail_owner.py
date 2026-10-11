@@ -133,7 +133,8 @@ async def test_live_observer_forwards_native_opening_without_changing_readiness(
 
     seen = []
     opening = object()
-    state, observed = object(), object()
+    state = NS(cohort_sha256="ab" * 32, phase="requests")
+    observed = object()
     source = NS(
         seal_fenced=lambda s, c: seen.append(("fence", s, c)),
         observe=lambda s, c, **kw: seen.append((s, c, kw)) or "progress",

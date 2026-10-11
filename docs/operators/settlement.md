@@ -1265,9 +1265,13 @@ The admission owner, independent phase reviewer, settlement service, reward
 coordinator and standing reward writer accept an optional `host_memory_admission`
 selection with `policy_path` and the exact policy-file `policy_sha256`. The optional
 `host_identity_path` defaults to `/etc/machine-id`. An omitted
-selection preserves existing canonical configuration bytes. Select the same
-qualified host policy in every co-resident aggregate consumer; enabling one
-consumer alone does not establish a host-wide capacity bound.
+selection preserves existing canonical configuration bytes. An explicit aggregate
+evidence budget of up to **4 GiB (4,294,967,296 bytes)** is supported with this
+optional policy omitted. Preserve existing signed clocks and state bindings
+when changing the aggregate budget. Host memory admission is an
+independent opt-in configuration: select the same qualified host policy in every
+co-resident aggregate consumer; enabling one consumer alone does not establish
+a host-wide capacity bound.
 
 Provision the `umi-host-memory-admission/2` policy and its empty lock files on
 persistent root-owned storage. The policy binds the host's `/etc/machine-id`,
@@ -1279,49 +1283,29 @@ from its own mount namespace. Preserve these files across unattended reboot;
 replacing a file requires a deliberate policy/configuration cutover after draining
 all existing consumers. No runtime creates or rewrites this namespace.
 
-The separate `umi-c5-requests-memory-admission/1` schema supports the existing
-C5 request closure while later settlement reservations await qualification.
-It binds the original cohort, protocol policy, series, recovery authority and
-certified preparation result. The authority identity is
-`digest(series.recovery.authority)`; the preparation identity is
-`digest(prepared.roster.round)`. Only the admission owner and phase reviewer can
-boot with this schema. It contains owner-export and transient slots, plus a
-positive measured background allowance for retained source, roster, catalog and
-preparation caches. It contains no settlement slots or signals.
+The retained `umi-c5-requests-memory-admission/1` schema is restricted to its
+original cohort, protocol policy, series, recovery authority and certified
+preparation result. Its authority identity is `digest(series.recovery.authority)`;
+its preparation identity is `digest(prepared.roster.round)`. Only the admission
+owner and phase reviewer support this selection. Its measured owner-export,
+transient and background allowances do not admit settlement or reward work.
 
-Every enabled request operation must appear in its finite `operations` list.
-Unknown operations, another cohort, fresh preparation and settlement/reward
-roles are refused before their aggregate work starts. Retained
-`preparation_republish` is mandatory because lifecycle repairs the original
-preparation handoff before publishing request closure. `requests_publish` can
-remain absent until that handoff operation is separately qualified; a committed
-native request closure then remains pending publication. Intake reconciliation,
-vote polling, dispatch, order delivery and benchmark workers do not start under
-this stage policy. Public routes and unqualified private routes refuse before
-consuming request bodies or reading native state.
-The protected C4 reward consumers retain their independent immutable file/proof
-delivery and chain RPC paths. Keep the public results gateway's legacy fallback,
-legacy intake, observer, assignment and successor routes active. Verify those
-actual configured dependencies before selecting this isolated stage; C5 public
-status, readiness, history and catalog clients receive an explicit 503. The
-merged round index can continue from the legacy store and truthfully reports
-`degraded_single_intake_store` while the staged intake is unavailable.
-Readiness remains native and reports the held dispatch as unavailable; no
-service interval or signed clock is invented. Declaration, record, object, service,
-order, inventory and JSON shape bounds are explicit measured inputs; they
-narrow native read limits before decoding and do not replace proof validation.
-The JSON value bound includes object keys as well as scalar/container values.
+For an existing restricted selection, preserve the exact `operations` list and
+declaration, record, object, service, order, inventory and JSON shape bounds.
+JSON value bounds include object keys as well as scalar and container values;
+shape checks precede native proof validation.
+`preparation_republish` remains required; without qualified `requests_publish`,
+native request closure remains pending publication. Public routes and unqualified
+private routes return 503 before consuming bodies or reading native state; disabled
+dispatch remains unavailable. Preserve independent reward file/proof delivery,
+chain RPC and gateway fallback dependencies when recovering such a selection.
+Verify the complete configured request path before a supported migration.
 
-Before enabling any request handoff, cooperatively drain older C5 settlement
-consumers and maintain a restart-persistent hold: older consumers can allocate
-before rejecting their original smaller package limit. Preserve their journals,
-configuration, signed clocks and original state paths. Keep the existing C4
-writer and readers active. Promote to a fully qualified host policy only after
-measuring the retained settlement and reward lifetimes and verifying startup,
-namespace bindings and recovery. The C5 stage and its migration instructions
-remain necessary until that promotion and removal of every stage-policy
-selection and held legacy consumer. This stage is not completion of C5 or a
-qualification of later cohorts.
+Keep restricted-policy decoders, immutable policies, selectors, source and state
+bindings while an installed service, active experiment or recovery consumer
+references them. Retire their migration guidance only after the last such
+dependency is removed. A retained helper or qualification receipt does not
+require selecting that policy for an aggregate-budget upgrade.
 
 A containerized writer may have its own `/etc/machine-id`. Preserve that local
 identity and provide a separate read-only bind of the host identity, for example
@@ -1333,7 +1317,7 @@ policy's host identity. Verify the actual writer account sees the same slot inod
 and selected host identity as the ordinary services while retaining its own local
 identity. A host-account test alone does not establish this namespace binding.
 
-Reservations cover separate owner-export, transient-operation and retained
+Full host policy reservations cover separate owner-export, transient-operation and retained
 settlement capacity. An owner response keeps its reservation through bounded
 ASGI sends. A reviewer can hold transient capacity while fetching an owner export,
 so those lanes must remain independent. Reward opportunity and peer-vote waits
@@ -1373,8 +1357,9 @@ selections, bounded history/vote/model/order buffers and future allocations that
 do not own a slot. Logical object release does not imply that Python returned its
 resident pages to the operating system.
 
-Startup requires current available memory above the unchanged 24 GiB floor plus
-all slot reservations and background allowance. Each serialized grant rechecks
+With host memory admission enabled, startup requires current available memory
+above the 24 GiB floor plus all slot reservations and background allowance.
+Each serialized grant rechecks
 current available memory against the floor, background allowance, candidate
 reservation and the full reservations of all occupied slots. This deliberately
 charges occupied work again even when it is already resident. Qualification must

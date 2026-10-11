@@ -2111,6 +2111,7 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
     service_quality_inputs, tmp_path, monkeypatch
 ):
     from umi.competition_artifacts import preserve_bundle
+    from umi.competition_cohort_capacity import MAX_AGGREGATE_EVIDENCE_BYTES
     from umi.competition_cohort_quality import ClosedQualityReview
     from umi.competition_cohort_quality_signing import build_quality_manifest
     from umi.competition_cohort_reward_allocation import retain_reward_allocation
@@ -2379,11 +2380,20 @@ async def test_native_reward_allocation_replays_lost_commit_without_new_head(
 
     with pytest.raises(ValueError, match="byte bound"):
         load_reward_package(path, b["policy"], reopened, certified, maximum_bytes=1024, **selection)
-    for limit in (True, 0, 2**31):
-        with pytest.raises(ValueError, match="byte bound"):
+    for limit in (True, 0, 1023, MAX_AGGREGATE_EVIDENCE_BYTES + 1):
+        with pytest.raises(
+            ValueError, match="aggregate evidence capacity is outside runtime bounds"
+        ):
             replay_reward_package(
                 package, b["policy"], reopened, certified, maximum_bytes=limit, **selection
             )
+    for limit in (2**31, MAX_AGGREGATE_EVIDENCE_BYTES):
+        assert (
+            replay_reward_package(
+                package, b["policy"], reopened, certified, maximum_bytes=limit, **selection
+            )
+            == result
+        )
 
     # Original decision inputs must travel with the archive; the callback only
     # supplies transitions made after this package was prepared.
