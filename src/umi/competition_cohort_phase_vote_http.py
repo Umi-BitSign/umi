@@ -91,6 +91,16 @@ def phase_vote_routes(
                 path=_path(phase, kind),
                 request_model=model,
                 maximum_request_bytes=MAX_REQUEST_BYTES,
+                admission_operation=(
+                    "requests_review" if kind == "progress" else "requests_decision"
+                )
+                if phase == "requests"
+                else None,
+                admission_scope=lambda request: (
+                    (request.progress.cohort_sha256, request.progress.phase)
+                    if isinstance(request, ProgressVoteRequest)
+                    else (request.transition.cohort_sha256, request.transition.phase)
+                ),
             )
         )
     return router

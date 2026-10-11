@@ -32,6 +32,7 @@ from .competition_cohort_service_certification import (
 from .competition_cohort_settlement_inputs import ReplayedSettlementInputs
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
+from .host_memory_request_bounds import stage_limit
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .private_files import read_private_model as read
@@ -51,7 +52,11 @@ class SettlementEvidenceFiles:
         return self.root / (key + ".json")
 
     def __call__(self, key: str) -> bytes:
-        item = read(self._path(key), RewardPackageObject, maximum_bytes=MAX_DELIVERY_BYTES)
+        item = read(
+            self._path(key),
+            RewardPackageObject,
+            maximum_bytes=stage_limit("maximum_object_bytes", MAX_DELIVERY_BYTES),
+        )
         if item.sha256 != key or digest(item.value) != key:
             raise ValueError("settlement object delivery changed its identity")
         return read_endpoint_object(lambda _: canonical_json_bytes(item.value), key)
@@ -80,7 +85,7 @@ class ModelReviewEvidenceFiles:
             value = read(
                 self.root / (sha + ".json"),
                 RootModel[dict[str, JsonValue]],
-                maximum_bytes=MAX_ARCHIVE_OBJECT_BYTES,
+                maximum_bytes=stage_limit("maximum_object_bytes", MAX_ARCHIVE_OBJECT_BYTES),
             )
             return canonical_json_bytes(value)
 

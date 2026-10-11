@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hashlib
+import json
 import os
 import stat
 from contextlib import asynccontextmanager
@@ -269,7 +270,13 @@ class HostMemoryAdmission:
         raw = _read_policy(_absolute(str(policy_path)))
         if hashlib.sha256(raw).hexdigest() != expected_sha256:
             raise AdmissionBindingError("host admission policy differs from selection")
-        self.policy = HostMemoryAdmissionPolicy.model_validate_json(raw)
+        schema = json.loads(raw).get("schema")
+        if schema == "umi-c5-requests-memory-admission/1":
+            from .host_memory_requests import RequestsStageMemoryPolicy
+
+            self.policy = RequestsStageMemoryPolicy.model_validate_json(raw)
+        else:
+            self.policy = HostMemoryAdmissionPolicy.model_validate_json(raw)
         self.policy_sha256 = expected_sha256
         if self.policy.host_identity_sha256 != _host_identity(host_identity_path):
             raise AdmissionBindingError("host admission policy belongs to another host")
@@ -283,6 +290,31 @@ class HostMemoryAdmission:
             + self.policy.background_reservation_bytes
         ):
             raise OSError("host memory admission startup awaits qualified headroom")
+
+    @property
+    def requests_stage(self) -> bool:
+        return self.policy.schema_ == "umi-c5-requests-memory-admission/1"
+
+    def authorize(self, operation=None, cohort=None, phase=None, *, lane=None):
+        if not self.requests_stage:
+            return
+        from .host_memory_requests import OPERATIONS
+
+        if (
+            operation not in self.policy.operations
+            or cohort != self.policy.cohort_sha256
+            or OPERATIONS.get(operation) != (lane, phase)
+        ):
+            raise AdmissionBindingError("operation is outside the qualified C5 requests stage")
+
+    def bind_runtime(self, role, protocol_policy, series, authority):
+        if self.requests_stage and (
+            role not in {"intake", "phase_reviewer"}
+            or protocol_policy != self.policy.protocol_policy_sha256
+            or series != self.policy.series_sha256
+            or authority != self.policy.authority_sha256
+        ):
+            raise AdmissionBindingError("runtime identity is outside the qualified requests stage")
 
     def _open_root(self) -> int:
         descriptor = _open_directory(_absolute(self.policy.directory))
@@ -315,12 +347,10 @@ class HostMemoryAdmission:
     def _validate_all(self) -> None:
         parent = self._open_root()
         try:
-            for slot in (
-                *self.policy.slots,
-                self.policy.transaction_lock,
-                self.policy.settlement_gate,
-                *self.policy.settlement_signals,
-            ):
+            files = (*self.policy.slots, self.policy.transaction_lock)
+            if not self.requests_stage:
+                files += (self.policy.settlement_gate, *self.policy.settlement_signals)
+            for slot in files:
                 os.close(self._open_slot(parent, slot))
         finally:
             os.close(parent)
@@ -374,7 +404,10 @@ class HostMemoryAdmission:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def try_acquire(self, lane: Lane) -> HostMemoryLease | None:
+    def try_acquire(
+        self, lane: Lane, *, operation=None, cohort=None, phase=None
+    ) -> HostMemoryLease | None:
+        self.authorize(operation, cohort, phase, lane=lane)
         if lane not in {"owner_export", "transient"}:
             raise ValueError("retained settlement requires role/cohort admission")
         parent = self._open_root()
@@ -395,6 +428,8 @@ class HostMemoryAdmission:
             os.close(parent)
 
     def try_settlement(self, cohort: str, role: str) -> HostMemoryLease | None:
+        if self.requests_stage:
+            raise AdmissionBindingError("settlement is outside requests-stage qualification")
         if role not in {"coordinator", "reviewer"}:
             raise ValueError("settlement capacity requires a configured replica")
         signal = next(
@@ -435,11 +470,17 @@ class HostMemoryAdmission:
                 if descriptor is not None:
                     os.close(descriptor)
 
-    async def acquire(self, lane: Lane) -> HostMemoryLease:
+    async def acquire(
+        self, lane: Lane, *, operation=None, cohort=None, phase=None
+    ) -> HostMemoryLease:
         # No blocking flock in a worker thread: cancellation cannot leave a
         # future acquisition running after the waiter has abandoned ownership.
         while True:
-            lease = self.try_acquire(lane)
+            lease = (
+                self.try_acquire(lane, operation=operation, cohort=cohort, phase=phase)
+                if self.requests_stage
+                else self.try_acquire(lane)
+            )
             if lease is not None:
                 return lease
             await asyncio.sleep(0.1)

@@ -1279,6 +1279,50 @@ from its own mount namespace. Preserve these files across unattended reboot;
 replacing a file requires a deliberate policy/configuration cutover after draining
 all existing consumers. No runtime creates or rewrites this namespace.
 
+The separate `umi-c5-requests-memory-admission/1` schema supports the existing
+C5 request closure while later settlement reservations await qualification.
+It binds the original cohort, protocol policy, series, recovery authority and
+certified preparation result. The authority identity is
+`digest(series.recovery.authority)`; the preparation identity is
+`digest(prepared.roster.round)`. Only the admission owner and phase reviewer can
+boot with this schema. It contains owner-export and transient slots, plus a
+positive measured background allowance for retained source, roster, catalog and
+preparation caches. It contains no settlement slots or signals.
+
+Every enabled request operation must appear in its finite `operations` list.
+Unknown operations, another cohort, fresh preparation and settlement/reward
+roles are refused before their aggregate work starts. Retained
+`preparation_republish` is mandatory because lifecycle repairs the original
+preparation handoff before publishing request closure. `requests_publish` can
+remain absent until that handoff operation is separately qualified; a committed
+native request closure then remains pending publication. Intake reconciliation,
+vote polling, dispatch, order delivery and benchmark workers do not start under
+this stage policy. Public routes and unqualified private routes refuse before
+consuming request bodies or reading native state.
+The protected C4 reward consumers retain their independent immutable file/proof
+delivery and chain RPC paths. Keep the public results gateway's legacy fallback,
+legacy intake, observer, assignment and successor routes active. Verify those
+actual configured dependencies before selecting this isolated stage; C5 public
+status, readiness, history and catalog clients receive an explicit 503. The
+merged round index can continue from the legacy store and truthfully reports
+`degraded_single_intake_store` while the staged intake is unavailable.
+Readiness remains native and reports the held dispatch as unavailable; no
+service interval or signed clock is invented. Declaration, record, object, service,
+order, inventory and JSON shape bounds are explicit measured inputs; they
+narrow native read limits before decoding and do not replace proof validation.
+The JSON value bound includes object keys as well as scalar/container values.
+
+Before enabling any request handoff, cooperatively drain older C5 settlement
+consumers and maintain a restart-persistent hold: older consumers can allocate
+before rejecting their original smaller package limit. Preserve their journals,
+configuration, signed clocks and original state paths. Keep the existing C4
+writer and readers active. Promote to a fully qualified host policy only after
+measuring the retained settlement and reward lifetimes and verifying startup,
+namespace bindings and recovery. The C5 stage and its migration instructions
+remain necessary until that promotion and removal of every stage-policy
+selection and held legacy consumer. This stage is not completion of C5 or a
+qualification of later cohorts.
+
 A containerized writer may have its own `/etc/machine-id`. Preserve that local
 identity and provide a separate read-only bind of the host identity, for example
 `BindReadOnlyPaths=/etc/machine-id:/run/umi-host-machine-id`, then select

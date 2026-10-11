@@ -34,6 +34,7 @@ from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import digest, identity, verify_signature
 from .policy import ScoringPolicy
 from .protocol import canonical_json_bytes
@@ -102,6 +103,7 @@ class RemoteRequestProgressReviewer:
         raw = await wait_for_owned(self.fetch(request), timeout=self.timeout_seconds)
         if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
             raise ValueError("request response exceeds its byte bound")
+        check_stage_json(raw)
         signed = SignedRequestReviewResponse.model_validate_json(raw)
         response, signature = signed.response, signed.signature
         if not canonical_json_matches(signed, raw) or identity(signature.hotkey) != self.owner:

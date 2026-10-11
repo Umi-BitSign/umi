@@ -37,6 +37,7 @@ from .competition_cohort_service_closure import CohortServiceRequestClosure
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -107,11 +108,16 @@ class RequestReviewExporter:
                 size += len(raw)
                 if size > self.maximum_bytes:
                     raise OSError("request export exceeds capacity; preserve and retry")
+                stage_count("maximum_services", len(services) + 1)
+                stage_count("maximum_input_bytes", size)
+                check_stage_json(raw, kind="object")
                 services.append(CohortAvailabilityObservation.model_validate_json(raw))
             for _, raw in self.source.intake._records(db, original.history):
                 size += len(raw)
                 if size > self.maximum_bytes:
                     raise OSError("request export exceeds capacity; preserve and retry")
+                stage_count("maximum_records", len(records) + 1)
+                stage_count("maximum_input_bytes", size)
                 records.append(read_participation(raw))
             if tuple(digest(r.request.consent.consent) for r in records) != original.consents:
                 raise OSError("request inventory changed during owner export")

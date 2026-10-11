@@ -25,6 +25,7 @@ from .competition_cohort_review_export import MAX_EXPORT_BYTES, review_export_li
 from .competition_progress import _failure_details
 from .concurrency import wait_for_owned
 from .host_memory_admission import HostMemoryAdmission
+from .host_memory_request_bounds import stage_evidence_budget
 from .host_memory_runtime import selected_memory
 from .open_competition import Hotkey
 from .private_files import Directory
@@ -164,12 +165,16 @@ def phase_review_routes(
     concurrency: int = 1,
     admission: HostMemoryAdmission | None = None,
     admission_lane: Literal["owner_export", "transient"] | None = None,
+    admission_operation: str | None = None,
+    admission_scope: Callable | None = None,
 ) -> APIRouter:
     # This transport also serves reviewer vote routes. Only explicitly marked
     # owner exports take the reserved owner lane; otherwise a reviewer would
     # occupy that lane while waiting for its owner's response.
-    if admission is None and admission_lane is not None:
-        admission = selected_memory()
+    if admission is None:
+        selected = selected_memory()
+        if admission_lane is not None or getattr(selected, "requests_stage", False):
+            admission = selected
     if admission is not None and exporter.maximum_bytes > admission.policy.maximum_aggregate_bytes:
         raise ValueError("owner export exceeds its qualified host aggregate capacity")
     _request_limit(maximum_request_bytes)
@@ -185,6 +190,12 @@ def phase_review_routes(
             raise HTTPException(401, "phase review authentication required")
         if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
             raise HTTPException(415, "application/json required")
+
+        if (
+            getattr(admission, "requests_stage", False)
+            and admission_operation not in admission.policy.operations
+        ):
+            raise HTTPException(503, "operation is outside the qualified C5 requests stage")
 
         async def body():
             raw = bytearray()
@@ -219,8 +230,26 @@ def phase_review_routes(
             except ValueError as error:
                 raise HTTPException(422, "invalid phase review request") from error
             if admission is not None:
-                lease = await admission.acquire(admission_lane or "owner_export")
-            output = await wait_for_owned(exporter.respond(value), timeout=exporter.timeout_seconds)
+                if getattr(admission, "requests_stage", False):
+                    cohort, phase = (
+                        (None, None) if admission_scope is None else admission_scope(value)
+                    )
+                    admission.authorize(
+                        admission_operation, cohort, phase, lane=admission_lane or "transient"
+                    )
+                    if admission_lane is not None:
+                        lease = await admission.acquire(
+                            admission_lane,
+                            operation=admission_operation,
+                            cohort=cohort,
+                            phase=phase,
+                        )
+                else:
+                    lease = await admission.acquire(admission_lane or "owner_export")
+            with stage_evidence_budget():
+                output = await wait_for_owned(
+                    exporter.respond(value), timeout=exporter.timeout_seconds
+                )
             if type(output) is not bytes or len(output) > exporter.maximum_bytes:
                 raise ValueError("phase export response exceeds its byte bound")
             response = _OwnedReviewResponse(output, capacity, release)

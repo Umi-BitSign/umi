@@ -43,6 +43,8 @@ from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
+from .host_memory_request_bounds import bounded_stage_declarations, check_stage_json, stage_count
+from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .open_competition import digest
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, publish_private_model, read_private_model
@@ -148,6 +150,7 @@ class LifecycleHost:
         return self.stores[cohort].source(cohort, key, CohortDecisionInput)
 
     async def _intake(self):
+        authorize_memory(None, None, "intake")
         phase = CohortIntakePhaseObserver(
             self.service.intake,
             maximum_sample_gap_blocks=self.service.config.admission_owner.maximum_sample_gap_blocks,
@@ -172,7 +175,9 @@ class LifecycleHost:
             publisher.publish_history,
         )
 
+    @bounded_stage_declarations
     def _request_source(self, cohort):
+        authorize_memory("requests_source", cohort, "requests")
         c = self.config
         prepared = read_private_model(
             Path(c.sources.round_directory) / (cohort + ".json"),
@@ -181,9 +186,14 @@ class LifecycleHost:
         )
         if prepared.roster.round.cohort_sha256 != cohort:
             raise ValueError("request owner prepared round changed its cohort")
+        stage = requests_stage_policy()
+        if stage is not None and digest(prepared.roster.round) != stage.preparation_result_sha256:
+            raise ValueError("prepared round differs from qualified requests stage")
+        stage_count("maximum_participants", len(prepared.roster.round.participants))
         requirement = next(
             r for r in self.service.config.manifest.cohorts if r.cohort_sha256 == cohort
         )
+        stage_count("maximum_catalogs", len(requirement.catalog_sha256s))
         queues = tuple(self.service.queues[k] for k in requirement.catalog_sha256s)
         # Queues must already be installed by their native admission owner.
         installed = tuple(q._catalog() for q in queues)
@@ -191,7 +201,9 @@ class LifecycleHost:
             raise ValueError("request owner queue differs from the prepared round")
         catalogs = tuple(catalog for catalog, _ in installed)
         objects = SettlementEvidenceFiles(Path(c.sources.objects_directory))
-        terms = ServiceTerms.model_validate_json(objects(requirement.terms_sha256))
+        terms_raw = objects(requirement.terms_sha256)
+        check_stage_json(terms_raw, kind="declaration")
+        terms = ServiceTerms.model_validate_json(terms_raw)
         transport = read_private_model(
             Path(c.sources.transport_directory) / (terms.transport_policy_sha256 + ".json"),
             ScoringPolicy,
@@ -290,6 +302,7 @@ class LifecycleHost:
         ).respond(request)
 
     async def node(self, cohort):
+        authorize_memory("requests_lifecycle", cohort, "requests")
         if cohort in self.nodes:
             return self.nodes[cohort]
         original = await self.service.history(cohort)
@@ -299,7 +312,12 @@ class LifecycleHost:
             or original.history.authority != self.service.config.series.recovery
         ):
             raise ValueError("cohort lifecycle admission differs from selected series")
-        replay_cohort_decisions(original.history, self.policy, original.inputs().__getitem__)
+        original_state, _, _ = replay_cohort_decisions(
+            original.history, self.policy, original.inputs().__getitem__
+        )
+        stage = requests_stage_policy()
+        if stage is not None and original_state.phase in {"intake", "preparation", "revoked"}:
+            raise ValueError("requests stage requires the existing active request authority")
         if cohort not in self.stores:
             self.stores[cohort] = self.resources.enter_context(
                 settlement_store(self.root / cohort / "control", self.config.maximum_state_bytes)
@@ -368,8 +386,11 @@ class LifecycleHost:
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
 
+        stage = requests_stage_policy()
         tasks = [
-            asyncio.create_task(cohort_loop(digest(p))) for p in self.service.config.series.cohorts
+            asyncio.create_task(cohort_loop(digest(p)))
+            for p in self.service.config.series.cohorts
+            if stage is None or digest(p) == stage.cohort_sha256
         ]
         try:
             await asyncio.gather(*tasks)

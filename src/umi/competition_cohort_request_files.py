@@ -40,6 +40,7 @@ from .competition_cohort_request_terminal import SignedRequestTerminal, read_req
 from .competition_cohort_reward_package import DEFAULT_PACKAGE_BYTES, ReplayObjectCollector
 from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
+from .host_memory_request_bounds import stage_count, stage_limit
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .private_files import read_private_model as read
@@ -431,7 +432,7 @@ class RequestCompletionFiles:
                         count += 1
                         parts = entry.name.removesuffix(".json").split("-")
                         if (
-                            count > 65536
+                            count > stage_limit("maximum_inventory_entries", 65536)
                             or len(parts) != 3
                             or not entry.name.endswith(".json")
                             or len(parts[0]) != 16
@@ -550,6 +551,8 @@ class RequestCompletionFiles:
     def orders(
         self, roster: RecoverableRosterEvidence
     ) -> Iterator[SignedRecoverableEvaluationOrder]:
+        stage_count("maximum_participants", len(roster.round.participants))
+        order_count = 0
         for participant in roster.round.participants:
             try:
                 ref = read(
@@ -559,6 +562,8 @@ class RequestCompletionFiles:
                 )
             except FileNotFoundError:
                 continue
+            order_count += 1
+            stage_count("maximum_orders", order_count)
             order = SignedRecoverableEvaluationOrder.model_validate_json(
                 read_endpoint_object(self.objects, ref.sha256)
             )

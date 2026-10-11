@@ -54,6 +54,7 @@ from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
+from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .thread_gate import ThreadGate
@@ -559,11 +560,16 @@ class CohortIntake:
         if hotkey is not None:
             clauses.append("hotkey=?")
             parameters.append(identity(hotkey))
-        for consent, tip, raw in db.execute(
+        stage_bytes = 0
+        records = db.execute(
             "SELECT consent,recovery_tip,substr(body,1,4194305) FROM cohort_consents "
             "WHERE " + " AND ".join(clauses) + " ORDER BY consent",
             parameters,
-        ):
+        )
+        for stage_records, (consent, tip, raw) in enumerate(records, 1):
+            stage_bytes += len(raw)
+            stage_count("maximum_records", stage_records)
+            stage_count("maximum_input_bytes", stage_bytes)
             retained = read_participation(raw)
             if (
                 retained.proposed_admission.recovery_tip_sha256 != tip
@@ -637,6 +643,7 @@ class CohortIntake:
         raw = row[0]
         if len(raw) > 4 * 1024 * 1024:
             raise ValueError("retained intake seal exceeds its byte bound")
+        check_stage_json(raw, kind="object")
         seal = CohortIntakeSeal.model_validate_json(raw)
         if canonical_json_bytes(seal) != raw:
             raise ValueError("retained intake seal is not canonical")

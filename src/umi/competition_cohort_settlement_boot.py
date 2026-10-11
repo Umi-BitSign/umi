@@ -102,7 +102,9 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         resources.callback(os.close, descriptor)
         memory = resources.enter_context(
             memory_runtime(
-                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+                config.host_memory_admission,
+                maximum_aggregate_bytes=config.maximum_package_bytes,
+                role="settlement",
             )
         )
         if memory is not None and {digest(p) for p in config.series.cohorts} != {

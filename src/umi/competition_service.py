@@ -39,6 +39,7 @@ from .competition_store import (
     CompetitionStore,
     HistoricalIntakeArchiveBinding,
 )
+from .host_memory_runtime import RequestsStageASGIBinding, memory_runtime
 from .open_competition import CompetitionPolicy, Hex32, RegistrationSnapshot, digest
 from .policy import umi_source_tree_sha256
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -162,7 +163,30 @@ class CompetitionServiceConfig(StrictProtocolModel):
         return self
 
 
-def create_intake_app(
+def create_intake_app(config, policy, *, provider_factory=None) -> FastAPI:
+    """Bind the selected stage before construction and across ASGI task roots."""
+    config = CompetitionServiceConfig.model_validate_json(canonical_json_bytes(config))
+    service = config.recoverable_service
+    owner = None if service is None else service.admission_owner
+    if owner is None or owner.host_memory_admission is None:
+        return _create_intake_app(config, policy, provider_factory=provider_factory)
+    with memory_runtime(
+        owner.host_memory_admission,
+        role="intake",
+        protocol_policy_sha256=digest(policy),
+        series_sha256=digest(service.series),
+        authority_sha256=digest(service.series.recovery.authority),
+        maximum_aggregate_bytes=max(
+            owner.maximum_export_bytes, owner.request_evidence_bytes, owner.request_replay_bytes
+        ),
+    ) as controller:
+        app = _create_intake_app(config, policy, provider_factory=provider_factory)
+        if controller.requests_stage:
+            app.add_middleware(RequestsStageASGIBinding, controller=controller)
+        return app
+
+
+def _create_intake_app(
     config: CompetitionServiceConfig,
     policy: CompetitionPolicy,
     *,

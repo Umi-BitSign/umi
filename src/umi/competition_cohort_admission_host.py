@@ -54,7 +54,13 @@ from .competition_reward_service import _stop_task
 from .competition_service_supervision import drain_server_requests
 from .concurrency import await_owned_task, run_owned_thread
 from .config import Limits
-from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
+from .host_memory_runtime import (
+    HostMemoryAdmissionSelection,
+    RequestsStageASGIBinding,
+    memory_runtime,
+    requests_stage_policy,
+    selected_memory,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
 from .policy import scoring_policy_hash
@@ -157,6 +163,12 @@ async def admission_owner_app(
         resources.enter_context(
             memory_runtime(
                 c.host_memory_admission,
+                role="intake",
+                protocol_policy_sha256=digest(intake.policy),
+                series_sha256=None if service_host is None else digest(service_host.config.series),
+                authority_sha256=None
+                if service_host is None
+                else digest(service_host.config.series.recovery.authority),
                 maximum_aggregate_bytes=max(
                     c.maximum_export_bytes, c.request_evidence_bytes, c.request_replay_bytes
                 ),
@@ -210,6 +222,10 @@ async def admission_owner_app(
         )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        if requests_stage_policy() is not None:
+            app.add_middleware(
+                RequestsStageASGIBinding, controller=selected_memory(), private_role="intake"
+            )
         app.include_router(
             admission_history_routes(
                 AdmissionHistoryExporter(queue, c.owner_hotkey, sign),
@@ -364,12 +380,16 @@ async def run_admission_owner(
             if not stop.is_set() and server.started:
                 if service_host is not None:
                     service_host.history_exporter = app.state.history_exporter
-                workers = [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
+                workers = (
+                    []
+                    if requests_stage_policy() is not None
+                    else [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
+                )
                 if app.state.lifecycle is not None:
                     workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
-                if app.state.dispatch is not None:
+                if app.state.dispatch is not None and requests_stage_policy() is None:
                     workers.append(asyncio.create_task(app.state.dispatch.run(stop)))
-                if app.state.orders is not None:
+                if app.state.orders is not None and requests_stage_policy() is None:
                     workers.append(asyncio.create_task(app.state.orders.run(stop)))
                 if app.state.request_readiness is not None:
                     app.state.request_readiness.running = lambda: (

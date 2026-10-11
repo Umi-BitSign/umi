@@ -28,6 +28,7 @@ from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCoh
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
+from .host_memory_runtime import authorize_memory
 from .open_competition import CompetitionPolicy, Signature
 from .protocol import canonical_json_bytes
 
@@ -154,6 +155,7 @@ class CohortLifecycleService:
         return self.drivers[phase]
 
     async def _sample(self, state, capture):
+        authorize_memory("requests_lifecycle", state.cohort_sha256, state.phase)
         self._remember_state(state)
         driver = await self._driver(state.phase)
         self.stage = "progress_sampling"
@@ -171,6 +173,7 @@ class CohortLifecycleService:
         return progress
 
     async def _attest(self, progress):
+        authorize_memory("requests_lifecycle", progress.cohort_sha256, progress.phase)
         driver = await self._driver(progress.phase)
         self.stage = "progress_review"
         self.last_progress = progress
@@ -180,6 +183,7 @@ class CohortLifecycleService:
         return result
 
     async def _certify(self, transition, evidence):
+        authorize_memory("requests_lifecycle", transition.cohort_sha256, transition.phase)
         if transition.phase != evidence.progress.progress.phase:
             raise ValueError("phase decision differs from its reserved progress")
         driver = await self._driver(transition.phase)

@@ -80,7 +80,9 @@ class CohortRequestSettlementPublisher:
             },
         )
 
-    @memory_operation
+    @memory_operation(
+        operation="requests_publish", scope=lambda self, history: (digest(history.plan), "requests")
+    )
     async def __call__(self, history: CohortRecoveryHistory) -> None:
         if digest(history.plan) != self.source.cohort:
             raise ValueError("request publication belongs to another cohort")

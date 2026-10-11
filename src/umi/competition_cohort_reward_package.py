@@ -46,6 +46,13 @@ from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_store import CompetitionStore
+from .host_memory_request_bounds import (
+    check_stage_json,
+    stage_bounds,
+    stage_count,
+    stage_limit,
+    stage_object_budget,
+)
 from .open_competition import CompetitionPolicy, EvaluationSuite, digest
 from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -124,7 +131,10 @@ class ReplayObjectCollector:
 
     def __call__(self, key: str) -> bytes:
         if key not in self.values:
-            self._remember(key, read_endpoint_object(self.source, key))
+            stage_count("maximum_objects", len(self.values) + 1)
+            remaining = stage_limit("maximum_input_bytes", self.maximum_bytes) - self.used
+            with stage_object_budget(remaining):
+                self._remember(key, read_endpoint_object(self.source, key))
         return self.values[key]
 
     def _remember(self, key: str, raw: bytes) -> None:
@@ -134,10 +144,17 @@ class ReplayObjectCollector:
             return
         if len(self.values) >= MAX_PACKAGE_OBJECTS or self.used + len(raw) > self.maximum_bytes:
             raise ValueError("reward package evidence exceeds its bound")
+        stage_count("maximum_objects", len(self.values) + 1)
+        stage_count("maximum_input_bytes", self.used + len(raw))
+        check_stage_json(raw, kind="object")
         self.values[key] = raw
         self.used += len(raw)
 
     def retain(self, value: StrictProtocolModel | JsonValue) -> str:
+        if stage_bounds() is not None:
+            size = canonical_json_size(value)
+            stage_count("maximum_object_bytes", size)
+            stage_count("maximum_input_bytes", self.used + size)
         raw = canonical_json_bytes(value)
         key = digest(value)
         self._remember(key, read_endpoint_object({key: raw}.__getitem__, key))

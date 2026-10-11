@@ -16,6 +16,8 @@ from .competition_cohort_recovery import cohort_tracks
 from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
+from .host_memory_request_bounds import check_stage_json
+from .host_memory_runtime import authorize_memory
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 
@@ -65,6 +67,7 @@ class CohortPreparation:
         The host owns the capture provider and these stores. This method does not read
         another running process's database, sign a phase, or reveal evaluation labels.
         """
+        authorize_memory(None, cohort, "preparation")
         observation = execution_boundary(capture)
         return self._prepare(
             cohort,
@@ -218,6 +221,7 @@ class CohortPreparation:
             if row is not None:
                 if len(row[1]) > self.maximum_bytes:
                     raise ValueError("retained preparation exceeds its byte bound")
+                check_stage_json(row[1], kind="declaration")
                 previous = PreparedCohortRound.model_validate_json(row[1])
                 if (
                     canonical_json_bytes(previous) != row[1]

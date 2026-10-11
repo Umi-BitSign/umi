@@ -50,6 +50,7 @@ from .competition_cohort_service_work import (
 )
 from .competition_execution import execution_boundary
 from .competition_round_journal import FinalizedHeadRegression, RecordReservation, RoundJournal
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import CompetitionPolicy, SignedSubmission, digest
 from .private_files import Directory, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -107,6 +108,7 @@ class ServiceWorkQueue:
         raw = self.journal.get_raw(kind, key, db=db)
         if raw is None:
             return None
+        check_stage_json(raw, kind="declaration")
         fingerprint = (model, hashlib.sha256(raw).digest())
         cached = self._parsed_records.lookup((kind, key), fingerprint)
         if cached is not None:

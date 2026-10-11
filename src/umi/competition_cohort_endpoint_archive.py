@@ -34,6 +34,7 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_round_journal import RoundJournal
+from .host_memory_request_bounds import check_stage_json, stage_limit
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -53,8 +54,11 @@ def read_endpoint_object(source: EndpointObjectSource, sha256: str) -> bytes:
     if len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256):
         raise ValueError("invalid endpoint archive identity")
     raw = source(sha256)
-    if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_ARCHIVE_OBJECT_BYTES:
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= stage_limit(
+        "maximum_object_bytes", MAX_ARCHIVE_OBJECT_BYTES
+    ):
         raise ValueError("endpoint archive object differs from its bounded identity")
+    check_stage_json(raw, kind="object")
     value = json.loads(raw)
     if canonical_json_bytes(value) != raw or digest(value) != sha256:
         raise ValueError("endpoint archive object differs from its bounded identity")

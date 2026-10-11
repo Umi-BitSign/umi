@@ -41,7 +41,12 @@ from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import _close_provider
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread
-from .host_memory_runtime import memory_runtime
+from .host_memory_runtime import (
+    RequestsStageASGIBinding,
+    memory_runtime,
+    requests_stage_policy,
+    selected_memory,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, identity, sign_object
 from .private_files import ensure_private_directory, lock_private_file
@@ -101,6 +106,10 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         resources.enter_context(
             memory_runtime(
                 config.host_memory_admission,
+                role="phase_reviewer",
+                protocol_policy_sha256=digest(config.policy),
+                series_sha256=digest(config.series),
+                authority_sha256=digest(config.series.recovery.authority),
                 maximum_aggregate_bytes=max(
                     config.request_evidence_bytes, config.request_replay_bytes
                 ),
@@ -153,6 +162,12 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             },
         )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        if requests_stage_policy() is not None:
+            app.add_middleware(
+                RequestsStageASGIBinding,
+                controller=selected_memory(),
+                private_role="phase_reviewer",
+            )
         models = None
         direct_artifacts = None
         for phase in ("intake", "preparation", "requests"):
@@ -333,7 +348,12 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
                         raise PhaseReviewServiceFailure(
                             "endpoint_finality_observer_stopped"
                         ) from error
-                if server.started and app.state.benchmark is not None and workers is None:
+                if (
+                    server.started
+                    and app.state.benchmark is not None
+                    and workers is None
+                    and requests_stage_policy() is None
+                ):
                     workers = asyncio.create_task(app.state.benchmark.run(stop))
                 await asyncio.wait((serving, *((workers,) if workers else ())), timeout=0.25)
                 if workers is not None and workers.done():

@@ -241,7 +241,9 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         resources.callback(os.close, descriptor)
         resources.enter_context(
             memory_runtime(
-                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+                config.host_memory_admission,
+                maximum_aggregate_bytes=config.maximum_package_bytes,
+                role="reward_coordinator",
             )
         )
         if config.role == "coordinator":

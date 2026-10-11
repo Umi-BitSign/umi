@@ -10,6 +10,8 @@ def request_review_routes(exporter: RequestReviewExporter, *, token: str):
     return phase_review_routes(
         exporter,
         admission_lane="owner_export",
+        admission_operation="requests_export",
+        admission_scope=lambda request: (request.progress.cohort_sha256, request.progress.phase),
         token=token,
         path=PATH,
         request_model=RequestReviewRequest,

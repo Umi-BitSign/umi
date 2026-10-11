@@ -59,6 +59,7 @@ from .competition_reward_manifest import RewardManifest, verify_reward_manifest
 from .competition_reward_service import _stop_task
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
 from .private_files import Directory, lock_private_file, read_private_model
@@ -580,12 +581,15 @@ class ServiceAdmissionHost:
             )
 
     async def _poll_legacy_uploads(self):
+        authorize_memory(None, None, "intake")
         return await run_owned_thread(self.uploads.poll_once)
 
     async def _poll_direct_uploads(self):
+        authorize_memory(None, None, "intake")
         return await self.direct_uploads.poll_once()
 
     async def _poll_models(self):
+        authorize_memory(None, None, "intake")
         return await self.models.poll_once()
 
     async def poll_once(self) -> dict:
@@ -604,6 +608,7 @@ class ServiceAdmissionHost:
         }
 
     async def _poll_catalogs(self) -> dict:
+        authorize_memory(None, None, "preparation")
         ready = pending = 0
         last_error = ""
         for key, queue in self.queues.items():
@@ -730,6 +735,9 @@ class ServiceAdmissionHost:
                 os.close(lease)
 
     async def _poll(self, stop: asyncio.Event) -> None:
+        if requests_stage_policy() is not None:
+            await stop.wait()
+            return
         # Each store has one serial reconciliation owner. Slow model reviews or
         # direct-R2 verification cannot postpone legacy upload finalization or
         # catalog installation. Cancel/drain every owner before closing clients,

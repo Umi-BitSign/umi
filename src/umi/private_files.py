@@ -18,6 +18,7 @@ from typing import Annotated, Literal, TypeVar
 from pydantic import AfterValidator, BaseModel, Field
 
 from .canonical_stream import canonical_json_matches
+from .host_memory_request_bounds import charge_stage_declaration, check_stage_json, stage_limit
 from .protocol import canonical_json_bytes
 
 MAX_PRIVATE_BYTES = 64 * 1024**2
@@ -119,7 +120,11 @@ def _read_bounded_private_bytes(path: Path, *, maximum_bytes: int) -> bytes:
 def read_private_model(
     path: Path, model: type[_Model], *, maximum_bytes: int | None = None
 ) -> _Model:
-    raw = _read_private_bytes(path, maximum_bytes=_byte_bound(maximum_bytes))
+    raw = _read_private_bytes(
+        path, maximum_bytes=stage_limit("maximum_declaration_bytes", _byte_bound(maximum_bytes))
+    )
+    charge_stage_declaration(len(raw))
+    check_stage_json(raw, kind="declaration")
     value = model.model_validate_json(raw)
     if not canonical_json_matches(value, raw):
         raise ValueError("evaluator input must have stable canonical bytes")

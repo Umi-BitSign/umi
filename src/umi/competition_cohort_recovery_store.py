@@ -30,6 +30,7 @@ from .competition_cohort_recovery import (
     propose_recovery_transition,
     verify_recovery_quorum,
 )
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -73,6 +74,7 @@ _Record = TypeVar("_Record", bound=StrictProtocolModel)
 def _decode(model: type[_Record], raw: bytes, maximum: int) -> _Record:
     if type(raw) is not bytes or not 0 < len(raw) <= maximum:
         raise ValueError("cohort recovery record exceeds its byte bound")
+    check_stage_json(raw, kind="declaration")
     value = model.model_validate_json(raw)
     if canonical_json_bytes(value) != raw:
         raise ValueError("cohort recovery record is not canonical")

@@ -17,6 +17,7 @@ from pydantic import JsonValue
 
 from .competition_round_plan import RoundPlan, RoundProposal
 from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
+from .host_memory_request_bounds import charge_stage_declaration, check_stage_json, stage_limit
 from .open_competition import digest
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, acquire_private_mutex
 from .private_files import MAX_PRIVATE_BYTES as MAX_BYTES
@@ -911,10 +912,15 @@ class RoundJournal:
         ).fetchone()
         if size is None:
             return None
-        if type(size[0]) is not int or not 1 <= size[0] <= self.maximum_record_bytes:
+        bound_kind = "declaration" if kind in {"service_catalog", "service_round"} else "object"
+        maximum = stage_limit("maximum_" + bound_kind + "_bytes", self.maximum_record_bytes)
+        if type(size[0]) is not int or not 1 <= size[0] <= maximum:
             raise ValueError("retained round object exceeds its byte bound")
         row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
         raw = bytes(row[0])
+        if bound_kind == "declaration":
+            charge_stage_declaration(len(raw))
+        check_stage_json(raw, kind=bound_kind)
         if not is_canonical_json(raw):
             raise ValueError("retained round object is not canonical")
         return raw
@@ -926,7 +932,9 @@ class RoundJournal:
         either an absent record or a retained JSON null.
         """
         raw = self.get_raw(kind, key, db=db)
-        return json.loads(raw) if raw is not None else None
+        if raw is not None:
+            return json.loads(raw)
+        return None
 
     def get_raw(self, kind: str, key: str, *, db: sqlite3.Connection | None = None) -> bytes | None:
         """Read bounded canonical bytes with the same fresh conflict fence."""

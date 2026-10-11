@@ -349,7 +349,9 @@ async def run_installed_standing_rewards(
     async with AsyncExitStack() as constructing:
         constructing.enter_context(
             memory_runtime(
-                config.host_memory_admission, maximum_aggregate_bytes=config.maximum_package_bytes
+                config.host_memory_admission,
+                maximum_aggregate_bytes=config.maximum_package_bytes,
+                role="reward_writer",
             )
         )
         providers = {}

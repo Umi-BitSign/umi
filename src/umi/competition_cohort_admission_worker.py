@@ -31,6 +31,7 @@ from .competition_cohort_preparation_publisher import (
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import AdmissionCapacity, CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import authorize_memory
 from .open_competition import CompetitionPolicy, digest, identity, sign_object
 from .private_files import Directory, ensure_private_directory, lock_private_file
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -149,6 +150,7 @@ class CohortAdmissionWorker:
         self.cursors = {}
 
     async def poll_once(self):
+        authorize_memory(None, None, "intake")
         published = certified = retried = 0
         for binding in self.votes.cohorts:
             cohort = binding.cohort_sha256

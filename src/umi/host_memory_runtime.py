@@ -18,6 +18,7 @@ from pydantic import Field, ValidationError, model_validator
 
 from .concurrency import run_owned_thread
 from .host_memory_admission import HostMemoryAdmission, HostMemoryLease, _absolute
+from .host_memory_request_bounds import stage_evidence_budget
 from .protocol import StrictProtocolModel
 
 
@@ -46,7 +47,15 @@ def selected_memory() -> HostMemoryAdmission | None:
 
 
 @contextmanager
-def memory_runtime(selection: HostMemoryAdmissionSelection | None, *, maximum_aggregate_bytes: int):
+def memory_runtime(
+    selection: HostMemoryAdmissionSelection | None,
+    *,
+    maximum_aggregate_bytes: int,
+    role=None,
+    protocol_policy_sha256=None,
+    series_sha256=None,
+    authority_sha256=None,
+):
     previous = selected_memory()
     if selection is None:
         if previous is not None:
@@ -58,6 +67,7 @@ def memory_runtime(selection: HostMemoryAdmissionSelection | None, *, maximum_ag
         expected_sha256=selection.policy_sha256,
         host_identity_path=Path(selection.host_identity_path),
     )
+    controller.bind_runtime(role, protocol_policy_sha256, series_sha256, authority_sha256)
     if maximum_aggregate_bytes > controller.policy.maximum_aggregate_bytes:
         raise ValueError("host aggregate limit exceeds its qualified admission policy")
     if previous is not None and previous.policy_sha256 != controller.policy_sha256:
@@ -133,7 +143,7 @@ def compact_memory_error(error: BaseException) -> BaseException:
     return result
 
 
-def memory_operation(function):
+def memory_operation(function=None, *, operation=None, scope=None, requests_stage_only=False):
     """Guard a complete async operation whose successful result is compact.
 
     Callers must use owned work helpers and must not await peer operations
@@ -141,19 +151,38 @@ def memory_operation(function):
     whereas preceding/following opportunity or peer-vote work stays outside.
     """
 
+    if function is None:
+        return lambda selected: memory_operation(
+            selected, operation=operation, scope=scope, requests_stage_only=requests_stage_only
+        )
+
     @wraps(function)
     async def admitted(*args, **kwargs):
         controller = selected_memory()
-        if controller is None:
+        if controller is None or (
+            requests_stage_only and not getattr(controller, "requests_stage", False)
+        ):
             return await function(*args, **kwargs)
+        selected_scope = (
+            {}
+            if scope is None or not getattr(controller, "requests_stage", False)
+            else dict(zip(("cohort", "phase"), scope(*args, **kwargs), strict=True))
+        )
+        if getattr(controller, "requests_stage", False):
+            controller.authorize(operation, **selected_scope, lane="transient")
         inherited = _active.get()
         if inherited is not None and not inherited.closed:
             raise RuntimeError("nested host memory operation would wait on its own capacity")
-        lease = await controller.acquire("transient")
+        lease = await (
+            controller.acquire("transient", operation=operation, **selected_scope)
+            if getattr(controller, "requests_stage", False)
+            else controller.acquire("transient")
+        )
         token = _active.set(lease)
         failure = None
         try:
-            return await function(*args, **kwargs)
+            with stage_evidence_budget():
+                return await function(*args, **kwargs)
         except BaseException as error:
             failure = compact_memory_error(error)
         finally:
@@ -164,7 +193,79 @@ def memory_operation(function):
     return admitted
 
 
-@memory_operation
-async def run_memory_thread(function, *args):
+async def run_memory_thread(function, *args, operation=None, cohort=None, phase=None):
     """A complete local package operation returning only compact state."""
-    return await run_owned_thread(function, *args)
+    admitted = memory_operation(operation=operation, scope=lambda *_: (cohort, phase))(
+        run_owned_thread
+    )
+    return await admitted(function, *args)
+
+
+def authorize_memory(operation, cohort, phase, *, lane=None):
+    controller = selected_memory()
+    if controller is not None and getattr(controller, "requests_stage", False):
+        controller.authorize(operation, cohort, phase, lane=lane)
+
+
+def requests_stage_policy():
+    controller = selected_memory()
+    return (
+        controller.policy
+        if controller is not None and getattr(controller, "requests_stage", False)
+        else None
+    )
+
+
+@contextmanager
+def bind_memory_controller(controller):
+    """Bind an already validated immutable controller across an explicit entry."""
+    previous = selected_memory()
+    if previous is not None and previous.policy_sha256 != controller.policy_sha256:
+        raise ValueError("entry point changes its selected memory policy")
+    token = _selected.set(controller)
+    try:
+        yield
+    finally:
+        _selected.reset(token)
+
+
+class RequestsStageASGIBinding:
+    """Cover lifespan children and independent HTTP tasks with the same policy.
+
+    Public routes are not qualified during requests closure and refuse before
+    reading bodies or native state. Private owner/reviewer routes have fixed scopes.
+    """
+
+    def __init__(self, app, *, controller, private_role=None):
+        self.app, self.controller, self.private_role = app, controller, private_role
+
+    def _permitted(self, scope):
+        if self.private_role is None:
+            return False
+        paths = {
+            "intake": {"/internal/cohorts/request-review": "requests_export"},
+            "phase_reviewer": {
+                "/internal/cohorts/requests/votes/progress": "requests_review",
+                "/internal/cohorts/requests/votes/decision": "requests_decision",
+            },
+        }
+        operation = paths.get(self.private_role, {}).get(scope.get("path"))
+        return scope.get("method") == "POST" and operation in self.controller.policy.operations
+
+    async def __call__(self, scope, receive, send):
+        with bind_memory_controller(self.controller):
+            if scope["type"] == "http" and not self._permitted(scope):
+                body = b'{"detail":"C5 request certification stage holds new admission work"}'
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            await self.app(scope, receive, send)
