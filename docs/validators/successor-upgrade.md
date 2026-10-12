@@ -824,9 +824,10 @@ not a supported way to shorten a pending operation.
 Adoption prepare, reserve and review require a fresh verifier-owned finalized
 height. The native provider checks observer liveness, authenticated header
 bindings, policy/runtime verifier pins, startup/minimum floors, freshness and
-durable rollback evidence. For post-C5 lifecycle owners with a selected profile,
-initial history import and intake history publication use that same height port
-under `authority_seconds`; publication preserves authority, decision replay,
+durable rollback evidence. Lifecycle owners with a signed plan sequence greater
+than five and a selected profile use that same height port for initial history
+import and intake history publication under `authority_seconds`; publication
+preserves authority, decision replay,
 retained participation, closure seals and exact pending-control checks. Failed
 publication can be retried after control commit using the original certificate.
 This height is not registration-membership evidence and cannot authorize public
@@ -849,8 +850,10 @@ other hosts or their proxies.
 
 Omitting the profile preserves historical canonical configuration bytes and
 legacy timeout behavior, including the 2,400-second adoption history/reservation
-reader defaults. C5 and lifecycle owners without a profile retain their capture
-publication port. Ordinary readiness, model, service, registration collection
+reader defaults. Lifecycle owners whose signed plan sequence is five or lower,
+and owners without a selected profile, retain their capture publication port.
+This compatibility path remains required while retained plans or deployed owners
+meet either condition. Ordinary readiness, model, service, registration collection
 and signing limits retain their explicit selections. Existing owner/reviewer journals, authority, state
 directories and signed cohort clocks remain in place. Timed-out owned native
 work drains before its lock is released, so a late HTTP 503 can occur after the
