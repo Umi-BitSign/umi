@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
+from collections.abc import Callable
 
 from .competition_cohort_reward_package import CohortRewardPackage
-from .competition_evidence_codec import checked_size
+from .competition_evidence_codec import checked_digest, checked_size
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, review_reward_coverage
 from .competition_reward_coverage_capture import capture_reward_eligibility
 from .competition_reward_coverage_intervals import coverage_point
 from .competition_reward_coverage_journal import RewardCoverageJournal
+from .competition_reward_coverage_prepared import (
+    CoveragePackageReplayRequired,
+    RetainedCoveragePackage,
+)
 from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryPending
+from .host_memory_runtime import memory_operation, selected_memory
 from .open_competition import digest
 
 
@@ -32,7 +40,10 @@ class NativeRewardCoverageSource:
         journal: RewardCoverageJournal,
         history: RewardControlHistoryReader,
         preparation: StandingRewardPreparation,
-        package: CohortRewardPackage,
+        package: CohortRewardPackage | None = None,
+        package_loader: Callable[[], CohortRewardPackage] | None = None,
+        package_sha256: str | None = None,
+        package_guard: asyncio.Lock | None = None,
         decisions: DecisionSource,
         profile: RewardEligibilityRuntime,
         maximum_history_blocks: int = 64,
@@ -40,6 +51,8 @@ class NativeRewardCoverageSource:
     ):
         checked_size(maximum_history_blocks, 4096)
         checked_size(maximum_cached_endpoints, 512)
+        if selected_memory() is not None and package is not None:
+            raise ValueError("host-admitted coverage requires a lazy private package loader")
         reader = preparation.reader
         if (
             journal.rule != opportunity_rule(preparation.manifest, reader.series, reader.policy)
@@ -50,7 +63,18 @@ class NativeRewardCoverageSource:
         ):
             raise ValueError("coverage source differs from selected native context")
         self.provider, self.journal, self.history = provider, journal, history
+        if (package is None) == (package_loader is None):
+            raise ValueError(
+                "coverage source selects exactly one package or private package loader"
+            )
+        if package_loader is not None:
+            checked_digest(package_sha256)
+        elif package_sha256 is not None:
+            raise ValueError("eager coverage source does not take a package loader identity")
         self.preparation, self.package, self.decisions = preparation, package, decisions
+        self._package_loader, self._package_sha256 = package_loader, package_sha256
+        self._retained_package = None
+        self._package_guard = package_guard if package_guard is not None else asyncio.Lock()
         self.profile = profile
         self.maximum_history_blocks = maximum_history_blocks
         self.maximum_cached_endpoints = maximum_cached_endpoints
@@ -83,7 +107,8 @@ class NativeRewardCoverageSource:
         try:
             # RPCs/proof executors bound their individual operations. A total
             # timer here would repeatedly discard slow immutable package replay.
-            return await self._capture(validator_hotkey, height)
+            async with self._package_guard:
+                return await self._capture(validator_hotkey, height)
         except HistoricalHeaderRecoveryPending:
             raise CoverageHistoryPending from None
 
@@ -98,33 +123,54 @@ class NativeRewardCoverageSource:
             profile=self.profile,
             expected_runtime_profile_sha256=self.journal.rule.runtime_profile_sha256,
         )
-        return self._remember(
-            await review_reward_coverage(
+
+        async def review(package):
+            return await review_reward_coverage(
                 self.preparation,
-                self.package,
+                package,
                 eligibility=eligibility,
                 history=history,
                 source=self.decisions,
                 expected_runtime_profile_sha256=self.journal.rule.runtime_profile_sha256,
             )
-        )
+
+        return self._remember(await self._with_package(review))
+
+    @memory_operation
+    async def _with_package(self, review):
+        if self._package_loader is None:
+            return await review(self.package)
+        if self._retained_package is not None:
+            try:
+                return await review(self._retained_package)
+            except CoveragePackageReplayRequired:
+                pass
+        package = await run_owned_thread(self._package_loader)
+        if await run_owned_thread(digest, package) != self._package_sha256:
+            raise ValueError("coverage package loader changed the selected original")
+        endpoint = await review(package)
+        self._retained_package = RetainedCoveragePackage(endpoint.prepared)
+        return endpoint
 
     async def replay(self, key: str) -> OwnedRewardCoverageEndpoint:
-        return await self._replay(key)
+        async with self._package_guard:
+            return await self._replay(key)
 
     async def _replay(self, key):
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        return self._remember(
-            await self.journal.review_endpoint(
+
+        async def review(package):
+            return await self.journal.review_endpoint(
                 key,
                 provider=self.provider,
                 preparation=self.preparation,
-                package=self.package,
+                package=package,
                 history=None,
                 history_source=self._history,
                 source=self.decisions,
                 profile=self.profile,
             )
-        )
+
+        return self._remember(await self._with_package(review))

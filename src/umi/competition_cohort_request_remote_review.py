@@ -6,6 +6,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from functools import partial
 
+from .canonical_stream import canonical_json_matches
 from .competition_cohort_admission_review import review_cohort_participation
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -22,6 +23,7 @@ from .competition_cohort_request_export import (
     replay_request_export,
 )
 from .competition_cohort_request_phase import NativeRequestReview, RequestProgressReviewRecord
+from .competition_cohort_request_tail import verify_request_tail_clock
 from .competition_cohort_review_export import (
     MAX_EXPORT_BYTES,
     review_export_limits,
@@ -31,7 +33,15 @@ from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
+from .competition_work_progress import (
+    WorkProgress,
+    await_progress,
+    progress_items,
+    review_operation,
+    review_read,
+)
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import digest, identity, verify_signature
 from .policy import ScoringPolicy
 from .protocol import canonical_json_bytes
@@ -61,7 +71,7 @@ class RemoteRequestProgressReviewer:
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
     ):
-        review_export_limits(maximum_bytes, timeout_seconds)
+        review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=True)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
             raise ValueError("request export sampling gap is outside bounds")
         self.policy, self.cohorts, self.owner = review_selection(provider.policy, cohorts, owner)
@@ -82,6 +92,7 @@ class RemoteRequestProgressReviewer:
             timeout_seconds,
         )
 
+    @review_read
     async def _read(
         self, progress: CohortPhaseProgress
     ) -> tuple[RequestReviewExport, NativeRequestReview]:
@@ -97,23 +108,41 @@ class RemoteRequestProgressReviewer:
             challenge=secrets.token_hex(32),
             progress=progress,
         )
-        raw = await wait_for_owned(self.fetch(request), timeout=self.timeout_seconds)
-        if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
-            raise ValueError("request response exceeds its byte bound")
-        signed = SignedRequestReviewResponse.model_validate_json(raw)
-        response, signature = signed.response, signed.signature
-        if canonical_json_bytes(signed) != raw or identity(signature.hotkey) != self.owner:
-            raise ValueError("request response is not canonical or changes its selected owner")
-        verify_signature(response, signature)
-        exported = response.evidence
-        if (
-            response.challenge != request.challenge
-            or exported.record.progress != progress
-            or digest(exported.history.authority.authority) != bindings[progress.cohort_sha256]
-        ):
-            raise ValueError(
-                "request response changes its challenge, progress or approved authority"
-            )
+        raw = await await_progress(
+            wait_for_owned(self.fetch(request), timeout=self.timeout_seconds),
+            stage="request_owner_export",
+        )
+        with WorkProgress(
+            "request_response_validation",
+            5,
+            unit="validation_steps",
+            estimate=False,
+            cohort=progress.cohort_sha256,
+        ) as validation:
+            if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
+                raise ValueError("request response exceeds its byte bound")
+            check_stage_json(raw)
+            validation.advance()
+            signed = SignedRequestReviewResponse.model_validate_json(raw)
+            validation.advance()
+            response, signature = signed.response, signed.signature
+            if not canonical_json_matches(signed, raw) or identity(signature.hotkey) != self.owner:
+                raise ValueError("request response is not canonical or changes its selected owner")
+            validation.advance()
+            del raw
+            verify_signature(response, signature)
+            validation.advance()
+            exported = response.evidence
+            if (
+                response.challenge != request.challenge
+                or exported.record.progress != progress
+                or digest(exported.history.authority.authority) != bindings[progress.cohort_sha256]
+            ):
+                raise ValueError(
+                    "request response changes its challenge, progress or approved authority"
+                )
+            validation.advance()
+        del signed, response, signature
         replay = await run_owned_thread(
             partial(
                 replay_request_export,
@@ -128,19 +157,40 @@ class RemoteRequestProgressReviewer:
         )
         return exported, replay
 
+    @review_operation(reads=2)
     async def review(self, progress: CohortPhaseProgress) -> RequestProgressReviewRecord:
         exported, original = await self._read(progress)
+        # Pin the complete canonical evidence before releasing its large object
+        # graph. Both independent reads still perform full native replay; the
+        # digest also detects changes outside the compact native review result.
+        with WorkProgress(
+            "request_export_digest", 1, unit="exports", cohort=progress.cohort_sha256
+        ) as hashing:
+            exported_sha256 = digest(exported)
+            hashing.advance()
+        records, seals = exported.records, exported.seals
+        del exported
         observations = [
             original.record.service.observation,
             *(d.observation for d in original.decisions),
+            *original.inventory_observations,
         ]
         if original.record.fence is not None:
             observations.append(original.record.fence.observation)
+        if original.record.tail_fence is not None:
+            observations.append(original.record.tail_fence.observation)
+        if original.tail is not None and original.tail.selected_observation is not None:
+            observations.append(original.tail.selected_observation)
         seal = self.roster.intake_seal
         if progress.completion == "complete":
-            observations.extend([seal.observation, *(s.observation for s in exported.seals)])
+            observations.extend([seal.observation, *(s.observation for s in seals)])
         checked = {}
-        for observation in observations:
+        for observation in progress_items(
+            observations,
+            stage="closure_registration_observations",
+            unit="observations",
+            cohort=progress.cohort_sha256,
+        ):
             key = digest(observation)
             if key in checked:
                 continue
@@ -151,10 +201,26 @@ class RemoteRequestProgressReviewer:
                 or checked[key].replayed_at.block_number < observation.block
             ):
                 raise ValueError("request proof differs from its original observation")
+        for tail in (original.tail, original.record.tail_fence):
+            if tail is None:
+                continue
+            verify_request_tail_clock(
+                tail,
+                checked[digest(tail.opened_observation)],
+                checked[digest(tail.observation)],
+                None
+                if tail.selected_observation is None
+                else checked[digest(tail.selected_observation)],
+            )
         if progress.completion == "complete":
             if checked[digest(seal.observation)].snapshot != seal.snapshot:
                 raise ValueError("request roster seal changed its original registration")
-            for record in exported.records:
+            for record in progress_items(
+                records,
+                stage="closure_participations",
+                unit="participations",
+                cohort=progress.cohort_sha256,
+            ):
                 proof = await self.archive(record.observation)
                 await review_cohort_participation(
                     canonical_json_bytes(record),
@@ -167,10 +233,16 @@ class RemoteRequestProgressReviewer:
         if execution_boundary(await self.provider.collect()).block < progress.observed_at_block:
             raise ValueError("request completion is ahead of owned finality")
         repeated, replay = await self._read(progress)
-        if repeated != exported or replay != original:
+        with WorkProgress(
+            "request_repeated_export_digest", 1, unit="exports", cohort=progress.cohort_sha256
+        ) as hashing:
+            repeated_sha256 = digest(repeated)
+            hashing.advance()
+        if repeated_sha256 != exported_sha256 or replay != original:
             raise OSError("request history changed during independent review")
         return original.record
 
+    @review_operation(reads=1)
     async def decision(
         self, transition: CohortRecoveryTransition, evidence: CohortDecisionInput
     ) -> str:

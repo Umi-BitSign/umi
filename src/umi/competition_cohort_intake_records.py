@@ -20,6 +20,7 @@ from .competition_cohort_participation import (
     admit_recovery_participant,
 )
 from .competition_execution import ExecutionBoundary
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import CompetitionPolicy, RegistrationSnapshot, digest
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -40,6 +41,7 @@ def read_participation(raw: bytes) -> RetainedCohortParticipation:
         raise ValueError("retained cohort participation exceeds its byte bound")
     # Only canonical decoding is reusable here. Callers still read the ledger
     # and check its current indexes, authority and registration separately.
+    check_stage_json(raw, kind="object")
     key = hashlib.sha256(raw).digest()
     cached = _participation_decode_reuse.lookup(key, key)
     if cached is not None:

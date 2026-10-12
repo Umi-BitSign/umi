@@ -30,6 +30,7 @@ from .competition_reward_coverage_intervals import (
     coverage_interval,
     coverage_point,
 )
+from .competition_reward_coverage_prepared import RetainedCoveragePackage, retained_package_sha256
 from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_eligibility_archive import review_reward_eligibility
@@ -373,7 +374,7 @@ class RewardCoverageJournal:
         *,
         provider: HistoricalRewardControlProvider,
         preparation: StandingRewardPreparation,
-        package: CohortRewardPackage,
+        package: CohortRewardPackage | RetainedCoveragePackage,
         history: OwnedRewardControlHistory | None,
         source: DecisionSource,
         profile: RewardEligibilityRuntime,
@@ -386,7 +387,12 @@ class RewardCoverageJournal:
                 if saved is None:
                     saved = await run_owned_thread(self._import, key)
                 point, frame, blobs = saved
-                if await run_owned_thread(digest, package) != frame["package"]:
+                package_sha256 = (
+                    retained_package_sha256(preparation, package)
+                    if type(package) is RetainedCoveragePackage
+                    else await run_owned_thread(digest, package)
+                )
+                if package_sha256 != frame["package"]:
                     raise ValueError("coverage endpoint requires its original package")
                 eligibility = await review_reward_eligibility(
                     provider,

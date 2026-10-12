@@ -1,7 +1,9 @@
-# RequestCompletionFiles only, including both original indexes.
+# RequestCompletionFiles only, including immutable partial-work snapshots.
 - .*
 - **/.*
 + /objects/*.json
 + /orders/*/*.json
 + /terminals/*/*.json
++ /partials/*/*/*/*.json
++ /inventories/*/*/*/*.json
 - **

@@ -42,6 +42,7 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_settlement import PromotionHeadBinding
 from .competition_store import CompetitionStore
+from .competition_work_progress import await_progress, progress_items
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import (
     CompetitionPolicy,
@@ -161,7 +162,7 @@ def replay_preparation_export(
     expected = {
         t.transition.evidence_sha256
         for t in exported.history.transitions
-        if t.transition.operation != "revoke"
+        if t.transition.requires_progress_evidence
     }
     if len(decisions) != len(exported.decisions) or set(decisions) != expected:
         raise ValueError("preparation export needs every original decision exactly once")
@@ -279,7 +280,11 @@ class RemotePreparationProgressReviewer:
             challenge=secrets.token_hex(32),
             progress=progress,
         )
-        raw = await wait_for_owned(self.fetch(request), timeout=self.timeout_seconds)
+        raw = await await_progress(
+            wait_for_owned(self.fetch(request), timeout=self.timeout_seconds),
+            stage="preparation_owner_export",
+            cohort=progress.cohort_sha256,
+        )
         if type(raw) is not bytes or not 0 < len(raw) <= self.maximum_bytes:
             raise ValueError("preparation response exceeds its byte bound")
         signed = SignedPreparationReviewResponse.model_validate_json(raw)
@@ -308,14 +313,24 @@ class RemotePreparationProgressReviewer:
             *(d.observation for d in original.decisions),
         )
         checked = {}
-        for observation in observations:
+        for observation in progress_items(
+            observations,
+            stage="preparation_registration_archives",
+            unit="observations",
+            cohort=progress.cohort_sha256,
+        ):
             key = digest(observation)
             if key not in checked:
                 raw, metadata = await self.archive(observation)
                 checked[key] = await self.provider.review_archive(observation, raw, metadata)
         if checked[digest(seal.observation)].snapshot != seal.snapshot:
             raise ValueError("prepared intake differs from independently verified registration")
-        for record in exported.records:
+        for record in progress_items(
+            exported.records,
+            stage="preparation_participations",
+            unit="participations",
+            cohort=progress.cohort_sha256,
+        ):
             proof = await self.archive(record.observation)
             await review_cohort_participation(
                 canonical_json_bytes(record),

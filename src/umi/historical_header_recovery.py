@@ -23,7 +23,11 @@ MAXIMUM_VERIFIED_HEADER_BYTES = 8 * 1024**2
 
 
 class HistoricalHeaderRecoveryPending(FileNotFoundError):
-    """A bounded pass preserved progress; the next review should resume it."""
+    """Recovery is unfinished; preserve its target and retry after backoff."""
+
+
+class HistoricalHeaderRecoveryProgress(HistoricalHeaderRecoveryPending):
+    """A bounded pass verified and retained links; the same target can continue."""
 
 
 @dataclass(frozen=True)
@@ -164,6 +168,18 @@ class HistoricalHeaderRecovery:
         current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
         if cached is not None and current["number"] != height:
             raise ValueError("historical registration differs from finalized ancestry")
+        # Another request may already have proved a closer descendant under
+        # this exact anchor. Continue from that link instead of repeating the
+        # entire walk when, for example, the next target is its parent.
+        nearest = min(
+            (number for number in self._verified if height < number < current["number"]),
+            default=None,
+        )
+        if nearest is not None:
+            encoded = self._verified[nearest]
+            current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+            if current["number"] != nearest:
+                raise ValueError("historical registration differs from finalized ancestry")
         used = 0
         for _ in range(self.batch_size):
             if current["number"] == height:
@@ -188,7 +204,7 @@ class HistoricalHeaderRecovery:
             if used >= MAXIMUM_PATH_BYTES:
                 break
         if current["number"] != height:
-            raise HistoricalHeaderRecoveryPending("historical header recovery in progress")
+            raise HistoricalHeaderRecoveryProgress("historical header recovery in progress")
         recovered = FinalizedSnapshotRef(
             current["number"], current["hash"], current["parent_hash"], current["state_root"]
         )

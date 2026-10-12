@@ -41,6 +41,12 @@ def main(argv=None):
                         "config_sha256": digest(config),
                         "series_sha256": digest(config.series),
                         "runtime_qualified": False,
+                        "phase_review_budget": (
+                            None
+                            if config.phase_review_budget is None
+                            else config.phase_review_budget.effective()
+                        ),
+                        "managed_phase_path_qualified": False,
                     }
                 )
             )

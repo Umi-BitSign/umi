@@ -86,11 +86,18 @@ def endpoint_inputs(original, scenario, miner_name):
 
 async def closure_fixture(original, tmp_path, *, prepared=None):
     b = make_round(original, include_outcomes=False) if prepared is None else prepared
-    b["history"] = b["history"].model_copy(update={"transitions": b["history"].transitions[:2]})
+    opened = next(
+        i for i, item in enumerate(b["history"].transitions) if item.transition.phase == "requests"
+    )
+    b["history"] = b["history"].model_copy(
+        update={"transitions": b["history"].transitions[:opened]}
+    )
     source = CohortOrderHistory(
         history=b["history"],
         decisions=tuple(
-            b["decisions"][t.transition.evidence_sha256] for t in b["history"].transitions
+            b["decisions"][t.transition.evidence_sha256]
+            for t in b["history"].transitions
+            if t.transition.requires_progress_evidence
         ),
     )
     objects, orders, terminals, owners, endpoint_archives = {}, [], {}, {}, {}
@@ -214,4 +221,14 @@ def build(b, **changes):
         current_block=1680,
     )
     args.update(changes)
+    if args.get("partial_source") is not None and "inventory_source" not in changes:
+        from .cohort_tail_settlement_fixture import inventory_original
+
+        def inventories(key, *, selected_at_block, completed_by_block):
+            return tuple(
+                inventory_original(b, partial, args["observation"])
+                for partial in args["partial_source"](key)
+            )
+
+        args["inventory_source"] = inventories
     return build_request_closure(**args)

@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
+from .competition_cohort_capacity import AggregateEvidenceCapacity
 from .competition_cohort_direct_model_review import (
     DirectModelArtifactReviewer,
     DirectModelReviewSourceConfig,
@@ -23,7 +24,7 @@ from .competition_cohort_direct_model_review import (
 )
 from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
-from .competition_reward_boot import Capacity, ObjectCapacity, _disjoint
+from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
 from .competition_reward_control_publisher import StandingControlPublisher
@@ -52,6 +53,7 @@ from .competition_reward_service import StandingRewardServiceLimits, _close_prov
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, sign_object
 from .private_files import (
@@ -92,22 +94,27 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     exchange_inbox: Directory
     exchange_outbox: Directory
     service: StandingRewardServiceLimits
-    maximum_history_bytes: Capacity
+    maximum_history_bytes: HistoryCapacity
     maximum_coverage_bytes: Capacity
     maximum_reader_bytes: Capacity
-    maximum_package_bytes: ObjectCapacity
+    maximum_package_bytes: AggregateEvidenceCapacity
     maximum_promotion_bytes: ObjectCapacity
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def omit_direct_model_review(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         for name in (
             "direct_model_review",
             "predecessor_series",
@@ -116,6 +123,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if not self.runtime_proof_reads:
+            value.pop("runtime_proof_reads", None)
         return value
 
     @model_validator(mode="after")
@@ -230,6 +239,13 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
     descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, descriptor)
+        resources.enter_context(
+            memory_runtime(
+                config.host_memory_admission,
+                maximum_aggregate_bytes=config.maximum_package_bytes,
+                role="reward_coordinator",
+            )
+        )
         if config.role == "coordinator":
             # Series journals are disjoint, but the control hotkey has one
             # mutable chain slot. Keep one host-wide publisher across series.
@@ -282,12 +298,14 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         provider = HistoricalRewardControlProvider(
             config.chain,
             config.policy,
+            runtime_proof_reads=config.runtime_proof_reads,
             historical_header_directory=root / "headers",
             historical_header_maximum_bytes=config.maximum_header_bytes,
             historical_header_database_maximum_bytes=config.maximum_header_database_bytes,
         )
         resources.push_async_callback(_close_provider, provider)
         rule = opportunity_rule(config.manifest, config.series, config.policy)
+        coverage_package_guard = asyncio.Lock()
         coverage = StandingRewardCoverageService(
             provider=provider,
             history=history,
@@ -295,6 +313,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             files=files,
             profile=config.eligibility,
             maximum_history_blocks=config.service.maximum_history_blocks,
+            package_guard=coverage_package_guard,
             journal=RewardCoverageJournal(
                 root / "coverage",
                 rule,
@@ -341,6 +360,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 files=files,
                 profile=config.predecessor_eligibility,
                 maximum_history_blocks=config.service.maximum_history_blocks,
+                package_guard=coverage_package_guard,
                 journal=RewardCoverageJournal(
                     old_root / "coverage",
                     old_rule,
@@ -450,25 +470,23 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
         await provider.start()
         work = asyncio.create_task(run(stop, poll_seconds=config.service.poll_seconds))
         resources.push_async_callback(_stop_task, work)
-        if config.role == "coordinator":
-            # Capture and recover minimum opportunity automatically, including
-            # while the next cohort is being evaluated. Validators also export
-            # original proofs; no periodic coordinator renewal is involved.
-            collectors = [
-                asyncio.create_task(coverage.run(stop, poll_seconds=config.service.poll_seconds))
-            ]
-            if predecessor_coverage is not None:
-                collectors.append(
-                    asyncio.create_task(
-                        predecessor_coverage.run(stop, poll_seconds=config.service.poll_seconds)
-                    )
+        # Both roles keep their native history and opportunity evidence ready
+        # while waiting for work. Otherwise a reviewer would start a full
+        # historical replay only after the coordinator requests its first vote.
+        # The reviewer still never loads the control transaction key.
+        collectors = [
+            asyncio.create_task(coverage.run(stop, poll_seconds=config.service.poll_seconds))
+        ]
+        if predecessor_coverage is not None:
+            collectors.append(
+                asyncio.create_task(
+                    predecessor_coverage.run(stop, poll_seconds=config.service.poll_seconds)
                 )
-            for collector in collectors:
-                resources.push_async_callback(_stop_task, collector)
-            done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-            if not stop.is_set():
-                raise RuntimeError("reward coordinator component exited before shutdown")
-        else:
-            await work
+            )
+        for collector in collectors:
+            resources.push_async_callback(_stop_task, collector)
+        done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+        if not stop.is_set():
+            raise RuntimeError("reward coordinator component exited before shutdown")

@@ -570,6 +570,25 @@ async def test_restart_retains_host_selection_and_allows_capacity_change(selecte
     assert providers.events[-1] == "closed"
 
 
+def test_private_owner_origin_matches_peer_and_transport_boundaries(selected):
+    from .test_competition_cohort_review_origin import ACCEPTED, REJECTED
+
+    original = canonical_json_bytes(selected.config)
+    for origin in ACCEPTED:
+        changed = PhaseReviewServiceConfig.model_validate(
+            selected.config.model_dump(by_alias=True) | {"owner_origin": origin}
+        )
+        assert changed.owner_origin == origin
+        assert changed.signing == selected.config.signing
+        assert canonical_json_bytes(changed.series) == canonical_json_bytes(selected.config.series)
+    for origin in REJECTED:
+        with pytest.raises(ValueError):
+            PhaseReviewServiceConfig.model_validate(
+                selected.config.model_dump(by_alias=True) | {"owner_origin": origin}
+            )
+    assert canonical_json_bytes(selected.config) == original
+
+
 @pytest.mark.parametrize("failure", ["key", "start"])
 async def test_failed_startup_closes_provider_and_releases_lease(
     selected, providers, monkeypatch, failure
@@ -1076,13 +1095,16 @@ async def test_direct_model_only_review_boot_omits_endpoint_path(selected, provi
 
 
 @pytest.mark.parametrize("shared_windows", [False, True])
+@pytest.mark.parametrize("loopback", [False, True])
 async def test_endpoint_boot_owns_origin_provider_and_native_workers(
-    selected, providers, monkeypatch, shared_windows
+    selected, providers, monkeypatch, shared_windows, loopback
 ):
     c = with_endpoint(selected.config)
     c = c.model_copy(
         update={"endpoint": c.endpoint.model_copy(update={"shared_miner_windows": shared_windows})}
     )
+    if loopback:
+        c = c.model_copy(update={"owner_origin": "http://127.0.0.1:18090"})
     endpoint_credentials(c)
     monkeypatch.setattr(boot, "CohortEndpointFinalityProvider", providers.provider)
     async with boot.phase_review_app(c) as app:
@@ -1166,3 +1188,22 @@ def test_cli_enables_numeric_retirement_diagnostics(
         old_propagate,
         old_handlers,
     )
+
+
+@pytest.mark.parametrize("maximum", [1024**3, 4 * 1024**3])
+def test_request_aggregate_override_preserves_legacy_config_and_other_phase_limits(
+    selected, maximum
+):
+    original = canonical_json_bytes(selected.config)
+    assert b"maximum_aggregate_evidence_bytes" not in original
+    assert selected.config.request_evidence_bytes == selected.config.maximum_export_bytes
+    assert selected.config.request_replay_bytes == 256 * 1024**2
+    changed = PhaseReviewServiceConfig.model_validate(
+        selected.config.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": maximum}
+    )
+    assert changed.request_evidence_bytes == changed.request_replay_bytes == maximum
+    assert changed.maximum_export_bytes == selected.config.maximum_export_bytes
+    assert changed.maximum_promotion_bytes == selected.config.maximum_promotion_bytes
+    restored = changed.model_dump(by_alias=True)
+    restored.pop("maximum_aggregate_evidence_bytes")
+    assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate(restored)) == original

@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from websockets.protocol import State
 
 from umi.chain_evidence import FinalizedSnapshotRef
 from umi.competition_chain import (
@@ -957,19 +958,22 @@ async def test_wait_ready_propagates_owned_observer_failure(chain, monkeypatch):
 
 @pytest.fixture
 def pooled_sockets(monkeypatch):
-    state = SimpleNamespace(connections=[], requests=0, blocked=False, invalid_next=False)
+    state = SimpleNamespace(
+        connections=[], requests=0, blocked=False, invalid_next=False, started_after=8
+    )
     started = asyncio.Event()
 
     class Socket:
         def __init__(self):
             self.busy = False
+            self.state = State.OPEN
 
         async def send(self, request):
             assert not self.busy
             assert json.loads(request)["id"] == 1
             self.busy = True
             state.requests += 1
-            if state.requests >= 8:
+            if state.requests >= state.started_after:
                 started.set()
 
         async def recv(self):
@@ -995,6 +999,7 @@ def pooled_sockets(monkeypatch):
         async def __aexit__(self, *args):
             await asyncio.sleep(0)
             self.closed = True
+            self.socket.state = State.CLOSED
 
     def connect(endpoint, **kwargs):
         assert kwargs["max_size"] in (2048, 17 * 1024**2, 33 * 1024**2, 1024**2)
@@ -1073,6 +1078,52 @@ async def test_persistent_rpc_discards_protocol_error_without_retry(chain_config
     assert await transport.request("state_getStorageAt", ("0x02", _hash(1))) == "0x00"
     assert len(state.connections) == 2
     await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
+
+
+async def test_persistent_block_reads_reuse_socket_and_discard_invalid_response(
+    chain_config, pooled_sockets
+):
+    state, _ = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    try:
+        results = await asyncio.gather(
+            *(transport.request("chain_getBlock", (_hash(block),)) for block in (1, 2, 3))
+        )
+        assert results == ["0x00"] * 3
+        assert state.requests == 3
+        assert len(state.connections) == 1
+        assert state.connections[0].max_size == 1024**2
+        state.invalid_next = True
+        with pytest.raises(RuntimeError, match="proof_rpc_response_invalid"):
+            await transport.request("chain_getBlock", (_hash(4),))
+        assert state.requests == 4 and state.connections[0].closed
+        assert await transport.request("chain_getBlock", (_hash(5),)) == "0x00"
+        assert len(state.connections) == 2
+    finally:
+        await transport.aclose()
+    assert all(connection.closed for connection in state.connections)
+
+
+async def test_persistent_block_read_cancellation_drains_socket(chain_config, pooled_sockets):
+    state, started = pooled_sockets
+    transport = _RegistrationRpc(chain_config, persistent=True)
+    state.blocked = True
+    state.started_after = 1
+    task = asyncio.create_task(transport.request("chain_getBlock", (_hash(1),)))
+    try:
+        await asyncio.wait_for(started.wait(), 30)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(state.connections) == 1 and state.connections[0].closed
+        state.blocked = False
+        assert await transport.request("chain_getBlock", (_hash(2),)) == "0x00"
+        assert len(state.connections) == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await transport.aclose()
     assert all(connection.closed for connection in state.connections)
 
 

@@ -155,6 +155,226 @@ def test_retained_round_reuses_private_object_with_fresh_authority(preparation, 
     assert len(h.owner._retained_cache) == 1
 
 
+def test_cached_preparation_does_not_wait_for_intake_writer(preparation):
+    h = preparation
+    h.certify()
+    first = run(h)
+    expected = history_tip(h.history)
+    assert h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=340) == first
+    with ThreadPoolExecutor(max_workers=1) as pool, h.intake._connection() as (db, _):
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            reading = pool.submit(
+                h.owner.retained, h.cohort, expected_tip_sha256=expected, current_block=350
+            )
+            assert reading.result(timeout=60) == first
+        finally:
+            db.rollback()
+
+
+@pytest.mark.parametrize("one_round_budget", [False, True])
+def test_independent_cohorts_reuse_preparation_with_bounded_eviction(
+    scenario, tmp_path, monkeypatch, one_round_budget
+):
+    from umi.competition_cohort_history import CohortRecoveryHistory
+    from umi.competition_cohort_intake import CohortIntakeBinding, CohortIntakeConfig
+    from umi.competition_cohort_recovery import (
+        SignedCohortRecoveryAuthority,
+        admit_recoverable_cohort,
+    )
+
+    from .test_competition_cohort_recovery import signatures
+
+    original = scenario["intake_history"]
+    plans = (
+        original.plan,
+        original.plan.model_copy(update={"sequence": original.plan.sequence + 1}),
+    )
+    body = original.authority.authority.model_copy(
+        update={"cohort_sha256s": tuple(sorted(digest(plan) for plan in plans))}
+    )
+    authority = SignedCohortRecoveryAuthority(authority=body, signatures=signatures(body))
+    intake = CohortIntake(
+        CohortIntakeConfig(
+            directory=str(tmp_path / "two-cohort-intake"),
+            cohorts=tuple(
+                CohortIntakeBinding(cohort_sha256=digest(plan), authority_sha256=digest(body))
+                for plan in sorted(plans, key=digest)
+            ),
+        ),
+        scenario["policy"],
+        initialize=True,
+    )
+    queue = CohortAdmissionQueue(intake)
+    store = CompetitionStore(tmp_path / "promotion", intake.policy)
+    bundle = bundle_at(tmp_path / "model")
+    preserve_bundle(bundle, tmp_path / "model", tmp_path / "archive", intake.policy)
+    store.initialize_baseline(bundle, tmp_path / "archive")
+    owner = CohortPreparation(queue, store)
+    prepared = []
+    for plan in plans:
+        cohort = digest(plan)
+        genesis, _ = admit_recoverable_cohort(plan, authority, intake.policy, admitted_at_block=160)
+        history = CohortRecoveryHistory(
+            schema="umi-cohort-recovery-history/1",
+            plan=plan,
+            authority=authority,
+            genesis=genesis,
+            genesis_signatures=signatures(genesis),
+            transitions=(),
+        )
+        consent_body = scenario["consent"].consent.model_copy(
+            update={"cohort_sha256": cohort, "authority_sha256": digest(body)}
+        )
+        consent = scenario["consent"].__class__(
+            consent=consent_body, signature=sign_object(consent_body, wallet("Alice"))
+        )
+        current = {**scenario, "intake_history": history, "consent": consent}
+        intake.publish(history, capture_at(210))
+        request = request_for(current)
+        receipt = intake.retain(request, capture_at(210))
+        history, closing, _ = seal_and_close(intake, current)
+        intake.publish(history, capture_at(300), closure_input=closing)
+        admission = CohortParticipantAdmission.model_validate(receipt["proposed_admission"])
+        for name in ("Charlie", "Dave"):
+            queue.publish_vote(
+                CohortAdmissionVote(
+                    admission=admission, signature=sign_object(admission, wallet(name))
+                ),
+                capture_at(320),
+            )
+        expected = history_tip(history)
+        result = owner.prepare(cohort, capture_at(330), expected_tip_sha256=expected)
+        prepared.append((cohort, expected, result))
+
+    if one_round_budget:
+        owner = CohortPreparation(
+            queue, store, maximum_bytes=max(len(canonical_json_bytes(r)) for _, _, r in prepared)
+        )
+    for cohort, expected, result in prepared:
+        assert owner.retained(cohort, expected_tip_sha256=expected, current_block=340) == result
+
+    replays = []
+    original_prepare = owner._prepare
+
+    def replay(cohort, *args, **kwargs):
+        replays.append(cohort)
+        return original_prepare(cohort, *args, **kwargs)
+
+    monkeypatch.setattr(owner, "_prepare", replay)
+    for cohort, expected, result in prepared:
+        assert owner.retained(cohort, expected_tip_sha256=expected, current_block=350) == result
+    assert replays == ([cohort for cohort, _, _ in prepared] if one_round_budget else [])
+
+
+@pytest.mark.parametrize("wrong_round", [False, True])
+def test_cached_preparation_replays_new_closure_without_rebuilding_members(
+    preparation, monkeypatch, wrong_round
+):
+    h = preparation
+    h.certify()
+    first = run(h)
+    h.owner.retained(h.cohort, expected_tip_sha256=history_tip(h.history), current_block=340)
+    decisions = {digest(h.closing): h.closing}
+    h.history = close(
+        h.history,
+        h.intake.policy,
+        decisions,
+        400,
+        "ab" * 32 if wrong_round else digest(first.roster.round),
+    )
+    h.intake.publish(h.history, capture_at(410), decision_inputs=tuple(decisions.values()))
+
+    def no_participant_replay(*args, **kwargs):
+        raise AssertionError("new authority must not repeat original participant reconstruction")
+
+    monkeypatch.setattr(h.owner, "_prepare", no_participant_replay)
+    if wrong_round:
+        with pytest.raises(ValueError, match="certified preparation"):
+            h.owner.retained(
+                h.cohort, expected_tip_sha256=history_tip(h.history), current_block=420
+            )
+    else:
+        assert (
+            h.owner.retained(
+                h.cohort, expected_tip_sha256=history_tip(h.history), current_block=420
+            )
+            == first
+        )
+
+
+def test_cached_preparation_extension_keeps_original_round(preparation, monkeypatch):
+    from umi.competition_cohort_coordinator import (
+        AttestedCohortPhaseProgress,
+        CohortDecisionInput,
+        CohortPhaseProgress,
+        _choice,
+    )
+    from umi.competition_cohort_history import verify_cohort_history
+    from umi.competition_execution import execution_boundary
+
+    from .test_competition_cohort_recovery import signatures, signed_transition
+
+    h = preparation
+    h.certify()
+    first = run(h)
+    previous_tip = history_tip(h.history)
+    h.owner.retained(h.cohort, expected_tip_sha256=previous_tip, current_block=340)
+    block = 10_000
+    state = verify_cohort_history(
+        h.history, h.intake.policy, expected_tip_sha256=previous_tip, current_block=block
+    ).state
+    progress = CohortPhaseProgress(
+        schema="umi-cohort-phase-progress/1",
+        cohort_sha256=h.cohort,
+        recovery_tip_sha256=previous_tip,
+        phase=state.phase,
+        observed_at_block=block,
+        unavailable_blocks=0,
+        completion="pending",
+        phase_result_sha256=None,
+        evidence_sha256="ab" * 32,
+    )
+    evidence = CohortDecisionInput(
+        schema="umi-cohort-decision-input/1",
+        progress=AttestedCohortPhaseProgress(progress=progress, signatures=signatures(progress)),
+        observation=execution_boundary(capture_at(block)),
+    )
+    proposed, _ = _choice(state, h.history.authority.authority, h.intake.policy, evidence, 0, 0)
+    assert proposed.operation == "extend"
+    h.history = h.history.model_copy(
+        update={
+            "transitions": (*h.history.transitions, signed_transition(proposed)),
+        }
+    )
+    h.intake.publish(h.history, capture_at(block), decision_inputs=(h.closing, evidence))
+
+    def no_participant_replay(*args, **kwargs):
+        raise AssertionError("a deadline extension cannot replace original preparation")
+
+    monkeypatch.setattr(h.owner, "_prepare", no_participant_replay)
+    with pytest.raises(ValueError, match="history changed"):
+        h.owner.retained(h.cohort, expected_tip_sha256=previous_tip, current_block=block)
+    assert (
+        h.owner.retained(h.cohort, expected_tip_sha256=history_tip(h.history), current_block=block)
+        == first
+    )
+
+
+def test_cached_preparation_rejects_revocation_and_older_owned_observation(preparation):
+    h = preparation
+    h.certify()
+    run(h)
+    expected = history_tip(h.history)
+    h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=340)
+    with pytest.raises(ValueError, match="current intake history"):
+        h.owner.retained(h.cohort, expected_tip_sha256=expected, current_block=320)
+    h.history = transition(h.history, h.intake.policy, "revoke", 350)
+    h.intake.publish(h.history, capture_at(350), decision_inputs=(h.closing,))
+    with pytest.raises(ValueError, match="active authority"):
+        h.owner.retained(h.cohort, expected_tip_sha256=history_tip(h.history), current_block=360)
+
+
 @pytest.mark.parametrize("change", ["body", "digest", "observed", "delete"])
 def test_retained_object_reuse_rejects_changed_durable_record(preparation, change):
     h = preparation

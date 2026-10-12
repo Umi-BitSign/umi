@@ -14,6 +14,8 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .canonical_stream import canonical_json_size
+from .competition_cohort_aggregate_model import AggregateProtocolModel
 from .competition_cohort_availability import (
     CohortAvailabilityObservation,
     unavailable_service_blocks,
@@ -34,7 +36,9 @@ from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_closure import CohortServiceRequestClosure
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
 from .policy import ScoringPolicy, scoring_policy_hash
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -46,7 +50,7 @@ class RequestReviewRequest(StrictProtocolModel):
     progress: CohortPhaseProgress
 
 
-class RequestReviewExport(StrictProtocolModel):
+class RequestReviewExport(AggregateProtocolModel):
     schema_: Literal["umi-request-review-export/1"] = Field(alias="schema")
     record: RequestProgressReviewRecord
     history: CohortRecoveryHistory
@@ -62,13 +66,13 @@ class RequestReviewExport(StrictProtocolModel):
     objects: Annotated[tuple[RewardPackageObject, ...], Field(max_length=65536)]
 
 
-class RequestReviewResponse(StrictProtocolModel):
+class RequestReviewResponse(AggregateProtocolModel):
     schema_: Literal["umi-request-review-response/1"] = Field(alias="schema")
     challenge: Hex32
     evidence: RequestReviewExport
 
 
-class SignedRequestReviewResponse(StrictProtocolModel):
+class SignedRequestReviewResponse(AggregateProtocolModel):
     response: RequestReviewResponse
     signature: Signature
 
@@ -83,7 +87,7 @@ class RequestReviewExporter:
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
     ):
-        review_export_limits(maximum_bytes, timeout_seconds)
+        review_export_limits(maximum_bytes, timeout_seconds, aggregate_evidence=True)
         self.source, self.owner, self.sign = source, identity(owner), sign
         if self.owner not in {identity(e.hotkey) for e in source.intake.policy.evaluators}:
             raise ValueError("request export owner is outside the configured evaluator set")
@@ -105,11 +109,16 @@ class RequestReviewExporter:
                 size += len(raw)
                 if size > self.maximum_bytes:
                     raise OSError("request export exceeds capacity; preserve and retry")
+                stage_count("maximum_services", len(services) + 1)
+                stage_count("maximum_input_bytes", size)
+                check_stage_json(raw, kind="object")
                 services.append(CohortAvailabilityObservation.model_validate_json(raw))
             for _, raw in self.source.intake._records(db, original.history):
                 size += len(raw)
                 if size > self.maximum_bytes:
                     raise OSError("request export exceeds capacity; preserve and retry")
+                stage_count("maximum_records", len(records) + 1)
+                stage_count("maximum_input_bytes", size)
                 records.append(read_participation(raw))
             if tuple(digest(r.request.consent.consent) for r in records) != original.consents:
                 raise OSError("request inventory changed during owner export")
@@ -138,7 +147,10 @@ class RequestReviewExporter:
                 for k, raw in sorted(captured.values.items())
             ),
         )
-        if len(canonical_json_bytes(result)) > self.maximum_bytes:
+        # The result owns the validated JSON inventory. Raw collector bytes are
+        # no longer needed during aggregate size checks, signing or delivery.
+        del captured
+        if canonical_json_size(result) > self.maximum_bytes:
             raise OSError("request export exceeds capacity; preserve and retry")
         return result
 
@@ -214,8 +226,13 @@ def replay_request_export(
         ):
             raise ValueError("request export service history is incomplete or inconsistent")
         previous = service
-    if previous != record.service or (
-        record.fence is not None and record.fence not in exported.services
+    if (
+        previous != record.service
+        or (record.fence is not None and record.fence not in exported.services)
+        or (
+            record.tail_fence is not None
+            and not any(s.observation == record.tail_fence.observation for s in exported.services)
+        )
     ):
         raise ValueError("request export changed its original service observation or fence")
     records = tuple(
@@ -226,7 +243,15 @@ def replay_request_export(
     keys = tuple(o.sha256 for o in exported.objects)
     if keys != tuple(sorted(set(keys))):
         raise ValueError("request export objects must be unique and ordered")
-    values = {o.sha256: canonical_json_bytes(o.value) for o in exported.objects}
+    values = {
+        o.sha256: canonical_json_bytes(o.value)
+        for o in progress_items(
+            exported.objects,
+            stage="request_export_objects",
+            unit="objects",
+            cohort=progress.cohort_sha256,
+        )
+    }
 
     def read(key: str) -> bytes:
         if key not in values:

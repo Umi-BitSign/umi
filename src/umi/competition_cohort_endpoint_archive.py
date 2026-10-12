@@ -26,7 +26,7 @@ from .competition_cohort_endpoint_selection import (
     selection_grant,
     selection_slot,
 )
-from .competition_cohort_endpoint_terminal import EndpointTerminalSelection
+from .competition_cohort_endpoint_terminal import EndpointTerminalCase, EndpointTerminalSelection
 from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_miner_case import verify_replacement_parent
@@ -34,6 +34,7 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_round_journal import RoundJournal
+from .host_memory_request_bounds import check_stage_json, stage_limit
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -53,8 +54,11 @@ def read_endpoint_object(source: EndpointObjectSource, sha256: str) -> bytes:
     if len(sha256) != 64 or any(c not in "0123456789abcdef" for c in sha256):
         raise ValueError("invalid endpoint archive identity")
     raw = source(sha256)
-    if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_ARCHIVE_OBJECT_BYTES:
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= stage_limit(
+        "maximum_object_bytes", MAX_ARCHIVE_OBJECT_BYTES
+    ):
         raise ValueError("endpoint archive object differs from its bounded identity")
+    check_stage_json(raw, kind="object")
     value = json.loads(raw)
     if canonical_json_bytes(value) != raw or digest(value) != sha256:
         raise ValueError("endpoint archive object differs from its bounded identity")
@@ -128,51 +132,65 @@ def endpoint_archive_cases(
     assignment, terminal, _ = endpoint_archive_header(archive, source, policy)
     original_selection = None
     for ref in terminal.cases:
-        review = parse_case_review(read_endpoint_object(source, ref.review_sha256))
-        certificate = SignedCohortEndpointCaseDecision.model_validate_json(
-            read_endpoint_object(source, ref.decision_sha256)
+        final, original = read_endpoint_case(
+            assignment, ref, source, policy, request_interval=request_interval
         )
-        if (
-            digest(review.selection) != ref.selection_sha256
-            or selection_slot(review.selection) != ref.selection_slot
-            or certificate.decision.disposition != "retain_response"
-        ):
-            raise ValueError("endpoint terminal reference differs from retained response")
-        final = review
-        while True:
-            verify_case_decision(certificate, review, policy)
-            if (
-                review.assignment != assignment
-                or review.retirement.case_id != ref.case_id
-                or review.selection.transport_policy != final.selection.transport_policy
-            ):
-                raise ValueError("endpoint archive lineage changed its assignment or case")
-            selected = review.selection
-            if request_interval is not None:
-                opened, closed = request_interval
-                request = selected_request(selected, ref.case_id)
-                if not (
-                    opened < request.issued_block <= closed
-                    and request.issued_block <= request.deadline_block
-                    and request.issued_block <= review.retirement.observed_block <= closed
-                ):
-                    raise ValueError("endpoint attempt is outside certified request phases")
-            if not isinstance(selected, CohortEndpointReplacementSelection):
-                if selected.order.order.attempt_number != 1:
-                    raise ValueError("endpoint archive lacks its first attempt")
-                if original_selection is not None and digest(selected) != original_selection:
-                    raise ValueError("endpoint archive selected conflicting original attempts")
-                original_selection = digest(selected)
-                break
-            prior = selected.order.order.prior_decision
-            parent = parse_case_review(read_endpoint_object(source, prior.decision.review_sha256))
-            verify_replacement_parent(selected.grant, selection_grant(parent.selection, assignment))
-            if selected.order.order.prior_retirement != parent.retirement.retirement:
-                raise ValueError("endpoint archive changed its predecessor retirement")
-            # Parent verification enforces a strictly decreasing attempt number.
-            # There is no history-length timeout or recursively nested grant.
-            review, certificate = parent, prior
+        if original_selection is not None and original != original_selection:
+            raise ValueError("endpoint archive selected conflicting original attempts")
+        original_selection = original
         yield final
+
+
+def read_endpoint_case(
+    assignment: CohortExecutionAssignment,
+    ref: EndpointTerminalCase,
+    source: EndpointObjectSource,
+    policy: CompetitionPolicy,
+    *,
+    request_interval: tuple[int, int] | None = None,
+) -> tuple[EndpointCaseReview, str]:
+    """Replay one retained case and its ancestry without asserting full coverage."""
+    review = parse_case_review(read_endpoint_object(source, ref.review_sha256))
+    certificate = SignedCohortEndpointCaseDecision.model_validate_json(
+        read_endpoint_object(source, ref.decision_sha256)
+    )
+    if (
+        digest(review.selection) != ref.selection_sha256
+        or selection_slot(review.selection) != ref.selection_slot
+        or certificate.decision.disposition != "retain_response"
+    ):
+        raise ValueError("endpoint terminal reference differs from retained response")
+    final = review
+    while True:
+        verify_case_decision(certificate, review, policy)
+        if (
+            review.assignment != assignment
+            or review.retirement.case_id != ref.case_id
+            or review.selection.transport_policy != final.selection.transport_policy
+        ):
+            raise ValueError("endpoint archive lineage changed its assignment or case")
+        selected = review.selection
+        if request_interval is not None:
+            opened, closed = request_interval
+            request = selected_request(selected, ref.case_id)
+            if not (
+                opened < request.issued_block <= closed
+                and request.issued_block <= request.deadline_block
+                and request.issued_block <= review.retirement.observed_block <= closed
+            ):
+                raise ValueError("endpoint attempt is outside certified request phases")
+        if not isinstance(selected, CohortEndpointReplacementSelection):
+            if selected.order.order.attempt_number != 1:
+                raise ValueError("endpoint archive lacks its first attempt")
+            return final, digest(selected)
+        prior = selected.order.order.prior_decision
+        parent = parse_case_review(read_endpoint_object(source, prior.decision.review_sha256))
+        verify_replacement_parent(selected.grant, selection_grant(parent.selection, assignment))
+        if selected.order.order.prior_retirement != parent.retirement.retirement:
+            raise ValueError("endpoint archive changed its predecessor retirement")
+        # Parent verification enforces a strictly decreasing attempt number.
+        # There is no history-length timeout or recursively nested grant.
+        review, certificate = parent, prior
 
 
 def export_endpoint_archive(schedule: CohortEndpointSchedule, slot: str) -> EndpointReplayArchive:

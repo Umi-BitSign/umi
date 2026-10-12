@@ -171,7 +171,7 @@ async def runtime_archive(executed_weight_case, chain_config, monkeypatch, tmp_p
         await item.provider.aclose()
 
 
-def check_replay(h, result):
+def check_replay(h, result, *, fresh_executor=False):
     validate_historical_reward_control(
         result,
         expected_control_hotkey=h.item.hotkey,
@@ -187,7 +187,7 @@ def check_replay(h, result):
         ("chain_getHeader", (h.fresh.block_hash,)),
         ("chain_getBlockHash", (h.fresh.height,)),
     ]
-    assert h.executions == [h.item.code]
+    assert h.executions == ([h.item.code] if fresh_executor else [])
     assert len(h.code_checks) == 1
     assert h.code_checks[0]["state_root"] == bytes.fromhex(h.old.state_root[2:])
 
@@ -209,7 +209,7 @@ async def test_native_executed_archive_replays_old_control_after_restart(runtime
 
     result = await h.provider.review_control(h.raw, h.metadata)
 
-    check_replay(h, result)
+    check_replay(h, result, fresh_executor=True)
     assert len(h.item.verifier.checked) == checked + 1
     proved = h.item.verifier.checked[-1]
     assert proved["state_root"] == bytes.fromhex(h.old.state_root[2:])
@@ -279,7 +279,9 @@ async def test_changed_metadata_cannot_replace_executed_metadata(runtime_archive
     )
     with pytest.raises(ValueError, match=reason):
         await h.provider.review_control(canonical_json_bytes(body), metadata)
-    assert h.executions == ([h.item.code] if rebind_digest else [])
+    # Fixture setup already cached this exact deterministic execution result;
+    # altered metadata is still rejected against the authenticated code output.
+    assert h.executions == []
 
 
 @pytest.mark.parametrize("field", ["specVersion", "transactionVersion", "stateVersion"])
@@ -290,7 +292,7 @@ async def test_archived_runtime_versions_must_equal_executed_versions(runtime_ar
     checked = len(h.item.verifier.checked)
     with pytest.raises(ValueError, match="replayed runtime differs from archived control evidence"):
         await h.provider.review_control(canonical_json_bytes(body), h.metadata)
-    assert h.executions == [h.item.code]
+    assert h.executions == []
     assert len(h.item.verifier.checked) == checked
 
 
@@ -413,5 +415,15 @@ async def test_historical_capture_uses_owned_executed_runtime(runtime_archive, m
     body = json.loads(captured.evidence)
     assert body["runtime_execution"] == json.loads(h.raw)["runtime_execution"]
     assert body["finality"]["evidence_class"] == "owned_finalized_ancestry"
-    assert h.executions and all(code == h.item.code for code in h.executions)
-    assert h.code_checks
+    # The deterministic runtime output was cached during fixture setup. Capture
+    # must prove this block's code once without immediately redoing that proof.
+    assert h.executions == []
+    assert len(h.code_checks) == 1
+
+    h.executions.clear()
+    h.code_checks.clear()
+    replayed = await h.provider.review_control(captured.evidence, captured.metadata)
+    assert replayed == captured
+    # Independently supplied evidence still takes the complete replay path.
+    assert h.executions == []
+    assert len(h.code_checks) == 1

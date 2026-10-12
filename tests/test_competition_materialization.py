@@ -758,6 +758,58 @@ def test_different_controls_never_reuse_previous_stage(case):
     second.recheck()
 
 
+@pytest.mark.parametrize("receipts", [19, 9])
+def test_old_control_mismatch_skips_package_hashing(case, monkeypatch, receipts):
+    first = _stage(case)
+    changed = case.execution.model_copy(
+        update={
+            "replay_capacity": case.execution.replay_capacity.model_copy(
+                update={"maximum_receipts": receipts}
+            )
+        }
+    )
+    original_tree = material._tree
+    metadata_checks = []
+
+    def observed_tree(path, *args, **kwargs):
+        if path == first.path:
+            assert kwargs.get("hash_files", True) is False, "old payload rehashed"
+            metadata_checks.append(kwargs["sealed"])
+        return original_tree(path, *args, **kwargs)
+
+    monkeypatch.setattr(material, "_tree", observed_tree)
+    second = _stage(
+        case, files=replace(case.files, worker_execution_bytes=canonical_json_bytes(changed))
+    )
+    assert second.path != first.path
+    assert True in metadata_checks  # Old stages still receive sealed metadata checks.
+    second.recheck()
+
+
+def test_matching_controls_do_not_hide_changed_package(case):
+    first = _stage(case)
+    payload = first.path / "package" / "manifest.json"
+    original = payload.read_bytes()
+    payload.chmod(0o600)
+    payload.write_bytes(b" " + original[1:])  # Same length, different payload.
+    payload.chmod(0o400)
+    second = _stage(case)
+    assert second.path != first.path
+    assert payload.read_bytes() != original
+    second.recheck()
+
+
+def test_control_mismatch_does_not_hide_unsealed_package(case):
+    first = _stage(case)
+    control = first.path / material.WORKER_EXECUTION_FILENAME
+    control.chmod(0o600)
+    control.write_bytes(b"{}")
+    control.chmod(0o400)
+    (first.path / "package" / "manifest.json").chmod(0o600)
+    with pytest.raises(material.SuccessorMaterializationError, match="cached input mode"):
+        _stage(case)
+
+
 def test_modified_sealed_stage_is_not_reused_or_deleted(case):
     first = _stage(case)
     control = first.path / material.WORKER_EXECUTION_FILENAME
@@ -827,6 +879,31 @@ def test_partial_stage_survives_write_failure_and_counts_toward_quota(case, monk
     monkeypatch.setattr(material, "_write_at", original)
     with pytest.raises(material.SuccessorMaterializationError, match="cache is full"):
         _stage(case, limits=case.limits.model_copy(update={"maximum_stages": 1}))
+
+
+def test_staged_recheck_reuses_payload_hashes_with_unchanged_identity(case, monkeypatch):
+    staged = _stage(case)
+    original = material._tree
+
+    def metadata_only(path, *args, **kwargs):
+        assert kwargs.get("hash_files", True) is False, "verified payload rehashed"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(material, "_tree", metadata_only)
+    staged.recheck()
+
+
+def test_staged_recheck_rejects_payload_edit_even_with_restored_mtime(case):
+    staged = _stage(case)
+    payload = staged.path / "package" / "manifest.json"
+    before = payload.stat()
+    body = payload.read_bytes()
+    payload.chmod(0o600)
+    payload.write_bytes(b" " + body[1:])
+    payload.chmod(0o400)
+    os.utime(payload, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(material.SuccessorMaterializationError, match="identities changed"):
+        staged.recheck()
 
 
 def test_staged_capability_cannot_be_rebound(case):

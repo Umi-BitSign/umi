@@ -426,8 +426,12 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             raise ValueError("historical control digest differs from proved storage")
         archive.consumed()
         _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        return self._issue_control(archive, runtime, raw, metadata, control, committed), runtime
+
+    def _issue_control(self, archive, runtime, raw, metadata, control, committed):
+        """Issue only after capture or external replay has proved these inputs."""
         result = OwnedHistoricalRewardControl(
-            ref,
+            archive.snapshot,
             archive.hotkey,
             control,
             committed,
@@ -439,7 +443,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             _issuer=_ISSUER,
         )
         object.__setattr__(result, "_binding", _binding(result))
-        return result, runtime
+        return result
 
     async def _resolve_control_header(self, ref, encoded):
         head = await self._proofs.finalized_snapshot()
@@ -549,6 +553,24 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                     "block": {"scale_header": encoded},
                 },
             )
-            # Reuse the bounded replay consumer and its process-local issuer.
-            # This replay consumes the captured bytes without remote state fallback.
-            return await self._review_control_locked(raw, runtime.metadata_bytes)
+            # The owned collector already proved the runtime and every claim.
+            # Check the exact archive envelope and current ancestry again, but
+            # do not repeat native proofs or construct another mutable codec.
+            # Externally supplied archives still take the full replay path.
+            archive = await run_owned_thread(_Archive, raw, runtime.metadata_bytes)
+            if (
+                archive.snapshot,
+                archive.hotkey,
+                archive.body["control_sha256"],
+                archive.body["committed_at_block"],
+            ) != (ref, hotkey, control, committed):
+                raise ValueError("captured control archive differs from proved storage")
+            timestamp, ceiling = await self._resolve_control_header(ref, encoded)
+            if not 0 < actual_time <= ceiling or (
+                timestamp is not None and actual_time != timestamp
+            ):
+                raise ValueError("historical control timestamp or subnet differs")
+            _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+            return self._issue_control(
+                archive, runtime, raw, runtime.metadata_bytes, control, committed
+            )

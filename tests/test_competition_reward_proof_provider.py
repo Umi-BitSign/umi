@@ -21,10 +21,11 @@ from .test_competition_proof_rpc import wire as wire
 from .test_competition_proof_rpc import with_fallback
 from .test_competition_reward_control import commitment
 from .test_competition_reward_registrations import (
-    base_policy as base_policy,
+    advance,
+    key,
 )
 from .test_competition_reward_registrations import (
-    key,
+    base_policy as base_policy,
 )
 from .test_competition_reward_registrations import (
     policy as policy,
@@ -107,13 +108,25 @@ async def test_control_and_complete_weights_need_five_proof_batches(standing, se
 
 async def test_proven_absence_stays_absent_after_prior_discovery(standing):
     item = standing
-    assert (await item.provider.collect_control(item.control_hotkey)).control_sha256 == "aa" * 32
+    prior = await item.provider.collect_control(item.control_hotkey)
+    assert prior.control_sha256 == "aa" * 32
+    # A changed commitment belongs to a different finalized block. State at
+    # the same block hash is immutable and its proof transport may be reused.
+    advance(item)
     del item.rpc.values[item.control_spec]
     current = await item.provider.collect_control(item.control_hotkey)
     assert current.control_sha256 is None
     assert current.committed_at_block is None
+    assert current.snapshot != prior.snapshot
+    repeated = await item.provider.collect_control(item.control_hotkey)
+    assert repeated.snapshot == current.snapshot
+    assert repeated.control_sha256 is None and repeated.committed_at_block is None
     assert len(storage_reads(item)) == 2
     assert {m for _, m, _ in storage_reads(item)} == {"state_getReadProof"}
+    assert {params[1] for _, _, params in storage_reads(item)} == {
+        prior.snapshot.block_hash,
+        current.snapshot.block_hash,
+    }
 
 
 @pytest.mark.parametrize("fault", ["old-helper", "invalid-proof", "reader-error", "wrong-block"])

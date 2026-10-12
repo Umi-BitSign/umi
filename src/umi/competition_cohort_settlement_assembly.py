@@ -29,7 +29,7 @@ from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
 from .open_competition import CompetitionPolicy, EvaluationSuite, digest
 from .policy import ScoringPolicy
-from .private_files import read_private_model
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, read_private_model
 from .protocol import canonical_json_bytes
 
 
@@ -75,7 +75,9 @@ def assemble_settlement_inputs(
 
     def source_file(path, model, limit):
         nonlocal declared_bytes
-        value = read_private_model(path, model, maximum_bytes=min(limit, maximum_bytes))
+        value = read_private_model(
+            path, model, maximum_bytes=min(limit, maximum_bytes, MAX_CONFIGURED_PRIVATE_BYTES)
+        )
         declared_bytes += len(canonical_json_bytes(value))
         if declared_bytes > maximum_bytes:
             raise ValueError("settlement source declarations exceed their aggregate byte bound")

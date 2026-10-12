@@ -9,11 +9,19 @@ is needed to deliver the files to another host.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
+import sys
+import time
+from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     MAX_RECIPE_BYTES,
@@ -23,12 +31,30 @@ from .competition_evidence_codec import (
     encode_evidence,
 )
 from .open_competition import digest, identity
-from .private_files import private_path, publish_private_model, read_private_model
+from .private_files import (
+    ensure_private_directory,
+    private_path,
+    publish_private_model,
+    read_private_model,
+)
 from .protocol import Hex32, StrictProtocolModel
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
+_MAX_PUBLISHED_OBJECTS = 4096
+_MAX_READ_OBJECTS = 4096
+_MAX_READ_BYTES = 32 * 1024**2
 Kind = Literal["history", "endpoint", "interval", "registration"]
+
+
+def _publication_clock_ns():
+    # Linux inode ctime may use the coarse realtime clock (clock ID 5).
+    # A file changed within that same tick can retain every stamp field.
+    # Other platforms keep ordinary publication until their clock is qualified.
+    if sys.platform == "linux":
+        with suppress(OSError, ValueError):
+            return time.clock_gettime_ns(5)
+    return None
 
 
 class _Bytes(StrictProtocolModel):
@@ -65,6 +91,42 @@ class RewardProofArchive:
 
     def __init__(self, root: Path):
         self.root = Path(private_path(str(root)))
+        self._published = OrderedDict()
+        self._publication_lock = Lock()
+        self._read_objects = OrderedDict()
+        self._read_bytes = 0
+        self._read_lock = Lock()
+        self._pid = os.getpid()
+
+    @staticmethod
+    def _object_stamp(path):
+        private_path(str(path))
+        ensure_private_directory(path.parent)
+        parent, info = path.parent.lstat(), path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("reward archive object is not an owned private regular file")
+        return (
+            str(path),
+            parent.st_dev,
+            parent.st_ino,
+            parent.st_uid,
+            parent.st_gid,
+            parent.st_mode,
+            info.st_dev,
+            info.st_ino,
+            info.st_uid,
+            info.st_gid,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
 
     def _path(self, kind: Kind, key: str) -> Path:
         if kind not in ("history", "endpoint", "interval", "registration"):
@@ -74,16 +136,85 @@ class RewardProofArchive:
     def _retain_bytes(self, raw: bytes) -> str:
         checked_size(len(raw), MAX_EVIDENCE_BYTES)
         sha = hashlib.sha256(raw).hexdigest()
-        publish_private_model(
-            self.root / "objects" / (sha + ".json"),
-            _Bytes(hex=raw.hex()),
-            maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
-        )
+        path = self.root / "objects" / (sha + ".json")
+        if os.getpid() != self._pid:
+            # Do not acquire a possibly inherited thread lock after fork.
+            self._publish_bytes(path, raw)
+            return sha
+        with self._publication_lock:
+            prior = self._published.pop(sha, None)
+            if prior is not None:
+                with suppress(OSError, ValueError):
+                    if self._object_stamp(path) == prior:
+                        self._published[sha] = prior
+                        return sha
+            verification_tick = _publication_clock_ns()
+            self._publish_bytes(path, raw)
+            # Only a completed durable publication creates a reusable receipt.
+            # Retain bounded metadata, never object payloads or proof authority.
+            with suppress(OSError, ValueError):
+                stamp = self._object_stamp(path)
+                # Only cache a file whose ctime predates this verification.
+                # A newly written file must be checked after its creation tick;
+                # waiting alone cannot make an earlier same-tick check reusable.
+                if verification_tick is not None and stamp[-1] < verification_tick:
+                    self._published[sha] = stamp
+                    while len(self._published) > _MAX_PUBLISHED_OBJECTS:
+                        self._published.popitem(last=False)
         return sha
 
+    @staticmethod
+    def _publish_bytes(path, raw):
+        # Model validation and publication serialize the same hex object. Reuse
+        # those exact canonical bytes within this call only; the current file,
+        # publication lock, schema and durability checks still run on every retry.
+        with canonical_json_reuse(maximum_bytes=32 * 1024**2):
+            publish_private_model(
+                path,
+                _Bytes(hex=raw.hex()),
+                maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+            )
+
     def _bytes(self, sha: str, maximum: int) -> bytes:
+        path = self.root / "objects" / (checked_digest(sha) + ".json")
+        checked_size(maximum, MAX_EVIDENCE_BYTES)
+        if os.getpid() != self._pid:
+            # Inherited locks and verification receipts are not usable after fork.
+            return self._read_object(path, sha, maximum)
+        with self._read_lock:
+            prior = self._read_objects.pop(sha, None)
+            if prior is not None:
+                self._read_bytes -= len(prior[1])
+            stamp = self._object_stamp(path)
+            if prior is not None and prior[0] == stamp:
+                checked_size(len(prior[1]), maximum)
+                self._read_objects[sha] = prior
+                self._read_bytes += len(prior[1])
+                return prior[1]
+            verification_tick = _publication_clock_ns()
+            raw = self._read_object(path, sha, maximum)
+            # Reuse only verified bytes from an unchanged, private object whose
+            # ctime predates this read. Frames and native proofs are still checked.
+            if (
+                verification_tick is not None
+                and stamp[-1] < verification_tick
+                and len(raw) <= _MAX_READ_BYTES
+                and self._object_stamp(path) == stamp
+            ):
+                self._read_objects[sha] = (stamp, raw)
+                self._read_bytes += len(raw)
+                while (
+                    self._read_bytes > _MAX_READ_BYTES
+                    or len(self._read_objects) > _MAX_READ_OBJECTS
+                ):
+                    _, (_, removed) = self._read_objects.popitem(last=False)
+                    self._read_bytes -= len(removed)
+            return raw
+
+    @staticmethod
+    def _read_object(path: Path, sha: str, maximum: int) -> bytes:
         value = read_private_model(
-            self.root / "objects" / (checked_digest(sha) + ".json"),
+            path,
             _Bytes,
             maximum_bytes=2 * maximum + 1024,
         )

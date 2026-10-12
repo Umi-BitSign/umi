@@ -43,7 +43,7 @@ def source_for(b, history):
         {
             t.transition.evidence_sha256
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
     )
     return CohortOrderHistory(history=history, decisions=tuple(b["decisions"][k] for k in keys))
@@ -459,6 +459,17 @@ def test_exact_order_history_reuses_proof_but_keeps_current_head_and_conflict_fe
         journal.journal.put("order_history", digest(h.source), {"changed": True})
     with pytest.raises(ValueError, match="conflict"):
         journal.remember(h.source, h.block + 2)
+
+
+def test_exact_current_order_history_does_not_wait_for_unrelated_writer(harness):
+    from concurrent.futures import ThreadPoolExecutor
+
+    h = harness
+    journal = h.worker().journal
+    journal.remember(h.source, h.block)
+    with ThreadPoolExecutor(max_workers=1) as pool, journal.journal.transaction():
+        retry = pool.submit(journal.remember, h.source, h.block)
+        retry.result(timeout=5)
 
 
 @pytest.mark.parametrize("damage", ["decisions", "genesis", "policy"])

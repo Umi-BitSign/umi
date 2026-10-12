@@ -331,7 +331,10 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
 
     _supports_executed_runtime = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, runtime_proof_reads: bool = False, **kwargs):
+        if type(runtime_proof_reads) is not bool:
+            raise TypeError("runtime proof reader selection must be boolean")
+        self._runtime_proof_reads = runtime_proof_reads
         self._cache_lease = None
         self._weight_rpc = None
         self._runtime_rpc = None
@@ -390,6 +393,8 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                         maximum_proof_node_bytes=MAX_CODE_BYTES,
                         maximum_proof_bytes=MAX_CODE_BYTES + 1024**2,
                     ),
+                    maximum_cached_storage_evidence_bytes=3 * (2 * MAX_CODE_BYTES + 1024**2),
+                    read_values_from_proof=self._runtime_proof_reads,
                 )
                 if self._owned
                 else self._proofs

@@ -6,7 +6,100 @@ import threading
 
 import pytest
 
-from umi.concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from umi.concurrency import await_owned_task, run_owned_thread, run_until_stopped, wait_for_owned
+
+
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+async def test_stop_drains_current_native_write_without_finishing_history_batch(repeat_cancel):
+    stop, entered, cancelling, closing, closed = (asyncio.Event() for _ in range(5))
+    finish_write, write_finished = threading.Event(), threading.Event()
+    finish_close = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    committed = []
+
+    def save(block):
+        loop.call_soon_threadsafe(entered.set)
+        assert finish_write.wait(30), "test must release native write"
+        committed.append(block)
+        write_finished.set()
+
+    async def history():
+        try:
+            for block in range(1024):
+                await run_owned_thread(save, block, on_cancel=cancelling.set)
+        finally:
+            closing.set()
+            await finish_close.wait()
+            closed.set()
+
+    task = asyncio.create_task(run_until_stopped(history(), stop))
+    try:
+        await asyncio.wait_for(entered.wait(), 30)
+        stop.set()
+        await asyncio.wait_for(cancelling.wait(), 30)
+        if repeat_cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done() and not write_finished.is_set() and not closing.is_set()
+        finish_write.set()
+        await asyncio.wait_for(closing.wait(), 30)
+        assert committed == [0] and write_finished.is_set()
+        assert not task.done() and not closed.is_set()
+        finish_close.set()
+        if repeat_cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 30)
+        else:
+            assert await asyncio.wait_for(task, 30) is None
+        assert closed.is_set() and committed == [0]
+    finally:
+        finish_write.set()
+        finish_close.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_stop_does_not_start_new_work_and_preserves_result_and_error():
+    calls = []
+
+    async def work():
+        calls.append(True)
+        return 42
+
+    stop = asyncio.Event()
+    stop.set()
+    assert await run_until_stopped(work(), stop) is None
+    assert calls == []
+    stop.clear()
+    assert await run_until_stopped(work(), stop) == 42
+    error = ValueError("native operation failed")
+
+    async def fail():
+        raise error
+
+    with pytest.raises(ValueError) as caught:
+        await run_until_stopped(fail(), stop)
+    assert caught.value is error
+
+
+async def test_stop_cleanup_failure_is_not_success():
+    stop, entered = asyncio.Event(), asyncio.Event()
+    error = OSError("native cleanup failed")
+
+    async def work():
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            raise error
+
+    task = asyncio.create_task(run_until_stopped(work(), stop))
+    await asyncio.wait_for(entered.wait(), 30)
+    stop.set()
+    with pytest.raises(OSError) as caught:
+        await asyncio.wait_for(task, 30)
+    assert caught.value is error
 
 
 @pytest.mark.parametrize("times_out", [False, True])

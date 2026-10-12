@@ -224,14 +224,14 @@ async def test_cancellation_drains_capture_proof_before_unlock(historical, monke
     h = historical
     await capture_source(h, monkeypatch)
     entered, release = threading.Event(), threading.Event()
-    verify = h.item.verifier.verify_many
+    read = h.item.verifier.read_many
 
     def blocked(**kwargs):
         entered.set()
         assert release.wait(10)
-        return verify(**kwargs)
+        return read(**kwargs)
 
-    monkeypatch.setattr(h.item.verifier, "verify_many", blocked)
+    monkeypatch.setattr(h.item.verifier, "read_many", blocked)
     task = asyncio.create_task(h.item.provider.capture_control_at(h.item.hotkey, h.old.height))
     closing = None
     try:
@@ -245,6 +245,41 @@ async def test_cancellation_drains_capture_proof_before_unlock(historical, monke
     with pytest.raises(asyncio.CancelledError):
         await task
     await closing
+
+
+@pytest.mark.parametrize("bound", ["MAX_CONTROL_ARCHIVE_BYTES", "MAX_CONTROL_METADATA_BYTES"])
+async def test_capture_keeps_archive_size_bounds(historical, monkeypatch, bound):
+    from umi import competition_reward_control_archive as archive_module
+
+    h = historical
+    await capture_source(h, monkeypatch)
+    monkeypatch.setattr(archive_module, bound, 1)
+    with pytest.raises(ValueError, match="exceeds its byte bound"):
+        await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+
+
+@pytest.mark.parametrize("change", ["unavailable", "timestamp", "ceiling"])
+async def test_capture_rechecks_owned_finality_after_native_proofs(historical, monkeypatch, change):
+    h = historical
+    await capture_source(h, monkeypatch)
+    resolve = h.item.provider._resolve_control_header
+    calls = []
+
+    async def changed(ref, encoded):
+        timestamp, ceiling = await resolve(ref, encoded)
+        calls.append(ref)
+        if len(calls) == 2:
+            if change == "unavailable":
+                raise ValueError("owned finality no longer available")
+            if change == "timestamp":
+                return 1, ceiling
+            return timestamp, 0
+        return timestamp, ceiling
+
+    monkeypatch.setattr(h.item.provider, "_resolve_control_header", changed)
+    with pytest.raises(ValueError, match=r"owned finality|historical control timestamp"):
+        await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("schema", [[], {}, None, 1])

@@ -54,6 +54,7 @@ async def native(execution, tmp_path, monkeypatch):
         owner_hotkey=wallet("Charlie").hotkey.ss58_address,
         owner_origin="https://owner.example",
         review_timeout_seconds=30,
+        request_replay_bytes=1024**3,
     )
 
     def history(request):
@@ -93,6 +94,7 @@ async def native(execution, tmp_path, monkeypatch):
 async def test_completed_steps_survive_offline_restart_and_export_originals(native):
     n, e = native, native.e
     first = n.host()
+    assert first.files.maximum_bytes == 1024**3
     await first.worker.poll_once()
     original = canonical_json_bytes(first.execution.step(e.job, 0))
     n.unavailable = True

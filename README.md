@@ -37,7 +37,8 @@ binary downloads and service configuration. Check public status and readiness
 for the active phase, accepted tracks and whether admission accepts new
 submissions. The active cohort's published phase blocks are nominal progression
 targets, not non-extendable
-deadlines; liveness delays retain and extend unfinished work. Accepted submissions remain subject to the signed terms,
+deadlines; liveness recovery retains original work, with a certified miner-tail
+cutoff described in the launch guide. Accepted submissions remain subject to the signed terms,
 registration, validity and selection rules.
 Open-competition rewards have not replaced the bridge. An
 `accepted_no_weight` receipt records an admitted submission; it does not prove

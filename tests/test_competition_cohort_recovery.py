@@ -21,6 +21,7 @@ from umi.competition_cohort_recovery import (
     admit_recoverable_cohort,
     apply_recovery_transition,
     cohort_model_delivery,
+    cohort_request_tail_rule,
     cohort_tracks,
     propose_recovery_transition,
     verify_cohort_service_pool,
@@ -46,7 +47,7 @@ def signed_transition(body):
 
 
 @pytest.fixture
-def recovery(policy):
+def recovery(policy, request):
     plan = RecoverableCohortPlan(
         schema="umi-recoverable-cohort-plan/1",
         policy_sha256=digest(policy),
@@ -58,6 +59,22 @@ def recovery(policy):
             PhaseTarget(phase=p, target_block=300 + 90 * i) for i, p in enumerate(PHASES)
         ),
     )
+    if getattr(request, "param", "legacy") == "legacy6":
+        plan = plan.model_copy(update={"sequence": 6})
+    if getattr(request, "param", "legacy") == "hard12h":
+        plan = RecoverableCohortPlan.model_validate(
+            plan.model_dump(by_alias=True)
+            | {
+                "schema": "umi-recoverable-cohort-plan/4",
+                "eligible_tracks": ("endpoint", "model"),
+                "service_pool_bps": 5000,
+                "model_delivery": {
+                    "schema": "umi-model-delivery-profile/1",
+                    "mechanism": "coordinator_chunked_v1",
+                },
+                "request_tail_rule": "original_request_12h_with_completed_miner/1",
+            }
+        )
     body = CohortRecoveryAuthority(
         schema="umi-cohort-recovery-authority/1",
         policy_sha256=digest(policy),
@@ -216,6 +233,41 @@ def test_version_one_plan_preserves_exact_legacy_bytes(recovery):
     verify_cohort_tracks(legacy, ("endpoint", "model"))
     verify_cohort_service_pool(legacy, 5000)
     assert cohort_tracks(legacy, ("endpoint", "model")) == ("endpoint", "model")
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_legacy_tail_policy_preserves_bytes_for_every_existing_plan(recovery, version):
+    legacy, _, _ = recovery
+    original = legacy.model_dump(by_alias=True) | {
+        "schema": f"umi-recoverable-cohort-plan/{version}"
+    }
+    if version >= 2:
+        original.update(eligible_tracks=("model",), service_pool_bps=0)
+    if version == 3:
+        original["model_delivery"] = {
+            "schema": "umi-model-delivery-profile/1",
+            "mechanism": "coordinator_chunked_v1",
+        }
+    before = canonical_json_bytes(original)
+    plan = RecoverableCohortPlan.model_validate_json(before)
+    assert canonical_json_bytes(plan) == before
+    assert cohort_request_tail_rule(plan) == "original_request_12h_at_most_tenth/1"
+    with pytest.raises(ValueError, match="explicit request tail rule"):
+        RecoverableCohortPlan.model_validate(
+            original | {"request_tail_rule": "original_request_12h_with_completed_miner/1"}
+        )
+
+
+@pytest.mark.parametrize("recovery", ["hard12h"], indirect=True)
+def test_version_four_tail_policy_is_bound_before_signed_admission(recovery):
+    plan, authority, state = recovery
+    assert cohort_request_tail_rule(plan) == "original_request_12h_with_completed_miner/1"
+    assert state.cohort_sha256 == digest(plan) in authority.authority.cohort_sha256s
+    assert RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan)) == plan
+    with pytest.raises(ValueError, match="explicit request tail rule"):
+        RecoverableCohortPlan.model_validate(
+            plan.model_dump(by_alias=True) | {"request_tail_rule": None}
+        )
 
 
 def at_phase(recovery, policy, target_phase):

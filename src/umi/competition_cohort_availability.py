@@ -30,6 +30,7 @@ from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_recovery import Block, CohortRecoveryState, Phase
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -226,6 +227,8 @@ class CohortServiceAvailability:
             # Match every byte of the verified prefix before reusing its result;
             # changed/deleted rows fall back to the original native replay.
             for sequence, raw in cursor:
+                stage_count("maximum_services", sequence)
+                check_stage_json(raw, kind="object")
                 self._hash_row(prefix, sequence, raw)
                 if sequence >= verified.sequence:
                     if sequence == verified.sequence and prefix.hexdigest() == expected:
@@ -235,6 +238,8 @@ class CohortServiceAvailability:
                 cursor.close()
                 prefix, cursor = hashlib.sha256(), rows()
         for sequence, raw in cursor:
+            stage_count("maximum_services", sequence)
+            check_stage_json(raw, kind="object")
             self._hash_row(prefix, sequence, raw)
             receipt = CohortAvailabilityObservation.model_validate_json(raw)
             if (

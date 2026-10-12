@@ -101,8 +101,9 @@ async def test_cancelled_download_preserves_prior_links(walk):
 async def test_capacity_increase_resumes_same_target(walk):
     w = walk
     service = HistoricalHeaderRecovery(w.connect, maximum_bytes=600)
-    with pytest.raises(HistoricalHeaderRecoveryPending, match="capacity"):
+    with pytest.raises(HistoricalHeaderRecoveryPending, match="capacity") as pending:
         await service.recover(w.anchor, w.target, w.request)
+    assert type(pending.value) is HistoricalHeaderRecoveryPending
     with w.connect() as db:
         retained = db.execute("SELECT COUNT(*) FROM historical_header_hints").fetchone()[0]
     assert retained > 0
@@ -246,6 +247,27 @@ async def test_verified_link_reuse_requires_the_exact_target(walk, field):
         await service.recover(w.anchor, replace(w.target, **{field: value}), w.request)
 
 
+async def test_adjacent_older_target_continues_from_verified_descendant(walk, monkeypatch):
+    w = walk
+    original = w.target
+    height = original.block_number + 1
+    block_hash = w.by_height[height]
+    header = w.headers[block_hash]
+    w.target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
+    service = HistoricalHeaderRecovery(w.connect, batch_size=4)
+    assert (await finish(service, w)).snapshot == w.target
+    loaded, load = [], service._load
+
+    def counted(block_hash):
+        loaded.append(block_hash)
+        return load(block_hash)
+
+    monkeypatch.setattr(service, "_load", counted)
+    assert (await service.recover(w.anchor, original, w.request)).snapshot == original
+    assert loaded == [original.block_hash]
+    assert len(w.calls) == len(set(w.calls)) == w.anchor.height - original.block_number
+
+
 async def test_new_anchor_rechecks_durable_links(walk, monkeypatch, chain_config, policy):
     w = walk
     service = HistoricalHeaderRecovery(w.connect)
@@ -315,3 +337,14 @@ async def test_gap_beyond_2048_recovers_height_without_rpc_hash_claim(walk):
     assert len(w.calls) == len(set(w.calls)) == 2050
     assert (await service.recover(w.anchor, w.target, w.request)).snapshot == w.target
     assert len(w.calls) == 2050
+
+
+async def test_successful_bounded_header_pass_reports_progress(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect, batch_size=4)
+    with pytest.raises(HistoricalHeaderRecoveryPending) as pending:
+        await service.recover(w.anchor, w.target, w.request)
+    assert type(pending.value).__name__ == "HistoricalHeaderRecoveryProgress"
+    assert len(w.calls) == 4
+    assert (await finish(service, w)).snapshot == w.target
+    assert len(w.calls) == len(set(w.calls)) == w.anchor.height - w.target.block_number

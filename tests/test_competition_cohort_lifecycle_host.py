@@ -83,7 +83,9 @@ def configured(h, root):
             request_start=RequestStartConfig(
                 schema="umi-cohort-request-start-config/1",
                 directory=str(root / "rest"),
-                first_cohort_not_before_unix_ms=2_000_000,
+                first_cohort_not_before_unix_ms=getattr(
+                    h, "first_request_not_before_unix_ms", 2_000_000
+                ),
             ),
             request_completion_directory=str(root / "completion"),
             settlement_history_directory=str(root / "closed"),
@@ -96,11 +98,34 @@ def configured(h, root):
     )
 
 
+def test_peer_origin_migration_preserves_shared_token_bindings(lifecycle, tmp_path):
+    config = configured(lifecycle, tmp_path / "host")
+    peers = config.admission_owner.reviewers
+    config = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(config.model_copy(update={"model_review_peers": peers}))
+    )
+    original_paths = config.stores()
+    local = tuple(
+        peer.model_copy(update={"origin": f"http://127.0.0.1:{19578 + index}"})
+        for index, peer in enumerate(peers)
+    )
+    owner = config.admission_owner.model_copy(update={"reviewers": local})
+    inconsistent = config.model_copy(update={"admission_owner": owner})
+    with pytest.raises(ValueError, match="conflicting identities or origins"):
+        inconsistent.stores()
+    migrated = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(inconsistent.model_copy(update={"model_review_peers": local}))
+    )
+    assert migrated.stores() == original_paths
+    assert canonical_json_bytes(migrated.series) == canonical_json_bytes(config.series)
+    assert migrated.lifecycle == config.lifecycle
+
+
 @pytest.fixture
 async def host(lifecycle, tmp_path, monkeypatch):
     h = lifecycle
     c = configured(h, tmp_path / "host")
-    h.timestamp = 1_000_000
+    h.timestamp = getattr(h, "timestamp", 1_000_000)
     h.provider.config = SimpleNamespace(maximum_head_age_ms=120_000, maximum_future_skew_ms=30_000)
     collect = h.provider.collect
 

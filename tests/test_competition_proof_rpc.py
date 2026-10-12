@@ -680,3 +680,208 @@ async def test_repeated_close_cancellation_waits_for_every_transport():
     await rpc.aclose()
     with pytest.raises(ValueError, match="closed"):
         await rpc.request("chain_getHeader", ())
+
+
+async def test_failed_providers_retain_each_numeric_error_without_remote_text():
+    from umi.competition_progress import _failure_details
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _FakeConnect, _RpcClient
+
+    block = _hash(77)
+    secret = "https://private.example/?token=secret remote response body"
+    calls = []
+
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, code):
+            self.code = code
+
+        async def request(self, method, params):
+            calls.append((self.code, method, params))
+            response = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": self.code, "message": secret, "data": secret},
+                }
+            )
+            rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(response))
+            return await rpc.request(method, params)
+
+    rpc = FailoverProofRpc(
+        tuple(Transport(code) for code in (429, -32000, 4003)), timeout_seconds=30
+    )
+    params = (["0x3a636f6465"], block)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error") as caught:
+        await rpc.request("state_getReadProof", params)
+    details = _failure_details(caught.value)
+    report = details[0]
+    assert [item["rpc_error_code"] for item in report["rpc_failures"]] == [429, -32000, 4003]
+    assert [item["provider_index"] for item in report["rpc_failures"]] == [0, 1, 2]
+    assert all(item["rpc_block_hash"] == block for item in report["rpc_failures"])
+    assert report["rpc_method"] == "state_getReadProof"
+    assert report["rpc_error_code"] == 4003
+    assert secret not in json.dumps(details)
+    assert str(caught.value) == "proof_rpc_error"
+    assert calls == [(code, "state_getReadProof", params) for code in (429, -32000, 4003)]
+
+
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_failed_primary_handshake_survives_later_provider_errors(chain, wire, status):
+    from umi.competition_progress import _failure_details
+
+    state, router = wire
+    state.primary_status = status
+    state.fallback_rpc_error = state.second_rpc_error = True
+    block = chain.finality.ref.block_hash
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error") as caught:
+        await router.request("chain_getHeader", (block,))
+    failures = _failure_details(caught.value)[0]["rpc_failures"]
+    assert [item["provider_index"] for item in failures] == [0, 1, 2]
+    assert failures[0]["rpc_http_status"] == status
+    assert failures[0]["rpc_transport_error"] == "handshake_rejected"
+    assert failures[0]["rpc_method"] == "chain_getHeader"
+    assert failures[0]["rpc_block_hash"] == block
+    assert failures[0]["reason_code"] == (
+        "proof_rpc_rate_limited" if status == 429 else "proof_rpc_failed"
+    )
+    assert "fixture unavailable" not in json.dumps(failures)
+    assert "Retry-After" not in json.dumps(failures)
+
+
+@pytest.mark.parametrize(
+    "cause", [TimeoutError("secret"), OSError("secret"), RuntimeError("secret")]
+)
+async def test_transport_failure_keeps_safe_kind_and_request_identity(cause):
+    from umi.competition_progress import _failure_details
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _RpcClient
+
+    def fail(*_args, **_kwargs):
+        raise cause
+
+    block = _hash(77)
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=fail)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_failed") as caught:
+        await rpc.request("state_getReadProof", (["0x3a636f6465"], block))
+    report = _failure_details(caught.value)[0]
+    expected = (
+        "timeout"
+        if isinstance(cause, TimeoutError)
+        else "os_error"
+        if isinstance(cause, OSError)
+        else "unknown"
+    )
+    assert report["rpc_transport_error"] == expected
+    assert report["rpc_method"] == "state_getReadProof"
+    assert report["rpc_block_hash"] == block
+    assert "secret" not in json.dumps(_failure_details(caught.value))
+
+
+async def test_provider_budget_expiry_retains_timeout_before_next_failure():
+    from umi.competition_progress import _failure_details
+
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, index):
+            self.index = index
+
+        async def request(self, method, params):
+            if self.index == 0:
+                await asyncio.Event().wait()
+            raise ValidatorChainError(
+                "proof_rpc_error", rpc_method=method, rpc_block_hash=params[-1]
+            )
+
+    rpc = FailoverProofRpc(tuple(Transport(i) for i in range(3)), timeout_seconds=0.03)
+    block = _hash(77)
+    with pytest.raises(ValidatorChainError, match="proof_rpc_error") as caught:
+        await rpc.request("chain_getHeader", (block,))
+    failures = _failure_details(caught.value)[0]["rpc_failures"]
+    assert failures[0]["rpc_transport_error"] == "timeout"
+    assert failures[0]["rpc_method"] == "chain_getHeader"
+    assert failures[0]["rpc_block_hash"] == block
+    assert [item["provider_index"] for item in failures] == [0, 1, 2]
+
+
+@pytest.mark.parametrize("status", [True, 99, 600, "secret", None])
+def test_transport_metadata_rejects_unbounded_provider_values(status):
+    from umi.competition_progress import _failure_details
+
+    error = ValidatorChainError(
+        "proof_rpc_failed", rpc_http_status=status, rpc_transport_error="secret"
+    )
+    report = _failure_details(error)[0]
+    assert "rpc_http_status" not in report
+    assert "rpc_transport_error" not in report
+    assert "secret" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "code,message,throttled",
+    [
+        (-32004, "Historical work rate limit exceeded", True),
+        (-32004, "Method not supported", False),
+        (-32000, "Historical work rate limit exceeded", False),
+    ],
+)
+async def test_historical_work_throttle_enters_provider_cooldown(code, message, throttled):
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _FakeConnect, _RpcClient
+
+    calls = []
+    block = _hash(77)
+    params = (["0x3a636f6465"], block)
+
+    class Transport:
+        bulk_storage_reads = False
+
+        def __init__(self, index):
+            self.index = index
+
+        async def request(self, method, arguments):
+            calls.append((self.index, method, arguments))
+            if self.index:
+                return {"at": block, "proof": []}
+            response = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": code, "message": message, "data": "private must not escape"},
+                }
+            )
+            rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(response))
+            return await rpc.request(method, arguments)
+
+    rpc = FailoverProofRpc(tuple(Transport(i) for i in range(3)), timeout_seconds=30)
+    now = [100.0]
+    rpc._now = lambda: now[0]
+    for _ in range(2):
+        assert await rpc.request("state_getReadProof", params) == {"at": block, "proof": []}
+    assert [i for i, _, _ in calls] == ([0, 1, 1] if throttled else [0, 1, 0, 1])
+    assert all(arguments == params for _, _, arguments in calls)
+    now[0] = 111.0
+    await rpc.request("state_getReadProof", params)
+    assert [i for i, _, _ in calls[-2:]] == [0, 1]
+
+
+@pytest.mark.parametrize("code", [True, "secret", 2**40, None])
+async def test_rpc_error_diagnostics_do_not_copy_invalid_codes_or_arguments(code):
+    from umi.competition_progress import _failure_details
+    from umi.validator_chain import BittensorRawJsonRpc
+
+    from .test_validator_chain import _FakeConnect, _RpcClient
+
+    response = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": "secret"}})
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(response))
+    with pytest.raises(ValidatorChainError) as caught:
+        await rpc.request("chain_getBlockHash", (42,))
+    details = _failure_details(caught.value)
+    assert "rpc_error_code" not in details[0]
+    assert "rpc_block_hash" not in details[0]
+    assert "secret" not in json.dumps(details)

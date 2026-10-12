@@ -25,5 +25,7 @@ grant directory and policy-bound assignment state.
 
 C5 phase blocks are operating targets. Coordinator or validator downtime delays
 and resumes unfinished work; it does not discard the cohort or advance intake to
-C6. C4 remains the effective reward cohort until C5 produces a certified
-successor row.
+C6. The [request-tail rule](launch.md#timing-and-recovery) also applies to retained
+C5 work using its original request opening. It preserves completed evidence and
+requires independent closure certification. C4 remains the effective reward
+cohort until C5 produces a certified successor row.

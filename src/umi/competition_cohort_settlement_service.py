@@ -10,6 +10,8 @@ from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
+from .competition_cohort_aggregate_files import read_aggregate_model
+from .competition_cohort_aggregate_replica import replicate_verified_aggregate
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
     CohortProgressIntent,
@@ -25,12 +27,17 @@ from .competition_cohort_model_award import read_model_acceptances
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_recovery import RecoverableCohortPlan
 from .competition_cohort_recovery_store import CohortRecoveryStore
+from .competition_cohort_request_closure import CohortRequestClosure
+from .competition_cohort_request_inventory import request_inventory_observations
+from .competition_cohort_request_tail import verify_request_tail_clock
+from .competition_cohort_service_partial import paid_partial_observations
 from .competition_cohort_settlement import CohortSettlement
 from .competition_cohort_settlement_assembly import assemble_settlement_inputs
 from .competition_cohort_settlement_config import SettlementServiceConfig
 from .competition_cohort_settlement_controller import CohortSettlementPhases, SettlementInputBatch
 from .competition_cohort_settlement_delivery import (
     ModelReviewEvidenceFiles,
+    RetainedResultVoteDelivery,
     SettlementEvidenceFiles,
     SettlementResultVotes,
 )
@@ -46,13 +53,23 @@ from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
+from .host_memory_runtime import (
+    compact_memory_error,
+    discard_error_frames,
+    memory_operation,
+    selected_memory,
+)
 from .open_competition import Signature, digest, identity
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
 MAX_HISTORY_BYTES = 8 * 1024**2
+
+
+def _released_input(*_args):
+    raise RuntimeError("settlement native inputs have been released")
 
 
 class CohortSettlementService:
@@ -84,6 +101,8 @@ class CohortSettlementService:
             sign,
         )
         self.model_artifacts = model_artifacts
+        self._memory_admission = selected_memory()
+        self._memory_lease = None
         root = Path(config.state_directory) / digest(config.series) / self.cohort
         binding = {
             "schema": "umi-cohort-settlement-owner/1",
@@ -110,7 +129,11 @@ class CohortSettlementService:
         self.completed_requests = {}
         self.last_report = None
         self.published_tip = None
-        self.package = None
+        self.reviewed_terminal_tip = None
+        self.retained_result_votes: tuple[RetainedResultVoteDelivery, ...] = ()
+        self.package_reference: tuple[Path, str] | None = None
+        self.reward_package_reference: tuple[Path, str] | None = None
+        self.terminal_certification_sha256: str | None = None
         self.reference = False
 
     async def _handoff(self):
@@ -234,11 +257,97 @@ class CohortSettlementService:
         self.store.publish_history(history, self.config.policy, current_block=block)
         return history
 
+    async def _request_inventory_proofs(self, data):
+        """Authenticate the original cutoff clock and evaluator snapshot boundaries."""
+        benchmark = CohortRequestClosure.model_validate_json(
+            data.objects(data.inputs.closure.benchmark_closure_sha256)
+        )
+        tail = benchmark.tail
+        if tail is None:
+            return
+        observations = [tail.opened_observation, tail.observation]
+        if tail.selected_observation is not None:
+            observations.append(tail.selected_observation)
+        observations.extend(request_inventory_observations(benchmark, data.objects))
+        observations.extend(paid_partial_observations(data.inputs.closure, data.objects))
+        checked = {}
+        for observation in observations:
+            key = digest(observation)
+            if key in checked:
+                continue
+            raw, metadata = await self.proofs.read(observation)
+            reviewed = await self.provider.review_archive(observation, raw, metadata)
+            if (
+                reviewed.original != observation
+                or reviewed.replayed_at.block_number < observation.block
+            ):
+                raise ValueError(
+                    "settlement request inventory proof changed its original observation"
+                )
+            checked[key] = reviewed
+        verify_request_tail_clock(
+            tail,
+            checked[digest(tail.opened_observation)],
+            checked[digest(tail.observation)],
+            None
+            if tail.selected_observation is None
+            else checked[digest(tail.selected_observation)],
+        )
+
+    def _release_active_inputs(self, *, retain_exchange: bool = False) -> None:
+        """Release native graphs after owned work has drained; retain durable journals.
+
+        A terminal reviewer keeps only the ports needed to authenticate and
+        retransmit already retained votes. It must never sample or sign a new
+        phase using those ports after releasing its native input inventory.
+        """
+        if self.phases is not None:
+            # Coordinator peer closures point back to their exchange/phases.
+            # Break that cycle explicitly rather than waiting for cyclic GC.
+            self.phases.peers = ()
+            self.phases.owner.external = _released_input
+            self.phases.owner.pulses = _released_input
+        if retain_exchange and self.votes is not None:
+            self.retained_result_votes = self.votes.retained_deliveries
+        self.data = self.votes = self.controller = None
+        self.batch_votes = ((), ())
+        if not retain_exchange:
+            self.retained_result_votes = ()
+            self.phases = self.exchange = None
+            self.reviewed_terminal_tip = None
+
+    def _release_memory(self):
+        lease = getattr(self, "_memory_lease", None)
+        self._memory_lease = None
+        if lease is not None:
+            lease.close()
+
     async def _start(self, history):
+        # Keep the same cohort reservation across reference/scoring replacement.
+        # No second full graph is built while the obsolete inputs remain live.
+        self._release_active_inputs()
+        admission = getattr(self, "_memory_admission", None)
+        if admission is not None and self._memory_lease is None:
+            self._memory_lease = admission.try_settlement(self.cohort, self.config.role)
+            if self._memory_lease is None:
+                raise OSError("settlement awaits its cohort-group memory reservation")
+        failure = None
+        try:
+            await self._load_active_inputs(history)
+        except BaseException as error:
+            self._release_active_inputs()
+            if getattr(self, "_memory_lease", None) is None:
+                raise
+            failure = compact_memory_error(error)
+        if failure is not None:
+            self._release_memory()
+            raise failure from None
+
+    async def _load_active_inputs(self, history):
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
         state, _ = self.store.status(self.cohort)
         reference = state.phase == "reference_reveal"
@@ -257,7 +366,7 @@ class CohortSettlementService:
         try:
             package = await run_owned_thread(
                 partial(
-                    read_private_model,
+                    read_aggregate_model,
                     path,
                     SettlementInputPackage,
                     maximum_bytes=self.config.maximum_package_bytes,
@@ -295,7 +404,8 @@ class CohortSettlementService:
             logger.info(
                 "settlement_inputs cohort=%s phase=%s status=retained", self.cohort, state.phase
             )
-        if prior is not None and prior != {"sha256": digest(package)}:
+        package_sha256 = await run_owned_thread(digest, package)
+        if prior is not None and prior != {"sha256": package_sha256}:
             raise ValueError("settlement inputs changed after their first native review")
         self.data = await run_owned_thread(
             partial(
@@ -304,15 +414,20 @@ class CohortSettlementService:
                 self.config.policy,
                 self.config.manifest.requirement(self.cohort),
                 history,
-                expected_package_sha256=digest(package),
+                expected_package_sha256=package_sha256,
                 expected_tip_sha256=history_tip(history),
                 current_block=block,
                 current_decisions=decisions.__getitem__,
                 maximum_bytes=self.config.maximum_package_bytes,
             )
         )
-        self.journal.put(kind, "original", {"sha256": digest(package)})
-        self.package = package
+        # Native replay retains its required immutable objects and metadata.
+        # The full parsed package is no longer needed while checking proofs or
+        # waiting for peers; later delivery authenticates the retained file.
+        del package
+        await self._request_inventory_proofs(self.data)
+        self.journal.put(kind, "original", {"sha256": package_sha256})
+        self.package_reference = (path, package_sha256)
         delivered = SettlementEvidenceFiles(Path(self.config.exchange_inbox) / "objects")
         model_documents = ModelReviewEvidenceFiles(self.promotion.directory / "objects")
 
@@ -417,10 +532,12 @@ class CohortSettlementService:
             self.promotion.directory / "model-reward-acceptances",
             review,
         )
+        completed = {p.submission_sha256 for p in review.closure.participants}
         participants = tuple(
             participant
             for participant in review.roster.participants
             if participant.record.request.signed_submission.submission.track == "model"
+            and digest(participant.record.request.signed_submission.submission) in completed
         )
         for participant, certificate in zip(participants, certificates, strict=True):
             await self.model_artifacts.ensure(participant, certificate)
@@ -429,7 +546,7 @@ class CohortSettlementService:
         sources = tuple(
             self._decisions(t.transition.evidence_sha256)
             for t in history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         )
         await run_owned_thread(
             partial(
@@ -443,58 +560,163 @@ class CohortSettlementService:
             )
         )
 
+    async def _review_requests(self, *, terminal: bool = False) -> None:
+        for phase in PHASES:
+            for kind in ("progress", "transition"):
+                try:
+                    request = await run_owned_thread(self.exchange.request, phase, kind)
+                except FileNotFoundError:
+                    continue
+                key, sha = (phase, kind), digest(request)
+                if key in self.completed_requests and self.completed_requests[key] != sha:
+                    raise ValueError("completed settlement request changed")
+                closed = any(
+                    t.transition.phase == phase and t.transition.operation == "close_phase"
+                    for t in self.store.published_history(self.cohort).transitions
+                )
+                if terminal and not closed:
+                    raise ValueError("terminal settlement reviewer received an open phase")
+                if closed:
+                    self.exchange._check(request)
+                    try:
+                        self.phases.signer.retained_vote(self.exchange._body(request))
+                    except FileNotFoundError:
+                        # A late reviewer can accept a quorum certificate
+                        # without having voted itself. It must not roll back
+                        # to generate a redundant vote for that closed phase.
+                        self.completed_requests[key] = sha
+                        continue
+                await self.exchange.review(request)
+                self.completed_requests[key] = sha
+
+    @memory_operation
+    async def _selected_history(self):
+        return await self._receive_history(await self._handoff())
+
+    @staticmethod
+    def _certification_prefix(history):
+        closed = [
+            item.transition
+            for item in history.transitions
+            if item.transition.phase == "certification"
+            and item.transition.operation == "close_phase"
+        ]
+        if len(closed) != 1:
+            raise ValueError("terminal settlement lacks its certified allocation prefix")
+        return digest(closed[0])
+
+    async def _replicate_inputs(self):
+        if self.package_reference is None:
+            raise RuntimeError("settlement has no verified original package")
+        path, sha256 = self.package_reference
+        await run_owned_thread(
+            partial(
+                replicate_verified_aggregate,
+                path,
+                Path(self.config.exchange_outbox)
+                / "inputs"
+                / (self.cohort + ("-reference.json" if self.reference else ".json")),
+                expected_digest=sha256,
+                maximum_bytes=self.config.maximum_package_bytes,
+            )
+        )
+
+    def _reward_package_reference(self, package):
+        return (
+            Path(self.config.settlement_directory) / (self.cohort + ".json"),
+            digest(package),
+        )
+
+    async def _remember_reward_package(self, package):
+        reference = await run_owned_thread(self._reward_package_reference, package)
+        prior = getattr(self, "reward_package_reference", None)
+        if prior is not None and reference != prior:
+            raise ValueError("rebuilt settlement output changes its native original")
+        self.reward_package_reference = reference
+
+    async def _check_reward_package(self):
+        reference = getattr(self, "reward_package_reference", None)
+        if reference is None:
+            raise RuntimeError("published settlement lacks its native output reference")
+        path, sha256 = reference
+        # Bounded verification of an already native digest; never authorize or
+        # rebuild a package here. Source=destination performs no replacement.
+        await run_owned_thread(
+            partial(
+                replicate_verified_aggregate,
+                path,
+                path,
+                expected_digest=sha256,
+                maximum_bytes=self.config.maximum_package_bytes,
+            )
+        )
+
+    async def _maintain_selected(self, history, state):
+        """Compact maintenance only; None requests this role's native lane."""
+        if state.phase == "revoked":
+            self._release_active_inputs()
+            self._release_memory()
+            if self.config.role == "coordinator":
+                await self._publish_history(history)
+            return "revoked"
+        if self.published_tip is None and self.reviewed_terminal_tip is None:
+            return None
+        if state.phase not in {"first_admission", "complete"} or (
+            self._certification_prefix(history) != self.terminal_certification_sha256
+        ):
+            raise ValueError("terminal settlement changed its certified allocation prefix")
+        if self.config.role == "coordinator":
+            # Repair restarted peers while a later cohort holds the native slot.
+            # Missing mandatory inputs are restore-only, even when final output
+            # is also missing. Only the generated final output can be rebuilt.
+            await self._replicate_inputs()
+            await self._publish_history(history)
+            try:
+                await self._check_reward_package()
+            except FileNotFoundError:
+                return None
+            self.published_tip = state.tip_sha256
+            return "package_published"
+        for delivery in self.retained_result_votes:
+            await run_owned_thread(delivery.publish)
+        await self._review_requests(terminal=True)
+        self.reviewed_terminal_tip = state.tip_sha256
+        return "reviewing"
+
+    async def maintain(self):
+        self.provider.ensure_observer_running()
+        history = await self._selected_history()
+        state, _ = self.store.status(self.cohort)
+        return await self._maintain_selected(history, state)
+
     async def tick(self) -> str:
         self.provider.ensure_observer_running()
-        history = await self._receive_history(await self._handoff())
+        history = await self._selected_history()
         state, _ = self.store.status(self.cohort)
-        if state.phase == "revoked":
-            return "revoked"
-        if self.published_tip == state.tip_sha256:
-            return "package_published"
-        if self.phases is None or self.reference != (state.phase == "reference_reveal"):
+        maintained = await self._maintain_selected(history, state)
+        if maintained is not None:
+            return maintained
+        if (
+            self.data is None
+            or self.phases is None
+            or self.reference != (state.phase == "reference_reveal")
+        ):
             await self._start(history)
         if state.phase in {"certification", "first_admission", "complete"}:
             await self._ensure_model_artifacts()
         if self.config.role == "coordinator":
-            await run_owned_thread(
-                partial(
-                    publish_settlement_inputs,
-                    Path(self.config.exchange_outbox)
-                    / "inputs"
-                    / (self.cohort + ("-reference.json" if self.reference else ".json")),
-                    self.package,
-                    maximum_bytes=self.config.maximum_package_bytes,
-                )
-            )
+            await self._replicate_inputs()
         if self.votes is not None:
             await self.votes.publish()
             self.batch_votes = await run_owned_thread(self.votes.collect)
         if self.config.role == "reviewer":
-            for phase in PHASES:
-                for kind in ("progress", "transition"):
-                    try:
-                        request = await run_owned_thread(self.exchange.request, phase, kind)
-                    except FileNotFoundError:
-                        continue
-                    key, sha = (phase, kind), digest(request)
-                    if key in self.completed_requests and self.completed_requests[key] != sha:
-                        raise ValueError("completed settlement request changed")
-                    closed = any(
-                        t.transition.phase == phase and t.transition.operation == "close_phase"
-                        for t in self.store.published_history(self.cohort).transitions
-                    )
-                    if closed:
-                        self.exchange._check(request)
-                        try:
-                            self.phases.signer.retained_vote(self.exchange._body(request))
-                        except FileNotFoundError:
-                            # A late reviewer can accept a quorum certificate
-                            # without having voted itself. It must not roll back
-                            # to generate a redundant vote for that closed phase.
-                            self.completed_requests[key] = sha
-                            continue
-                    await self.exchange.review(request)
-                    self.completed_requests[key] = sha
+            terminal = state.phase in {"first_admission", "complete"}
+            await self._review_requests(terminal=terminal)
+            if terminal:
+                self.terminal_certification_sha256 = self._certification_prefix(history)
+                self._release_active_inputs(retain_exchange=True)
+                self._release_memory()
+                self.reviewed_terminal_tip = state.tip_sha256
             return "reviewing"
         if state.phase in PHASES:
             await self.controller.tick()
@@ -507,7 +729,7 @@ class CohortSettlementService:
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
             for t in batch.inputs.history.transitions
-            if t.transition.operation != "revoke"
+            if t.transition.requires_progress_evidence
         }
         owner = copy.copy(self.phases.owner)
         owner.decisions = decisions.__getitem__
@@ -522,25 +744,194 @@ class CohortSettlementService:
                 service_votes=batch.service_votes,
             )
         )
-        await self._publish_history(batch.inputs.history)
-        if result.status == "package_published":
+        status = result.status
+        if status == "package_published":
+            await self._remember_reward_package(result.package)
+        # The worker result itself carries the final full package. Do not retain
+        # it or the batch/owner closures across history publication or release.
+        published_history = batch.inputs.history
+        del result, batch, owner, decisions
+        await self._publish_history(published_history)
+        if status == "package_published":
             self.published_tip = state.tip_sha256
-        return result.status
+            self.terminal_certification_sha256 = self._certification_prefix(published_history)
+            self._release_active_inputs()
+            self._release_memory()
+        return status
 
     async def run(self, stop: asyncio.Event):
-        while not stop.is_set():
-            self.provider.ensure_observer_running()
+        failure = None
+        try:
+            while not stop.is_set():
+                self.provider.ensure_observer_running()
+                try:
+                    report = await self.tick()
+                except Exception as error:
+                    report = "retry:" + type(error).__name__
+                if report != self.last_report:
+                    logger.info(
+                        "settlement_status cohort=%s role=%s status=%s",
+                        self.cohort,
+                        self.config.role,
+                        report,
+                    )
+                    self.last_report = report
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
+        except BaseException as error:
+            failure = compact_memory_error(error)
+        finally:
+            self._release_active_inputs()
+            self._release_memory()
+        if failure is not None:
+            raise failure from None
+
+
+class SettlementSeriesScheduler:
+    """One native cohort per role, ordered by its approved signed series.
+
+    A missing earlier handoff is a barrier. Completed native cohorts continue
+    compact delivery independently while the first pending cohort runs. If an
+    earlier output needs rebuilding, the later owned tick must drain before its
+    graph and reservation are released. Original journals and signed clocks stay put.
+    """
+
+    def __init__(self, nodes, *, ordered_cohorts):
+        self.nodes = tuple(nodes)
+        if not self.nodes or tuple(node.cohort for node in self.nodes) != tuple(ordered_cohorts):
+            raise ValueError("settlement scheduler differs from its approved series order")
+        if len(set(ordered_cohorts)) != len(self.nodes):
+            raise ValueError("settlement scheduler repeats a cohort")
+        self.active = None
+        self._locks = {node: asyncio.Lock() for node in self.nodes}
+        self._completed = set()
+        self.recovery_requested = set()
+
+    @staticmethod
+    def _report(node, report):
+        if report != node.last_report:
+            logger.info(
+                "settlement_status cohort=%s role=%s status=%s",
+                node.cohort,
+                node.config.role,
+                report,
+            )
+            node.last_report = report
+
+    @staticmethod
+    async def _attempt(operation):
+        failure = None
+        try:
+            result = await operation()
+        except Exception as error:
+            failure = "retry:" + type(error).__name__
+            discard_error_frames(error)
+        # End the original exception's scope before releasing any reservation:
+        # rejected inputs can live in error args independently of tracebacks.
+        return (False, failure) if failure is not None else (True, result)
+
+    def _suspend(self):
+        if self.active is not None:
+            if (
+                self.active.data is not None
+                or getattr(self.active, "_memory_lease", None) is not None
+            ):
+                self.active._release_active_inputs()
+                self.active._release_memory()
+            self.active = None
+
+    async def tick(self):
+        candidate = None
+        ready = False
+        for node in self.nodes:
+            async with self._locks[node]:
+                okay, status = await self._attempt(node.maintain)
+            if not okay or status is None:
+                candidate, ready = node, okay
+                if not okay:
+                    self._report(node, status)
+                break
+            self._completed.add(node)
+            self.recovery_requested.discard(node.cohort)
+            self._report(node, status)
+        if self.active is not candidate:
+            self._suspend()
+        if candidate is None or not ready:
+            return
+        self.active = candidate
+        async with self._locks[candidate]:
+            # Compact maintenance can discover earlier recovery while this
+            # scanner awaits a later node. Honor it at the final safe boundary;
+            # already-running owned work is never abandoned or interrupted.
+            if any(
+                node.cohort in self.recovery_requested
+                for node in self.nodes[: self.nodes.index(candidate)]
+            ):
+                self._suspend()
+                return
+            _, status = await self._attempt(candidate.tick)
+        self._report(candidate, status)
+
+    async def maintain_completed(self):
+        # Independent serial maintenance may overlap a later native tick, but
+        # never enter native start or mutate the active/queued node concurrently.
+        for node in self.nodes:
+            if node is self.active or node not in self._completed:
+                continue
+            async with self._locks[node]:
+                if node is self.active:
+                    continue
+                okay, status = await self._attempt(node.maintain)
+            if not okay or status is None:
+                self.recovery_requested.add(node.cohort)
+                if not okay:
+                    self._report(node, status)
+            else:
+                self.recovery_requested.discard(node.cohort)
+                self._report(node, status)
+
+    async def _loop(self, stop, operation):
+        failure = None
+        try:
+            while not stop.is_set():
+                await operation()
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=self.nodes[0].config.poll_seconds)
+        except BaseException as error:
+            failure = compact_memory_error(error)
+        if failure is not None:
+            raise failure from None
+
+    async def run(self, stop: asyncio.Event):
+        tasks = [
+            asyncio.create_task(self._loop(stop, self.tick)),
+            asyncio.create_task(self._loop(stop, self.maintain_completed)),
+        ]
+        failure = None
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            if not stop.is_set():
+                raise RuntimeError("settlement scheduler component exited before shutdown")
+        except BaseException as error:
+            failure = compact_memory_error(error)
+        finally:
+
+            async def drain():
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
             try:
-                report = await self.tick()
-            except Exception as error:
-                report = "retry:" + type(error).__name__
-            if report != self.last_report:
-                logger.info(
-                    "settlement_status cohort=%s role=%s status=%s",
-                    self.cohort,
-                    self.config.role,
-                    report,
-                )
-                self.last_report = report
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
+                await await_owned_task(asyncio.create_task(drain()))
+            except BaseException as error:
+                drained_error = compact_memory_error(error)
+                if failure is None:
+                    failure = drained_error
+            for node in self.nodes:
+                node._release_active_inputs()
+                node._release_memory()
+            self.active = None
+        if failure is not None:
+            raise failure from None

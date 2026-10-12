@@ -55,6 +55,7 @@ from umi.competition_cohort_service_work import (
     SignedServiceWorkClaim,
 )
 from umi.competition_execution import execution_boundary
+from umi.competition_historical_registration import HistoricalRegistration
 from umi.competition_reward_decisions import StandingRewardSeries
 from umi.competition_reward_manifest import (
     RewardReplayRequirement,
@@ -67,6 +68,7 @@ from umi.grandpa_finality import FINNEY_GENESIS_HASH
 from umi.open_competition import digest, sign_object
 from umi.private_files import read_private_model
 from umi.protocol import canonical_json_bytes
+from umi.validator_chain import FinalizedSnapshotRef
 
 from .test_competition_cohort_consumers import scenario as legacy_scenario  # noqa: F401
 from .test_competition_cohort_consumers import transition
@@ -138,6 +140,7 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
     )
     metadata = b"fixture-metadata"
     archives = {}
+    timestamps = {}
 
     def capture(block):
         base = capture_at(block)
@@ -165,6 +168,9 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
             base.snapshot,
             {
                 **base.provenance,
+                "timestamp_ms": timestamps.setdefault(
+                    block, getattr(h, "timestamp", base.provenance["timestamp_ms"])
+                ),
                 "evidence_sha256": hashlib.sha256(raw).hexdigest(),
             },
         )
@@ -197,6 +203,11 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
 
         async def collect(self):
             self.ensure_observer_running()
+            # Host fixtures explicitly advance their synthetic chain clock.
+            # Preserve the selected clock for later original-archive review.
+            timestamps[h.block] = getattr(
+                h, "timestamp", capture_at(h.block).provenance["timestamp_ms"]
+            )
             return capture(h.block)
 
         async def current_finalized_block(self):
@@ -210,10 +221,17 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
         async def review_archive(self, observation, raw, metadata):
             capture(observation.block)
             assert (raw, metadata) == archives[observation.block]
-            return SimpleNamespace(
+            current = capture_at(h.block)
+            return HistoricalRegistration(
                 original=observation,
                 snapshot=capture_at(observation.block).snapshot,
-                replayed_at=SimpleNamespace(block_number=h.block),
+                replayed_at=FinalizedSnapshotRef(
+                    block_number=h.block,
+                    block_hash=current.snapshot.block_hash,
+                    parent_hash="0x" + "00" * 32,
+                    state_root=current.provenance["state_root"],
+                ),
+                timestamp_ms=timestamps[observation.block],
             )
 
     provider = h.provider = Provider()
@@ -349,6 +367,22 @@ def lifecycle(intake, scenario, tmp_path, lifecycle_before_intake):
         yield h
     finally:
         h.db.close()
+
+
+async def test_historical_review_keeps_original_clock_after_current_time_advances(lifecycle):
+    h = lifecycle
+    h.timestamp = 2_000_000
+    original = await h.provider.collect()
+    observation = execution_boundary(original)
+    raw, metadata = await h.provider.retained_archive(observation)
+    h.block += 100
+    h.timestamp += 13 * 60 * 60 * 1000
+    await h.provider.collect()
+    reviewed = await h.provider.review_archive(observation, raw, metadata)
+    assert isinstance(reviewed, HistoricalRegistration)
+    assert reviewed.original == observation
+    assert reviewed.timestamp_ms == original.provenance["timestamp_ms"] == 2_000_000
+    assert reviewed.replayed_at.block_number == h.block
 
 
 def precommit_service_inventory(
@@ -1051,3 +1085,41 @@ async def test_selected_request_start_gate_survives_lifecycle_restart(lifecycle,
         await service.tick()
     assert h.request_entered.is_set()
     assert max(h.calls.values()) == 1
+
+
+async def test_driver_and_attempt_preparation_finish_before_progress_capture(lifecycle):
+    from contextlib import asynccontextmanager
+
+    h = lifecycle
+    service = h.reopen()
+    factory = service.factories["intake"]
+    stages = []
+
+    async def delayed_driver():
+        native = await factory()
+        h.block += 2
+        stages.append("driver")
+
+        @asynccontextmanager
+        async def prepare(state):
+            h.block += 2
+            stages.append("prepare")
+
+            async def sample(capture):
+                assert capture.snapshot.block == h.block
+                stages.append("sample")
+                return await native.observer.sample(state, capture)
+
+            try:
+                yield sample
+            finally:
+                stages.append("release")
+
+        return CohortPhaseDriver(
+            native.observer, sample_service=native.sample_service, prepare_progress=prepare
+        )
+
+    service.factories["intake"] = delayed_driver
+    assert (await service.tick())["status"] == "waiting_phase_progress"
+    assert stages == ["driver", "prepare", "sample", "release"]
+    assert service.last_progress.observed_at_block == h.block

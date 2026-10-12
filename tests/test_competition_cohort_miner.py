@@ -256,6 +256,45 @@ async def test_native_late_grant_inference_restart_and_original_response_recover
     assert (await grant(p)).content == ack.content
 
 
+async def test_same_hotkey_at_new_uid_keeps_original_grant_and_response_after_restart(granted):
+    p = granted
+    original = canonical_json_bytes(p.grant)
+    initial = await p.collect()
+    hotkey = p.miner.hotkey_ss58
+    values = p.c.rpc.values
+    uid_key = ("SubtensorModule", "Uids", (78, hotkey))
+    old_uid = values.pop(uid_key)
+    replacement = wallet("Charlie").hotkey.ss58_address
+    assert replacement != hotkey
+    values[("SubtensorModule", "Keys", (78, old_uid))] = replacement
+    values[("SubtensorModule", "Uids", (78, replacement))] = old_uid
+    head = p.c.finality.ref.block_number
+    p.c.finality.ref = replace(p.c.finality.ref, block_number=head + 1, block_hash="0x" + "81" * 32)
+    with pytest.raises(ValueError, match="registration storage membership is incomplete"):
+        await p.collect()
+    assert p.model.calls == 0
+
+    new_uid = values[("SubtensorModule", "SubnetworkN", (78,))]
+    values[("SubtensorModule", "SubnetworkN", (78,))] = new_uid + 1
+    values[uid_key] = new_uid
+    values[("SubtensorModule", "Keys", (78, new_uid))] = hotkey
+    p.c.finality.ref = replace(p.c.finality.ref, block_number=head + 2, block_hash="0x" + "82" * 32)
+    recovered = await p.collect()
+    assert recovered.uid == new_uid != old_uid
+    assert recovered.submission_sha256 == initial.submission_sha256
+    assert canonical_json_bytes(p.grant) == original
+    ack = await grant(p)
+    assert ack.status_code == 200, ack.text
+    result = await translate(p)
+    assert result.status_code == 200, result.text
+    p.miner = p.rebuild()
+    assert (await grant(p)).content == ack.content
+    response = await request(p, RESPONSE_RECOVERY_PATH, p.requests[0])
+    assert response.status_code == 200 and response.content == result.content
+    assert p.model.calls == p.fetcher.calls == 1
+    assert canonical_json_bytes(p.grant) == original
+
+
 async def test_grant_accepts_equivalent_serving_origin_spelling(granted):
     p = granted
     p.miner = p.rebuild(

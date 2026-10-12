@@ -13,9 +13,11 @@ this module.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from functools import partial
 from itertools import pairwise
@@ -35,7 +37,7 @@ from .chain_evidence import (
     StorageProofVerifier,
     assert_shadow_no_weight_interval,
 )
-from .concurrency import run_owned_thread
+from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
 
@@ -558,10 +560,26 @@ class FinalizedBlockScanner:
         if not isinstance(identity, VerifiedFinalizedBlockIdentity):
             raise TypeError("identity must be a VerifiedFinalizedBlockIdentity")
         runtime = await self._required_runtime(identity)
-        body = await self._required_body(
-            identity, state_version=runtime.pin.extrinsics_root_state_version
+        # Body and event proofs are independent once the parent runtime and
+        # finalized child identity are selected. Keep both owned through errors
+        # and cancellation before the caller can close their shared provider.
+        tasks = (
+            asyncio.create_task(
+                self._required_body(
+                    identity, state_version=runtime.pin.extrinsics_root_state_version
+                )
+            ),
+            asyncio.create_task(self._required_events(identity, runtime)),
         )
-        events_raw = await self._required_events(identity, runtime)
+        try:
+            body, events_raw = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError, Exception):
+                    await await_owned_task(task)
+            raise
 
         # Runtime decoding and proof tools can take seconds. Keep the loop
         # responsive, but drain each owned thread before releasing its caller's
@@ -1517,7 +1535,7 @@ def _weight_event_target(
     extrinsic_index: int | None,
     calls: tuple[FinalizedCallRecord, ...],
     limits: ScanLimits,
-) -> tuple[bytes, int, int]:
+) -> tuple[bytes | None, int, int]:
     named, positional = _attributes_positional_or_named(attributes)
     account: bytes | None = None
     if event in {
@@ -1585,6 +1603,19 @@ def _weight_event_target(
                 index=0,
             )
         )
+        if extrinsic_index is None:
+            # Runtime hooks can set weights without a current extrinsic. This
+            # event carries a neuron UID, not an account; a current registration
+            # lookup cannot establish its historical origin. Retain the proven
+            # event without inventing attribution. No-weight assertions reject
+            # an unattributed event, while unrelated commitment scans can use
+            # the complete block and its original events.
+            _uint(
+                _field(named, positional, aliases=("uid", "neuron_uid"), index=1),
+                "weight_event_uid_invalid",
+                maximum=_MAX_U16,
+            )
+            return None, target[0], target[1]
         account = _unique_weight_origin(calls, extrinsic_index)
     else:  # pragma: no cover - guarded by the closed event set
         raise ValidatorChainScanError("weight_event_unsupported")

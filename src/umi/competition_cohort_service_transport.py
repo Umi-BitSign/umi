@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import time
 from collections.abc import Awaitable, Callable
@@ -45,6 +46,7 @@ from .endpoint_retirement import (
 )
 from .miner_admission import MinerAdmissionError
 from .open_competition import digest, identity
+from .private_state_wait import run_private_state_operation
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import (
     ComponentResponseError,
@@ -56,6 +58,7 @@ from .validator import (
 )
 
 ServiceOriginSource = Callable[[ServiceWorkAssignment], Awaitable[EndpointOriginCapture]]
+_LOG = logging.getLogger(__name__)
 
 
 class ServiceDispatchIntent(StrictProtocolModel):
@@ -124,6 +127,18 @@ class ServiceWorkTransport:
             evaluator_hotkey=grant.body.evaluator_hotkey,
         )
 
+    def _retain_inventory_record(self, kind, slot, value):
+        # Closure snapshots and transport originals share the native compound
+        # lease. A response/retirement cannot appear halfway through an absence
+        # classification while the owner believes that inventory is stable.
+        with self.journal.locked():
+            self.journal.put(kind, slot, value)
+
+    async def _retain_inventory(self, kind, slot, value):
+        await run_private_state_operation(
+            self._retain_inventory_record, kind, slot, value, timeout=self.timeout
+        )
+
     async def _capture(self, grant):
         capture = await wait_for_owned(self.origin(grant.body.assignment), timeout=self.timeout)
         submission = grant.body.assignment.admission.submission.submission
@@ -137,6 +152,23 @@ class ServiceWorkTransport:
 
     async def _exchange(self, capture, path, value, maximum):
         body = canonical_json_bytes(value)
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        operation = {COHORT_GRANT_PATH: "grant", COHORT_RETIRE_PATH: "retirement"}.get(
+            path, "unknown"
+        )
+
+        def pending(*, http_status=0, failure="http_status"):
+            # Report only fixed labels and already public identities. Responses,
+            # exception messages, URLs and authentication headers stay private.
+            _LOG.warning(
+                "service_transport_pending operation=%s miner_hotkey=%s "
+                "body_sha256=%s http_status=%s failure=%s",
+                operation,
+                capture.hotkey,
+                body_sha256,
+                http_status,
+                failure,
+            )
 
         async def exchange():
             origin, host, sni = await _pinned_public_origin(
@@ -150,7 +182,7 @@ class ServiceWorkTransport:
                     "Content-Type": "application/json",
                     "Accept-Encoding": "identity",
                     "Host": host,
-                    REQUEST_BODY_SHA256_HEADER: hashlib.sha256(body).hexdigest(),
+                    REQUEST_BODY_SHA256_HEADER: body_sha256,
                 }
             )
             async with httpx.AsyncClient(
@@ -169,6 +201,7 @@ class ServiceWorkTransport:
                     if _header_size(reply.headers) > self.limits.maximum_http_header_bytes:
                         raise ValueError("service response header bound")
                     if reply.status_code != 200:
+                        pending(http_status=reply.status_code)
                         return None
                     return await _read_response_body(reply, maximum, prefix=bytearray())
                 finally:
@@ -176,7 +209,16 @@ class ServiceWorkTransport:
 
         try:
             return await wait_for_owned(exchange(), timeout=self.timeout)
-        except (OSError, httpx.HTTPError, asyncio.TimeoutError, ComponentResponseError):
+        except (OSError, httpx.HTTPError, asyncio.TimeoutError, ComponentResponseError) as error:
+            if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException)):
+                failure = "timeout"
+            elif isinstance(error, httpx.HTTPError):
+                failure = "http_transport"
+            elif isinstance(error, ComponentResponseError):
+                failure = "response_bound"
+            else:
+                failure = "os_error"
+            pending(failure=failure)
             return None
 
     async def _recover(self, grant, capture):
@@ -192,8 +234,7 @@ class ServiceWorkTransport:
             transport=self.transport,
         )
         if result.response is not None:
-            await run_owned_thread(
-                self.journal.put,
+            await self._retain_inventory(
                 "service_response",
                 service_grant_slot(grant.body),
                 result.response,
@@ -224,6 +265,17 @@ class ServiceWorkTransport:
             if raw is None:
                 raw = await self._exchange(capture, COHORT_GRANT_PATH, grant, 64 * 1024)
                 if raw is None:
+                    # The miner may have retained the grant before its reply was
+                    # lost. After expiry, a failed grant retry must not prevent
+                    # native retirement of that exact original request. Missing
+                    # grants/receipts remain pending; the clock proves no absence.
+                    if (
+                        retire
+                        and bt.timelock.current_round() >= grant.body.request.response_close_round
+                    ):
+                        if response is None:
+                            response = await self._recover(grant, capture)
+                        return await self._retire(slot, grant, capture, response)
                     return ServiceTransportOutcome("grant_pending", response)
                 receipt = SignedCohortMinerGrantReceipt.model_validate_json(raw)
                 if canonical_json_bytes(receipt) != raw:
@@ -358,36 +410,41 @@ class ServiceWorkTransport:
                         except ValueError:
                             response = None
                         if response is not None:
-                            await run_owned_thread(
-                                self.journal.put, "service_response", slot, response
-                            )
+                            await self._retain_inventory("service_response", slot, response)
             if response is None:
                 response = await self._recover(grant, capture)
             if not retire:
                 # Dispatch ownership has drained and its durable intent/reply
                 # survives. Let the scheduler give retirement its own capacity.
                 return ServiceTransportOutcome("request_retirement_pending", response)
-            raw = await self._exchange(capture, COHORT_RETIRE_PATH, grant.body.request, 16 * 1024)
-            if raw is None:
-                return ServiceTransportOutcome("retirement_pending", response)
-            retired = SignedEndpointRetirementReceipt.model_validate_json(raw)
-            if canonical_json_bytes(retired) != raw:
-                raise ValueError("service retirement acknowledgement is noncanonical")
-            retired = self._retirement(grant, retired)
-            if retired.receipt.result != "response_retained" and not retirement_absence_elapsed(
-                retired.receipt,
-                grant.body.request,
-                observed_block=capture.block,
-                observed_round=bt.timelock.current_round(),
-            ):
-                return ServiceTransportOutcome("request_window_open", response)
-            # Retirement may race completion. Recover before recording that fence.
-            if retired.receipt.result == "response_retained" and response is None:
-                response = await self._recover(grant, capture)
-                if response is None:
-                    return ServiceTransportOutcome("retired_response_pending")
-            self._agrees(retired, response)
-            await run_owned_thread(self.journal.put, "service_retirement", slot, retired)
+            return await self._retire(slot, grant, capture, response)
+        return await self._retired_outcome(grant, response, retired)
+
+    async def _retire(self, slot, grant, capture, response):
+        raw = await self._exchange(capture, COHORT_RETIRE_PATH, grant.body.request, 16 * 1024)
+        if raw is None:
+            return ServiceTransportOutcome("retirement_pending", response)
+        retired = SignedEndpointRetirementReceipt.model_validate_json(raw)
+        if canonical_json_bytes(retired) != raw:
+            raise ValueError("service retirement acknowledgement is noncanonical")
+        retired = self._retirement(grant, retired)
+        if retired.receipt.result != "response_retained" and not retirement_absence_elapsed(
+            retired.receipt,
+            grant.body.request,
+            observed_block=capture.block,
+            observed_round=bt.timelock.current_round(),
+        ):
+            return ServiceTransportOutcome("request_window_open", response)
+        # Retirement may race completion. Recover before recording that fence.
+        if retired.receipt.result == "response_retained" and response is None:
+            response = await self._recover(grant, capture)
+            if response is None:
+                return ServiceTransportOutcome("retired_response_pending")
+        self._agrees(retired, response)
+        await self._retain_inventory("service_retirement", slot, retired)
+        return await self._retired_outcome(grant, response, retired)
+
+    async def _retired_outcome(self, grant, response, retired):
         self._agrees(retired, response)
         if self.windows is not None:
             await self.windows.retire(grant, grant.body.request, retired)

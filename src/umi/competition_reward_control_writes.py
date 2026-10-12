@@ -135,6 +135,9 @@ class _BlockPort(LiveFinalizedBlockScanPort):
                 maximum_proof_node_bytes=limits.maximum_event_proof_node_bytes,
                 maximum_proof_bytes=limits.maximum_event_proof_bytes,
             ),
+            # The explicitly selected native proof reader also recovers event
+            # values from their proof, avoiding a redundant storage RPC.
+            read_values_from_proof=provider._runtime_proof_reads,
         )
         super().__init__(
             rpc=provider._registration_rpc,

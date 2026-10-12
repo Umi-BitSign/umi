@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from heartbeat import (
+    delivery_healthy,
     heartbeat,
     lifecycle_status,
     public_round_index,
@@ -25,6 +26,63 @@ class HeartbeatTests(unittest.TestCase):
     systemd_running = (
         "ActiveState=active\nSubState=running\nInvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
     )
+
+    @patch("heartbeat.read_delivery_journal")
+    def test_delivery_reports_current_invocation_and_ignores_old_success(self, read):
+        current, old = "a" * 32, "b" * 32
+        for status, failed, expected in (
+            ("artifact_delivery_retry", 1, False),
+            ("artifact_delivery_current", 0, True),
+            ("artifact_delivery_pending", 0, True),
+            ("artifact_delivery_pending", 1, False),
+        ):
+            reports = [
+                {
+                    "_SYSTEMD_INVOCATION_ID": old,
+                    "MESSAGE": json.dumps({"status": "artifact_delivery_current"}),
+                },
+                {
+                    "_SYSTEMD_INVOCATION_ID": current,
+                    "MESSAGE": json.dumps({"status": status, "failed_source_trees": failed}),
+                },
+            ]
+            read.return_value = "\n".join(json.dumps(x) for x in reports)
+            self.assertIs(delivery_healthy("delivery.service", current), expected)
+        read.return_value = json.dumps(reports[0])
+        self.assertIsNone(delivery_healthy("delivery.service", current))
+
+    @patch("heartbeat.read_delivery_journal", side_effect=OSError("private journal failure"))
+    def test_unavailable_delivery_journal_does_not_fabricate_service_failure(self, read):
+        with self.assertRaisesRegex(RuntimeError, "delivery_status_unavailable"):
+            delivery_healthy("delivery.service", "a" * 32)
+
+    @patch("heartbeat.delivery_healthy", return_value=False)
+    @patch("heartbeat.subprocess.run")
+    def test_running_delivery_process_with_retry_is_reported_failed(self, run, healthy):
+        run.return_value = subprocess.CompletedProcess([], 0, self.systemd_running, "")
+        self.assertEqual(
+            heartbeat(["delivery.service"], delivery_services=["delivery.service"])["services"],
+            {"delivery.service": "failed"},
+        )
+
+    @patch("heartbeat.time.monotonic", return_value=10000)
+    @patch("heartbeat.delivery_healthy", return_value=None)
+    @patch("heartbeat.subprocess.run")
+    def test_delivery_first_pass_has_bounded_startup_grace(self, run, healthy, clock):
+        for started, expected in ((9999, "running"), (7000, "failed"), (10001, "failed")):
+            run.return_value = subprocess.CompletedProcess(
+                [],
+                0,
+                self.systemd_running + f"ActiveEnterTimestampMonotonic={started * 1_000_000}\n",
+                "",
+            )
+            self.assertEqual(
+                heartbeat(["delivery.service"], delivery_services=["delivery.service"])["services"],
+                {"delivery.service": expected},
+            )
+        for selected in (["other.service"], ["delivery.service", "delivery.service"]):
+            with self.assertRaisesRegex(ValueError, "invalid delivery services"):
+                heartbeat(["delivery.service"], delivery_services=selected)
 
     @patch("heartbeat.subprocess.run")
     def test_systemd_permission_failure_is_not_a_service_failure(self, run):
@@ -205,6 +263,9 @@ class HeartbeatTests(unittest.TestCase):
         for status, reason in (
             ("started", "successor_worker_started"),
             ("healthy", "successor_worker_healthy"),
+            ("healthy", "current_worker_healthy"),
+            ("healthy", "future_directive_staged"),
+            ("healthy", "future_stage_failed"),
         ):
             read.return_value = json.dumps(
                 {

@@ -33,6 +33,23 @@ from .test_competition_reward_boot import series_case as series_case
 from .test_open_competition import wallet
 
 
+class LifecycleScheduler:
+    """Substitute scheduler work to test boot ownership, not cohort progress."""
+
+    def __init__(self, nodes, *, ordered_cohorts):
+        assert len(nodes) == len(ordered_cohorts)
+        self.nodes = nodes
+
+    async def run(self, stop):
+        tasks = [asyncio.create_task(node.run(stop)) for node in self.nodes]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @pytest.fixture
 def selected(inputs, tmp_path):
     v = inputs.value
@@ -92,6 +109,31 @@ def test_settlement_config_and_cli_use_exact_root_selection(selected, capsys):
     selected.save(selected.path, b" " + canonical_json_bytes(selected.config))
     with pytest.raises(ValueError, match="canonical"):
         load_settlement_service_config(selected.path)
+
+
+def test_cli_exposes_background_preparation_and_restores_logging(selected, monkeypatch, capsys):
+    import logging
+
+    loggers = tuple(
+        logging.getLogger(name)
+        for name in ("umi.competition_cohort_settlement_preparation", "umi.competition.progress")
+    )
+    before = tuple((logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers)
+
+    async def running(config):
+        assert config == selected.config
+        loggers[0].info("cohort_settlement_preparation entries_ready=2")
+        loggers[1].info("work_progress entries_ready=2")
+
+    monkeypatch.setattr(cli, "_run", running)
+    cli.main(["run", "--config", str(selected.path)])
+    output = capsys.readouterr().err
+    assert "cohort_settlement_preparation entries_ready=2" in output
+    assert output.count("work_progress entries_ready=2") == 1
+    assert (
+        tuple((logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers)
+        == before
+    )
 
 
 @pytest.mark.parametrize(
@@ -220,6 +262,7 @@ async def test_settlement_boot_owns_keys_locks_and_drains_children(selected, mon
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
     monkeypatch.setattr(boot, "load_named_hotkey", key)
     monkeypatch.setattr(boot, "CohortSettlementService", Node)
+    monkeypatch.setattr(boot, "SettlementSeriesScheduler", LifecycleScheduler)
     if failure == "stop":
         await boot.run_settlement_service(config, stop)
     else:
@@ -399,6 +442,7 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
         )
     )
     events, stop, entered = [], asyncio.Event(), asyncio.Event()
+    preparation_entered = asyncio.Event()
 
     class Provider:
         def __init__(self, chain, policy):
@@ -423,9 +467,13 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
                 events.append("node_drained")
 
     class Exports:
-        def __init__(self, executions, provider, sign, files, journal):
+        def __init__(self, executions, provider, sign, files, journal, **inventory):
             assert executions[0].config == config.executions[0]
             assert files.root == Path(config.request_export_directory)
+            assert callable(inventory["publish_inventory_proof"])
+            assert callable(inventory["inventory_needed"])
+            assert callable(inventory["inventory_cutoff"])
+            assert inventory["inventory_cutoff"](digest(config.series.cohorts[0])) is None
             if failure == "construction":
                 raise ValueError("export constructor failed")
             self.sign = sign
@@ -433,6 +481,7 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
         async def run(self, halted, *, poll_seconds):
             try:
                 await entered.wait()
+                await preparation_entered.wait()
                 events.append("export_started")
                 signature = await self.sign(config.series)
                 verify_signature(config.series, signature)
@@ -442,10 +491,26 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
             finally:
                 events.append("export_drained")
 
+    class Preparation:
+        def __init__(self, conf, promotion, direct_by_cohort):
+            assert conf == config
+            assert promotion.directory == Path(config.promotion_directory)
+            assert direct_by_cohort == {}
+
+        async def run(self, halted):
+            try:
+                events.append("preparation_started")
+                preparation_entered.set()
+                await halted.wait()
+            finally:
+                events.append("preparation_drained")
+
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", Provider)
     monkeypatch.setattr(boot, "load_named_hotkey", lambda *args: wallet("Charlie"))
     monkeypatch.setattr(boot, "CohortSettlementService", Node)
+    monkeypatch.setattr(boot, "SettlementSeriesScheduler", LifecycleScheduler)
     monkeypatch.setattr(boot, "RequestExportWorker", Exports)
+    monkeypatch.setattr(boot, "SettlementArtifactPreparation", Preparation)
     if failure:
         with pytest.raises((ValueError, RuntimeError), match="export"):
             await boot.run_settlement_service(config, stop)
@@ -455,3 +520,14 @@ async def test_export_worker_runs_before_settlement_and_drains_with_it(
     assert ("node_started" in events) == (failure != "construction")
     assert ("node_drained" in events) == (failure != "construction")
     assert ("export_drained" in events) == (failure != "construction")
+    assert ("preparation_started" in events) == (failure != "construction")
+    assert ("preparation_drained" in events) == (failure != "construction")
+
+
+def test_package_aggregate_budget_does_not_raise_promotion_limit(selected):
+    original = selected.config.model_dump(by_alias=True)
+    changed = SettlementServiceConfig.model_validate(original | {"maximum_package_bytes": 1024**3})
+    assert changed.maximum_package_bytes == 1024**3
+    assert changed.maximum_promotion_bytes == selected.config.maximum_promotion_bytes
+    with pytest.raises(ValueError):
+        SettlementServiceConfig.model_validate(original | {"maximum_promotion_bytes": 1024**3})

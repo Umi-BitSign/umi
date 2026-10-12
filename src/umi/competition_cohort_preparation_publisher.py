@@ -16,6 +16,7 @@ from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .concurrency import run_owned_thread
+from .host_memory_runtime import authorize_memory, memory_operation, requests_stage_policy
 from .open_competition import digest
 from .private_files import Directory, publish_private_model
 from .protocol import StrictProtocolModel
@@ -42,6 +43,7 @@ class CohortPreparationPublisher:
         self.owner, self.provider, self.output = owner, provider, output
 
     async def poll_once(self) -> dict:
+        authorize_memory(None, None, None)
         self.provider.ensure_observer_running()
         published = pending = revoked = 0
         for cohort in self.owner.queue.intake.bindings:
@@ -77,6 +79,11 @@ class CohortPreparationPublisher:
             "chain_submission_authorized": False,
         }
 
+    @memory_operation(
+        operation="preparation_republish",
+        requests_stage_only=True,
+        scope=lambda self, history: (digest(history.plan), "preparation"),
+    )
     async def publish_history(self, history) -> None:
         """Lifecycle handoff: publish the exact retained prepared round."""
         cohort = digest(history.plan)
@@ -101,12 +108,19 @@ class CohortPreparationPublisher:
                 current_block=current_block,
             )
         )
+        stage = requests_stage_policy()
+        if stage is not None and digest(prepared.roster.round) != stage.preparation_result_sha256:
+            raise ValueError("retained preparation differs from qualified requests stage")
         await self._publish_prepared(cohort, prepared)
 
     async def _publish(self, cohort, capture, tip):
+        authorize_memory(None, cohort, "preparation")
         prepared = await run_owned_thread(
             partial(self.owner.prepare, cohort, capture, expected_tip_sha256=tip)
         )
+        stage = requests_stage_policy()
+        if stage is not None and digest(prepared.roster.round) != stage.preparation_result_sha256:
+            raise ValueError("retained preparation differs from qualified requests stage")
         await self._publish_prepared(cohort, prepared)
 
     async def _publish_prepared(self, cohort, prepared):

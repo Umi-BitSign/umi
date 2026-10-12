@@ -81,6 +81,141 @@ def test_other_snapshot_rejected_before_execution(snapshot, executor, monkeypatc
         executor.execute(replace(snapshot, block_number=124), evidence(snapshot))
 
 
+def test_runtime_execution_reused_with_fresh_proof_and_private_codec(
+    snapshot, executor, monkeypatch
+):
+    calls = []
+    invoke = executor._invoke
+
+    def count(code):
+        calls.append(code)
+        return invoke(code)
+
+    monkeypatch.setattr(executor, "_invoke", count)
+    original = executor.execute(snapshot, evidence(snapshot))
+    original._runtime.spec_version = 999
+    monkeypatch.setattr(
+        executor, "_decode_output", lambda *args: pytest.fail("decoded unchanged helper output")
+    )
+    next_snapshot = replace(snapshot, block_number=124, block_hash="0x" + "44" * 32)
+    proof = evidence(next_snapshot)
+    current = executor.execute(next_snapshot, proof)
+    assert calls == [b"verified wasm"]
+    assert current.snapshot == next_snapshot and current.code_evidence is proof
+    assert current._runtime.spec_version == current.pin.spec_version == 459
+    assert current._runtime is not original._runtime
+    with pytest.raises(RuntimeMetadataError, match="runtime_code_evidence_invalid"):
+        executor.execute(next_snapshot, evidence(snapshot))
+
+
+def test_metadata_reuse_still_rejects_an_invalid_fresh_codec(snapshot, executor, monkeypatch):
+    executor.execute(snapshot, evidence(snapshot))
+    monkeypatch.setattr(
+        "umi.runtime_metadata.bittensor_core.Runtime",
+        lambda *args, **kwargs: SimpleNamespace(
+            spec_version=459, transaction_version=1, constant=lambda *args: 0
+        ),
+    )
+    with pytest.raises(RuntimeMetadataError, match="runtime_execution_response_invalid"):
+        executor.execute(snapshot, evidence(snapshot))
+
+
+def test_runtime_execution_does_not_reuse_other_code_or_helper(snapshot, executor, monkeypatch):
+    calls = []
+    invoke = executor._invoke
+
+    def count(code):
+        calls.append(code)
+        return invoke(code)
+
+    monkeypatch.setattr(executor, "_invoke", count)
+    executor.execute(snapshot, evidence(snapshot))
+    executor.execute(snapshot, evidence(snapshot, value=b"upgraded wasm"))
+    executor.expected_sha256 = "b" * 64
+    result = executor.execute(snapshot, evidence(snapshot, value=b"upgraded wasm"))
+    assert calls == [b"verified wasm", b"upgraded wasm", b"upgraded wasm"]
+    assert result.executor_sha256 == "b" * 64
+
+
+def test_failed_runtime_execution_is_not_retained(snapshot, executor, monkeypatch):
+    calls = []
+
+    def first_invalid(code):
+        calls.append(code)
+        value = response(code)
+        if len(calls) == 1:
+            value["metadata_sha256"] = "0" * 64
+        return json.dumps(value).encode() + b"\n"
+
+    monkeypatch.setattr(executor, "_invoke", first_invalid)
+    with pytest.raises(RuntimeMetadataError, match="runtime_execution_response_invalid"):
+        executor.execute(snapshot, evidence(snapshot))
+    executor.execute(snapshot, evidence(snapshot))
+    executor.execute(snapshot, evidence(snapshot))
+    assert len(calls) == 2
+
+
+def test_runtime_execution_reuse_is_bounded(snapshot, executor, monkeypatch):
+    calls = []
+    invoke = executor._invoke
+
+    def count(code):
+        calls.append(code)
+        return invoke(code)
+
+    monkeypatch.setattr(executor, "_invoke", count)
+    for index in range(5):
+        executor.execute(snapshot, evidence(snapshot, value=f"runtime {index}".encode()))
+    executor.execute(snapshot, evidence(snapshot, value=b"runtime 4"))
+    executor.execute(snapshot, evidence(snapshot, value=b"runtime 0"))
+    assert calls == [f"runtime {index}".encode() for index in (0, 1, 2, 3, 4, 0)]
+
+
+def test_runtime_execution_reuse_obeys_total_byte_bound(snapshot, executor, monkeypatch):
+    import umi.runtime_metadata as module
+
+    calls = []
+    invoke = executor._invoke
+
+    def count(code):
+        calls.append(code)
+        return invoke(code)
+
+    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", len(invoke(b"first")) + 1)
+    monkeypatch.setattr(executor, "_invoke", count)
+    for code in (b"first", b"second", b"first"):
+        executor.execute(snapshot, evidence(snapshot, value=code))
+    assert calls == [b"first", b"second", b"first"]
+
+
+def test_overlapping_runtime_execution_is_coalesced(snapshot, executor, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    invoke = executor._invoke
+
+    def held(code):
+        calls.append(code)
+        entered.set()
+        assert release.wait(60)
+        return invoke(code)
+
+    monkeypatch.setattr(executor, "_invoke", held)
+    next_snapshot = replace(snapshot, block_number=124, block_hash="0x" + "44" * 32)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(executor.execute, snapshot, evidence(snapshot))
+        try:
+            assert entered.wait(60)
+            second = pool.submit(executor.execute, next_snapshot, evidence(next_snapshot))
+        finally:
+            release.set()
+        assert first.result(timeout=60).snapshot == snapshot
+        assert second.result(timeout=60).snapshot == next_snapshot
+    assert calls == [b"verified wasm"]
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -89,6 +224,11 @@ def test_other_snapshot_rejected_before_execution(snapshot, executor, monkeypatc
         ("metadata_sha256", "0" * 64),
         ("metadata_hex", "00"),
         ("metadata_hex", "6d 65 74 61 0e"),
+        ("metadata_hex", ""),
+        ("metadata_hex", "6d6574610"),
+        ("metadata_hex", "6D6574610E"),
+        ("metadata_hex", "6d6574610e\n"),
+        ("metadata_hex", "0x6d6574610e"),
         ("spec_version", True),
         ("spec_version", 0),
         ("spec_version", 2**32),

@@ -60,6 +60,7 @@ def retain_standing_reward_inputs(
         ):
             raise ValueError("reward delivery package differs from its certified decision")
         files.retain_package(package)
+        del package, history  # Do not retain this graph while loading the next item.
     # Per-file publication has its own lock. This outer lock serializes the
     # choice of the first signature envelope, including competing exact retries.
     lock = lock_private_file(files.root / ".decision-publication.lock")

@@ -28,6 +28,7 @@ from .competition_cohort_service_grant import (
     ServiceRequestBody,
     service_grant_slot,
 )
+from .competition_cohort_service_partial import ServicePaidPartialInventory, ServicePaidPartials
 from .competition_cohort_service_terminal import ServiceTerminal, ServiceWorkTerminals
 from .competition_cohort_service_transport import ServiceWorkTransport
 from .competition_cohort_service_work import ServiceWorkAssignment
@@ -39,8 +40,15 @@ from .open_competition import Signature, digest, identity
 from .private_files import PrivateStateBusyError, lock_private_file
 from .private_state_wait import run_private_state_operation
 from .protocol import Video
+from .sqlite_contention import is_sqlite_contention
 
 _RETRY = (OSError, ValueError, RuntimeError, sqlite3.Error, asyncio.TimeoutError)
+_MINER_LANES = {
+    "preparation": "preparation",
+    "dispatch": "transport",
+    "recovery": "transport",
+    "certification": "certification",
+}
 
 
 @dataclass(frozen=True)
@@ -58,7 +66,7 @@ ServiceRetry = Callable[
     [ServiceMinerGrant, SignedEndpointRetirementReceipt],
     Awaitable[SignedCohortEndpointCaseDecision],
 ]
-ServiceResultSign = Callable[[ServiceTerminal], Awaitable[Signature]]
+ServiceResultSign = Callable[[ServiceTerminal | ServicePaidPartialInventory], Awaitable[Signature]]
 
 
 class ServiceWorkWorker:
@@ -85,6 +93,7 @@ class ServiceWorkWorker:
         self.queue, self.journal = self.requests.queue, self.requests.journal
         self.inputs, self.observation, self.retry, self.sign = inputs, observation, retry, sign
         self.terminals = ServiceWorkTerminals(self.requests)
+        self.partials = ServicePaidPartials(self.terminals)
         known = {identity(e.hotkey): e.control_group for e in self.requests.policy.evaluators}
         self.reviewers = {identity(k): v for k, v in reviewers.items()}
         self.reviewer_keys = {identity(k): k for k in reviewers}
@@ -99,6 +108,10 @@ class ServiceWorkWorker:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS service_worker_cursor "
                 "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ordinal INTEGER NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS service_worker_turns "
+                "(ordinal INTEGER PRIMARY KEY, turn INTEGER NOT NULL)"
             )
         # Restart may change operational capacity, but never the evaluator.
         self.journal.put(
@@ -166,10 +179,14 @@ class ServiceWorkWorker:
     async def _prepare(self, assignment, *, parent=None, decision=None, retirement=None):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.transport.timeout
+        work = assignment.admission.work_sha256
         while True:
+            self._stage(work, "preparation_inputs")
             inputs = await self._call(self.inputs(assignment))
+            self._stage(work, "preparation_authority")
             source, capture = await self._call(self.observation(assignment))
             try:
+                self._stage(work, "preparation_persistence")
                 return await run_owned_thread(
                     partial(
                         self.requests.prepare,
@@ -184,16 +201,68 @@ class ServiceWorkWorker:
                         retirement=retirement,
                     ),
                 )
-            except PrivateStateBusyError:
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise
                 # Never retry persistence with the same authority/head after a wait.
+                self._stage(work, "preparation_contention")
                 await asyncio.sleep(min(1.0, remaining))
 
     def _stage(self, work, name):
         if work in self._operation_stages:
             self._operation_stages[work] = (name, asyncio.get_running_loop().time())
+
+    async def _prepare_terminal(self, assignment, slot, response, retirement):
+        work = assignment.admission.work_sha256
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.transport.timeout
+        while True:
+            self._stage(work, "terminal_observation")
+            source, capture = await self._call(self.observation(assignment))
+            self._stage(work, "terminal_preparation")
+            try:
+                return await run_owned_thread(
+                    self.terminals.prepare,
+                    slot,
+                    response,
+                    retirement,
+                    source,
+                    execution_boundary(capture),
+                )
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # Recollect mutable authority after contention; never reissue
+                # miner work or extend an old observation while waiting.
+                await asyncio.sleep(min(1.0, remaining))
+
+    async def _prepare_partial(self, assignment):
+        retained = await self._local(self.partials.prepare, assignment)
+        if retained is not None:
+            return retained
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.transport.timeout
+        while True:
+            source, capture = await self._call(self.observation(assignment))
+            try:
+                return await run_owned_thread(
+                    self.partials.prepare, assignment, source, execution_boundary(capture)
+                )
+            except (PrivateStateBusyError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.OperationalError) and not is_sqlite_contention(error):
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                # A new inventory cannot reuse a stale pre-contention head.
+                # Existing intents above always recover their original clock.
+                await asyncio.sleep(min(1.0, remaining))
 
     def _ready_stage(self, admission):
         """Scheduling hints only; each stage still authenticates its native inputs."""
@@ -250,6 +319,19 @@ class ServiceWorkWorker:
             self._stage(work, "terminal_preparation")
             terminal = await self._local(self.terminals.prepare, slot)
         else:
+            # After the fixed admission cutoff an unavailable miner need not
+            # provide retirement for an authenticated no-credit inventory.
+            partial = None
+            fence = await self._local(self.queue._tail_admission_fence)
+            if fence is not None:
+                partial = await self._prepare_partial(assignment)
+            if partial is not None:
+                self._stage(work, "paid_partial_signing")
+                retained = await self._local(self.partials.retained, partial)
+                if retained is None:
+                    signature = await self._call(self.sign(partial))
+                    await self._local(self.partials.retain, partial, signature)
+                return "pending", "paid_partial_retained"
             self._stage(work, "request_certificate")
             had_grant = await self._local(self.journal.get, "service_grant", slot)
             grant = await self._certificate(body)
@@ -280,16 +362,8 @@ class ServiceWorkWorker:
                     assignment, parent=grant, decision=certificate, retirement=result.retirement
                 )
                 return "pending", "replacement_selected"
-            self._stage(work, "terminal_observation")
-            source, capture = await self._call(self.observation(assignment))
-            self._stage(work, "terminal_preparation")
-            terminal = await run_owned_thread(
-                self.terminals.prepare,
-                slot,
-                result.response,
-                result.retirement,
-                source,
-                execution_boundary(capture),
+            terminal = await self._prepare_terminal(
+                assignment, slot, result.response, result.retirement
             )
         self._stage(work, "terminal_signing")
         signature = await self._call(self.sign(terminal))
@@ -297,15 +371,17 @@ class ServiceWorkWorker:
         await self._local(self.terminals.retain, terminal, signature)
         return "completed", "terminal_retained"
 
-    def _batch(self, *, advance=True):
-        with self.journal.transaction() as db:
+    def _batch(self, *, advance=True, pending_only=False):
+        with self.journal.read_transaction() as db:
             row = db.execute(
                 "SELECT ordinal FROM service_worker_cursor WHERE singleton=1"
             ).fetchone()
         after = 0 if row is None else row[0]
-        rows = self.queue.entries(after_ordinal=after, limit=self.batch_size)
+        rows = self.queue.entries(
+            after_ordinal=after, limit=self.batch_size, pending_only=pending_only
+        )
         if not rows and after:
-            rows = self.queue.entries(limit=self.batch_size)
+            rows = self.queue.entries(limit=self.batch_size, pending_only=pending_only)
         if rows and advance:
             self._advance_cursor(rows[-1].ordinal)
         return rows
@@ -316,6 +392,24 @@ class ServiceWorkWorker:
                 "INSERT INTO service_worker_cursor VALUES (1,?) "
                 "ON CONFLICT(singleton) DO UPDATE SET ordinal=excluded.ordinal",
                 (ordinal,),
+            )
+
+    def _fair_order(self, rows):
+        # Scheduling metadata never grants credit or changes admission order.
+        # Skipped jobs keep their turn when a miner or phase is already busy.
+        with self.journal.read_transaction() as db:
+            turns = dict(db.execute("SELECT ordinal,turn FROM service_worker_turns"))
+        return sorted(rows, key=lambda row: (turns.get(row.ordinal, 0), row.ordinal))
+
+    def _remember_turn(self, ordinal):
+        with self.journal.transaction() as db:
+            turn = db.execute(
+                "SELECT COALESCE(MAX(turn),0)+1 FROM service_worker_turns"
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO service_worker_turns VALUES (?,?) "
+                "ON CONFLICT(ordinal) DO UPDATE SET turn=excluded.turn",
+                (ordinal, turn),
             )
 
     async def poll_once(self):
@@ -412,26 +506,35 @@ class ServiceWorkWorker:
             if work not in active:
                 del self._operation_lanes[work]
         if len(active) < len(lanes) * self.concurrency:
-            rows = await self._local(partial(self._batch, advance=False))
-            miners = {miner for miner, _ in active.values()}
-            last = None
-            for admission in rows:
+            rows = await self._local(partial(self._batch, advance=False, pending_only=True))
+            occupied = {
+                (miner, _MINER_LANES[self._operation_lanes[work]])
+                for work, (miner, _) in active.items()
+            }
+            last = max((row.ordinal for row in rows), default=None)
+            for admission in await self._local(self._fair_order, rows):
                 if all(counts[lane] >= self.concurrency for lane in lanes):
                     break
-                last = admission.ordinal
                 miner = identity(admission.claim.claim.hotkey)
                 work = admission.work_sha256
-                if work in active or miner in miners:
+                if work in active:
                     continue
                 lane = await self._local(self._ready_stage, admission)
                 if lane == "completed":
                     continue
-                if counts[lane] >= self.concurrency:
+                slot = miner, _MINER_LANES[lane]
+                # Preparation yields before miner delivery, and certification
+                # uses a retained retirement or immutable terminal intent.
+                # Neither may block this miner's transport recovery. Dispatch
+                # and recovery still serialize against each other, and each
+                # control phase admits at most one operation for this miner.
+                if slot in occupied or counts[lane] >= self.concurrency:
                     continue
+                await self._local(self._remember_turn, admission.ordinal)
                 self._operation_lanes[work] = lane
                 counts[lane] += 1
                 active[work] = (miner, asyncio.create_task(perform(admission)))
-                miners.add(miner)
+                occupied.add(slot)
             if last is not None:
                 # Rotate past this inspected page; capacity-blocked work stays
                 # accepted and returns on the next complete cursor rotation.

@@ -264,3 +264,68 @@ def test_directory_change_cannot_hide_in_place_corruption(tmp_path, policy):
     scratch.unlink()
     with pytest.raises(ValueError, match="immutable manifest"):
         artifacts.verify_preserved_bundle(bundle, archive, policy)
+
+
+@pytest.mark.parametrize("corrupted", [False, True])
+def test_private_writable_legacy_receipt_requires_one_complete_verification(
+    tmp_path, policy, monkeypatch, corrupted
+):
+    import json
+
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    receipt = archive / (".verified-" + digest(bundle) + ".json")
+    legacy = json.loads(receipt.read_bytes())
+    legacy.pop("archive_identity")
+    legacy["schema"] = "umi-preserved-content-verification/1"
+    receipt.chmod(0o600)
+    receipt.write_bytes(canonical_json_bytes(legacy))
+    original_receipt = receipt.read_bytes()
+    if corrupted:
+        path = archive / digest(bundle) / "model" / bundle.files[0].path
+        path.chmod(0o600)
+        path.write_bytes(b"x" * path.stat().st_size)
+        path.chmod(0o400)
+    calls = []
+    original = artifacts._copy_verified
+
+    def count(stream, record, output):
+        calls.append(record.path)
+        return original(stream, record, output)
+
+    monkeypatch.setattr(artifacts, "_copy_verified", count)
+    if corrupted:
+        with pytest.raises(ValueError, match="immutable manifest"):
+            artifacts.verify_preserved_bundle(bundle, archive, policy)
+        assert receipt.read_bytes() == original_receipt
+        assert receipt.stat().st_mode & 0o777 == 0o600
+        return
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+    assert calls == [record.path for record in bundle.files]
+    assert receipt.stat().st_mode & 0o777 == 0o400
+    assert json.loads(receipt.read_bytes())["schema"] == "umi-preserved-content-verification/2"
+    monkeypatch.setattr(artifacts, "_copy_verified", forbid_hashing)
+    assert artifacts.verify_preserved_bundle(bundle, archive, policy) == digest(bundle)
+
+
+@pytest.mark.parametrize("fault", ["current-writable", "world-readable", "linked", "other-model"])
+def test_legacy_migration_refuses_unrecognized_or_unsafe_receipts(tmp_path, policy, fault):
+    import json
+
+    bundle, _, archive = fixture_archive(tmp_path, policy)
+    receipt = archive / (".verified-" + digest(bundle) + ".json")
+    value = json.loads(receipt.read_bytes())
+    if fault != "current-writable":
+        value.pop("archive_identity")
+        value["schema"] = "umi-preserved-content-verification/1"
+    if fault == "other-model":
+        value["model_sha256"] = "a" * 64
+    receipt.chmod(0o600)
+    receipt.write_bytes(canonical_json_bytes(value))
+    if fault == "world-readable":
+        receipt.chmod(0o644)
+    if fault == "linked":
+        os.link(receipt, archive / "unrelated-linked-receipt")
+    before = receipt.read_bytes()
+    with pytest.raises(ValueError, match="unsafe metadata"):
+        artifacts.verify_preserved_bundle(bundle, archive, policy)
+    assert receipt.read_bytes() == before

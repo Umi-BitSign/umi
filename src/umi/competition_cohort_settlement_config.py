@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import CompetitionChainConfig
+from .competition_cohort_capacity import AggregateEvidenceCapacity
 from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_execution_journal import CohortExecutionConfig
 from .competition_cohort_intake import CohortIntakeConfig
@@ -18,6 +19,7 @@ from .competition_reward_manifest import (
     StandingRewardOpportunityManifest,
     verify_reward_manifest,
 )
+from .host_memory_runtime import HostMemoryAdmissionSelection
 from .open_competition import CompetitionPolicy, Hotkey, Track, digest, identity
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -71,7 +73,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     proof_export_directory: Directory
     exchange_inbox: Directory
     exchange_outbox: Directory
-    maximum_package_bytes: ObjectCapacity
+    maximum_package_bytes: AggregateEvidenceCapacity
     maximum_promotion_bytes: ObjectCapacity
     maximum_state_bytes: Annotated[int, Field(ge=1024 * 1024, le=16 * 1024**3)]
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
@@ -80,9 +82,13 @@ class SettlementServiceConfig(StrictProtocolModel):
     request_export_directory: Directory | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None
 
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
+
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
         if self.original_sources is None:
             value.pop("original_sources", None)
         if self.request_export_directory is None:

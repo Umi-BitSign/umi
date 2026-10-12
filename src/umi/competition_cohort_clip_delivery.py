@@ -64,7 +64,7 @@ class CohortClipDelivery:
             maximum_bytes=config.maximum_bytes,
         )
 
-    def _select(self, sha256: Hex32, now: int) -> tuple[str, ClipDeliveryIntent, bytes]:
+    def _select(self, sha256: Hex32, now: int) -> tuple[str, ClipDeliveryIntent, bytes | None]:
         if not re.fullmatch("[0-9a-f]{64}", sha256):
             raise ValueError("clip delivery requires an exact content digest")
         # One retained capability per clip/day, valid for at least another day.
@@ -74,13 +74,13 @@ class CohortClipDelivery:
         end = start + 2 * 86400
         if not 10**9 <= start < end < 10**10:
             raise ValueError("clip delivery clock is outside the transport range")
-        body = read_case_video(Path(self.config.videos_directory), sha256, 16 * 1024**2)
-        if body[4:8] != b"ftyp":
-            raise ValueError("selected clip is not an MP4")
         slot = digest(["umi-cohort-clip-delivery/1", sha256, start])
         with self.journal.locked():
             raw = self.journal.get("intent", slot)
             if raw is None:
+                body = read_case_video(Path(self.config.videos_directory), sha256, 16 * 1024**2)
+                if body[4:8] != b"ftyp":
+                    raise ValueError("selected clip is not an MP4")
                 cap = secrets.token_hex(32)
                 value = ClipDeliveryIntent(
                     video=Video(
@@ -95,11 +95,13 @@ class CohortClipDelivery:
                 self.journal.put("intent", slot, value)
             else:
                 value = ClipDeliveryIntent.model_validate_json(canonical_json_bytes(raw))
+                body = None
             if (
                 value.start != start
                 or value.end != end
                 or value.video.sha256 != sha256
-                or value.video.size_bytes != len(body)
+                or not 8 <= value.video.size_bytes <= 16 * 1024**2
+                or value.video.media_type != "video/mp4"
                 or not re.fullmatch(
                     re.escape(self.config.origin)
                     + f"/v1/clips/{start}/{end}/[0-9a-f]{{64}}/{sha256}[.]mp4",
@@ -107,6 +109,18 @@ class CohortClipDelivery:
                 )
             ):
                 raise ValueError("clip delivery differs from original retained bytes")
+            complete = self.journal.get("complete", slot)
+            if complete is not None:
+                if complete != {"intent": digest(value)}:
+                    raise ValueError("clip delivery receipt differs from its retained intent")
+                # This exact capability and content were already verified. Its
+                # immutable receipt survives restart; retries need no local
+                # model-store read, remote download or duplicate journal write.
+                return slot, value, None
+            if body is None:
+                body = read_case_video(Path(self.config.videos_directory), sha256, 16 * 1024**2)
+            if body[4:8] != b"ftyp" or len(body) != value.video.size_bytes:
+                raise ValueError("selected clip differs from retained original")
         return slot, value, body
 
     async def _verify(self, video: Video) -> None:
@@ -137,8 +151,12 @@ class CohortClipDelivery:
         slot, value, body = await run_private_state_operation(
             self._select, sha256, now, timeout=self.config.timeout_seconds
         )
-        # Even retained delivery is checked before a new signed request. If an
-        # object was lost, republish the exact retained URL and bytes.
+        if body is None:
+            if not value.start <= int(time.time()) < value.end - 3600:
+                raise OSError("clip delivery window elapsed during selection")
+            return value.video
+        # An incomplete publication recovers its exact capability and bytes.
+        # The first successful remote verification creates the durable receipt.
         try:
             await self._verify(value.video)
         except OSError:

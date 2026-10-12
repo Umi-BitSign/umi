@@ -4,6 +4,8 @@ Finality and inference are fixture boundaries. Admission, phase closure, all
 quality signatures, bundle hashes and model selection use native consumers.
 """
 
+import json
+import logging
 from fractions import Fraction
 
 import pytest
@@ -18,7 +20,7 @@ from umi.competition_cohort_model_award import (
     build_model_award,
 )
 from umi.competition_cohort_quality_signing import build_quality_manifest
-from umi.open_competition import digest, model_content_digest
+from umi.open_competition import digest, identity, model_content_digest
 from umi.protocol import canonical_json_bytes
 
 from .cohort_request_closure_fixture import closure_fixture
@@ -118,8 +120,30 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
             artifacts.append(a.model_copy(update={"steps": tuple(steps)}))
         scenario["artifacts"] = tuple(artifacts)
     b = await closure_fixture(s, tmp_path / "execution", prepared=b)
+    signable = b
+    if mode == "tail":
+        from .cohort_request_closure_fixture import build
+        from .cohort_tail_settlement_fixture import partial_original, tail_observation
+
+        original, selected = b["closure"], b["orders"][0]
+        who = identity(selected.order.submission.submission.hotkey)
+
+        def terminals(order, evaluator):
+            if order == selected and evaluator == selected.order.evaluators[-1]:
+                return None
+            return b["terminals"].get((digest(order), identity(evaluator)))
+
+        partial = partial_original(b, selected, selected.order.evaluators[-1])
+        b["closure"] = build(
+            b,
+            tail=tail_observation(b, (who,)),
+            terminal_source=terminals,
+            partial_source=lambda _: (partial,),
+        )
+        b["original_closure"] = original
+        signable = {**b, "orders": tuple(o for o in b["orders"] if o != selected)}
     review = reviewer(b)
-    certificates = await certificates_for(b, review, tmp_path / "certificates")
+    certificates = await certificates_for(signable, review, tmp_path / "certificates")
     manifest = build_quality_manifest(review, certificates.get)
     archive = tmp_path / "preserved"
     preserve_bundle(
@@ -169,6 +193,54 @@ def award(c, **changes):
     )
 
 
+@pytest.mark.parametrize("model_case", [("tail", 11)], indirect=True)
+async def test_tail_model_partition_keeps_real_quality_and_duplicate_priority(model_case, tmp_path):
+    from umi.competition_cohort_model_award import read_model_acceptances
+    from umi.competition_cohort_quality_signing import review_quality_manifest
+    from umi.private_files import publish_private_model
+
+    b, review, manifest, acceptances, _ = model_case
+    original = b["original_closure"]
+    skipped = b["closure"].skipped[0].submission_sha256
+    completed = {p.submission_sha256 for p in b["closure"].participants}
+    assert manifest.schema_ == "umi-cohort-quality-manifest/2"
+    assert manifest.skipped_participants == tuple(digest(p) for p in b["closure"].skipped)
+    outcomes = review_quality_manifest(manifest, review)
+    assert {o.submission_sha256 for o in outcomes} == completed
+    assert len(outcomes) == 10 and len(b["closure"].skipped) == 1
+    assert b["closure"].participants == tuple(
+        p for p in original.participants if p.submission_sha256 != skipped
+    )
+    with pytest.raises(ValueError, match="unselected participant"):
+        review.outcome(skipped)
+    for replacement in ((), ("ff" * 32,), (*manifest.skipped_participants,) * 2):
+        with pytest.raises(ValueError):
+            review_quality_manifest(
+                manifest.model_copy(update={"skipped_participants": replacement}), review
+            )
+    with pytest.raises(ValueError, match="exact certified roster"):
+        review_quality_manifest(
+            manifest.model_copy(update={"participants": manifest.participants[:-1]}), review
+        )
+    accepted = tuple(a for a in acceptances if a.acceptance.submission_sha256 in completed)
+    directory = tmp_path / "retained-acceptances"
+    for certificate in accepted:
+        publish_private_model(
+            directory
+            / digest(b["history"].plan)
+            / (certificate.acceptance.submission_sha256 + ".json"),
+            certificate,
+        )
+    assert read_model_acceptances(directory, review) == accepted
+    result = award(model_case, review=review, manifest=manifest, acceptances=accepted)
+    assert result.skipped_participants == manifest.skipped_participants
+    assert {c.submission_sha256 for c in result.candidates} == completed
+    expected = min(accepted, key=lambda a: a.acceptance.accepted_ordinal).acceptance
+    assert result.recipient_hotkey == expected.recipient_hotkey
+    with pytest.raises(PendingModelAward, match="entire sealed"):
+        award(model_case, review=review, manifest=manifest, acceptances=acceptances)
+
+
 @pytest.mark.parametrize(
     "model_case",
     [("equal", 1), ("zero", 1), ("above", 1), ("below", 1), ("baseline", 1)],
@@ -215,15 +287,23 @@ def test_same_model_cannot_shop_for_different_quality_observations(model_case):
 
 
 @pytest.mark.parametrize("model_case", [("equal", 2)], indirect=True)
-def test_pending_competitor_is_never_dropped_to_make_a_sole_entrant(model_case):
+def test_pending_competitor_is_never_dropped_to_make_a_sole_entrant(model_case, caplog):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     _, _, manifest, accepted, _ = model_case
     with pytest.raises(PendingModelAward, match="entire sealed"):
         award(model_case, acceptances=accepted[:1])
+    with pytest.raises(PendingModelAward, match="entire sealed"):
+        award(model_case, acceptances=(*accepted, accepted[-1]))
     with pytest.raises(ValueError, match="exact certified roster"):
         award(
             model_case,
             manifest=manifest.model_copy(update={"participants": manifest.participants[:1]}),
         )
+    assert not any(
+        json.loads(record.message).get("stage") == "certification_model_artifacts"
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    )
 
 
 @pytest.mark.parametrize(
@@ -256,13 +336,33 @@ def test_even_signed_artifact_acceptance_cannot_change_original_entry(model_case
         award(model_case, acceptances=(changed,))
 
 
-def test_missing_local_artifact_blocks_award_and_restores_without_new_quality(model_case, tmp_path):
+def test_missing_local_artifact_blocks_award_and_restores_without_new_quality(
+    model_case, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     with pytest.raises(FileNotFoundError):
         award(model_case, archive=tmp_path / "unavailable-archive")
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("stage") == "certification_model_artifacts"
+    ]
+    assert events[-1]["state"] == "interrupted"
+    assert events[-1]["percent"] < 100 and events[-1]["eta_seconds"] is None
+    caplog.clear()
     result = award(model_case)
     b = model_case[0]
     late = reviewer(b, current_block=2**53 - 1)
     assert canonical_json_bytes(award(model_case, review=late)) == canonical_json_bytes(result)
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("stage") == "certification_model_artifacts"
+    ]
+    assert events[-1]["state"] == "completed"
+    assert events[-1]["percent"] == 100 and events[-1]["eta_seconds"] == 0
 
 
 def test_settlement_verifier_allows_direct_candidate_without_local_archive(model_case):

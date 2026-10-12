@@ -61,6 +61,14 @@ def scenario(legacy_scenario, request):
         genesis_signatures=signatures(genesis),
         transitions=(),
     )
+    if request.param == "adopted":
+        from umi.competition_cohort_request_rule import prepare_request_tail_adoption
+
+        from .test_competition_cohort_recovery import signed_transition
+        from .test_competition_execution import boundary
+
+        adoption = prepare_request_tail_adoption(h, p, boundary(200))
+        h = h.model_copy(update={"transitions": (signed_transition(adoption),)})
     body = s["consent"].consent.model_copy(update={"authority_sha256": digest(authority.authority)})
     s["consent"] = SignedCohortParticipationConsent(
         consent=body, signature=sign_object(body, wallet("Alice"))

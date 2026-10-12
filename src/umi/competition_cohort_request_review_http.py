@@ -7,7 +7,15 @@ PATH = "/internal/cohorts/request-review"
 
 
 def request_review_routes(exporter: RequestReviewExporter, *, token: str):
-    return phase_review_routes(exporter, token=token, path=PATH, request_model=RequestReviewRequest)
+    return phase_review_routes(
+        exporter,
+        admission_lane="owner_export",
+        admission_operation="requests_export",
+        admission_scope=lambda request: (request.progress.cohort_sha256, request.progress.phase),
+        token=token,
+        path=PATH,
+        request_model=RequestReviewRequest,
+    )
 
 
 class RequestReviewHTTPClient(PhaseReviewHTTPClient[RequestReviewRequest]):
@@ -26,5 +34,6 @@ class RequestReviewHTTPClient(PhaseReviewHTTPClient[RequestReviewRequest]):
             token=token,
             path=PATH,
             maximum_bytes=maximum_bytes,
+            aggregate_evidence=True,
             timeout_seconds=timeout_seconds,
         )

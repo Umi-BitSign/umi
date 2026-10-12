@@ -29,6 +29,7 @@ from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
 from umi.competition_reward_offers import StandingRewardOffers
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.competition_reward_preparation import StandingRewardPreparation
+from umi.competition_reward_service import _prepare_first
 from umi.competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
 from umi.historical_header_recovery import HistoricalHeaderRecoveryPending
 from umi.open_competition import digest, sign_object
@@ -43,7 +44,7 @@ from .test_competition_reward_preparation import current_control_finality
 from .test_open_competition import wallet
 
 
-async def run_activation(owner, settled, root, monkeypatch, signatures):
+async def run_activation(owner, settled, root, monkeypatch, signatures, *, admission_probe=None):
     ensure_private_directory(root)
     series, manifest = owner.config.series, owner.config.manifest
     package, policy = settled.package, owner.h.intake.policy
@@ -149,7 +150,9 @@ async def run_activation(owner, settled, root, monkeypatch, signatures):
     history.reader = history.new_reader(maximum_bytes=128 * 1024**2)
     files, readback = (
         StandingRewardFiles(
-            root / name, maximum_package_bytes=64 * 1024**2, maximum_witness_bytes=64 * 1024**2
+            root / name,
+            maximum_package_bytes=owner.config.admission_owner.request_evidence_bytes,
+            maximum_witness_bytes=64 * 1024**2,
         )
         for name in ("delivery", "readback")
     )
@@ -294,16 +297,27 @@ async def run_activation(owner, settled, root, monkeypatch, signatures):
             settled.nodes["Dave"].promotion,
             manifest,
             maximum_promotion_bytes=1024**2,
-            maximum_package_bytes=64 * 1024**2,
+            maximum_package_bytes=owner.config.admission_owner.request_evidence_bytes,
         )
-        native_history = await history.reader.verified_prefix(end)
-        control = await history.reader.review_control(item.provider, end)
-        result = await prepared.prepare_initial(
-            readback.package(activation.package_sha256),
-            control=control,
-            history=native_history,
-            source=readback.decision,
-        )
+        if admission_probe is None:
+            native_history = await history.reader.verified_prefix(end)
+            control = await history.reader.review_control(item.provider, end)
+            result = await prepared.prepare_initial(
+                readback.package(activation.package_sha256),
+                control=control,
+                history=native_history,
+                source=readback.decision,
+            )
+        else:
+            result = await _prepare_first(
+                prepared,
+                item.provider,
+                history.reader,
+                readback.package,
+                readback.decision,
+                end,
+                4096,
+            )
         assert result.activation == activation and result.allocation == package.allocation
         assert not result.chain_submission_authorized
         assert max(signatures.values()) == 1

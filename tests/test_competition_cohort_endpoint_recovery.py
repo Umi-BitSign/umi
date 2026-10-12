@@ -606,6 +606,38 @@ async def test_reloaded_response_signature_is_verified_again(recovery_case, monk
     assert p.http_paths == ["/v1/translate", "/v1/translate/response"]
 
 
+async def test_empty_recovery_poll_reads_while_execution_writer_is_busy(recovery_case):
+    import asyncio
+    import threading
+
+    from umi.competition_cohort_endpoint_recovery_worker import CohortEndpointRecoveryWorker
+
+    p = recovery_case
+    for index in range(len(p.e.job.cases)):
+        assert (await send_original(p, index)).status_code == 200
+    worker = CohortEndpointRecoveryWorker(p.consumer())
+    assert (await worker.poll_once())["responses_recovered"] == len(p.e.job.cases)
+    entered, release = threading.Event(), threading.Event()
+    calls = len(p.http_paths)
+
+    def writer():
+        with worker.recovery.journal.journal.transaction() as db:
+            db.execute("INSERT INTO holds VALUES ('unrelated-pending-hold')")
+            entered.set()
+            assert release.wait(60)
+
+    pending = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        result = await asyncio.wait_for(worker.poll_once(), 10)
+        assert result["considered"] == 0
+        assert len(p.http_paths) == calls
+    finally:
+        release.set()
+        await pending
+    assert (await CohortEndpointRecoveryWorker(p.consumer()).poll_once())["considered"] == 0
+
+
 async def test_worker_cursor_survives_restart_and_skips_stalled_case(recovery_case):
     from umi.competition_cohort_endpoint_recovery_worker import CohortEndpointRecoveryWorker
 

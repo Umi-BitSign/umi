@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +16,7 @@ from umi.competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     MAX_METADATA_BYTES,
     MAX_SEGMENTS,
+    _hex_spans,
     decode_evidence,
     encode_evidence,
 )
@@ -23,6 +26,29 @@ from umi.protocol import canonical_json_bytes
 OWNER = "e" * 64
 ATTEMPT = "a" * 64
 LIMITS = EvidenceBudget(128 * 1024**2, 1024**3, 10000, 100000)
+
+
+def test_hex_scanning_preserves_historical_match_boundaries():
+    historical = re.compile(rb'"(?:0x)?([0-9a-f]{64,})"')
+    rng = random.Random(9178000)
+    pieces = [
+        b'"',
+        b'\\"',
+        b"0x",
+        b"0X",
+        b"\x00\xff",
+        b"invalid",
+        b"a" * 63,
+        b"a" * 64,
+        b"b" * 65,
+        b"ab" * 128,
+        b"A1" * 64,
+        b"0" * 128,
+        b'"invalid"' + b"a" * 64 + b'"',
+    ]
+    examples = pieces + [b"".join(rng.choices(pieces, k=40)) for _ in range(500)]
+    for raw in examples:
+        assert list(_hex_spans(raw)) == [match.span(1) for match in historical.finditer(raw)]
 
 
 def proof(block=100, recipients=256, runtime=b"r" * 8192):

@@ -44,8 +44,14 @@ def main(argv=None):
                 )
             )
             return
-        for suffix in ("service", "controller", "exchange"):
-            logger = logging.getLogger("umi.competition_cohort_settlement_" + suffix)
+        for name in (
+            *(
+                "umi.competition_cohort_settlement_" + suffix
+                for suffix in ("service", "controller", "exchange", "preparation")
+            ),
+            "umi.competition.progress",
+        ):
+            logger = logging.getLogger(name)
             loggers.append((logger, logger.level, logger.propagate))
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)

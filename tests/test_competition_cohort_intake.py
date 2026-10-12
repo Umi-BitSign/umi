@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -121,6 +122,31 @@ def test_authority_history_snapshot_rejects_mutation(intake, scenario):
             store.retain_source(cohort, scenario["intake_history"].genesis)
         assert store.published_history(cohort) == scenario["intake_history"]
     assert intake.history(cohort) == scenario["intake_history"]
+
+
+@pytest.mark.parametrize("fault", ["genesis", "signature"])
+def test_history_read_rejects_changed_published_admission(intake, scenario, fault):
+    history = scenario["intake_history"]
+    cohort = digest(history.plan)
+    assert intake.history(cohort) == history
+    with intake._connection() as (db, store):
+        published = json.loads(
+            db.execute(
+                "SELECT body FROM cohort_published_genesis WHERE cohort=?", (cohort,)
+            ).fetchone()[0]
+        )
+        if fault == "genesis":
+            published["genesis"]["admitted_at_block"] += 1
+        else:
+            published["signatures"][0]["signature"] = "00" * 64
+        db.execute(
+            "UPDATE cohort_published_genesis SET body=? WHERE cohort=?",
+            (canonical_json_bytes(published), cohort),
+        )
+        with pytest.raises(ValueError):
+            store.published_history(cohort)
+    with pytest.raises(ValueError):
+        intake.history(cohort)
 
 
 @pytest.mark.parametrize("fault", ["binding", "replacement"])

@@ -18,10 +18,14 @@ from umi.competition_cohort_admission_http import (
 )
 from umi.competition_cohort_preparation_owner import CohortPreparation
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
+from umi.competition_cohort_service_host import ServiceAdmissionHostConfig
 from umi.competition_cohort_window_http import WINDOW_PATH
 from umi.competition_cohort_window_owner import WindowOwnerConfig
+from umi.competition_reward_decisions import StandingRewardSeries
+from umi.competition_reward_manifest import RewardReplayRequirement, StandingRewardManifest
 from umi.competition_store import CompetitionStore
-from umi.open_competition import identity
+from umi.grandpa_finality import FINNEY_GENESIS_HASH
+from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_admission_http import (  # noqa: F401
@@ -243,8 +247,35 @@ async def test_configured_window_owner_boot_preserves_pending_bootstrap_and_priv
                 ).status_code == 401
 
 
-async def test_service_owner_shares_its_capture_with_every_reviewer(owned):
+async def test_service_owner_shares_its_capture_with_every_reviewer(owned, tmp_path):
     o = owned
+
+    manifest = StandingRewardManifest(
+        schema="umi-standing-reward-manifest/1",
+        policy_sha256=digest(o.h.queue.policy),
+        cohorts=(
+            RewardReplayRequirement(
+                cohort_sha256=o.h.cohort,
+                terms_sha256="ab" * 32,
+                catalog_sha256s=("ac" * 32,),
+            ),
+        ),
+    )
+    series = StandingRewardSeries(
+        schema="umi-standing-reward-series/1",
+        genesis_hash=FINNEY_GENESIS_HASH,
+        netuid=78,
+        policy_sha256=digest(o.h.queue.policy),
+        policy_epoch=1,
+        manifest_sha256=digest(manifest),
+        control_hotkey=OWNER,
+        recovery=o.h.source.history.authority,
+        cohorts=(o.h.source.history.plan,),
+        validators=(wallet("Dave").hotkey.ss58_address,),
+        maximum_proof_lag_blocks=32,
+        maximum_transaction_lifetime_blocks=128,
+        lifetime="until_superseded_or_revoked",
+    )
 
     async def shared_capture():
         return await o.h.archive.reviewer.collect()
@@ -253,7 +284,13 @@ async def test_service_owner_shares_its_capture_with_every_reviewer(owned):
         preparation=o.preparation,
         provider=o.h.archive.reviewer,
         capture=shared_capture,
-        config=SimpleNamespace(lifecycle=None),
+        config=ServiceAdmissionHostConfig(
+            schema="umi-cohort-service-admission-host/1",
+            series=series,
+            manifest=manifest,
+            queue_directory=str(tmp_path / "service-queues"),
+            inputs_directory=str(tmp_path / "service-inputs"),
+        ),
     )
     async with boot.admission_owner_app(
         o.config,
@@ -398,3 +435,20 @@ async def test_shutdown_bounds_control_drain_and_retains_owned_writes(owned, mon
             await asyncio.gather(request, return_exceptions=True)
     async with boot.admission_owner_app(o.config, o.preparation, o.h.archive.reviewer):
         pass
+
+
+@pytest.mark.parametrize("maximum", [1024**3, 4 * 1024**3])
+async def test_owner_request_aggregate_override_preserves_original_selection(owned, maximum):
+    old = owned.config
+    original = canonical_json_bytes(old)
+    assert b"maximum_aggregate_evidence_bytes" not in original
+    assert old.request_replay_bytes == 256 * 1024**2
+    changed = boot.AdmissionOwnerConfig.model_validate(
+        old.model_dump(by_alias=True) | {"maximum_aggregate_evidence_bytes": maximum}
+    )
+    assert changed.request_evidence_bytes == changed.request_replay_bytes == maximum
+    assert changed.maximum_export_bytes == old.maximum_export_bytes
+    assert changed.reviewers == old.reviewers and changed.directory == old.directory
+    restored = changed.model_dump(by_alias=True)
+    restored.pop("maximum_aggregate_evidence_bytes")
+    assert canonical_json_bytes(boot.AdmissionOwnerConfig.model_validate(restored)) == original

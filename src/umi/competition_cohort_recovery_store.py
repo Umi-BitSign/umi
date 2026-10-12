@@ -20,6 +20,7 @@ from .competition_cohort_recovery import (
     CohortRecoveryGenesis,
     CohortRecoveryState,
     CohortRecoveryTransition,
+    CohortRequestTailAdoption,
     Phase,
     RecoverableCohortPlan,
     RecoveryOperation,
@@ -30,6 +31,7 @@ from .competition_cohort_recovery import (
     propose_recovery_transition,
     verify_recovery_quorum,
 )
+from .host_memory_request_bounds import check_stage_json
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -73,6 +75,7 @@ _Record = TypeVar("_Record", bound=StrictProtocolModel)
 def _decode(model: type[_Record], raw: bytes, maximum: int) -> _Record:
     if type(raw) is not bytes or not 0 < len(raw) <= maximum:
         raise ValueError("cohort recovery record exceeds its byte bound")
+    check_stage_json(raw, kind="declaration")
     value = model.model_validate_json(raw)
     if canonical_json_bytes(value) != raw:
         raise ValueError("cohort recovery record is not canonical")
@@ -218,6 +221,8 @@ class CohortRecoveryStore:
                 observed_at_block=transition.observed_at_block,
                 evidence_sha256=transition.evidence_sha256,
                 extension_blocks=transition.extension_blocks,
+                request_tail_sha256=transition.request_tail_sha256,
+                request_tail_adoption=transition.request_tail_adoption,
             )
             if sequence != state.sequence + 1 or transition != expected:
                 raise ValueError("retained cohort decision forks its authenticated history")
@@ -232,7 +237,7 @@ class CohortRecoveryStore:
 
     def status(self, cohort: str) -> tuple[CohortRecoveryState, CohortRecoveryTransition | None]:
         # One consistent snapshot even if another process commits during replay.
-        with self._transaction():
+        with self._transaction(write=False):
             _, state, pending = self._load(cohort)
             return state, pending
 
@@ -275,7 +280,10 @@ class CohortRecoveryStore:
                 "INSERT OR IGNORE INTO cohort_recovery_bindings VALUES (?,?)", (cohort, raw)
             )
             _, state, pending = self._load(cohort)
-            if pending is not None:
+            if pending is not None and (
+                pending.operation != "adopt_request_tail_rule"
+                or not any(signed.transition == pending for signed in history.transitions)
+            ):
                 raise ValueError("consumer publication cannot replace a pending signing decision")
             if state.sequence > view.state.sequence:
                 raise ValueError("published cohort history rolls back its retained tip")
@@ -290,6 +298,15 @@ class CohortRecoveryStore:
                 if prior is not None:
                     if prior[0] != encoded:
                         raise ValueError("published cohort history forks its retained decisions")
+                    if pending is not None and transition == pending:
+                        # Intake reserves this exact rule before the controller
+                        # signs it. Certified publication completes that gate in
+                        # the same transaction as the authenticated history.
+                        self.db.execute(
+                            "UPDATE cohort_recovery_decisions SET certificate=? "
+                            "WHERE cohort=? AND sequence=? AND certificate IS NULL",
+                            (canonical_json_bytes(signed), cohort, transition.sequence),
+                        )
                     continue
                 self.db.execute(
                     "INSERT INTO cohort_recovery_decisions VALUES (?,?,?,?,?)",
@@ -333,10 +350,10 @@ class CohortRecoveryStore:
             if row is None:
                 raise ValueError("cohort has no published admission")
             genesis = _decode(_PublishedGenesis, row[0], 64 * 1024)
-            binding, _, _ = self._load(cohort)
-            if genesis.genesis != binding.genesis:
+            history = self.read_history(cohort, genesis_signatures=genesis.signatures)
+            if genesis.genesis != history.genesis:
                 raise ValueError("published admission differs from the retained cohort")
-        return self.export_history(cohort, genesis_signatures=genesis.signatures)
+            return history
 
     def retain_source(self, cohort: str, value: StrictProtocolModel) -> str:
         """Retain decision input before reservation; consumers authenticate its meaning."""
@@ -479,6 +496,8 @@ class CohortRecoveryStore:
         observed_at_block: int,
         evidence_sha256: str,
         extension_blocks: int | None = None,
+        request_tail_sha256: str | None = None,
+        request_tail_adoption: CohortRequestTailAdoption | None = None,
     ) -> CohortRecoveryTransition:
         """Acknowledge the same decision or return pending bytes before new work.
 
@@ -507,6 +526,8 @@ class CohortRecoveryStore:
                 observed_at_block=observed_at_block,
                 evidence_sha256=evidence_sha256,
                 extension_blocks=extension_blocks,
+                request_tail_sha256=request_tail_sha256,
+                request_tail_adoption=request_tail_adoption,
             )
             raw = canonical_json_bytes(transition)
             _decode(CohortRecoveryTransition, raw, 16 * 1024)
@@ -515,6 +536,48 @@ class CohortRecoveryStore:
                 (cohort, transition.sequence, key, raw),
             )
             return transition
+
+    def reserve_exact(self, proposal: CohortRecoveryTransition) -> CohortRecoveryTransition:
+        """CAS the selected predecessor and exact bytes before any reservation.
+
+        An identical durable reservation or certificate is an idempotent retry.
+        A competing pending decision is never replaced or returned as this body.
+        """
+        raw = canonical_json_bytes(proposal)
+        proposal = _decode(CohortRecoveryTransition, raw, 16 * 1024)
+        cohort = proposal.cohort_sha256
+        with self._transaction():
+            binding, state, pending = self._load(cohort)
+            prior = self.db.execute(
+                "SELECT body FROM cohort_recovery_decisions WHERE cohort=? AND sequence=?",
+                (cohort, proposal.sequence),
+            ).fetchone()
+            if prior is not None:
+                if prior[0] != raw:
+                    raise ValueError("exact cohort reservation conflicts with retained decision")
+                return proposal
+            if pending is not None or state.tip_sha256 != proposal.predecessor_sha256:
+                raise ValueError("exact cohort reservation lost its selected predecessor")
+            expected = propose_recovery_transition(
+                state,
+                binding.authority.authority,
+                operation=proposal.operation,
+                observed_at_block=proposal.observed_at_block,
+                evidence_sha256=proposal.evidence_sha256,
+                extension_blocks=proposal.extension_blocks,
+                request_tail_sha256=proposal.request_tail_sha256,
+                request_tail_adoption=proposal.request_tail_adoption,
+            )
+            if canonical_json_bytes(expected) != raw:
+                raise ValueError("exact cohort reservation differs from native proposal")
+            key = _decision_key(
+                cohort, proposal.phase, proposal.operation, proposal.evidence_sha256
+            )
+            self.db.execute(
+                "INSERT INTO cohort_recovery_decisions VALUES (?,?,?,?,NULL)",
+                (cohort, proposal.sequence, key, raw),
+            )
+            return proposal
 
     def commit(self, signed: SignedCohortRecoveryTransition) -> CohortRecoveryState:
         """Adopt a verified next certificate or acknowledge an identical prior body."""

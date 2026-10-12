@@ -123,8 +123,10 @@ def replay(h, value):
 
 
 @pytest.mark.parametrize("completion", ["pending", "fenced_pending", "complete"])
-async def test_remote_request_export_matches_native_owner(remote, completion):
+@pytest.mark.parametrize("aggregate_bytes", [64 * 1024**2, 1024**3])
+async def test_remote_request_export_matches_native_owner(remote, completion, aggregate_bytes):
     h = remote
+    h.source.replay_bytes = h.exporter.maximum_bytes = h.remote.maximum_bytes = aggregate_bytes
     if completion == "pending":
         progress = h.sample()
     else:
@@ -141,7 +143,10 @@ async def test_remote_request_export_matches_native_owner(remote, completion):
     app.include_router(request_review_routes(h.exporter, token="owner-private-token" * 3))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
         h.remote.fetch = RequestReviewHTTPClient(
-            client, "https://owner.example", token="owner-private-token" * 3
+            client,
+            "https://owner.example",
+            token="owner-private-token" * 3,
+            maximum_bytes=aggregate_bytes,
         )
         assert await h.remote.review(progress) == h.source.read(progress).record
         vote = await h.remote_signer().attest(progress)
@@ -174,8 +179,9 @@ def test_pending_request_rejects_roster_not_certified_by_preparation(remote):
 
 
 @pytest.mark.parametrize("service_catalog_inputs", [True, "precommitted"], indirect=True)
+@pytest.mark.parametrize("loopback_restart", [False, True])
 async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vote(
-    remote, chain_config, tmp_path, monkeypatch
+    remote, chain_config, tmp_path, monkeypatch, loopback_restart
 ):
     from pathlib import Path
     from types import SimpleNamespace
@@ -292,10 +298,12 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
             fields={"proof": b"proof", "metadata": b"metadata"},
         )
 
+    peer_origin = "https://reviewer.example"
+
     def peer(client):
         return PhaseVotePeer(
             client,
-            "https://reviewer.example",
+            peer_origin,
             policy=policy,
             cohorts=config.signing.cohorts,
             signer=config.signing.signer,
@@ -332,6 +340,13 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
     h.block += 100_000
     for folder, key, _ in selections:
         (inputs / folder / (key + ".json")).unlink()
+    if loopback_restart:
+        original_signing = canonical_json_bytes(config.signing)
+        original_series = canonical_json_bytes(config.series)
+        config = config.model_copy(update={"owner_origin": "http://127.0.0.1:18090"})
+        peer_origin = "http://127.0.0.1:19579"
+        assert canonical_json_bytes(config.signing) == original_signing
+        assert canonical_json_bytes(config.series) == original_series
     async with (
         boot.phase_review_app(config) as app,
         client_type(transport=httpx.ASGITransport(app=app)) as client,
@@ -477,7 +492,10 @@ async def test_request_export_capacity_and_cancellation_preserve_completion(remo
     assert drained.is_set() and h.remote_calls == []
 
 
-async def test_native_controller_recovers_remote_request_vote_after_long_delay(remote, tmp_path):
+@pytest.mark.parametrize("loopback", [False, True])
+async def test_native_controller_recovers_remote_request_vote_after_long_delay(
+    remote, tmp_path, loopback
+):
     h = remote
     complete = h.window()
     owner, reviewer = FastAPI(), FastAPI()
@@ -509,11 +527,13 @@ async def test_native_controller_recovers_remote_request_vote_after_long_delay(r
             httpx.AsyncClient(transport=httpx.ASGITransport(app=reviewer)) as reviewer_client,
         ):
             h.remote.fetch = RequestReviewHTTPClient(
-                owner_client, "https://owner.example", token="owner-private-token" * 3
+                owner_client,
+                "http://127.0.0.1:18090" if loopback else "https://owner.example",
+                token="owner-private-token" * 3,
             )
             peer = PhaseVotePeer(
                 reviewer_client,
-                "https://reviewer.example",
+                "http://127.0.0.1:19579" if loopback else "https://reviewer.example",
                 policy=policy,
                 cohorts=h.intake.config.cohorts,
                 signer=wallet("Dave").hotkey.ss58_address,
@@ -580,3 +600,62 @@ async def test_remote_review_retains_outage_compensation_before_request_closure(
     with pytest.raises(ValueError, match="service history"):
         replay(h, shortened)
     assert await h.remote_signer().attest(complete)
+
+
+async def test_request_review_releases_export_before_proofs_and_second_read(remote, monkeypatch):
+    import gc
+    import weakref
+
+    h = remote
+    progress = h.window()
+    read = h.remote._read
+    archive = h.remote.archive
+    references = []
+    reads = 0
+
+    def released():
+        gc.collect()
+        assert all(reference() is None for reference in references)
+
+    async def tracked_read(selected):
+        nonlocal reads
+        released()
+        exported, native = await read(selected)
+        references.append(weakref.ref(exported))
+        references.extend(weakref.ref(obj) for obj in exported.objects)
+        reads += 1
+        return exported, native
+
+    async def checked_archive(observation):
+        released()
+        return await archive(observation)
+
+    monkeypatch.setattr(h.remote, "_read", tracked_read)
+    monkeypatch.setattr(h.remote, "archive", checked_archive)
+    assert await h.remote.review(progress) == h.source.read(progress).record
+    assert reads == 2
+    released()
+
+
+async def test_request_review_rejects_changed_repeat_even_when_native_result_matches(
+    remote, monkeypatch
+):
+    h = remote
+    progress = h.window()
+    read = h.remote._read
+    reads = 0
+
+    async def changed_repeat(selected):
+        nonlocal reads
+        exported, native = await read(selected)
+        reads += 1
+        if reads == 2:
+            # Exercise the independent full-export comparison after both real
+            # native replays; compact review equality alone is insufficient.
+            exported = exported.model_copy(update={"transport_sha256": "ab" * 32})
+        return exported, native
+
+    monkeypatch.setattr(h.remote, "_read", changed_repeat)
+    with pytest.raises(OSError, match="changed during independent review"):
+        await h.remote_signer().attest(progress)
+    assert reads == 2 and h.remote_calls == []

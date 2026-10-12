@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from typing import Annotated, Literal, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_chain import RegistrationCapture
@@ -41,7 +41,9 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class CohortPhaseProgress(StrictProtocolModel):
-    schema_: Literal["umi-cohort-phase-progress/1"] = Field(alias="schema")
+    schema_: Literal["umi-cohort-phase-progress/1", "umi-cohort-phase-progress/2"] = Field(
+        alias="schema"
+    )
     cohort_sha256: Hex32
     recovery_tip_sha256: Hex32
     phase: Phase
@@ -51,9 +53,26 @@ class CohortPhaseProgress(StrictProtocolModel):
     completion: Literal["pending", "complete"]
     phase_result_sha256: Hex32 | None
     evidence_sha256: Hex32
+    request_tail_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.request_tail_sha256 is None:
+            value.pop("request_tail_sha256", None)
+        return value
 
     @model_validator(mode="after")
     def result_binding(self) -> Self:
+        tail = self.request_tail_sha256 is not None
+        if tail != (self.schema_ == "umi-cohort-phase-progress/2"):
+            raise ValueError("request tail progress requires its explicit version and evidence")
+        if tail and (
+            self.phase != "requests"
+            or self.completion != "complete"
+            or self.request_tail_sha256 == "0" * 64
+        ):
+            raise ValueError("request tail only authorizes completed request progress")
         if (self.completion == "complete") != (self.phase_result_sha256 is not None):
             raise ValueError("completed phase requires its immutable result identity")
         if "0" * 64 in {self.evidence_sha256, self.phase_result_sha256}:
@@ -76,6 +95,10 @@ class CohortProgressIntent(StrictProtocolModel):
     schema_: Literal["umi-cohort-progress-intent/1"] = Field(alias="schema")
     progress: CohortPhaseProgress
     observation: ExecutionBoundary
+
+
+ProgressSampler = Callable[[RegistrationCapture], Awaitable[CohortPhaseProgress]]
+ProgressPreparation = Callable[[CohortRecoveryState], AbstractAsyncContextManager[ProgressSampler]]
 
 
 def _choice(
@@ -105,7 +128,11 @@ def _choice(
     window = state.phase in {"intake", "requests"}
     missing = checkpoint.unavailable_blocks - restored
     if checkpoint.completion == "complete":
-        if window and checkpoint.observed_at_block < target + missing:
+        if (
+            window
+            and checkpoint.request_tail_sha256 is None
+            and checkpoint.observed_at_block < target + missing
+        ):
             raise ValueError("participant window closed before restoring unavailable service")
         if state.phase == "reference_reveal" and block <= state.observed_at_block:
             return None, 0
@@ -132,6 +159,7 @@ def _choice(
         observed_at_block=block,
         evidence_sha256=digest(evidence),
         extension_blocks=extension,
+        request_tail_sha256=checkpoint.request_tail_sha256,
     ), restored_now
 
 
@@ -167,6 +195,10 @@ def replay_cohort_decisions(
     )
     restored = prior_unavailable = 0
     for signed in history.transitions:
+        if signed.transition.operation == "adopt_request_tail_rule":
+            # This separate quorum decision changes no phase or outage credit.
+            state = apply_recovery_transition(state, signed, history.authority, policy)
+            continue
         if signed.transition.operation == "revoke":
             # Explicit revocation has separate quorum authorization. It is
             # never inferred from stalled work or an unavailable observer.
@@ -230,6 +262,7 @@ class CohortRecoveryCoordinator:
             [CohortRecoveryState, RegistrationCapture], Awaitable[CohortPhaseProgress]
         ]
         | None = None,
+        prepare_progress: ProgressPreparation | None = None,
         attest_progress: Callable[[CohortPhaseProgress], Awaitable[AttestedCohortPhaseProgress]]
         | None = None,
     ) -> None:
@@ -241,6 +274,9 @@ class CohortRecoveryCoordinator:
             raise ValueError("durable progress needs both the native sampler and certifier")
         if observe is None and sample_progress is None:
             raise ValueError("cohort recovery needs an observer or durable native sampler")
+        if prepare_progress is not None and sample_progress is None:
+            raise ValueError("progress preparation requires a durable native sampler")
+        self.prepare_progress = prepare_progress
         self.sample_progress, self.attest_progress = sample_progress, attest_progress
         self.serial = asyncio.Lock()
         # A native readiness sampler may share the owner while quorum review
@@ -257,9 +293,33 @@ class CohortRecoveryCoordinator:
         )
         return history, state, restored, prior_unavailable
 
+    @asynccontextmanager
+    async def _prepared(self, state):
+        if self.prepare_progress is not None:
+            async with self.prepare_progress(state) as sample:
+                yield sample
+        else:
+
+            async def sample(capture):
+                return await self.sample_progress(state, capture)
+
+            yield sample
+
     async def tick(self) -> dict:
         async with self.serial:
             history, state, restored, prior_unavailable = self._history()
+            if (
+                history.plan.sequence > 5
+                and history.plan.schema_ != "umi-recoverable-cohort-plan/4"
+            ):
+                current, pending = self.store.status(self.cohort)
+                if current != state:
+                    return self._report(current, "history_changed_retry")
+                if pending is not None and pending.operation == "adopt_request_tail_rule":
+                    # Intake has already gated receipts for these exact bytes.
+                    # Republishing the predecessor would conflict with that
+                    # reservation before its certificate can be assembled.
+                    return self._report(state, "awaiting_request_tail_adoption_certificate")
             # Complete a lost publication acknowledgement before creating more
             # work. This also republishes a terminal cohort after a restart.
             await self.publish(history)
@@ -268,8 +328,13 @@ class CohortRecoveryCoordinator:
                 return self._report(current, "history_changed_retry")
             if state.phase in {"complete", "revoked"}:
                 return self._report(state, state.phase)
-            if pending is not None and pending.operation == "revoke":
-                return self._report(state, "awaiting_revocation_certificate")
+            if pending is not None and not pending.requires_progress_evidence:
+                return self._report(
+                    state,
+                    "awaiting_revocation_certificate"
+                    if pending.operation == "revoke"
+                    else "awaiting_request_tail_adoption_certificate",
+                )
             if pending is None:
                 intent = None
                 if self.sample_progress is None:
@@ -281,11 +346,11 @@ class CohortRecoveryCoordinator:
                         self.cohort, state.tip_sha256, CohortProgressIntent
                     )
                     if intent is None:
-                        async with self.sampling_lock:
+                        async with self.sampling_lock, self._prepared(state) as sample:
                             capture = await self.provider.collect()
                             intent = CohortProgressIntent(
                                 schema="umi-cohort-progress-intent/1",
-                                progress=await self.sample_progress(state, capture),
+                                progress=await sample(capture),
                                 observation=execution_boundary(capture),
                             )
                         intent = self.store.reserve_progress(self.cohort, state.tip_sha256, intent)
@@ -329,14 +394,20 @@ class CohortRecoveryCoordinator:
                     observed_at_block=proposal.observed_at_block,
                     evidence_sha256=key,
                     extension_blocks=proposal.extension_blocks,
+                    request_tail_sha256=proposal.request_tail_sha256,
                 )
                 if intent is not None:
                     self.store.finish_progress(self.cohort, state.tip_sha256, intent)
             current, retained = self.store.status(self.cohort)
             if current != state or pending != retained:
                 return self._report(current, "history_changed_retry")
-            if pending.operation == "revoke":
-                return self._report(state, "awaiting_revocation_certificate")
+            if not pending.requires_progress_evidence:
+                return self._report(
+                    state,
+                    "awaiting_revocation_certificate"
+                    if pending.operation == "revoke"
+                    else "awaiting_request_tail_adoption_certificate",
+                )
             evidence = self.store.source(self.cohort, pending.evidence_sha256, CohortDecisionInput)
             expected, _ = _choice(
                 state,

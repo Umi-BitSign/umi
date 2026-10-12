@@ -7,6 +7,7 @@ exchange.  It performs no RPC, signing, composition, or chain mutation.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -15,7 +16,9 @@ import re
 import selectors
 import signal
 import subprocess
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -147,7 +150,8 @@ class SubprocessStorageProofVerifier:
     The process is deliberately one-shot: EOF after the single request makes
     lifecycle and timeout handling unambiguous.  The Rust binary itself supports
     persistent NDJSON for a future supervised worker without changing the wire
-    schema.
+    schema. Each instance reuses at most 64 exact successful storage-proof checks;
+    this establishes no finality or current authorization.
     """
 
     def __init__(
@@ -177,6 +181,9 @@ class SubprocessStorageProofVerifier:
         self._expected_sha256 = expected_sha256
         self._timeout_seconds = float(timeout_seconds)
         self._limits = limits or SubstrateProofLimits()
+        self._pid = os.getpid()
+        self._successful_proofs: OrderedDict[tuple, None] = OrderedDict()
+        self._success_lock = threading.Lock()
         self._assert_binary_integrity()
 
     @property
@@ -354,24 +361,33 @@ class SubprocessStorageProofVerifier:
     ) -> dict:
 
         process: subprocess.Popen[bytes]
-        try:
-            process = subprocess.Popen(
-                [os.fspath(executable)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True,
-                env={"LANG": "C", "LC_ALL": "C"},
-            )
-        except OSError as error:
-            raise SubstrateProofVerifierError("sidecar_start_failed") from error
+        deadline = time.monotonic() + self._timeout_seconds
+        while True:
+            try:
+                process = subprocess.Popen(
+                    [os.fspath(executable)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                    env={"LANG": "C", "LC_ALL": "C"},
+                )
+                break
+            except OSError as error:
+                remaining = deadline - time.monotonic()
+                # A concurrent fork can briefly retain the staging write fd
+                # until exec closes it. Retry this exact verified copy only;
+                # no child ran and no proof response has been accepted.
+                if error.errno != errno.ETXTBSY or remaining <= 0:
+                    raise SubstrateProofVerifierError("sidecar_start_failed") from error
+                time.sleep(min(0.01, remaining))
         try:
             stdout = _communicate_bounded(
                 process,
                 request_bytes + b"\n",
                 maximum_response_bytes=maximum_response_bytes,
-                timeout_seconds=self._timeout_seconds,
+                timeout_seconds=max(0, deadline - time.monotonic()),
             )
         except subprocess.TimeoutExpired as error:
             raise SubstrateProofVerifierError("sidecar_timeout") from error
@@ -505,6 +521,22 @@ class SubprocessStorageProofVerifier:
 
         checked_items = self._preflight(state_root=state_root, items=items, proof=proof)
         request_id = self._request_id(state_root=state_root, items=checked_items, proof=proof)
+        # The request identity binds the complete root, claims, proof nodes and
+        # their boundaries. Archive callers still consume and validate all bytes;
+        # this only avoids repeating the same successful pure native check.
+        cache_key = (self._expected_sha256, STATE_VERSION, self._limits, request_id)
+        same_process = os.getpid() == self._pid
+        reused = False
+        # A forked child must not acquire a lock inherited from another thread
+        # or adopt that process's cache. A new verifier gets its own cache.
+        if same_process:
+            with self._success_lock:
+                reused = cache_key in self._successful_proofs
+                if reused:
+                    self._successful_proofs.move_to_end(cache_key)
+        if reused:
+            self._assert_binary_integrity()
+            return True
         request = {
             "schema": REQUEST_SCHEMA,
             "request_id": request_id,
@@ -522,7 +554,14 @@ class SubprocessStorageProofVerifier:
         request_bytes = json.dumps(
             request, ensure_ascii=True, separators=(",", ":"), sort_keys=True
         ).encode("ascii")
-        return self._invoke(request_bytes, request_id=request_id)
+        verified = self._invoke(request_bytes, request_id=request_id)
+        if verified is True and same_process:
+            with self._success_lock:
+                self._successful_proofs[cache_key] = None
+                self._successful_proofs.move_to_end(cache_key)
+                while len(self._successful_proofs) > 64:
+                    self._successful_proofs.popitem(last=False)
+        return verified
 
     def __call__(
         self,

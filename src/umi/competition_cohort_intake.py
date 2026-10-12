@@ -25,6 +25,7 @@ from pydantic import Field, model_validator
 from .canonical_reuse import canonical_json_reuse
 from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
+from .competition_cohort_capacity import MAX_AGGREGATE_EVIDENCE_BYTES
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake_records import (
@@ -48,11 +49,12 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
 )
-from .competition_cohort_recovery import ModelRewardCohortAuthority
+from .competition_cohort_recovery import CohortRecoveryTransition, ModelRewardCohortAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
+from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .thread_gate import ThreadGate
@@ -124,7 +126,7 @@ class CohortIntakePublisher:
                 [
                     await self.decision_source(digest(history.plan), s.transition.evidence_sha256)
                     for s in history.transitions
-                    if s.transition.operation != "revoke"
+                    if s.transition.requires_progress_evidence
                 ]
             )
             await run_owned_thread(
@@ -364,7 +366,7 @@ class CohortIntake:
             required = {
                 s.transition.evidence_sha256
                 for s in history.transitions
-                if s.transition.operation != "revoke"
+                if s.transition.requires_progress_evidence
             }
             if sources.keys() != required or len(sources) != len(decision_inputs):
                 raise ValueError("published decision evidence is incomplete or repeated")
@@ -409,6 +411,48 @@ class CohortIntake:
                 store.retain_source(cohort, evidence)
             return state
 
+    def pending_request_tail_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
+        """Read authenticated pending bytes for lifecycle reservation recovery."""
+        self._allowed(cohort)
+        with self._connection(prefer_history=True) as (_, store):
+            _, pending = store.status(cohort)
+            return (
+                pending
+                if pending is not None and pending.operation == "adopt_request_tail_rule"
+                else None
+            )
+
+    def reserve_request_tail_adoption(
+        self, proposal: CohortRecoveryTransition
+    ) -> CohortRecoveryTransition:
+        """Fence fresh receipts before the lifecycle owner reserves this exact tip.
+
+        The durable pending transition shares the existing intake journal. A
+        crash between intake and control reservation retries these same bytes;
+        ordinary signed history publication releases the fence after commit.
+        """
+        proposal = CohortRecoveryTransition.model_validate_json(canonical_json_bytes(proposal))
+        if proposal.operation != "adopt_request_tail_rule":
+            raise ValueError("intake rule reservation requires an adoption transition")
+        cohort = proposal.cohort_sha256
+        self._allowed(cohort)
+        with self._connection() as (db, store):
+            history = store.published_history(cohort)
+            if any(item.transition == proposal for item in history.transitions):
+                return store.reserve_exact(proposal)
+            if history_tip(history) != proposal.predecessor_sha256:
+                raise ValueError("intake rule reservation lost its selected predecessor")
+            state, pending = store.status(cohort)
+            if pending == proposal:
+                return store.reserve_exact(proposal)
+            if state.phase == "intake" and self._seal(db, history, state.tip_sha256) is not None:
+                raise ValueError("request-rule adoption cannot reopen sealed intake")
+            for _, _, retained in self._parsed_records(db, history):
+                admission = replay_participation(retained, history, self.policy)
+                if admission.admitted_at_block > proposal.observed_at_block:
+                    raise ValueError("request-rule adoption predates retained participation")
+            return store.reserve_exact(proposal)
+
     def history(self, cohort: str) -> CohortRecoveryHistory:
         self._allowed(cohort)
         with self._connection(prefer_history=True) as (_, store):
@@ -425,7 +469,7 @@ class CohortIntake:
         self._allowed(cohort)
         if (
             type(maximum_bytes) is not int
-            or not 1 <= maximum_bytes <= 512 * 1024**2
+            or not 1 <= maximum_bytes <= MAX_AGGREGATE_EVIDENCE_BYTES
             or type(maximum_records) is not int
             or not 1 <= maximum_records <= 65536
         ):
@@ -485,6 +529,9 @@ class CohortIntake:
             if prior is not None:
                 return self._receipt(prior[0], store, request)
             history = store.published_history(cohort)
+            _, pending = store.status(cohort)
+            if pending is not None and pending.operation == "adopt_request_tail_rule":
+                raise OSError("cohort intake awaits its reserved request-rule adoption")
             if (
                 db.execute(
                     "SELECT 1 FROM cohort_intake_seals WHERE cohort=? AND tip=?",
@@ -558,11 +605,16 @@ class CohortIntake:
         if hotkey is not None:
             clauses.append("hotkey=?")
             parameters.append(identity(hotkey))
-        for consent, tip, raw in db.execute(
+        stage_bytes = 0
+        records = db.execute(
             "SELECT consent,recovery_tip,substr(body,1,4194305) FROM cohort_consents "
             "WHERE " + " AND ".join(clauses) + " ORDER BY consent",
             parameters,
-        ):
+        )
+        for stage_records, (consent, tip, raw) in enumerate(records, 1):
+            stage_bytes += len(raw)
+            stage_count("maximum_records", stage_records)
+            stage_count("maximum_input_bytes", stage_bytes)
             retained = read_participation(raw)
             if (
                 retained.proposed_admission.recovery_tip_sha256 != tip
@@ -636,6 +688,7 @@ class CohortIntake:
         raw = row[0]
         if len(raw) > 4 * 1024 * 1024:
             raise ValueError("retained intake seal exceeds its byte bound")
+        check_stage_json(raw, kind="object")
         seal = CohortIntakeSeal.model_validate_json(raw)
         if canonical_json_bytes(seal) != raw:
             raise ValueError("retained intake seal is not canonical")

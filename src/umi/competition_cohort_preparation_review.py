@@ -13,6 +13,7 @@ from .competition_cohort_preparation_phase import (
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_progress import log_phase
+from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread
 from .open_competition import digest
 
@@ -45,7 +46,12 @@ class PreparationProgressReviewer:
             *(d.observation for d in original.decisions),
         )
         checked = {}
-        for observation in observations:
+        for observation in progress_items(
+            observations,
+            stage="preparation_registration_archives",
+            unit="observations",
+            cohort=progress.cohort_sha256,
+        ):
             key = digest(observation)
             if key not in checked:
                 raw, metadata = await self.archive(observation)
@@ -54,7 +60,12 @@ class PreparationProgressReviewer:
             raise ValueError("prepared intake differs from independently verified registration")
         # All original consents, including superseded and unregistered records,
         # participate in the seal. A selected-only proof export is incomplete.
-        for consent in original.consents:
+        for consent in progress_items(
+            original.consents,
+            stage="preparation_participations",
+            unit="participations",
+            cohort=progress.cohort_sha256,
+        ):
             raw, evidence, metadata = await run_owned_thread(
                 self.queue.evidence, progress.cohort_sha256, consent
             )

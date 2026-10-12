@@ -140,6 +140,52 @@ def admit(c, name="Alice", nonce=1, **kwargs):
     )
 
 
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+def test_closure_capture_precheck_preserves_heads_and_immutable_recovery(
+    queue_case, monkeypatch, caplog
+):
+    from umi.competition_round_journal import FinalizedHeadRegression
+
+    c = queue_case
+    caplog.set_level("INFO", logger="umi.competition_cohort_service_queue")
+    accepted = admit(c)
+    expected = c.queue.assignment(accepted.claim)
+    tip = history_tip(c.h.source.history)
+    replay = Mock(wraps=c.queue._read)
+    monkeypatch.setattr(c.queue, "_read", replay)
+    with pytest.raises(FinalizedHeadRegression), c.queue.closure_inventory(capture=capture(399)):
+        pytest.fail("stale capture reached inventory")
+    assert "stage=inventory_precheck capture_block=399 highwater_block=400" in caplog.text
+    assert replay.call_count == 0
+    assert c.queue.retained_seal() is None
+    with c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(400,)]
+    with c.queue.closure_inventory(capture=capture(401)) as inventory:
+        assert inventory == (expected,)
+        with c.queue.journal.read_transaction() as db:
+            assert db.execute("SELECT block FROM highwater").fetchall() == [(400,)]
+        # Ordinary journal observations can advance during the compound lease.
+        # The existing final seal check must remain authoritative in that race.
+        c.queue.journal.observe(402)
+        with pytest.raises(FinalizedHeadRegression):
+            c.queue.seal_locked(c.h.source, capture(401), expected_tip_sha256=tip)
+    assert "stage=seal_history capture_block=401 highwater_block=402" in caplog.text
+    assert c.queue.retained_seal() is None
+    sealed = c.queue.seal(c.h.source, capture(402), expected_tip_sha256=tip)
+    c.queue.journal.observe(403)
+    # Retained immutable recovery keeps its historical semantics across restart.
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    with c.queue.closure_inventory(capture=capture(400)) as inventory:
+        assert inventory == (expected,)
+        assert c.queue.seal_locked(c.h.source, capture(400), expected_tip_sha256=tip) == sealed
+    with c.queue.journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == [(403,)]
+    with c.queue.journal.transaction() as db:
+        db.execute("UPDATE records SET body=? WHERE kind='service_work_seal'", (b"{}",))
+    with c.queue.closure_inventory(capture=capture(400)), pytest.raises(ValueError):
+        c.queue.seal_locked(c.h.source, capture(400), expected_tip_sha256=tip)
+
+
 def precommit(c):
     raw = c.catalog.catalog.model_dump(mode="json", by_alias=True)
     raw.pop("round_sha256")
@@ -326,6 +372,39 @@ def test_retention_keeps_original_blocks_after_restart_without_review(queue_case
         c.queue.entries()
 
 
+def test_unchanged_retention_reuses_projection_but_new_claims_are_pinned(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    read = Mock(wraps=c.queue._raw_admission)
+    monkeypatch.setattr(c.queue, "_raw_admission", read)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    read.assert_not_called()
+    c.queue.admit(
+        *inputs(c, "Bob", 2),
+        c.h.source,
+        capture(401),
+        expected_tip_sha256=history_tip(c.h.source.history),
+    )
+    read.reset_mock()
+    assert c.queue.retained_registration_blocks() == frozenset({400, 401})
+    assert read.call_count == 2
+    read.reset_mock()
+    assert c.queue.retained_registration_blocks() == frozenset({400, 401})
+    read.assert_not_called()
+
+
+def test_retention_reuse_still_observes_new_conflict_hold(queue_case):
+    c = queue_case
+    value = admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    changed = value.model_copy(update={"ordinal": value.ordinal + 1})
+    with pytest.raises(ValueError):
+        c.queue.journal.put("service_admission", value.work_sha256, changed)
+    with pytest.raises(ValueError, match="conflict"):
+        c.queue.retained_registration_blocks()
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_empty_retention_does_not_require_catalog(queue_case, monkeypatch, installed):
     c = queue_case
@@ -347,6 +426,7 @@ def test_retention_rejects_changed_indexes_and_missing_admissions(queue_case, da
     c = queue_case
     admit(c)
     admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
     with c.queue.journal.transaction() as db:
         if damage in {"claim_key", "admission"}:
             db.execute(f"UPDATE service_claims SET {damage}=? WHERE ordinal=1", ("ff" * 32,))
@@ -364,6 +444,7 @@ def test_retention_rejects_changed_indexes_and_missing_admissions(queue_case, da
 def test_retention_checks_original_bindings_even_when_index_digest_matches(queue_case, damage):
     c = queue_case
     value = admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
     if damage == "predecessor":
         changed = value.model_copy(update={"predecessor_sha256": "ff" * 32})
     else:
@@ -640,6 +721,26 @@ def test_seal_freezes_complete_prefix_and_preserves_duplicate_recovery(queue_cas
     assert c.queue.entries() == tuple(accepted)
 
 
+def test_conditional_closure_inventory_holds_admission_without_premature_seal(queue_case):
+    c = queue_case
+    first = admit(c)
+    with c.queue.closure_inventory() as assignments:
+        assert tuple(a.admission for a in assignments) == (first,)
+        with pytest.raises(BlockingIOError):
+            admit(c, nonce=2)
+        assert c.queue.journal.get("service_work_seal", c.cfg.catalog_sha256) is None
+    second = admit(c, nonce=2)
+    with c.queue.closure_inventory() as assignments:
+        assert tuple(a.admission for a in assignments) == (first, second)
+        sealed = c.queue.seal_locked(
+            c.h.source, capture(400), expected_tip_sha256=history_tip(c.h.source.history)
+        )
+    assert tuple(r.work_sha256 for r in sealed.accepted) == (first.work_sha256, second.work_sha256)
+    with pytest.raises(ServiceQueueBackpressure):
+        admit(c, nonce=3)
+    assert admit(c) == first
+
+
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_seal_crash_and_ack_loss_preserve_whole_accepted_set(queue_case, monkeypatch, after_commit):
     c = queue_case
@@ -738,6 +839,39 @@ def test_read_assignment_still_observes_new_conflict_hold(queue_case):
         c.queue.journal.put("service_admission", admitted.work_sha256, changed)
     with pytest.raises(ValueError, match="conflict"):
         c.queue.assignment(signed)
+
+
+def test_pending_page_skips_completed_decode_without_shortening_fifo_page(queue_case, monkeypatch):
+    c = queue_case
+    values = [admit(c, "Alice", i) for i in range(1, 5)]
+    # Presence is deliberately only a scheduling hint, not a valid terminal.
+    for value in values[::2]:
+        c.queue.journal.put("service_terminal", value.work_sha256, {"unverified": True})
+    read = Mock(wraps=c.queue._read)
+    monkeypatch.setattr(c.queue, "_read", read)
+    assert c.queue.entries(limit=2, pending_only=True) == (values[1], values[3])
+    assert [call.args[0] for call in read.call_args_list] == [2, 4]
+    assert c.queue.entries(after_ordinal=2, limit=1, pending_only=True) == (values[3],)
+    assert c.queue.entries(after_ordinal=4, pending_only=True) == ()
+    assert c.queue.entries() == tuple(values)
+    # Each scheduling pass reads current presence, including after restart.
+    with c.queue.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='service_terminal'")
+    restarted = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    assert restarted.entries(limit=1, pending_only=True) == (values[0],)
+
+
+def test_terminal_hint_does_not_bypass_full_admission_review(queue_case):
+    c = queue_case
+    accepted = admit(c)
+    c.queue.journal.put("service_terminal", accepted.work_sha256, {"unverified": True})
+    with c.queue.journal.transaction() as db:
+        db.execute("UPDATE service_claims SET admission=?", ("ff" * 32,))
+    assert c.queue.entries(pending_only=True) == ()
+    with pytest.raises(ValueError, match="index differs"):
+        c.queue.entries()
+    with pytest.raises(ValueError, match="index differs"):
+        c.queue.assignment(accepted.claim)
 
 
 def test_static_assignment_reuse_preserves_mutation_and_policy_checks(queue_case, monkeypatch):

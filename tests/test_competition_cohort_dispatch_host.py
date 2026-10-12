@@ -173,6 +173,34 @@ async def host(networked, tmp_path, monkeypatch):
         yield SimpleNamespace(open=open_host, catalog=catalog, s=s, lifecycle=lifecycle)
 
 
+async def test_configured_preparation_distinguishes_media_wait(host):
+    h, s = host.open(), host.s
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = h.clips
+
+    async def held(sha):
+        entered.set()
+        await release.wait()
+        return await original(sha)
+
+    h.clips = held
+    worker = await h.worker(host.catalog)
+    work = s.c.assignment.admission.work_sha256
+    worker._operation_stages[work] = ("starting", asyncio.get_running_loop().time())
+    task = asyncio.create_task(worker.inputs(s.c.assignment))
+    try:
+        await asyncio.wait_for(entered.wait(), 120)
+        assert worker._operation_stages[work][0] == "preparation_media"
+        release.set()
+        fresh = await asyncio.wait_for(task, 120)
+        assert fresh.video == s.p.service_video and fresh.window == s.c.window
+        assert worker._operation_stages[work][0] == "preparation_window"
+    finally:
+        release.set()
+        await worker._stop_tasks((task,))
+        worker._operation_stages.pop(work, None)
+
+
 async def test_configured_dispatch_uses_native_votes_and_recovers_after_restart(host):
     h, s = host.open(), host.s
     assert h.timeout_seconds == h.config.operation_timeout_seconds == 2400
@@ -208,6 +236,46 @@ async def test_native_work_export_routes_only_selected_catalog(host):
     )
     with pytest.raises(ValueError, match="outside"):
         await h.respond(request.model_copy(update={"claim": claim}))
+
+
+@pytest.mark.parametrize("lagging", [False, True])
+async def test_dispatch_observation_refreshes_age_valid_registration_after_window(host, lagging):
+    h, s = host.open(), host.s
+    native = h.service.provider
+    cached = await native.collect()
+    minima = []
+
+    class CachedRegistration:
+        policy = native.policy
+
+        async def collect(self):
+            return cached
+
+        async def collect_at_least(self, block):
+            minima.append(block)
+            return cached if lagging else await native.collect()
+
+    h.service.finality = CachedRegistration()
+    worker = await h.worker(host.catalog)
+    original = canonical_json_bytes(s.body)
+    # The capture remains within its age budget while owned finality advances.
+    # A plain collect() would return authority older than a new request window.
+    head = cached.snapshot.block + 1
+    await s.move(head)
+    s.p.finality.head = head
+    if lagging:
+        with pytest.raises(OSError, match="precedes required origin"):
+            await worker.observation(s.c.assignment)
+    else:
+        source, capture = await worker.observation(s.c.assignment)
+        assert capture.snapshot.block == head
+        assert source == await s.history(s.c.assignment.round.cohort_sha256)
+    assert minima == [head]
+    assert (
+        canonical_json_bytes(worker.requests.latest(s.c.claim, worker.transport.evaluator))
+        == original
+    )
+    assert s.p.model.calls == 0 and s.signatures == 0
 
 
 async def test_recurring_dispatch_waits_for_inputs_then_drains(host):

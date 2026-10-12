@@ -15,17 +15,23 @@ from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
+from .competition_cohort_request_inventory import RequestInventoryCutoff
 from .competition_cohort_settlement_config import SettlementServiceConfig
+from .competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
-from .competition_cohort_settlement_service import CohortSettlementService
+from .competition_cohort_settlement_service import (
+    CohortSettlementService,
+    SettlementSeriesScheduler,
+)
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_reward_service import _close_provider, _stop_task
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
+from .host_memory_runtime import memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, sign_object
-from .private_files import ensure_private_directory, lock_private_file
+from .private_files import ensure_private_directory, lock_private_file, read_private_model
 from .protocol import canonical_json_bytes
 
 
@@ -94,6 +100,17 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
     descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, descriptor)
+        memory = resources.enter_context(
+            memory_runtime(
+                config.host_memory_admission,
+                maximum_aggregate_bytes=config.maximum_package_bytes,
+                role="settlement",
+            )
+        )
+        if memory is not None and {digest(p) for p in config.series.cohorts} != {
+            signal.cohort_sha256 for signal in memory.policy.settlement_signals
+        }:
+            raise ValueError("settlement series differs from host admission cohort groups")
         provider = HistoricalRegistrationProvider(config.chain, config.policy)
         resources.push_async_callback(_close_provider, provider)
         key = await run_owned_thread(
@@ -120,10 +137,22 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             )
         )
         nodes = []
+        direct_by_cohort = {}
         for plan in config.series.cohorts:
             store = resources.enter_context(
                 settlement_store(root / digest(plan), config.maximum_state_bytes)
             )
+            model_artifacts = (
+                None
+                if direct_artifacts is None
+                else DirectModelSettlementVerifier(
+                    direct_artifacts,
+                    promotion.directory / "model-reward-artifacts",
+                    root / digest(plan) / "direct-model-settlement-receipts",
+                )
+            )
+            if model_artifacts is not None:
+                direct_by_cohort[digest(plan)] = model_artifacts
             nodes.append(
                 CohortSettlementService(
                     config,
@@ -134,19 +163,31 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     promotion=promotion,
                     executions=executions,
                     sign=sign,
-                    model_artifacts=(
-                        None
-                        if direct_artifacts is None
-                        else DirectModelSettlementVerifier(
-                            direct_artifacts,
-                            promotion.directory / "model-reward-artifacts",
-                            root / digest(plan) / "direct-model-settlement-receipts",
-                        )
-                    ),
+                    model_artifacts=model_artifacts,
                 )
             )
         exports = None
         if config.request_export_directory is not None:
+
+            def inventory_cutoff(cohort):
+                try:
+                    return read_private_model(
+                        Path(config.history_directory) / (cohort + "-inventory-cutoff.json"),
+                        RequestInventoryCutoff,
+                        maximum_bytes=4096,
+                    )
+                except FileNotFoundError:
+                    return None
+
+            def inventory_needed(cohort):
+                # The event loop owns these stores. Once the ordinary settlement
+                # consumer authenticates closure, missing old work needs no new
+                # inventory signatures; retained evidence remains available.
+                node = next(n for n in nodes if n.cohort == cohort)
+                if not node.store.has_published_history(cohort):
+                    return True
+                return node.store.status(cohort)[0].phase == "requests"
+
             exports = RequestExportWorker(
                 executions,
                 provider,
@@ -165,10 +206,19 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                         "destination": config.request_export_directory,
                     },
                     maximum_bytes=config.maximum_state_bytes,
+                    maximum_rounds=65536,
                 ),
+                publish_inventory_proof=proofs.publish,
+                inventory_needed=inventory_needed,
+                inventory_cutoff=inventory_cutoff,
             )
+        preparation = SettlementArtifactPreparation(config, promotion, direct_by_cohort)
         await provider.start()
-        tasks = [asyncio.create_task(node.run(stop)) for node in nodes]
+        scheduler = SettlementSeriesScheduler(
+            nodes, ordered_cohorts=tuple(digest(plan) for plan in config.series.cohorts)
+        )
+        tasks = [asyncio.create_task(scheduler.run(stop))]
+        tasks.append(asyncio.create_task(preparation.run(stop)))
         if exports is not None:
             tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))
         for task in tasks:

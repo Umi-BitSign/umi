@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from .competition_progress import _failure_details
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
@@ -39,6 +40,8 @@ from .competition_reward_series_handoff import StandingRewardPredecessorOpportun
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
+from .host_memory_runtime import memory_operation, run_memory_thread
 from .open_competition import Signature, digest
 from .protocol import canonical_json_bytes
 
@@ -127,18 +130,8 @@ class StandingRewardDecisionReviewer:
                 raise RewardReviewPending from None
             history = progress.history
         control = await p.history.review_control(p.provider, height)
-        package, opportunity = None, None
+        opportunity = None
         if body.activation is not None:
-            package = await run_owned_thread(p.files.package, body.activation.package_sha256)
-            if p.model_artifacts is not None and package.allocation.model_award is not None:
-                participants = tuple(
-                    participant
-                    for participant in package.inputs.roster.participants
-                    if participant.record.request.signed_submission.submission.track == "model"
-                )
-                await p.model_artifacts.ensure_all(
-                    participants, package.allocation.model_award.acceptances
-                )
             if body.sequence == 1 and type(p.handoff) is StandingRewardHandoffPlan:
                 opportunity = await p.predecessor.review(
                     body.activation, observed_at_block=body.observed_at_block
@@ -153,6 +146,28 @@ class StandingRewardDecisionReviewer:
                 if selected.selection.decision_sha256 != body.predecessor_sha256:
                     raise ValueError("reward opportunity does not extend the proved predecessor")
                 opportunity = await self.opportunity(body.activation)
+        return await self._review_package(body, prefix, control, history, opportunity)
+
+    @memory_operation
+    async def _review_package(self, body, prefix, control, history, opportunity):
+        p = self
+        package = None
+        if body.activation is not None:
+            package = await run_owned_thread(p.files.package, body.activation.package_sha256)
+            if p.model_artifacts is not None and package.allocation.model_award is not None:
+                completed = {
+                    a.acceptance.submission_sha256
+                    for a in package.allocation.model_award.acceptances
+                }
+                participants = tuple(
+                    participant
+                    for participant in package.inputs.roster.participants
+                    if participant.record.request.signed_submission.submission.track == "model"
+                    and digest(participant.record.request.signed_submission.submission) in completed
+                )
+                await p.model_artifacts.ensure_all(
+                    participants, package.allocation.model_award.acceptances
+                )
         return await run_owned_thread(
             partial(
                 review_reward_decision,
@@ -240,6 +255,7 @@ class StandingRewardCoordinator:
                 package = self.readback.package(activation.package_sha256)
                 if digest(package.allocation) != activation.allocation_sha256:
                     raise ValueError("independent package readback changes its allocation")
+                del package  # Release before the next prefix item is decoded.
 
     async def step(self) -> RewardCoordinationProgress:
         async with self.serial:
@@ -256,7 +272,7 @@ class StandingRewardCoordinator:
             await self.signer.publish(sequence - 1, p.files, p.files.package)
             self.phase = "readback_inputs"
             try:
-                await run_owned_thread(self._readback, prefix)
+                await run_memory_thread(self._readback, prefix)
             except FileNotFoundError:
                 return RewardCoordinationProgress(
                     "delivery_pending", sequence - 1, digest(prefix[-1].decision)
@@ -290,7 +306,7 @@ class StandingRewardCoordinator:
             activation = None
             if sequence:
                 cohort = digest(p.series.cohorts[sequence - 1])
-                activation = await run_owned_thread(self.offers, cohort, prefix)
+                activation = await run_memory_thread(self.offers, cohort, prefix)
                 if activation is None:
                     return RewardCoordinationProgress("allocation_pending", sequence)
                 activation = RewardActivation.model_validate_json(canonical_json_bytes(activation))
@@ -373,12 +389,23 @@ class StandingRewardCoordinator:
                             }
                         ).decode()
                     )
+                except HistoricalHeaderRecoveryProgress:
+                    logger.info(
+                        "reward_coordinator_header_progress phase=%s sequence=%d",
+                        self.phase,
+                        self.sequence,
+                    )
+                    # The bounded pass retained progress. Yield to other tasks,
+                    # then resume its fixed target without a failure backoff.
+                    await asyncio.sleep(0)
+                    continue
                 except Exception as error:
                     logger.warning(
-                        "reward_coordinator_retry phase=%s sequence=%d reason=%s",
+                        "reward_coordinator_retry phase=%s sequence=%d reason=%s details=%s",
                         self.phase,
                         self.sequence,
                         type(error).__name__,
+                        canonical_json_bytes(_failure_details(error)).decode(),
                     )
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=poll_seconds)

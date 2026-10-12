@@ -8,6 +8,8 @@ signing and chain submission are not qualified here.
 
 import asyncio
 import hashlib
+import json
+import logging
 import os
 import threading
 from dataclasses import replace
@@ -464,14 +466,14 @@ async def test_later_cached_package_cannot_backdate_certification(
     monkeypatch,
 ):
     p, control, _, args = historical_preparation_case
-    replay = preparation.replay_reward_package
+    replay = preparation._replay_detached_reward_package
     blocks = []
 
     def checked(*a, **kw):
         blocks.append(kw["current_block"])
         return replay(*a, **kw)
 
-    monkeypatch.setattr(preparation, "replay_reward_package", checked)
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", checked)
     later = await p.preparation.prepare_historical(p.package, **args)
     assert await p.preparation.prepare_historical(p.package, **args) is later
     certification = p.package.inputs.history.transitions[-1].transition.observed_at_block
@@ -540,7 +542,7 @@ async def test_native_package_replay_is_reused_but_projection_needs_fresh_contro
 ):
     p = preparation_case
     observations = await p.observations()
-    replay = preparation.replay_reward_package
+    replay = preparation._replay_detached_reward_package
     calls = []
     virtual_time = [observations["control"].captured_monotonic_ns]
 
@@ -556,7 +558,7 @@ async def test_native_package_replay_is_reused_but_projection_needs_fresh_contro
         )
         return value
 
-    monkeypatch.setattr(preparation, "replay_reward_package", slow)
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", slow)
     with monkeypatch.context() as patch:
         patch.setattr("time.monotonic_ns", lambda: virtual_time[0])
         ready = await p.preparation.prepare(p.package, **replay_args(observations))
@@ -603,7 +605,7 @@ async def test_native_package_replay_is_reused_but_projection_needs_fresh_contro
 async def test_cancellation_retains_completed_native_replay(preparation_case, monkeypatch):
     p = preparation_case
     started, release = threading.Event(), threading.Event()
-    replay, calls = preparation.replay_reward_package, []
+    replay, calls = preparation._replay_detached_reward_package, []
 
     def delayed(*args, **kwargs):
         calls.append(1)
@@ -611,7 +613,7 @@ async def test_cancellation_retains_completed_native_replay(preparation_case, mo
         assert release.wait(30)
         return replay(*args, **kwargs)
 
-    monkeypatch.setattr(preparation, "replay_reward_package", delayed)
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", delayed)
     observations = await p.observations()
     task = asyncio.create_task(p.preparation.prepare(p.package, **replay_args(observations)))
     try:
@@ -670,7 +672,7 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
 ):
     p = preparation_case
     observations = await p.observations()
-    replay, calls = preparation.replay_reward_package, []
+    replay, calls = preparation._replay_detached_reward_package, []
 
     def interrupted(*args, **kwargs):
         calls.append(1)
@@ -678,7 +680,7 @@ async def test_failed_replay_retries_and_independent_bindings_are_enforced(
             raise OSError("promotion archive temporarily unavailable")
         return replay(*args, **kwargs)
 
-    monkeypatch.setattr(preparation, "replay_reward_package", interrupted)
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", interrupted)
     with pytest.raises(OSError):
         await p.preparation.prepare(p.package, **replay_args(observations))
     ready = await p.preparation.prepare(p.package, **replay_args(await p.observations()))
@@ -3030,7 +3032,10 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
         maximum_package_bytes=8 * 1024**2,
         maximum_witness_bytes=1024**2,
     )
-    original = file_module.publish_private_model
+    publisher = (
+        "publish_aggregate_model" if interrupt_after == "packages" else "publish_private_model"
+    )
+    original = getattr(file_module, publisher)
     interrupted = False
 
     def lost_reply(path, *args, **kwargs):
@@ -3040,7 +3045,7 @@ async def test_reward_input_publication_recovers_original_bytes_and_offline_sour
             interrupted = True
             raise OSError("publication reply lost")
 
-    monkeypatch.setattr(file_module, "publish_private_model", lost_reply)
+    monkeypatch.setattr(file_module, publisher, lost_reply)
     with pytest.raises(OSError, match="reply lost"):
         module.retain_standing_reward_inputs(
             files,
@@ -3564,7 +3569,26 @@ async def test_recurring_settlement_certifies_without_inference_or_manual_votes(
 
     package = CohortRewardPackage.model_validate_json(raw)
     assert canonical_json_bytes(package) == raw
-    assert len(package.benchmark.participants) == len(a.data.quality.closure.participants)
+    assert len(package.benchmark.participants) == len(h.c.package.inputs.roster.participants)
+    assert a.data is None and a.phases is None
+    # Final certification frees the reviewer's raw inputs but retains recovery
+    # of its exact signed deliveries without a second native signature.
+    h.deliver()
+    assert await z.tick() == "reviewing"
+    assert z.data is None and z.reviewed_terminal_tip is not None
+    lost_replies = tuple(
+        next(Path(z.config.exchange_outbox).glob(kind + "/**/*.json"))
+        for kind in ("votes", "quality", "service")
+    )
+    retained_replies = tuple(path.read_bytes() for path in lost_replies)
+    for path in lost_replies:
+        path.unlink()
+    assert await z.tick() == "reviewing"
+    assert tuple(path.read_bytes() for path in lost_replies) == retained_replies
+    assert max(h.calls.values()) == 1
+    z = await h.start("Dave")
+    assert await z.tick() == "reviewing"
+    assert z.data is None and max(h.calls.values()) == 1
     h.clock.block += 100000
     a = await h.start("Charlie")
     assert await a.tick() == "package_published"
@@ -3835,7 +3859,11 @@ async def test_native_request_certification_starts_recurring_settlement(
     assert a.last_report == "package_published"
     assert max(h.calls.values()) == 1
     assert h.b["service_case"].p.model.calls == 1
-    assert digest(a.data.inputs.closure) != digest(h.b["closure"])
+    from umi.competition_cohort_reward_package import CohortRewardPackage
+
+    published = CohortRewardPackage.model_validate_json(output.read_bytes())
+    assert digest(published.inputs.closure) != digest(h.b["closure"])
+    assert a.data is None and a.phases is None
     original_handoff, signatures = handoff.read_bytes(), dict(h.calls)
 
     async def settled_decision(cohort, key):
@@ -3931,6 +3959,8 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(
     assert len(package.intake) == 3  # Includes superseded consent for the two selected miners.
     # A first producer arriving after certification must select the same original prefix.
     current = a.store.published_history(a.cohort)
+    from umi.competition_cohort_endpoint_archive import JournalEndpointObjects
+
     assert len(current.transitions) > len(package.inputs.history.transitions)
     assert (
         assemble_settlement_inputs(
@@ -3941,7 +3971,7 @@ async def test_automatic_settlement_assembly_delivery_and_late_restart(
             a._decisions,
             current_block=h.clock.block + 100000,
             maximum_bytes=a.config.maximum_package_bytes,
-            retained_objects=a.phases.owner._object,
+            retained_objects=JournalEndpointObjects(a.journal),
         )
         == package
     )
@@ -4150,7 +4180,11 @@ async def test_automatic_settlement_incomplete_sources_never_sign(recurring_sett
     h.clock.block += 100000
     with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
-    assert a.package == h.c.package
+    assert a.package_reference == (
+        Path(a.config.inputs_directory) / (a.cohort + ".json"),
+        digest(h.c.package),
+    )
+    assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
 
 
 @pytest.mark.parametrize("where", ["before_input", "after_input", "export"])
@@ -4175,8 +4209,17 @@ async def test_automatic_settlement_recovers_interrupted_publication(
         if target:
             raise OSError("publication acknowledgement lost")
 
+    replicate = service_module.replicate_verified_aggregate
+
+    def interrupted_replica(source, destination, **kwargs):
+        replicate(source, destination, **kwargs)
+        raise OSError("publication acknowledgement lost")
+
     with monkeypatch.context() as patch:
-        patch.setattr(service_module, "publish_settlement_inputs", interrupted)
+        if where == "export":
+            patch.setattr(service_module, "replicate_verified_aggregate", interrupted_replica)
+        else:
+            patch.setattr(service_module, "publish_settlement_inputs", interrupted)
         with pytest.raises(OSError):
             await a.tick()
     assert not h.calls
@@ -4190,7 +4233,11 @@ async def test_automatic_settlement_recovers_interrupted_publication(
     a = await h.start("Charlie")
     with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
-    assert a.package == h.c.package
+    assert a.package_reference == (
+        Path(a.config.inputs_directory) / (a.cohort + ".json"),
+        digest(h.c.package),
+    )
+    assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
 
 
 @pytest.mark.parametrize("damage", ["lost", "changed"])
@@ -4217,7 +4264,7 @@ async def test_reviewed_automatic_inputs_require_original_replica(
         path.unlink()
     else:
         path.write_bytes(
-            canonical_json_bytes(a.package.model_copy(update={"policy_sha256": "ff" * 32}))
+            canonical_json_bytes(h.c.package.model_copy(update={"policy_sha256": "ff" * 32}))
         )
 
     def no_rebuild(*args, **kwargs):
@@ -4233,7 +4280,11 @@ async def test_reviewed_automatic_inputs_require_original_replica(
     h.clock.block += 100000
     with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
-    assert a.package == h.c.package
+    assert a.package_reference == (
+        Path(a.config.inputs_directory) / (a.cohort + ".json"),
+        digest(h.c.package),
+    )
+    assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
 
 
 async def test_settlement_input_replica_recovers_before_quality_votes(
@@ -4902,11 +4953,13 @@ async def test_reference_review_rejects_incomplete_or_changed_inputs(
 async def test_native_settlement_controller_resumes_original_votes_after_peer_outage(
     settlement_signing_case,
     offline_stage,
+    caplog,
 ):
     """No phase-completion helper after reveal: native review/signing/controller."""
     from umi.competition_cohort_settlement_controller import SettlementPhaseQuorumPending
 
     h = settlement_signing_case
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     h.fail = offline_stage
     controller = h.coordinator()
     with pytest.raises(SettlementPhaseQuorumPending):
@@ -4941,6 +4994,26 @@ async def test_native_settlement_controller_resumes_original_votes_after_peer_ou
     assert result.package.benchmark == h.c.native.package.benchmark
     assert result.package.service == h.c.native.package.service
     assert h.c.b["service_case"].p.model.calls == 1
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.name == "umi.competition.progress"
+        and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
+    ]
+    for phase in ("evidence", "review", "certification"):
+        for suffix in ("native_review", "peer_progress_vote", "peer_decision_vote"):
+            completed = [
+                e
+                for e in events
+                if e["stage"] == phase + "_" + suffix and e["state"] == "completed"
+            ]
+            assert completed, (phase, suffix)
+            assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in completed)
+            assert all(e["cohort_sha256"] == h.cohort for e in completed)
+    interrupted = [e for e in events if e["state"] == "interrupted"]
+    suffix = "progress" if offline_stage == "progress" else "decision"
+    assert any(e["stage"] == "evidence_peer_" + suffix + "_vote" for e in interrupted)
+    assert all(e["percent"] < 100 and e["eta_seconds"] is None for e in interrupted)
 
 
 async def test_settlement_phase_signing_rejects_changed_body_and_drains_cancellation(
@@ -5295,3 +5368,227 @@ async def test_settlement_file_reviewer_loop_recovers_after_missing_proof(settle
         h.receiver.outbox, request, wallet("Dave").hotkey.ss58_address
     ).exists()
     assert sum(v for (name, _), v in h.signatures.items() if name == "Dave") == 1
+
+
+async def test_native_reward_package_uses_dedicated_aggregate_file_and_replay_budget(
+    native_package, tmp_path
+):
+    from umi.competition_cohort_reward_package import load_reward_package, publish_reward_package
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p = native_package
+    maximum = 1024**3
+    files = StandingRewardFiles(
+        tmp_path / "aggregate-reward",
+        maximum_package_bytes=maximum,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    assert files.package(digest(p.package)) == p.package
+    path = tmp_path / "aggregate-settlement" / "package.json"
+    publish_reward_package(path, p.package, maximum_bytes=maximum)
+    selected = dict(
+        expected_package_sha256=digest(p.package),
+        expected_cohort_sha256=p.requirement.cohort_sha256,
+        expected_tip_sha256=tip(p.package.inputs.history),
+        current_block=2**53 - 1,
+        expected_terms_sha256=p.requirement.terms_sha256,
+        expected_catalog_sha256s=p.requirement.catalog_sha256s,
+        maximum_promotion_bytes=1_000_000,
+    )
+    assert (
+        load_reward_package(
+            path,
+            p.store.policy,
+            p.store,
+            p.package.inputs.history,
+            maximum_bytes=maximum,
+            **selected,
+        )
+        == p.allocation
+    )
+    with pytest.raises(ValueError, match="input exceeds"):
+        load_reward_package(
+            path,
+            p.store.policy,
+            p.store,
+            p.package.inputs.history,
+            maximum_bytes=1024,
+            **selected,
+        )
+
+
+async def test_reward_snapshot_detaches_nested_mutation_and_preserves_exact_budget(native_package):
+    package = native_package.package
+    raw = canonical_json_bytes(package)
+    snapshot = preparation._validated_reward_snapshot(package, len(raw))
+    assert canonical_json_bytes(snapshot) == raw
+    assert digest(snapshot) == digest(package)
+    with pytest.raises(ValueError, match="byte bound"):
+        preparation._validated_reward_snapshot(package, len(raw) - 1)
+    original = next(obj for obj in package.objects if isinstance(obj.value, dict))
+    original.value["snapshot_mutation"] = [1, 2, 3]
+    assert canonical_json_bytes(snapshot) == raw
+    assert digest(snapshot) != digest(package)
+    original.value["snapshot_mutation"].append(2**53)
+    with pytest.raises(ValueError):
+        preparation._validated_reward_snapshot(package, 1024**3)
+
+
+async def test_retained_coverage_package_keeps_native_owner_and_historical_boundary(
+    historical_preparation_case,
+):
+    from umi.competition_reward_coverage_prepared import (
+        CoveragePackageReplayRequired,
+        RetainedCoveragePackage,
+        prepare_retained_coverage,
+    )
+
+    p, control, chosen, args = historical_preparation_case
+    prepared = await p.preparation.prepare_historical(p.package, **args)
+    retained = RetainedCoveragePackage(prepared)
+    assert await prepare_retained_coverage(p.preparation, retained, **args) is prepared
+    # A current successor drain still uses its independently proved effective predecessor.
+    chosen.current = replace(
+        chosen.current, selection=replace(chosen.current.selection, state="draining")
+    )
+    assert await prepare_retained_coverage(p.preparation, retained, **args) is prepared
+    control.snapshot = replace(control.snapshot, block_number=prepared.reviewed_at_block - 1)
+    with pytest.raises(CoveragePackageReplayRequired):
+        await prepare_retained_coverage(p.preparation, retained, **args)
+    control.snapshot = replace(control.snapshot, block_number=prepared.reviewed_at_block)
+    changed = RetainedCoveragePackage(replace(prepared, _owner=object()))
+    with pytest.raises(ValueError, match="native replay owner"):
+        await prepare_retained_coverage(p.preparation, changed, **args)
+    p.preparation.model_artifacts = object()
+    with pytest.raises(CoveragePackageReplayRequired):
+        await prepare_retained_coverage(p.preparation, retained, **args)
+
+
+async def test_retained_coverage_package_refuses_changed_activation_or_authority(
+    historical_preparation_case,
+):
+    from umi.competition_reward_coverage_prepared import (
+        RetainedCoveragePackage,
+        prepare_retained_coverage,
+    )
+
+    p, _, chosen, args = historical_preparation_case
+    prepared = await p.preparation.prepare_historical(p.package, **args)
+    retained = RetainedCoveragePackage(prepared)
+    before = chosen.current
+    chosen.current = replace(
+        before,
+        effective_selection=replace(
+            before.effective_selection,
+            activation=prepared.activation.model_copy(update={"package_sha256": "ff" * 32}),
+        ),
+    )
+    with pytest.raises(ValueError, match="historical activation"):
+        await prepare_retained_coverage(p.preparation, retained, **args)
+    chosen.current = before
+    p.preparation.manifest = p.manifest.model_copy(update={"policy_sha256": "ee" * 32})
+    with pytest.raises(ValueError, match="authority changed"):
+        await prepare_retained_coverage(p.preparation, retained, **args)
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_lazy_native_coverage_releases_package_and_reloads_earlier_history(
+    complete_preparation_case,
+    tmp_path,
+):
+    import gc
+    import weakref
+
+    from umi.competition_cohort_reward_package import CohortRewardPackage
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
+    from umi.competition_reward_opportunity import opportunity_rule
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    journal = RewardCoverageJournal(
+        tmp_path / "lazy-coverage", rule, expected_rule_sha256=digest(rule)
+    )
+    owner = StandingRewardPreparation(
+        c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+    references = []
+
+    def load():
+        package = CohortRewardPackage.model_validate_json(canonical_json_bytes(p.package))
+        references.append(weakref.ref(package))
+        return package
+
+    source = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=journal,
+        history=h.reader,
+        preparation=owner,
+        package_loader=load,
+        package_sha256=digest(p.package),
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+
+    async def capture(height):
+        for _ in range(100):
+            try:
+                return await source.capture(h.validator_hotkey, height)
+            except CoverageHistoryPending:
+                continue
+        pytest.fail("native historical coverage did not converge")
+
+    later = await capture(h.end)
+    assert later.covered and len(references) == 1
+    gc.collect()
+    assert references[0]() is None and source.package is None
+    again = await capture(h.end)
+    assert again.covered and len(references) == 1
+    earlier = await capture(h.end - 1)
+    assert earlier.covered and len(references) == 2
+    gc.collect()
+    assert all(reference() is None for reference in references)
+    await capture(h.end)
+    assert len(references) == 2
+    # Retained journal replay still authenticates original proofs with compact native preparation.
+    await journal.retain_endpoint(later)
+    source._cache.clear()
+    from umi.competition_reward_coverage_intervals import coverage_point
+
+    assert (await source.replay(coverage_point(later, rule).key())).covered
+    assert len(references) == 2
+
+
+async def test_settlement_releases_parsed_package_after_native_replay(
+    recurring_settlement_case, monkeypatch
+):
+    import gc
+    import weakref
+
+    from umi import competition_cohort_settlement_service as service_module
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a = await h.start("Charlie")
+    assemble = service_module.assemble_settlement_inputs
+    references = []
+
+    def capture(*args, **kwargs):
+        package = assemble(*args, **kwargs)
+        references.append(weakref.ref(package))
+        return package
+
+    monkeypatch.setattr(service_module, "assemble_settlement_inputs", capture)
+    await a._start(await a._handoff())
+    await asyncio.sleep(0)
+    gc.collect()
+    assert references and all(reference() is None for reference in references)
+    assert a.package_reference[1] == digest(h.c.package)
+    assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
+    assert a.data is not None and a.phases is not None

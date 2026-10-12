@@ -15,6 +15,14 @@ from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
+from .aggregate_json import DetachedInventoryItem
+from .canonical_stream import canonical_json_size
+from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
+from .competition_cohort_aggregate_model import AggregateProtocolModel
+from .competition_cohort_capacity import (
+    LEGACY_AGGREGATE_REPLAY_BYTES,
+    check_aggregate_evidence_bytes,
+)
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import (
     MAX_ARCHIVE_OBJECT_BYTES,
@@ -38,20 +46,26 @@ from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_store import CompetitionStore
+from .competition_work_progress import progress_items
+from .host_memory_request_bounds import (
+    check_stage_json,
+    stage_bounds,
+    stage_count,
+    stage_limit,
+    stage_object_budget,
+)
 from .open_competition import CompetitionPolicy, EvaluationSuite, digest
 from .policy import ScoringPolicy
-from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_PACKAGE_OBJECTS = 65536
-DEFAULT_PACKAGE_BYTES = 256 * 1024**2
+DEFAULT_PACKAGE_BYTES = LEGACY_AGGREGATE_REPLAY_BYTES
 DecisionSource = Callable[[str], CohortDecisionInput]
 PulseSource = Callable[[int], RetainedRevealPulse]
 
 
 def _check_bound(maximum_bytes: int) -> None:
-    if type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= MAX_CONFIGURED_PRIVATE_BYTES:
-        raise ValueError("reward package byte bound is invalid")
+    check_aggregate_evidence_bytes(maximum_bytes)
 
 
 class RewardIntakeRef(StrictProtocolModel):
@@ -78,12 +92,12 @@ class RewardReplayInputs(StrictProtocolModel):
     history: CohortRecoveryHistory
 
 
-class RewardPackageObject(StrictProtocolModel):
+class RewardPackageObject(StrictProtocolModel, DetachedInventoryItem):
     sha256: Hex32
     value: JsonValue
 
 
-class CohortRewardPackage(StrictProtocolModel):
+class CohortRewardPackage(AggregateProtocolModel):
     schema_: Literal["umi-cohort-reward-package/1"] = Field(alias="schema")
     policy_sha256: Hex32
     inputs: RewardReplayInputs
@@ -118,7 +132,10 @@ class ReplayObjectCollector:
 
     def __call__(self, key: str) -> bytes:
         if key not in self.values:
-            self._remember(key, read_endpoint_object(self.source, key))
+            stage_count("maximum_objects", len(self.values) + 1)
+            remaining = stage_limit("maximum_input_bytes", self.maximum_bytes) - self.used
+            with stage_object_budget(remaining):
+                self._remember(key, read_endpoint_object(self.source, key))
         return self.values[key]
 
     def _remember(self, key: str, raw: bytes) -> None:
@@ -128,10 +145,17 @@ class ReplayObjectCollector:
             return
         if len(self.values) >= MAX_PACKAGE_OBJECTS or self.used + len(raw) > self.maximum_bytes:
             raise ValueError("reward package evidence exceeds its bound")
+        stage_count("maximum_objects", len(self.values) + 1)
+        stage_count("maximum_input_bytes", self.used + len(raw))
+        check_stage_json(raw, kind="object")
         self.values[key] = raw
         self.used += len(raw)
 
     def retain(self, value: StrictProtocolModel | JsonValue) -> str:
+        if stage_bounds() is not None:
+            size = canonical_json_size(value)
+            stage_count("maximum_object_bytes", size)
+            stage_count("maximum_input_bytes", self.used + size)
         raw = canonical_json_bytes(value)
         key = digest(value)
         self._remember(key, read_endpoint_object({key: raw}.__getitem__, key))
@@ -304,15 +328,68 @@ def prepare_reward_package(
         ),
         objects=tuple(
             RewardPackageObject(sha256=k, value=json.loads(v))
-            for k, v in sorted(captured.values.items())
+            for k, v in progress_items(
+                sorted(captured.values.items()),
+                stage="reward_package_serialization",
+                unit="objects",
+                cohort=digest(inputs.history.plan),
+            )
         ),
     )
-    if len(canonical_json_bytes(package)) > maximum_bytes:
+    if canonical_json_size(package) > maximum_bytes:
         raise ValueError("reward package including metadata exceeds its bound")
     return package
 
 
 def replay_reward_package(
+    package: CohortRewardPackage,
+    policy: CompetitionPolicy,
+    promotion_store: CompetitionStore,
+    current_history: CohortRecoveryHistory,
+    *,
+    expected_package_sha256: str,
+    expected_cohort_sha256: str,
+    expected_tip_sha256: str,
+    current_block: int,
+    expected_terms_sha256: str,
+    expected_catalog_sha256s: tuple[str, ...],
+    maximum_promotion_bytes: int,
+    maximum_bytes: int = DEFAULT_PACKAGE_BYTES,
+    current_decision_source: DecisionSource | None = None,
+    verify_model_artifact: ModelArtifactVerifier | None = None,
+) -> CohortRewardAllocation:
+    """Detach caller content before replaying any mutable nested protocol values."""
+    snapshot = _validated_reward_snapshot(package, maximum_bytes)
+    return _replay_detached_reward_package(
+        snapshot,
+        policy,
+        promotion_store,
+        current_history,
+        expected_package_sha256=expected_package_sha256,
+        expected_cohort_sha256=expected_cohort_sha256,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+        expected_terms_sha256=expected_terms_sha256,
+        expected_catalog_sha256s=expected_catalog_sha256s,
+        maximum_promotion_bytes=maximum_promotion_bytes,
+        maximum_bytes=maximum_bytes,
+        current_decision_source=current_decision_source,
+        verify_model_artifact=verify_model_artifact,
+    )
+
+
+def _validated_reward_snapshot(
+    package: CohortRewardPackage, maximum_bytes: int
+) -> CohortRewardPackage:
+    """Own one validated snapshot; do not retain its temporary canonical bytes."""
+    _check_bound(maximum_bytes)
+    raw = canonical_json_bytes(package)
+    if len(raw) > maximum_bytes:
+        raise ValueError("reward package exceeds its byte bound")
+    return CohortRewardPackage.model_validate_json(raw)
+
+
+def _replay_detached_reward_package(
     package: CohortRewardPackage,
     policy: CompetitionPolicy,
     promotion_store: CompetitionStore,
@@ -337,27 +414,36 @@ def replay_reward_package(
     """
     _check_bound(maximum_bytes)
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
-    raw = canonical_json_bytes(package)
-    if len(raw) > maximum_bytes:
-        raise ValueError("reward package exceeds its byte bound")
-    package = CohortRewardPackage.model_validate_json(raw)
     if (
         digest(package) != expected_package_sha256
         or package.policy_sha256 != digest(policy)
         or digest(package.inputs.history.plan) != expected_cohort_sha256
     ):
         raise ValueError("reward package differs from selected identity or policy")
-    inventory = {o.sha256: canonical_json_bytes(o.value) for o in package.objects}
+    inventory = {
+        o.sha256: canonical_json_bytes(o.value)
+        for o in progress_items(
+            package.objects,
+            stage="reward_package_inventory",
+            unit="objects",
+            cohort=expected_cohort_sha256,
+        )
+    }
     source = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
     # Check every declared object, including those missing from a replay traversal.
-    for key in inventory:
-        read_endpoint_object(inventory.__getitem__, key)
+    for item in progress_items(
+        package.objects,
+        stage="reward_package_object_integrity",
+        unit="objects",
+        cohort=expected_cohort_sha256,
+    ):
+        read_endpoint_object(inventory.__getitem__, item.sha256)
     pulse_refs = {p.round: p.pulse_sha256 for p in package.pulses}
     used_pulses: set[int] = set()
     original_decisions = {
         signed.transition.evidence_sha256
         for signed in package.inputs.history.transitions
-        if signed.transition.operation != "revoke"
+        if signed.transition.requires_progress_evidence
     }
     if not original_decisions <= inventory.keys():
         raise ValueError("reward package lacks original cohort decisions")
@@ -410,7 +496,7 @@ def publish_reward_package(
 ) -> None:
     """Atomically retain exact private bytes; this is not proof of qualification."""
     _check_bound(maximum_bytes)
-    publish_private_model(path, package, maximum_bytes=maximum_bytes)
+    publish_aggregate_model(path, package, maximum_bytes=maximum_bytes)
 
 
 def load_reward_package(
@@ -424,7 +510,7 @@ def load_reward_package(
 ) -> CohortRewardAllocation:
     """Load a retained replica and fully replay it, without a coordinator call."""
     _check_bound(maximum_bytes)
-    package = read_private_model(path, CohortRewardPackage, maximum_bytes=maximum_bytes)
+    package = read_aggregate_model(path, CohortRewardPackage, maximum_bytes=maximum_bytes)
     return replay_reward_package(
         package,
         policy,

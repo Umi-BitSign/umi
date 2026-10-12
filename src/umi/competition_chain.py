@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_serializer, model_validator
 from typing_extensions import Self
+from websockets.protocol import State
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_resources import CompetitionChainResources
@@ -251,6 +252,12 @@ class _SocketLease:
 
     @asynccontextmanager
     async def connect(self, *args, **kwargs):
+        if self.connection is not None and self.connection[1].state is not State.OPEN:
+            # A provider may close an idle socket between collection attempts.
+            # Detach before awaiting cleanup so cancellation cannot retain it.
+            context, _ = self.connection
+            self.connection = None
+            await context.__aexit__(None, None, None)
         if self.connection is None:
             context = websocket_connect(*args, **kwargs)
             socket = await context.__aenter__()
@@ -319,6 +326,7 @@ class _RegistrationRpc:
                     "state_getMetadata",
                     "state_getRuntimeVersion",
                     "chain_getHeader",
+                    "chain_getBlock",
                     "chain_getBlockHash",
                 )
             }

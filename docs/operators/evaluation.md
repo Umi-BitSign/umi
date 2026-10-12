@@ -94,6 +94,20 @@ do not establish provider independence. A recent-state endpoint may serve live
 intake while lacking proofs for an older roster; keep an archive-capable primary
 and qualify historical reads on a backup too.
 
+Structured failure diagnostics retain the RPC method, selected public block
+hash and numeric error code for an RPC error response. When every configured
+provider fails, `rpc_failures` records each attempted provider index and reason.
+Use this to distinguish the primary failure from a fallback lacking historical
+state. Remote error messages, response data and endpoint URLs are not logged.
+These diagnostics do not change retry selection, cooldowns or proof validation.
+
+Weight and reward proof transports also reuse the existing bounded exact-block
+RPC cache: identical successful reads coalesce and remain available for 30
+seconds, within 64 MiB and 512 entries per transport owner. Different blocks or
+keys remain separate. Failed reads and null results are not retained, and every
+consumer still verifies its original proof. Shutdown drains in-flight reads;
+the cache never grants finality or permission to submit weights.
+
 Adding the two fallbacks to an otherwise identical configuration preserves the
 existing registration namespace, captures, metadata artifacts and observed head.
 The cache records the old and new configuration bindings and the explicit
@@ -312,6 +326,96 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
+An exact single-record retention retry also uses that read-only snapshot: the
+same canonical bytes must already be committed and satisfy their reservation.
+New records and conflicting bytes still use the native writer transaction;
+conflicts remain durable holds. Batches with index callbacks always retain their
+writer transaction, including exact retries. This lets repeated archive exports
+confirm retained objects without competing with new signing or retirement work.
+Confirming the exact current order history and reading a retained execution
+attempt also use fresh read-only snapshots. New order-history heads keep their
+atomic monotonic update, and signing rechecks its selected history immediately
+before use. These reads do not rescan capacity or occupy the writer slot.
+
+Private-file publication retries compare current file bytes directly with the
+canonical output instead of repeatedly serializing the retained object. Schema,
+private-file ownership, bounds, publication locking and directory sync still run.
+Large proof-object publication reuses canonical bytes within one bounded call;
+it does not cache imported proof authority or skip checking changed files.
+History export uses the exact bytes just verified and retained, avoiding a second
+decode of the same journal frame. Export must still finish before its history
+cursor advances; interrupted exports remain retryable.
+Paid-service registration-boundary checks run off the event loop and each
+observation computes its boundary once. Fresh history and minimum-block checks
+remain required after contention or a regressed head.
+
+Terminal certification and evidence export run while other cohort requests are
+unfinished. The export worker processes up to four independent assignments at
+once, retaining each assignment's signing lock and original publication bytes.
+A slow signature or copy does not prevent another completed assignment from
+being exported. Shutdown drains all owned work before releasing the poll owner.
+These partial exports do not close requests, release references or authorize an
+allocation; final settlement still requires the complete certified cohort.
+
+Paid service recovery retries the original miner-signed retirement after request
+expiry even if a grant acknowledgement was lost and grant delivery still fails.
+A missing or unavailable grant remains pending unless the miner supplies a valid
+retirement receipt; expiry alone does not prove absence or authorize replacement.
+
+Historical block-body reads reuse a method-specific connection, as other proof
+reads do. Each connection carries one request at a time, retains its receive-size
+ceiling, and is discarded after protocol errors or cancellation. Block bytes
+still undergo the normal native header, body-root and event-proof checks.
+
+Historical reward scans reuse at most three verified runtime-code storage records,
+bounded to 51 MiB, for the exact block snapshot and storage key. The next block
+can therefore reuse its parent's code proof without another RPC request or
+proof verification. Finality selection and runtime codec construction remain
+independent checks. Account and weight collectors do not enable this cache, and
+archive replay always consumes and verifies the supplied archive bytes.
+
+With a qualified proof reader, the root-owned reward coordinator/reviewer and
+installed reward boot configurations may select `runtime_proof_reads: true`.
+This extracts runtime code and historical event values from their verified
+storage proofs instead of downloading the same values separately. The option
+defaults off and is omitted from existing canonical configuration bytes, so
+older helper installations remain compatible. It applies only to the current
+chain provider; legacy handoff providers retain their original read protocol.
+Unsupported readers or invalid proofs hold the read. Account/weight collection
+and archive claim verification are unchanged. Read-only recovery tools can
+select the same option on their weight provider.
+
+Start the ordinary reward coordinator and peer reviewer services when preparing
+the series. Both roles capture native history and reward opportunity evidence
+while evaluation continues, so peer review does not wait to begin its history
+scan until the first vote request. The reviewer never loads the control
+transaction key. A separate history preparation process must release its service
+lock before the ordinary service starts; restart still requires native replay
+of retained proof bytes. Completing a separate full scan first does not remove
+that replay cost. History preparation alone cannot certify an allocation or
+activate reward weights.
+
+Historical ancestry recovery verifies bounded batches. When a batch retains
+verified links but has not reached its fixed target, the ordinary coordinator
+and coverage service yield to other tasks and continue without the failure
+poll delay. RPC failures, capacity holds and other errors retain their normal
+backoff. A concurrent failure in coverage collection or discovery also keeps
+backoff; progress is not permission to retry an unavailable dependency in a loop.
+
+Historical control capture also retains the runtime and storage proofs verified
+within that capture. Encoding their archive does not immediately replay those
+same proofs or rebuild the codec. The archive's size and format, current owned
+ancestry and timestamp bounds remain checked before issuing a historical result.
+Reading an archive later or receiving one from another process still requires
+the complete native replay; this reuse cannot authorize a current weight write.
+
+Within one process, the proof archive reuses up to 32 MiB of verified immutable
+object bytes across at most 4,096 objects. Each read checks the current private
+file and parent identity, permissions, size and timestamps, and applies the
+requesting consumer's byte limit. Changed files, failed reads, a new process or
+an unqualified filesystem clock require ordinary verification. Frames and native
+chain proofs are still validated; the byte cache cannot certify an allocation.
+
 Remote endpoint concurrency is separate from local inference concurrency. The
 reviewer sizes its shared HTTP pool with the selected endpoint slots and keeps
 the existing 16-connection control budget for history, votes and exports. Slow
@@ -327,6 +431,11 @@ process-local cache. If another paid-service operation persists a newer finalize
 head while an observation waits, the worker recollects history and a strictly
 newer capture once; a persistently lagging provider remains held.
 
+Completed local execution reads its steps, selected attempts and retained outputs
+in one query-only snapshot. Each read still checks conflict holds, original
+outputs and execution boundaries. Reading completion does not invoke a model,
+change an attempt or authorize settlement.
+
 Service queues retain bounded private copies of decoded catalog, round, admission
 and history records. Each lookup first rereads the exact retained bytes and its
 current conflict fence. Changed bytes miss the cache; owner indices, configuration
@@ -340,9 +449,22 @@ parent bindings, current phase and quorum signatures remain separate checks.
 Model acceptance uses the already decoded indexed intake record without decoding
 it a second time; its native participation and certificate review remain required.
 
-Paid workers check for a retained terminal before reconstructing it; unfinished
-work still authenticates its accepted assignment before advancing. A retained
-terminal always passes native verification and interrupted-export recovery.
+Paid scheduling pages omit work with a retained terminal before reconstructing
+its admission. This presence check only avoids redispatch: full queue reads,
+sealing, terminal verification and interrupted-export recovery still authenticate
+the original records. Unfinished work authenticates its accepted assignment
+before advancing. Each scheduling pass reads current terminal presence, and
+completed entries do not consume the page capacity for unfinished work.
+Concurrent readers tolerate a private SQLite sidecar disappearing during its
+metadata check. Symlinks, extra hard links, public permissions and wrong owners
+remain rejected; the main database and process lock must stay linked.
+Historical header walks can continue from a closer descendant already verified
+under the same owned anchor. An adjacent older target therefore checks only the
+missing links. A changed anchor or process restart still requires native ancestry
+verification; durable hints never become proof by themselves.
+Reward coordinator and coverage retry logs include bounded native reason codes
+and source locations for nested failures, without exception messages or request
+contents. Use these to distinguish proof/RPC holds from history still advancing.
 Request-readiness roster reuse is scoped to each cohort's original selection
 and intent bytes, including the history embedded in those intents. Appending a
 new current history or delivery receipt does not replay every original order.
@@ -354,6 +476,21 @@ admission checkpoint/capacity read. A later request reads current state again;
 neither completed results nor failures are cached. Cancelling one HTTP request
 drains its owned read without cancelling other readers. Registration and finality
 checks remain separate from this shared disk read.
+
+Published cohort history reads admission signatures, reconstructs the committed
+history and checks its genesis in one read-only snapshot. It does not replay the
+same history again just to export it; signature, fork and pending-decision checks
+still run before returning that history.
+
+After its first full replay, a prepared round is reused independently for each
+cohort within a bounded process-local cache. Reads use a consistent read-only
+intake snapshot and do not acquire the admission writer's gate. Each read still
+checks current signed authority, finalized height, intake closure and the exact
+retained round bytes. New history tips replay their decision evidence and any
+preparation closure without reconstructing the unchanged participants. Revocation,
+changed round bytes or a mismatched closure remain errors. Restart or cache
+eviction replays the original retained round, preserving its observation and
+baseline rather than selecting new ones.
 
 The recoverable cohort worker retains each completed case separately. For new
 endpoint comparator jobs with identical preparation, round, evaluator, model,
@@ -379,6 +516,13 @@ exemption or new authority is invented. Cancellation still drains owned persiste
 and rolls back. Corruption, conflicting records, stale proofs and untrusted error
 subclasses continue to hold collection. Routine pruning resumes on a successful
 pin projection.
+
+For an unchanged paid-service queue, the process reuses its checked registration
+pin set. Each lookup still reads the current catalog, claim indices, admission
+bytes and conflict holds in one snapshot; changed inputs rebuild the projection.
+This avoids reconstructing every accepted claim inside each registration save.
+The cache does not authorize work, substitute for admission review or survive a
+process restart.
 
 Before endpoint proof collection, the origin observer waits to reach the owned
 execution start height. After collection, a lagging authority observer may catch

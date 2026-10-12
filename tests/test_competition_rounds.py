@@ -552,7 +552,7 @@ def test_round_journal_compound_lock_is_separate_from_sqlite(tmp_path):
         assert journal.get("intent", "1") == {"a": 1}
 
 
-def test_round_journal_serializes_local_file_validation_with_transactions(tmp_path):
+def test_round_journal_reader_rejects_unsafe_sidecar_during_writer_transaction(tmp_path):
     journal = rounds.RoundJournal(tmp_path / "journal", {"policy": "test"})
     entered = threading.Event()
     release = threading.Event()
@@ -564,16 +564,20 @@ def test_round_journal_serializes_local_file_validation_with_transactions(tmp_pa
             assert sidecar.exists()
             sidecar.chmod(0o644)
             entered.set()
-            assert release.wait(timeout=5)
+            assert release.wait(timeout=60)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         holding = pool.submit(hold_transaction)
-        assert entered.wait(timeout=5)
-        reading = pool.submit(journal.get, "intent", "missing")
-        assert not reading.done()
-        release.set()
-        holding.result(timeout=5)
-        assert reading.result(timeout=5) is None
+        try:
+            assert entered.wait(timeout=30)
+            reading = pool.submit(journal.get, "intent", "missing")
+            with pytest.raises(ValueError, match="private and owned"):
+                reading.result(timeout=5)
+        finally:
+            release.set()
+        holding.result(timeout=30)
+        # A fresh read succeeds once the committed writer removes the sidecar.
+        assert journal.get("intent", "missing") is None
 
 
 def test_round_journal_rejects_replaced_lock_file(tmp_path):

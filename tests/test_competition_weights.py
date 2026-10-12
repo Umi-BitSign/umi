@@ -12,6 +12,7 @@ from fractions import Fraction
 from types import SimpleNamespace
 
 import pytest
+from websockets.protocol import State
 
 from umi.competition_chain_state import (
     FinalizedCompetitionWeightProvider,
@@ -1135,13 +1136,14 @@ async def test_runtime_change_after_signing_never_broadcasts(
     def upgrade_after_signing(*args, **kwargs):
         encoded = encode(*args, **kwargs)
         _advance(item, 171)
-        if changed == "code":
-            item.code += b" upgraded"
-        elif changed == "metadata":
+        # Metadata and runtime versions are pure outputs of proven Wasm.
+        # Every real runtime upgrade changes code, including version-only ones.
+        item.code += b" upgraded " + changed.encode()
+        if changed == "metadata":
             item.executed_metadata += b" upgraded"
         elif changed == "spec_version":
             item.executed_spec_version += 1
-        else:
+        elif changed == "transaction_version":
             item.executed_transaction_version += 1
         return encoded
 
@@ -1742,6 +1744,7 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
 
     class Connection:
         closed = False
+        state = State.OPEN
         request = None
 
         async def __aenter__(self):
@@ -1749,6 +1752,7 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
 
         async def __aexit__(self, *args):
             self.closed = True
+            self.state = State.CLOSED
 
         async def send(self, raw):
             assert not self.closed
@@ -1792,6 +1796,9 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
     assert not any(socket.closed for socket in connections)
     assert item.verifier.checked and not item.encoded
     item.rpc.bad_proof = True
+    # Exact block RPC bytes already cached remain valid. A newly finalized
+    # block must fetch and verify its own proof through the same pooled sockets.
+    _advance(item, item.finality.ref.block_number + 1)
     with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
         await item.provider.collect_weights(item.hotkey, item.recipients)
     await item.provider.aclose()

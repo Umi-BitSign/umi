@@ -25,6 +25,11 @@ from .competition_cohort_admission_http import (
     admission_history_routes,
 )
 from .competition_cohort_admission_worker import CohortAdmissionWorker
+from .competition_cohort_capacity import (
+    LEGACY_AGGREGATE_REPLAY_BYTES,
+    AggregateEvidenceCapacity,
+    request_evidence_bytes,
+)
 from .competition_cohort_dispatch_host import start_service_dispatch
 from .competition_cohort_history_http import CohortHistoryExporter, cohort_history_routes
 from .competition_cohort_intake_export import IntakeReviewExporter
@@ -38,7 +43,10 @@ from .competition_cohort_preparation_review_http import preparation_review_route
 from .competition_cohort_request_probe import tasks_running
 from .competition_cohort_request_readiness_host import CombinedRequestReadiness
 from .competition_cohort_request_review_http import request_review_routes
+from .competition_cohort_request_rule_api import request_tail_adoption_owner_routes
+from .competition_cohort_request_rule_reservation import request_tail_reservation_routes
 from .competition_cohort_review_boot import _token
+from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_cohort_service_export import service_work_routes
 from .competition_cohort_window_http import LocalWindowClient, window_routes
@@ -49,6 +57,13 @@ from .competition_reward_service import _stop_task
 from .competition_service_supervision import drain_server_requests
 from .concurrency import await_owned_task, run_owned_thread
 from .config import Limits
+from .host_memory_runtime import (
+    HostMemoryAdmissionSelection,
+    RequestsStageASGIBinding,
+    memory_runtime,
+    requests_stage_policy,
+    selected_memory,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
 from .policy import scoring_policy_hash
@@ -74,14 +89,36 @@ class AdmissionOwnerConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_sample_gap_blocks: Annotated[int, Field(ge=1, le=300)] = 10
     maximum_export_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**2)] = 64 * 1024**2
+    maximum_aggregate_evidence_bytes: AggregateEvidenceCapacity | None = None
+    phase_review_budget: PhaseReviewBudget | None = None
     windows: WindowOwnerConfig | None = None
+
+    host_memory_admission: HostMemoryAdmissionSelection | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.host_memory_admission is None:
+            value.pop("host_memory_admission", None)
+        if self.phase_review_budget is None:
+            value.pop("phase_review_budget", None)
+        if self.maximum_aggregate_evidence_bytes is None:
+            value.pop("maximum_aggregate_evidence_bytes", None)
         if self.windows is None:
             value.pop("windows", None)
         return value
+
+    @property
+    def request_evidence_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, self.maximum_export_bytes
+        )
+
+    @property
+    def request_replay_bytes(self) -> int:
+        return request_evidence_bytes(
+            self.maximum_aggregate_evidence_bytes, LEGACY_AGGREGATE_REPLAY_BYTES
+        )
 
     def stores(self):
         return tuple(
@@ -104,6 +141,14 @@ class AdmissionOwnerConfig(StrictProtocolModel):
         return self
 
     def check_policy(self, policy):
+        checked_budget(
+            self.phase_review_budget,
+            policy,
+            self.request_evidence_bytes,
+            reviewers=len(self.reviewers),
+        )
+        for peer in self.reviewers:
+            checked_budget(peer.phase_review_budget, policy, self.request_evidence_bytes)
         groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
         keys = {identity(p.signer) for p in self.reviewers}
         if (
@@ -129,6 +174,20 @@ async def admission_owner_app(
     lease = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, lease)
+        resources.enter_context(
+            memory_runtime(
+                c.host_memory_admission,
+                role="intake",
+                protocol_policy_sha256=digest(intake.policy),
+                series_sha256=None if service_host is None else digest(service_host.config.series),
+                authority_sha256=None
+                if service_host is None
+                else digest(service_host.config.series.recovery.authority),
+                maximum_aggregate_bytes=max(
+                    c.maximum_export_bytes, c.request_evidence_bytes, c.request_replay_bytes
+                ),
+            )
+        )
         token = _token(c.export_token_file)
         credentials = tuple(_token(p.token_file) for p in c.reviewers)
         if token in credentials:
@@ -176,7 +235,21 @@ async def admission_owner_app(
             else None
         )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
+        phase_export_timeout_seconds = (
+            c.phase_review_budget.export_seconds
+            if c.phase_review_budget is not None
+            else review_timeout_seconds
+        )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        if requests_stage_policy() is not None:
+            app.add_middleware(
+                RequestsStageASGIBinding, controller=selected_memory(), private_role="intake"
+            )
+        if lifecycle is not None and lifecycle.config.request_tail_operator_token_file is not None:
+            operator_token = _token(lifecycle.config.request_tail_operator_token_file)
+            if operator_token in (token, *credentials):
+                raise ValueError("request-rule control requires a separate operator credential")
+            app.include_router(request_tail_adoption_owner_routes(lifecycle, token=operator_token))
         app.include_router(
             admission_history_routes(
                 AdmissionHistoryExporter(queue, c.owner_hotkey, sign),
@@ -185,6 +258,8 @@ async def admission_owner_app(
         )
         app.state.history_exporter = CohortHistoryExporter(intake, c.owner_hotkey, sign)
         app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
+        if lifecycle is not None:
+            app.include_router(request_tail_reservation_routes(lifecycle, token=token))
         app.state.intake_review_exporter = IntakeReviewExporter(
             NativeIntakeProgressSource(
                 intake, maximum_sample_gap_blocks=c.maximum_sample_gap_blocks
@@ -193,7 +268,7 @@ async def admission_owner_app(
             sign,
             publish_archive=None if lifecycle is None else lifecycle.proofs.publish,
             maximum_bytes=c.maximum_export_bytes,
-            timeout_seconds=review_timeout_seconds,
+            timeout_seconds=phase_export_timeout_seconds,
         )
         app.include_router(intake_review_routes(app.state.intake_review_exporter, token=token))
         app.include_router(
@@ -203,7 +278,7 @@ async def admission_owner_app(
                     c.owner_hotkey,
                     sign,
                     maximum_bytes=c.maximum_export_bytes,
-                    timeout_seconds=review_timeout_seconds,
+                    timeout_seconds=phase_export_timeout_seconds,
                 ),
                 token=token,
             )
@@ -331,12 +406,16 @@ async def run_admission_owner(
             if not stop.is_set() and server.started:
                 if service_host is not None:
                     service_host.history_exporter = app.state.history_exporter
-                workers = [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
+                workers = (
+                    []
+                    if requests_stage_policy() is not None
+                    else [asyncio.create_task(poll(w)) for w in app.state.admission_workers]
+                )
                 if app.state.lifecycle is not None:
                     workers.append(asyncio.create_task(app.state.lifecycle.run(stop)))
-                if app.state.dispatch is not None:
+                if app.state.dispatch is not None and requests_stage_policy() is None:
                     workers.append(asyncio.create_task(app.state.dispatch.run(stop)))
-                if app.state.orders is not None:
+                if app.state.orders is not None and requests_stage_policy() is None:
                     workers.append(asyncio.create_task(app.state.orders.run(stop)))
                 if app.state.request_readiness is not None:
                     app.state.request_readiness.running = lambda: (

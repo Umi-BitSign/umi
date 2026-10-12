@@ -41,6 +41,7 @@ from .competition_reward_transactions import (
 )
 from .competition_weights import BittensorCompetitionWeightTransport
 from .concurrency import run_owned_thread, wait_for_owned
+from .host_memory_runtime import memory_operation
 from .open_competition import digest, identity
 from .private_files import lock_private_file
 from .protocol import canonical_json_bytes
@@ -242,6 +243,13 @@ class StandingRewardExecutor:
             self._fence(self.handoff.through_block)
             return await self._step()
 
+    @memory_operation
+    async def _prepare_package(self, activation, control, history):
+        package = await run_owned_thread(self.packages, activation.package_sha256)
+        return await self.preparation.prepare(
+            package, control=control, history=history, source=self.decisions
+        )
+
     async def _step(self):
         previous = await run_owned_thread(self.journal.pending)
         ended = None
@@ -258,10 +266,7 @@ class StandingRewardExecutor:
         key = digest(activation)
         prepared = self._prepared.get(key)
         if prepared is None:
-            package = await run_owned_thread(self.packages, activation.package_sha256)
-            prepared = await self.preparation.prepare(
-                package, control=control, history=history, source=self.decisions
-            )
+            prepared = await self._prepare_package(activation, control, history)
             self._prepared[key] = prepared
         prior = (
             getattr(self, "prior", self.handoff)

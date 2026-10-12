@@ -36,7 +36,9 @@ def copy_originals(origin, target):
             destination.chmod(0o600)
 
 
-async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=False):
+async def run_settlement(
+    o, evaluators, root, signatures, interrupt, *, mixed=False, admission_probe=None
+):
     h, series = o.h, o.config.series
     plan = next(plan for plan in series.cohorts if digest(plan) == h.cohort)
     nodes, stacks, configs = {}, {}, {}
@@ -72,10 +74,11 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
                 proof_export_directory=str(base / "proof-out"),
                 exchange_inbox=str(base / "exchange-in"),
                 exchange_outbox=str(base / "exchange-out"),
-                maximum_package_bytes=64 * 1024**2,
+                maximum_package_bytes=o.config.admission_owner.request_evidence_bytes,
                 maximum_promotion_bytes=1024**2,
                 maximum_state_bytes=128 * 1024**2,
                 poll_seconds=1,
+                host_memory_admission=o.config.admission_owner.host_memory_admission,
             ),
         )
         if name in stacks:
@@ -220,6 +223,8 @@ async def run_settlement(o, evaluators, root, signatures, interrupt, *, mixed=Fa
         assert output.read_bytes() == original
         assert dict(signatures) == before
         assert max(signatures.values()) == 1
+        if admission_probe is not None:
+            await admission_probe.recover_settlement(nodes, start, deliver, output, signatures)
         return SimpleNamespace(package=package, nodes=nodes, output=output)
     finally:
         for stack in stacks.values():

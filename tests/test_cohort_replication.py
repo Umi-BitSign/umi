@@ -18,7 +18,16 @@ from .test_open_competition import policy as policy
     ("profile", "names"),
     [
         ("reward", ["registration/a.json", "objects/b.json", "opportunities/c.json"]),
-        ("requests", ["objects/a.json", "orders/b/c.json", "terminals/d/e.json"]),
+        (
+            "requests",
+            [
+                "objects/a.json",
+                "orders/b/c.json",
+                "terminals/d/e.json",
+                "partials/f/g/h/00001.json",
+                "inventories/f/g/h/0000000000000100-00001-a.json",
+            ],
+        ),
         (
             "settlement",
             [
@@ -38,6 +47,7 @@ from .test_open_competition import policy as policy
                 "objects/a.json",
                 "model-acceptance-proposals/a/b.json",
                 "model-reward-acceptances/a/b.json",
+                "model-reward-preparation/a/b.json",
             ],
         ),
         ("documents", ["a.json", "a-reference.json"]),

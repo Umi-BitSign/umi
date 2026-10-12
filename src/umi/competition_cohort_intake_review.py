@@ -33,6 +33,7 @@ from .competition_cohort_recovery import CohortRecoveryTransition
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_progress import log_phase
+from .competition_work_progress import progress_items
 from .concurrency import run_owned_thread
 from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -229,7 +230,12 @@ class IntakeProgressReviewer:
             )
             if registration.snapshot != original.seal.snapshot:
                 raise ValueError("intake seal differs from independently reviewed registration")
-            for consent in original.consents:
+            for consent in progress_items(
+                original.consents,
+                stage="intake_participations",
+                unit="participations",
+                cohort=progress.cohort_sha256,
+            ):
                 raw, evidence, metadata = await run_owned_thread(
                     self.queue.evidence, progress.cohort_sha256, consent
                 )

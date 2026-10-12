@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import sqlite3
 
 import httpx
@@ -121,8 +123,11 @@ def remote(reviewed, tmp_path):
     return h
 
 
-async def test_remote_rebuilds_original_round_over_http_with_separate_promotion_store(remote):
+async def test_remote_rebuilds_original_round_over_http_with_separate_promotion_store(
+    remote, caplog
+):
     h = remote
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     app = FastAPI()
     app.include_router(preparation_review_routes(h.exporter, token="private-test-token" * 3))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
@@ -131,6 +136,20 @@ async def test_remote_rebuilds_original_round_over_http_with_separate_promotion_
         )
         reviewed = await h.remote.review(h.progress)
         assert reviewed == h.source.read(h.progress).record
+        events = [
+            json.loads(r.message)
+            for r in caplog.records
+            if r.name == "umi.competition.progress"
+            and json.loads(r.message).get("schema") == "umi-competition-work-progress/1"
+        ]
+        for stage, total in (
+            ("preparation_participations", len(h.exported.records)),
+            ("preparation_owner_export", 1),
+        ):
+            done = [e for e in events if e["stage"] == stage and e["state"] == "completed"]
+            assert done and all(e["completed"] == e["total"] == total for e in done)
+            assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in done)
+            assert all(e["cohort_sha256"] == h.progress.cohort_sha256 for e in done)
         assert len(h.exported.records) == 2 and len(h.prepared.roster.participants) == 1
         vote = await h.remote_signer().attest(h.progress)
     h.offline = True

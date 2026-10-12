@@ -40,6 +40,7 @@ class HistoricalRegistration:
     snapshot: RegistrationSnapshot
     original: ExecutionBoundary
     replayed_at: FinalizedSnapshotRef
+    timestamp_ms: int | None = None
 
 
 class HistoricalRegistrationProvider(FinalizedRegistrationProvider):
@@ -210,4 +211,6 @@ class HistoricalRegistrationProvider(FinalizedRegistrationProvider):
             ):
                 raise ValueError("historical review finalized head rolled back or changed")
             self._fresh(head_block.timestamp_ms)
-            return HistoricalRegistration(snapshot, expected, head)
+            if archive.timestamp_ms is None:
+                raise ValueError("historical registration lacks its verified timestamp")
+            return HistoricalRegistration(snapshot, expected, head, archive.timestamp_ms)

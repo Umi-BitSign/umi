@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shutil
 from types import SimpleNamespace
@@ -28,8 +29,9 @@ from umi.competition_cohort_model_static_review import (
     StaticModelReviewHeld,
 )
 from umi.competition_cohort_roster import RecoverableRosterParticipant
+from umi.competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from umi.open_competition import digest, sign_object
-from umi.private_files import read_private_model
+from umi.private_files import publish_private_model, read_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_cohort_model_acceptance import base_policy as base_policy
@@ -40,6 +42,7 @@ from .test_competition_cohort_model_acceptance import receipt_scenario as receip
 from .test_competition_cohort_model_acceptance import recovery as recovery
 from .test_competition_cohort_model_acceptance import runtime as runtime
 from .test_competition_cohort_model_review import reviews as reviews
+from .test_competition_cohort_recovery import signatures
 from .test_open_competition import wallet
 
 pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
@@ -258,7 +261,7 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, mo
     direct_request = direct_request.model_copy(update={"acceptance": acceptance})
     certificate = CertifiedModelArtifactAcceptance(
         acceptance=acceptance,
-        signatures=(sign_object(acceptance, wallet("Bob")),),
+        signatures=signatures(acceptance),
     )
     settlement = DirectModelSettlementVerifier(
         verifier,
@@ -269,11 +272,35 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, mo
         record=direct_request.record,
         admission=direct_request.admission,
     )
+    # Independently stream the accepted object during requests, without a
+    # closure package; final settlement and restart must reuse this receipt.
+    history = reviews.owner.intake.history(reviews.cohort)
+    early_root = reviews.root / "early-settlement"
+    for directory, value in (
+        ("model-reward-preparation", direct_request),
+        ("model-reward-acceptances", certificate),
+    ):
+        publish_private_model(
+            early_root / directory / reviews.cohort / (acceptance.submission_sha256 + ".json"),
+            value,
+        )
+    config = SimpleNamespace(
+        policy=reviews.owner.intake.policy,
+        series=SimpleNamespace(recovery=history.authority, cohorts=(history.plan,)),
+    )
+    preparation = SettlementArtifactPreparation(
+        config, SimpleNamespace(directory=early_root), {reviews.cohort: settlement}
+    )
     before = source.ranges_read
-    await settlement.ensure(participant, certificate)
+    report = await preparation.poll_once(asyncio.Event())
+    assert report["entries_ready"] == 1 and report["entries_pending"] == 0
     assert source.ranges_read > before
+    assert not tuple((early_root / "model-reward-artifacts").iterdir())
     settlement.verify_candidate(certificate, participant)
     retained_reads = source.ranges_read
+    settlement = DirectModelSettlementVerifier(
+        verifier, reviews.owner.archive, reviews.root / "settlement-receipts"
+    )
     await settlement.ensure(participant, certificate)
     assert source.ranges_read == retained_reads
     receipt_path = settlement._path(certificate)

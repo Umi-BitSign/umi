@@ -418,8 +418,9 @@ def _validate_staged(value):
     _, cache = successor_materialization_paths(value.config)
     if value.path.parent != cache or not _STAGE_NAME.fullmatch(value.path.name):
         raise SuccessorMaterializationError("staged current is outside its fixed cache")
-    _, observed = _tree(value.path, value.limits, sealed=True)
-    if observed != value._records:
+    _, observed = _tree(value.path, value.limits, sealed=True, hash_files=False)
+    expected = {name: (identity, None) for name, (identity, _) in value._records.items()}
+    if observed != expected:
         raise SuccessorMaterializationError("staged current bytes or identities changed")
 
 
@@ -463,6 +464,25 @@ def _reusable_stage(cache, cache_fd, controls, package, config, consent, worker_
                 # Interrupted stages remain private and are not promoted implicitly.
                 continue
             path = cache / entry.name
+            # Renewal controls change much more often than their large packages.
+            # Reject mismatched stages before hashing payloads, while retaining
+            # the sealed-tree, ownership, link and quota checks for every stage.
+            _, metadata = _tree(path, limits, sealed=True, hash_files=False)
+            if metadata.keys() != expected.keys():
+                continue
+            stage_fd = _directory(path, modes={0o555})
+            try:
+                if _identity(os.fstat(stage_fd)) != metadata[""][0]:
+                    raise SuccessorMaterializationError("reusable stage changed before reading")
+                controls_match = all(
+                    metadata["/" + name][0][5] == len(payload)
+                    and _read_at(stage_fd, name, len(payload)) == payload
+                    for name, payload in sorted(controls.items(), key=lambda item: len(item[1]))
+                )
+            finally:
+                os.close(stage_fd)
+            if not controls_match:
+                continue
             _, records = _tree(path, limits, sealed=True)
             if {name: digest for name, (_, digest) in records.items()} != expected:
                 continue

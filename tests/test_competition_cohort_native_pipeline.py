@@ -53,9 +53,10 @@ from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
 from umi.competition_cohort_request_closure import PendingRequestClosure, build_request_closure
 from umi.competition_cohort_request_files import RequestCompletionFiles
-from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver
+from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
 from umi.competition_cohort_request_review import RequestProgressReviewer
 from umi.competition_cohort_request_start import REST_MS
+from umi.competition_cohort_request_tail import MINIMUM_REQUEST_OPEN_MS
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
 from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
@@ -69,11 +70,13 @@ from umi.policy import scoring_policy_hash
 from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
+from .cohort_native_memory_fixture import NativeAdmissionProbe
 from .cohort_native_reward_fixture import run_activation
 from .cohort_native_service_fixture import (
     SERVICE_SHA,
     NativeService,
     admit_endpoint,
+    fixture_issuance_timestamp,
     media,
     transport_policy,
 )
@@ -92,6 +95,7 @@ from .test_competition_cohort_recovery import signatures as quorum_signatures
 from .test_competition_cohort_standing_phases import standing
 from .test_competition_runner import runtime as runtime
 from .test_competition_service import chain_config as chain_config
+from .test_host_memory_admission import provisioned as provisioned
 from .test_open_competition import bundle_at, submission, wallet
 from .test_open_competition import policy as base_policy  # noqa: F401
 
@@ -111,6 +115,13 @@ def model_request(scenario, model, *, sequence, block):
 
 def precommit_model_inventory(h):
     h.transport = transport_policy()
+    # Use one clock for intake, request opening and the signed drand fixture.
+    # Eleven hours leaves room for the explicit ten-hour outage while these
+    # ordinary-completion cases remain below the separately tested tail cutoff.
+    h.first_request_not_before_unix_ms = (
+        fixture_issuance_timestamp(h.transport) - 11 * 60 * 60 * 1000
+    )
+    h.timestamp = h.first_request_not_before_unix_ms - 1_000_000
     h.terms = ServiceTerms(
         schema="umi-cohort-service-terms/1",
         policy_sha256=digest(h.intake.policy),
@@ -437,7 +448,7 @@ def configure_model_reviews(o, root, client, signatures):
     o.service.models.reviewers = tuple(peers)
 
 
-async def certify_requests(o, app, root, monkeypatch, signatures):
+async def certify_requests(o, app, root, monkeypatch, signatures, admission_probe=None):
     """Use native request observation, review and handoff with synthetic readiness.
 
     Fence the original catalog, preserve completed benchmark and service work,
@@ -449,11 +460,32 @@ async def certify_requests(o, app, root, monkeypatch, signatures):
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
+    selected = o.config.admission_owner
+    assert source.replay_bytes == source.observation_bytes == selected.request_replay_bytes
+    assert app.state.lifecycle.files.maximum_bytes == selected.request_replay_bytes
+    assert app.state.lifecycle.maximum_bytes == selected.request_evidence_bytes
+    state, _ = node.controller.store.status(h.cohort)
+    opening = source.request_opening(state)
+    raw, metadata = await h.provider.retained_archive(opening)
+    original = await h.provider.review_archive(opening, raw, metadata)
+    assert 0 <= h.timestamp - original.timestamp_ms < MINIMUM_REQUEST_OPEN_MS
 
-    async def ready(self, state, capture):
-        return h.ready
+    async def readiness(self, state):
+        nonce = "a" * 32
+        return nonce, RequestReadiness(
+            schema="umi-cohort-request-readiness/1",
+            nonce=nonce,
+            policy_sha256=digest(h.intake.policy),
+            cohort_sha256=state.cohort_sha256,
+            recovery_tip_sha256=state.tip_sha256,
+            catalog_sha256s=tuple(digest(c.catalog) for c in self.source.catalogs),
+            observation=execution_boundary(h.capture(h.block)),
+            ready=h.ready,
+        )
 
-    monkeypatch.setattr(LiveRequestPhaseObserver, "_ready", ready)
+    # Both direct and prepared observations validate the same readiness response.
+    # Replace only its external fetch, preserving native freshness/binding checks.
+    monkeypatch.setattr(LiveRequestPhaseObserver, "_fetch_readiness", readiness)
     for name in ("Charlie", "Dave"):
         config = CohortProgressSignerConfig(
             schema="umi-cohort-progress-signer-config/1",
@@ -467,7 +499,11 @@ async def certify_requests(o, app, root, monkeypatch, signatures):
             signatures[(name, digest(body))] += 1
             return sign_object(body, wallet(name))
 
-        reviewer = RequestProgressReviewer(source, h.provider, h.provider.retained_archive)
+        reviewer = (
+            RequestProgressReviewer(source, h.provider, h.provider.retained_archive)
+            if admission_probe is None
+            else await admission_probe.request_reviewer(o, name, config, source, root / name)
+        )
         signer = CohortProgressSigner(config, reviewer, sign)
         o.apps[name.lower() + ".example"].include_router(
             phase_vote_routes(signer, phase="requests", token="v" * 32)
@@ -496,6 +532,7 @@ def evaluator_config(o, name, root):
         owner_hotkey=o.config.admission_owner.owner_hotkey,
         owner_origin="https://owner.example",
         review_timeout_seconds=30,
+        request_replay_bytes=o.config.admission_owner.request_replay_bytes,
         benchmark=BenchmarkHostConfig(
             schema="umi-cohort-benchmark-host/1",
             directory=str(root / "host"),
@@ -556,6 +593,44 @@ async def test_accepted_model_reaches_native_reward_package(
     )
 
 
+async def test_explicit_aggregate_budget_through_native_request_settlement_and_reward(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    owner = host.config.admission_owner.model_copy(
+        update={"maximum_aggregate_evidence_bytes": 1024**3}
+    )
+    host.config = host.config.model_copy(update={"admission_owner": owner})
+    host.service.config = host.config
+    await run_pipeline(
+        host,
+        scenario,
+        runtime,
+        tmp_path,
+        monkeypatch,
+        chain_config,
+        interrupt=False,
+        mixed=True,
+    )
+
+
+async def test_selected_admission_covers_native_pipeline_and_original_recovery(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config, provisioned
+):
+    async with NativeAdmissionProbe(provisioned, monkeypatch, host) as probe:
+        await run_pipeline(
+            host,
+            scenario,
+            runtime,
+            tmp_path,
+            monkeypatch,
+            chain_config,
+            interrupt=False,
+            mixed=True,
+            admission_probe=probe,
+        )
+        probe.assert_completed()
+
+
 async def run_pipeline(
     host,
     scenario,
@@ -569,6 +644,7 @@ async def run_pipeline(
     cohort_index=0,
     expected_recovered_jobs=None,
     activate=True,
+    admission_probe=None,
 ):
     o, h = host, host.h
     orders = OrderHostConfig(
@@ -674,6 +750,7 @@ async def run_pipeline(
                     gate["not_before_unix_ms"] - gate["chain_timestamp_ms"]
                     == h.provider.config.maximum_head_age_ms + REST_MS
                 )
+            h.block += 1
             h.timestamp = gate["not_before_unix_ms"] + h.provider.config.maximum_future_skew_ms
             await lifecycle.tick()
             assert lifecycle.controller.store.status(h.cohort)[0].phase == "requests"
@@ -729,6 +806,7 @@ async def run_pipeline(
         if interrupt:
             # Ten hours at nominal block cadence, with no owner or renewer.
             h.block += 3000
+            h.timestamp += 10 * 60 * 60 * 1000
             o.outages.add("owner.example")
             for name in nodes:
                 nodes[name] = evaluator(name)
@@ -860,10 +938,18 @@ async def run_pipeline(
                 assert len(service.calls) == 7 and max(service.calls.values()) == 1
                 assert service.lost_replies == int(interrupt)
                 service.reveal()
-            await certify_requests(o, app, tmp_path / "request-review", monkeypatch, signatures)
+            await certify_requests(
+                o, app, tmp_path / "request-review", monkeypatch, signatures, admission_probe
+            )
             assert max(signatures.values()) == 1
             settled = await run_settlement(
-                o, nodes, tmp_path / "native-settlement", signatures, interrupt, mixed=mixed
+                o,
+                nodes,
+                tmp_path / "native-settlement",
+                signatures,
+                interrupt,
+                mixed=mixed,
+                admission_probe=admission_probe,
             )
             assert max(inference.values()) == max(signatures.values()) == 1
             # Reopened workers can recover all completed originals offline.
@@ -898,6 +984,11 @@ async def run_pipeline(
                 # Finality/RPC remain fixtures; reward review and replay do not.
                 with monkeypatch.context() as reward_patches:
                     await run_activation(
-                        o, settled, tmp_path / "native-rewards", reward_patches, signatures
+                        o,
+                        settled,
+                        tmp_path / "native-rewards",
+                        reward_patches,
+                        signatures,
+                        admission_probe=admission_probe,
                     )
             return settled

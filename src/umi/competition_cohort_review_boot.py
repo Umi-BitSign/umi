@@ -28,6 +28,7 @@ from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_phase_vote_http import phase_vote_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_request_probe import evaluator_request_readiness_routes
+from .competition_cohort_request_rule_api import request_tail_adoption_vote_routes
 from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_selection import SelectedPhaseReviewer
@@ -41,6 +42,12 @@ from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import _close_provider
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread
+from .host_memory_runtime import (
+    RequestsStageASGIBinding,
+    memory_runtime,
+    requests_stage_policy,
+    selected_memory,
+)
 from .named_hotkey import load_named_hotkey
 from .open_competition import digest, identity, sign_object
 from .private_files import ensure_private_directory, lock_private_file
@@ -97,6 +104,18 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
     lease = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
         resources.callback(os.close, lease)
+        resources.enter_context(
+            memory_runtime(
+                config.host_memory_admission,
+                role="phase_reviewer",
+                protocol_policy_sha256=digest(config.policy),
+                series_sha256=digest(config.series),
+                authority_sha256=digest(config.series.recovery.authority),
+                maximum_aggregate_bytes=max(
+                    config.request_evidence_bytes, config.request_replay_bytes
+                ),
+            )
+        )
         owner_token, vote_token = _token(config.owner_token_file), _token(config.vote_token_file)
         if owner_token == vote_token:
             raise ValueError("owner exports and reviewer votes need separate credentials")
@@ -144,8 +163,22 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             },
         )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        if requests_stage_policy() is not None:
+            app.add_middleware(
+                RequestsStageASGIBinding,
+                controller=selected_memory(),
+                private_role="phase_reviewer",
+            )
         models = None
         direct_artifacts = None
+        app.include_router(
+            request_tail_adoption_vote_routes(
+                signer,
+                config.series,
+                token=vote_token,
+                timeout_seconds=config.review_timeout_seconds,
+            )
+        )
         for phase in ("intake", "preparation", "requests"):
             app.include_router(
                 phase_vote_routes(
@@ -153,6 +186,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     phase=phase,
                     token=vote_token,
                     timeout_seconds=config.review_timeout_seconds,
+                    budget=config.phase_review_budget,
                 )
             )
         if config.service_signing is not None:
@@ -324,7 +358,12 @@ async def run_phase_review_service(config: PhaseReviewServiceConfig, stop: async
                         raise PhaseReviewServiceFailure(
                             "endpoint_finality_observer_stopped"
                         ) from error
-                if server.started and app.state.benchmark is not None and workers is None:
+                if (
+                    server.started
+                    and app.state.benchmark is not None
+                    and workers is None
+                    and requests_stage_policy() is None
+                ):
                     workers = asyncio.create_task(app.state.benchmark.run(stop))
                 await asyncio.wait((serving, *((workers,) if workers else ())), timeout=0.25)
                 if workers is not None and workers.done():

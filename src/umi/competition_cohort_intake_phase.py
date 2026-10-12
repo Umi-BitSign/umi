@@ -79,7 +79,8 @@ class CohortIntakePhaseObserver:
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):
             history = store.published_history(cohort)
-            if store.status(cohort)[0] != state or state.phase != "intake":
+            current, pending = store.status(cohort)
+            if current != state or state.phase != "intake":
                 raise ValueError("intake sampling requires its current owned phase")
             # A completed fence is immutable. Sampling cannot reopen admission
             # or extend the service receipt used to certify that fence.
@@ -90,6 +91,7 @@ class CohortIntakePhaseObserver:
                 return
             ready = (
                 serving
+                and (pending is None or pending.operation != "adopt_request_tail_rule")
                 and db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
                 < self.intake.capacity.maximum_records
                 and cohort_intake_bytes(db) < self.intake.capacity.maximum_bytes
@@ -173,8 +175,10 @@ class CohortIntakePhaseObserver:
                         serving=False,
                         genesis_signatures=history.genesis_signatures,
                     )
+                _, pending = store.status(cohort)
                 ready = (
                     serving
+                    and (pending is None or pending.operation != "adopt_request_tail_rule")
                     and db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
                     < self.intake.capacity.maximum_records
                     and cohort_intake_bytes(db) < self.intake.capacity.maximum_bytes

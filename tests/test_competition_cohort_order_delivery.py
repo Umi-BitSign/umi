@@ -288,18 +288,38 @@ async def test_capacity_can_increase_without_replacing_selection_or_completed_vo
     r = relay
     r.blocked_reviewers.add(identity(wallet("Dave").hotkey.ss58_address))
     await r.worker().poll_once()
-    retained = r.queue().intent(r.slot)
-    cfg = r.cfg.model_copy(update={"maximum_bytes": 1024})
-    small = CohortOrderQueue(cfg, r.h.batch["policy"])
+    original = r.queue()
+    retained = original.intent(r.slot)
+    intent_bytes = original.journal.get_raw("intent", r.slot)
+    vote_bytes = {
+        key: original.journal.get_raw("queue_vote", key)
+        for key in original.journal.keys("queue_vote")
+    }
+    assert len(vote_bytes) == len(r.h.calls) == 1
+    small = r.queue(maximum_bytes=1024)
     capture = await r.capture()
+    # Authenticating unchanged history consumes no new storage capacity.
+    small.check_current(r.slot, r.h.source, capture)
+    r.blocked_reviewers.clear()
+    vote = await r.reviewers.attest(
+        wallet("Dave").hotkey.ss58_address, retained.order, retained.participant
+    )
     with pytest.raises(ValueError, match="capacity"):
-        small.check_current(r.slot, r.h.source, capture)
-    r.cfg = r.cfg.model_copy(update={"maximum_bytes": 2 * 1024**3})
-    # Existing queue factory pins semantic config, independent of enlarged limits.
+        small.publish_vote(r.slot, vote)
+    assert small.journal.get_raw("intent", r.slot) == intent_bytes
+    assert {
+        key: small.journal.get_raw("queue_vote", key) for key in small.journal.keys("queue_vote")
+    } == vote_bytes
+    assert small.certificate(r.slot) is None and not r.delivery_calls
+    # Reopen the same native journal with more capacity and retain the exact vote.
     larger = r.queue(maximum_bytes=2 * 1024**3)
     assert larger.intent(r.slot) == retained
-    r.blocked_reviewers.clear()
-    assert (await r.worker().poll_once())["deliveries_acknowledged"] == 2
+    assert larger.publish_vote(r.slot, vote) is not None
+    worker = r.worker()
+    worker.queue = larger
+    assert (await worker.poll_once())["deliveries_acknowledged"] == 2
+    assert larger.journal.get_raw("intent", r.slot) == intent_bytes
+    assert all(larger.journal.get_raw("queue_vote", key) == raw for key, raw in vote_bytes.items())
     assert len(r.h.calls) == 2
 
 

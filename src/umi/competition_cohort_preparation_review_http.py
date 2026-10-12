@@ -11,7 +11,11 @@ PATH = "/internal/cohorts/preparation-review"
 
 def preparation_review_routes(exporter: PreparationReviewExporter, *, token: str):
     return phase_review_routes(
-        exporter, token=token, path=PATH, request_model=PreparationReviewRequest
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=PATH,
+        request_model=PreparationReviewRequest,
     )
 
 

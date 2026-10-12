@@ -12,7 +12,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -26,6 +26,7 @@ from .competition_cohort_quality import ClosedQualityReview, ExactQuality
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
 from .competition_cohort_recovery import ModelRewardCohortAuthority
 from .competition_cohort_roster import RecoverableRosterParticipant
+from .competition_work_progress import WorkProgress
 from .open_competition import Hotkey, digest, model_content_digest
 from .private_files import read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -54,8 +55,16 @@ class ModelAwardEvidence(StrictProtocolModel):
     suite_sha256: Hex32
     acceptances: Annotated[tuple[CertifiedModelArtifactAcceptance, ...], Field(max_length=512)]
     candidates: Annotated[tuple[ModelAwardCandidate, ...], Field(max_length=512)]
+    skipped_participants: Annotated[tuple[Hex32, ...], Field(max_length=512)] | None = None
     reference_promotion_authorized: Literal[False] = False
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_bytes(self, handler):
+        value = handler(self)
+        if self.skipped_participants is None:
+            value.pop("skipped_participants", None)
+        return value
 
 
 class CohortModelAward(ModelAwardEvidence):
@@ -300,73 +309,80 @@ def build_model_award(
     candidates, choices = [], []
     baseline = None
     legacy_content_quality = {}
-    for result, certificate in zip(models, accepted, strict=True):
-        a = certificate.acceptance
-        p = participants[result.submission_sha256]
-        sub = p.record.request.signed_submission.submission
-        bundle = sub.model_bundle
-        if bundle is None or sub.track != "model":
-            raise ValueError("model award requires a separate model submission")
-        content = model_content_digest(bundle)
-        verify_model_acceptance(
-            certificate,
-            p.record,
-            review.history,
-            review.policy,
-            maximum_block=view.closure("intake").observed_at_block,
-        )
-        # Retain the original review documents in portable reward packages too.
-        # A signed digest without its evidence is insufficient for recovery.
-        read_endpoint_object(review.objects, a.rights_evidence_sha256)
-        read_endpoint_object(review.objects, a.reconstruction_evidence_sha256)
-        if verify_artifact is None:
-            verify_preserved_bundle(bundle, archive, review.policy)
-        else:
-            verify_artifact(certificate, p)
-        order = SignedRecoverableEvaluationOrder.model_validate_json(
-            read_endpoint_object(review.objects, result.order_sha256)
-        ).order
-        if digest(order.incumbent) != review.roster.round.incumbent_model_sha256:
-            raise ValueError("paired baseline differs from the frozen model")
-        verify_preserved_bundle(order.incumbent, archive, review.policy)
-        if result.reason is not None or result.candidate is None or result.incumbent is None:
-            raise PendingModelAward("model quality remains unresolved")
-        if result.quality_rule != "paired_baseline_metric/1" or any(
-            r.candidate_basis != "measured_model_execution" for r in result.runs
-        ):
-            raise ValueError("endpoint content cannot establish model award eligibility")
-        score, reference = (
-            _fraction(result.candidate.aggregate),
-            _fraction(result.incumbent.aggregate),
-        )
-        if baseline is not None and baseline != result.incumbent:
-            raise PendingModelAward("paired model evaluations disagree on the frozen baseline")
-        baseline = result.incumbent
-        if (
-            authority.model_reward_rule
-            != "baseline_or_better_quality_bucket_best_score_first_complete/1"
-        ):
-            if (
-                content in legacy_content_quality
-                and legacy_content_quality[content] != result.candidate
-            ):
-                raise PendingModelAward("duplicate model content has inconsistent quality")
-            legacy_content_quality[content] = result.candidate
-        candidates.append(
-            ModelAwardCandidate(
-                submission_sha256=result.submission_sha256,
-                model_sha256=digest(bundle),
-                content_sha256=content,
-                recipient_hotkey=sub.hotkey,
-                acceptance_sha256=digest(certificate),
-                quality_sha256=digest(result),
-                aggregate=result.candidate.aggregate,
-                baseline_aggregate=result.incumbent.aggregate,
-                eligible=score >= reference,
+    with WorkProgress(
+        "certification_model_artifacts",
+        len(models),
+        unit="models",
+        cohort=review.roster.round.cohort_sha256,
+    ) as progress:
+        for result, certificate in zip(models, accepted, strict=True):
+            a = certificate.acceptance
+            p = participants[result.submission_sha256]
+            sub = p.record.request.signed_submission.submission
+            bundle = sub.model_bundle
+            if bundle is None or sub.track != "model":
+                raise ValueError("model award requires a separate model submission")
+            content = model_content_digest(bundle)
+            verify_model_acceptance(
+                certificate,
+                p.record,
+                review.history,
+                review.policy,
+                maximum_block=view.closure("intake").observed_at_block,
             )
-        )
-        if score >= reference:
-            choices.append((-score, a.accepted_ordinal, result.submission_sha256, sub.hotkey))
+            # Retain the original review documents in portable reward packages too.
+            # A signed digest without its evidence is insufficient for recovery.
+            read_endpoint_object(review.objects, a.rights_evidence_sha256)
+            read_endpoint_object(review.objects, a.reconstruction_evidence_sha256)
+            if verify_artifact is None:
+                verify_preserved_bundle(bundle, archive, review.policy)
+            else:
+                verify_artifact(certificate, p)
+            order = SignedRecoverableEvaluationOrder.model_validate_json(
+                read_endpoint_object(review.objects, result.order_sha256)
+            ).order
+            if digest(order.incumbent) != review.roster.round.incumbent_model_sha256:
+                raise ValueError("paired baseline differs from the frozen model")
+            verify_preserved_bundle(order.incumbent, archive, review.policy)
+            if result.reason is not None or result.candidate is None or result.incumbent is None:
+                raise PendingModelAward("model quality remains unresolved")
+            if result.quality_rule != "paired_baseline_metric/1" or any(
+                r.candidate_basis != "measured_model_execution" for r in result.runs
+            ):
+                raise ValueError("endpoint content cannot establish model award eligibility")
+            score, reference = (
+                _fraction(result.candidate.aggregate),
+                _fraction(result.incumbent.aggregate),
+            )
+            if baseline is not None and baseline != result.incumbent:
+                raise PendingModelAward("paired model evaluations disagree on the frozen baseline")
+            baseline = result.incumbent
+            if (
+                authority.model_reward_rule
+                != "baseline_or_better_quality_bucket_best_score_first_complete/1"
+            ):
+                if (
+                    content in legacy_content_quality
+                    and legacy_content_quality[content] != result.candidate
+                ):
+                    raise PendingModelAward("duplicate model content has inconsistent quality")
+                legacy_content_quality[content] = result.candidate
+            candidates.append(
+                ModelAwardCandidate(
+                    submission_sha256=result.submission_sha256,
+                    model_sha256=digest(bundle),
+                    content_sha256=content,
+                    recipient_hotkey=sub.hotkey,
+                    acceptance_sha256=digest(certificate),
+                    quality_sha256=digest(result),
+                    aggregate=result.candidate.aggregate,
+                    baseline_aggregate=result.incumbent.aggregate,
+                    eligible=score >= reference,
+                )
+            )
+            if score >= reference:
+                choices.append((-score, a.accepted_ordinal, result.submission_sha256, sub.hotkey))
+            progress.advance()
     evidence = dict(
         policy_sha256=digest(review.policy),
         authority_sha256=digest(authority),
@@ -379,6 +395,14 @@ def build_model_award(
         rule=authority.model_reward_rule,
         acceptances=accepted,
         candidates=tuple(candidates),
+        skipped_participants=tuple(
+            digest(p)
+            for p in review.closure.skipped
+            if participants[p.submission_sha256].record.request.signed_submission.submission.track
+            == "model"
+        )
+        if review.closure.schema_ == "umi-cohort-request-closure/3"
+        else None,
     )
     if authority.model_reward_rule == "baseline_or_better_best_score_first_complete/1":
         winner = min(choices) if choices else None
@@ -468,8 +492,9 @@ def build_model_award(
 def read_model_acceptances(
     directory: Path, review: ClosedQualityReview
 ) -> tuple[CertifiedModelArtifactAcceptance, ...]:
-    """Load one retained complete acceptance per selected model; never skip missing files."""
+    """Load every completed model's acceptance; certified unperformed entries earn no award."""
     cohort = digest(review.history.plan)
+    completed = {p.submission_sha256 for p in review.closure.participants}
     return tuple(
         read_private_model(
             directory / cohort / (digest(p.record.request.signed_submission.submission) + ".json"),
@@ -478,4 +503,5 @@ def read_model_acceptances(
         )
         for p in review.roster.participants
         if p.record.request.signed_submission.submission.track == "model"
+        and digest(p.record.request.signed_submission.submission) in completed
     )

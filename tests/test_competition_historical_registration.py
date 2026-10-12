@@ -125,6 +125,7 @@ async def test_four_hour_outage_replays_exact_old_membership_without_old_rpc(arc
     assert result.snapshot == a.capture.snapshot
     assert result.original == a.expected
     assert result.replayed_at == a.chain.finality.ref
+    assert result.timestamp_ms == a.capture.provenance["timestamp_ms"]
     assert len(a.chain.verifier.checked) == checked + 3
     assert a.chain.rpc.calls[before:] == [
         ("chain_getHeader", (a.fresh.block_hash,)),

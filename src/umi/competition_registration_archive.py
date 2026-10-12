@@ -87,6 +87,8 @@ class RegistrationArchive:
                 raise ValueError("registration archive claims are not ordered")
             self.proofs[tuple(keys)] = batch["proof"]
         self.used_keys, self.used_batches = set(), set()
+        # Populated only after the entire original archive passes native replay.
+        self.timestamp_ms: int | None = None
 
     async def request(self, method, params):
         if not params or params[-1] != self.snapshot.block_hash:
@@ -125,6 +127,7 @@ async def replay_registration_archive(
     timestamp_ms: int | None = None,
     maximum_timestamp_ms: int | None = None,
 ) -> RegistrationSnapshot:
+    archive.timestamp_ms = None
     if timestamp_ms is None and maximum_timestamp_ms is None:
         raise ValueError("registration replay requires an owned timestamp bound")
     if (
@@ -201,4 +204,5 @@ async def replay_registration_archive(
     archive.consumed()
     if digest(rebuilt) != digest(archive.snapshot):
         raise ValueError("registration archive snapshot differs from its verified claims")
+    archive.timestamp_ms = actual_timestamp
     return rebuilt

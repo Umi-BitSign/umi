@@ -7,6 +7,40 @@
 - [Independent settlement signing](#open-competition-settlement-signing)
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
+- [Work progress and ETA logs](#work-progress-and-eta-logs)
+
+## Work progress and ETA logs
+
+The intake owner, phase reviewer, settlement service and reward runtime emit
+`umi-competition-work-progress/1` JSON through `umi.competition.progress`. Each
+record identifies a process, a fresh `work_id`, the cohort and a named `stage`.
+Request review also identifies its review attempt and read cycle. Restarted work
+gets a new identity; logs are diagnostics and do not replace retained votes or
+create a replay checkpoint.
+
+Finite substages report `completed`, `total`, `unit`, `percent`,
+`elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
+item returns successfully. Preparation and intake count original participation
+proofs and registration observations; reference release counts committed inputs;
+quality review counts participants and paid terminals; model certification counts
+model artifacts; package construction and verification count evidence objects.
+An exhausted substage reaches 100%. A failed or interrupted attempt keeps its
+completed count and does not claim completion.
+
+ETA uses the elapsed time and the completed work rate for that substage. It is
+`null` until there is enough completed work to estimate a rate. Uneven object
+sizes or expensive remaining inputs can change the estimate. Counted validation
+steps with different costs deliberately retain a `null` ETA. Owner exports,
+quorum votes, native review workers and history publication emit waiting
+heartbeats with a `null` ETA: an external dependency has no measured finish time.
+Those waits retain their native timeouts, cancellation and drain behavior.
+
+Report the stage name with every percentage and ETA. Separate nested substages
+and repeated replays; do not add their percentages or describe a completed
+object inventory as completed certification. Use the native certified phase
+history, verified reward package and finalized chain observation to establish
+those milestones. These log records explicitly carry
+`certification_authority: false`.
 
 ## Recoverable cohort model awards
 
@@ -54,6 +88,39 @@ identity or metadata cannot reuse the old record and holds the operation rather
 than silently accepting changed content. The record is host bookkeeping and is
 not part of the published model bundle. Current policy, authorization and chain
 state checks still run.
+
+An older producer's owner-private, writable version-one receipt cannot authorize
+reuse. The native verifier checks that artifact completely once under its normal
+lock and, on success, replaces only the local receipt with the current read-only
+format. Failed verification preserves the old receipt and model. Other unsafe
+receipt ownership, links, permissions or identities remain errors; operators do
+not need to reset a model or edit its manifest.
+
+Each settlement service starts a bounded artifact-preparation worker alongside
+its normal request-export and settlement tasks. It begins during intake and
+requests, before request closure or reference release. Each pass prepares at
+most two entries in rotating order; missing or invalid entries stay pending
+without preventing their siblings from being prepared. Local legacy archives
+need no configuration change. Successful native verification receipts survive
+restart and are reused by final settlement. Preparation has no signing, scoring
+or phase-transition authority, and its per-pass ready count is not a count of
+certified results.
+
+For direct R2 delivery, acceptance export also publishes the original
+`ModelReviewRequest` under
+`model-reward-preparation/<cohort>/<submission>.json`. The `model-evidence`
+replication profile delivers it with the acceptance certificate. Each settlement
+signer checks the certified submission bindings, then uses its own read-only
+R2 verifier and private receipts to prepare the accepted object. No local model
+copy is created. Unchanged bytes are not downloaded again on restart or final
+settlement; ordinary object identity and authority checks still apply. Retained
+older acceptances without this publication remain supported by the final
+settlement path.
+
+Completed request evidence continues to be exported independently while these
+checks run. Final cohort quality decisions, allocation and signatures still
+require the original certified request closure and reference release. Background
+preparation cannot replace missing work or move those signed boundaries.
 
 During legacy upload completion, each finished staging file likewise retains a
 private verification record. Later completion passes and restarted uploaders
@@ -117,8 +184,11 @@ The service-admission host polls private `model-reviews/<model-sha256>.json`
 inputs and publishes retained `ModelAcceptanceIntent` records under the
 competition store's `model-acceptance-proposals/<cohort>/<submission>.json`.
 Service-admission host version 2 selects `model_review_peers`, each with an
-evaluator hotkey, HTTPS origin, private `token_file` and request timeout. Its
-recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
+evaluator hotkey, private review origin, private `token_file` and request timeout.
+Use HTTPS across hosts or the explicit literal-loopback HTTP transport described
+in the [private reviewer configuration](../validators/successor-upgrade.md).
+Shared token files must retain matching signer and origin bindings across peer
+lists. The recurring worker collects votes at `/internal/cohorts/model-artifacts/votes`,
 retains each response in the original intake ledger and forms a certificate
 only from independent policy groups. A disconnected peer leaves that entry
 pending while other peers and entries continue. Restart reuses collected votes
@@ -268,9 +338,21 @@ budgets. Replay limits are part of retained configuration bindings; establish
 the larger profile in newly staged state or use a separately reviewed migration.
 Do not overwrite an existing journal's bound configuration or delete its state.
 
-Byte envelopes are not process memory limits. Evidence is parsed, canonicalized
-and replayed repeatedly, and request timeouts still apply. Qualify full-sized
-structured evidence on the intended host, including concurrent model workloads,
+Aggregate package and request-export canonicalization traverses object inventories
+one typed object at a time, including signed response envelopes. Domain checks,
+size checks, digests and exact-byte comparisons use that same traversal. Plain
+aggregate JSON parsing validates inventory objects individually, then applies the
+original tuple constraints and aggregate validators through an operation-private
+parser. The shared model schema remains unchanged. Unsupported schemas and input
+forms retain the ordinary full-document parser. Private publication retries still
+validate the complete retained schema, and reward preparation retains a detached
+input snapshot while replay is active. No signed
+bytes, evidence limits or validation requirements change.
+
+Byte envelopes are not process memory limits. A caller model, its canonical bytes
+and a validated snapshot can coexist; metadata and one serialized object also
+need memory. Evidence is still replayed, and request timeouts still apply. Qualify
+full-sized structured evidence on the intended host, including concurrent model workloads,
 before relying on a larger profile for settlement timing or memory headroom.
 
 <a id="open-competition-settlement-preparation--output-and-retry-behavior"></a>
@@ -1202,3 +1284,124 @@ restart or host migration. Configure durable replication of original model
 artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward
 certification.
+
+Installed reward coverage collectors retain an owner-bound native preparation
+result after successful historical replay, and release the full package graph.
+Every uncached endpoint still verifies eligibility and complete native control
+history. An earlier block reloads and replays the original package, and direct
+model artifact checks keep their existing refresh behavior. The current and
+predecessor collectors share one process-local guard across loading and replay;
+cancellation drains owned work before releasing it. Other reward consumers and
+other processes require separate memory admission. This does not establish the
+whole-host memory envelope by itself.
+
+
+### Host memory admission
+
+The admission owner, independent phase reviewer, settlement service, reward
+coordinator and standing reward writer accept an optional `host_memory_admission`
+selection with `policy_path` and the exact policy-file `policy_sha256`. The optional
+`host_identity_path` defaults to `/etc/machine-id`. An omitted
+selection preserves existing canonical configuration bytes. An explicit aggregate
+evidence budget of up to **4 GiB (4,294,967,296 bytes)** is supported with this
+optional policy omitted. Preserve existing signed clocks and state bindings
+when changing the aggregate budget. Host memory admission is an
+independent opt-in configuration: select the same qualified host policy in every
+co-resident aggregate consumer; enabling one consumer alone does not establish
+a host-wide capacity bound.
+
+Provision the `umi-host-memory-admission/2` policy and its empty lock files on
+persistent root-owned storage. The policy binds the host's `/etc/machine-id`,
+namespace directory, group and every file's device/inode. The directory is mode
+0750, files are mode 0400 or 0440, and ancestors cannot be writable by the service
+accounts. Root-owned service configuration selects the policy's exact bytes.
+Every participating service account must be able to read the same inode bindings
+from its own mount namespace. Preserve these files across unattended reboot;
+replacing a file requires a deliberate policy/configuration cutover after draining
+all existing consumers. No runtime creates or rewrites this namespace.
+
+The retained `umi-c5-requests-memory-admission/1` schema is restricted to its
+original cohort, protocol policy, series, recovery authority and certified
+preparation result. Its authority identity is `digest(series.recovery.authority)`;
+its preparation identity is `digest(prepared.roster.round)`. Only the admission
+owner and phase reviewer support this selection. Its measured owner-export,
+transient and background allowances do not admit settlement or reward work.
+
+For an existing restricted selection, preserve the exact `operations` list and
+declaration, record, object, service, order, inventory and JSON shape bounds.
+JSON value bounds include object keys as well as scalar and container values;
+shape checks precede native proof validation.
+`preparation_republish` remains required; without qualified `requests_publish`,
+native request closure remains pending publication. Public routes and unqualified
+private routes return 503 before consuming bodies or reading native state; disabled
+dispatch remains unavailable. Preserve independent reward file/proof delivery,
+chain RPC and gateway fallback dependencies when recovering such a selection.
+Verify the complete configured request path before a supported migration.
+
+Keep restricted-policy decoders, immutable policies, selectors, source and state
+bindings while an installed service, active experiment or recovery consumer
+references them. Retire their migration guidance only after the last such
+dependency is removed. A retained helper or qualification receipt does not
+require selecting that policy for an aggregate-budget upgrade.
+
+A containerized writer may have its own `/etc/machine-id`. Preserve that local
+identity and provide a separate read-only bind of the host identity, for example
+`BindReadOnlyPaths=/etc/machine-id:/run/umi-host-machine-id`, then select
+`host_identity_path: /run/umi-host-machine-id` in its bootstrap configuration.
+Bind the shared immutable policy directory into the same namespace. The selected
+identity path must be absolute, root owned and immutable; it must hash to the
+policy's host identity. Verify the actual writer account sees the same slot inodes
+and selected host identity as the ordinary services while retaining its own local
+identity. A host-account test alone does not establish this namespace binding.
+
+Full host policy reservations cover separate owner-export, transient-operation and retained
+settlement capacity. An owner response keeps its reservation through bounded
+ASGI sends. A reviewer can hold transient capacity while fetching an owner export,
+so those lanes must remain independent. Reward opportunity and peer-vote waits
+run outside package admission. Complete local operations drain owned threads
+before releasing capacity, including on cancellation. Error boundaries replace
+native exceptions with bounded diagnostic copies before releasing their rejected
+input graphs. Never pass an admitted operation's full native graph to work that
+outlives its reservation.
+
+Each settlement role runs one native cohort at a time, in the approved series
+order. A missing earlier authenticated handoff or mandatory original remains a
+barrier; later cohorts cannot occupy that role's native slot while it waits.
+Coordinator and reviewer have independent slots and may resume at different
+cohorts. Completed cohorts continue repairing their exact input replicas,
+certified histories and already signed votes using bounded delivery operations.
+Their separate serial maintenance task can run while a later native worker is
+busy. Per-cohort exclusion prevents maintenance and native replay from changing
+the same cohort concurrently. Input and output aggregate digests run in owned
+workers under the native reservation; they do not block the event loop.
+An authenticated terminal-history extension keeps its original certification
+prefix and does not reload the full input inventory.
+
+If a completed coordinator's generated reward package disappears, its scheduler
+releases the later cohort's graph and reservation after owned work drains, then
+replays the earlier cohort from its original journals and files. A missing
+mandatory input is restored in place; it is never regenerated as a shortcut.
+Recovery detected during an active tick waits for that tick to drain. Shutdown
+drains both the native and compact maintenance tasks before closing their stores.
+Changed original bytes or a changed certification prefix refuse progress. A
+process restart authenticates each earlier cohort again before proceeding, so
+file counts, cohort numbers and elapsed time never establish completion.
+
+Select reservations from measurements of the exact supported runtime and maximum
+aggregate capacity. `maximum_aggregate_bytes` must cover each consumer's effective
+configuration. `background_reservation_bytes` explicitly covers persistent native
+selections, bounded history/vote/model/order buffers and future allocations that
+do not own a slot. Logical object release does not imply that Python returned its
+resident pages to the operating system.
+
+With host memory admission enabled, startup requires current available memory
+above the 24 GiB floor plus all slot reservations and background allowance.
+Each serialized grant rechecks
+current available memory against the floor, background allowance, candidate
+reservation and the full reservations of all occupied slots. This deliberately
+charges occupied work again even when it is already resident. Qualification must
+therefore include this conservative envelope, retained allocator memory, all
+configured concurrent consumers and downstream owner work. A policy fitting only
+the sum of isolated peaks can block its own dependencies. Verify startup, steady
+state, replica restart and recovery under the actual account/mount/cgroup limits
+before cutover; do not infer these bounds from aggregate file sizes alone.

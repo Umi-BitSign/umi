@@ -50,6 +50,16 @@ Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
 
+Renewed controls do not require hashing every older staged package during cache
+lookup. The supervisor checks sealed metadata and compares the small control
+files first, then verifies the complete matching stage before reuse. All retained
+stages still count toward cache limits; this lookup neither deletes evidence nor
+extends a directive's authorization interval. A process-issued staged capability
+reuses its payload hashes only while the complete sealed file identities remain
+unchanged; content edits, permission changes and replacement files invalidate it.
+Activation still uses fresh owned chain observations and reports missing validator
+permission separately from insufficient remaining authorization time.
+
 While the chain weight interval is pending, an already stopped supervisor may
 reuse its completed transaction audit only within the same process and while the
 registry, weight journal and every audited sealed package remain unchanged.
@@ -69,9 +79,14 @@ Service claim commits wait through local mutex contention without changing the
 retained signed request. Each retry recollects owned history, capture and proof
 inputs; it does not reuse a stale head. Validation or I/O failures still hold the
 claim, cancellation drains owned work, and duplicate recovery makes no new claim.
-Paid-service readiness returns `ready: false` with `reason_code: admission_busy`
-while a claim or another readiness probe owns the catalog's admission lock.
-It does not queue an HTTP request behind that long operation or cancel it.
+Paid-service readiness checks the native permanent admission fence before
+reporting `admission_busy` for a held catalog lock. A valid seal or durable cohort
+tail fence returns `ready: false`, `new_claims_closed: true`, and reason `sealed`
+or `tail_fenced`. Accepted claims remain recoverable. A busy operation or an
+unavailable snapshot is a transient hold; corrupt or mismatched fence evidence
+returns `queue_unavailable`, never a verified closure. Snapshot probes neither
+wait for SQLite contention nor take the dispatch/retirement writer lock. They do
+not cancel the operation holding the catalog, reserve space or authorize work.
 Only the ordinary fresh-input checks can return `ready: true`.
 
 Public cohort authority reads have two signing slots and wait up to30 seconds
@@ -345,7 +360,31 @@ retained control history and replays its original reward package. A successor or
 revocation in that history does not erase the initial handoff. Historical replay
 uses the retained proofs and a fixed target block while catching up; it grants no
 current submission authority. The executor checks fresh control before signing.
+Each proof-verifier instance remembers up to 64 successful exact storage-proof
+checks. Reuse binds the state root, claimed keys and values, every proof node,
+verifier binary identity and configured bounds. Changed claims or proofs still
+require verification, failures are never reused, and process restart clears the
+cache. Archive loading and current finality and authority checks still run.
 Cancellation drains owned signing work before releasing the writer locks.
+The standing supervisor and reward-reader CLI request cooperative cancellation
+when SIGTERM or SIGINT sets their stop event, including during initial history
+replay. The current owned operation and cleanup finish before process ownership
+is released; shutdown need not finish the remaining replay batch. This does not
+add a forced termination deadline or permit a replacement writer to overlap.
+
+While first-activation replay is pending, predecessor reconciliation publishes
+the same `umi-successor-host-status/1` reports as the ordinary supervisor.
+Monitoring uses the current service invocation's native result: a held writer
+remains unhealthy even when the process is running. A healthy current worker
+can continue while a future directive is staged or its staging fails; that
+result does not establish successor activation or received rewards.
+
+An archive response of `Historical work rate limit exceeded` is a provider
+throttle even when it arrives as JSON-RPC code `-32004` over an established
+connection. It enters the same bounded cooldown as an HTTP 429; alternate
+providers must still prove the exact requested block. Unrelated errors with
+that numeric code do not imply throttling. Cached reads reduce repeat requests,
+but completing uncached historical proofs still requires available archive capacity.
 
 The supervisor selects `standing-reward-boot.json` beside its existing supervisor
 configuration when that file is present. This works with the installed service
@@ -437,11 +476,61 @@ receipt.
 The explicit, disjoint `proof_export_directory` receives original proof objects
 and frames automatically during history replay and interval collection. An
 interrupted write retries the same bytes before advancing the local cursor or
-crediting an interval. Objects are published before their frame. The separate
+crediting an interval. Objects are published before their frame. Within one exporter process, successful
+object publications reuse up to 4,096 metadata receipts while the exact content
+identity, private parent and file identity/metadata remain unchanged. Changed or
+missing files require ordinary publication again; failed writes are never cached.
+On Linux, a reuse receipt requires successful verification after the inode's
+coarse timestamp tick. Publication during the creation tick cannot qualify a
+later shortcut, even if time has since passed. Platforms without this qualified
+clock use ordinary publication. This avoids trusting a same-size rewrite that
+restored the original mtime within the same ctime tick.
+Readers still validate original objects and proofs independently. The separate
 `proof_import_directory` accepts transferred frames; native readers verify every
 proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
 Restart requires native replay even when all archive files are already present.
+
+Each retained history frame reads its chunk references and proof objects through
+one native query-only database snapshot. It does not reserve the writer slot or
+open a connection per object. The next frame load takes a fresh snapshot and
+observes newly committed conflict holds; byte bounds, content identities and
+native proof verification are unchanged.
+
+Within that one frame snapshot, repeated byte objects are decoded once, bounded
+by 128 entries and 32 MiB. The next frame load discards that cache so new conflict
+holds remain visible. Lossless encoding locates quoted hex with bounded byte
+scanning; original match boundaries, recipes, hashes and published bytes are
+unchanged. Neither optimization substitutes for native proof verification.
+
+For each verified historical block, body and event collection overlap after
+selecting its parent runtime. Both remain bound to the same finalized identity;
+failure or cancellation drains both operations before releasing the provider.
+
+The storage-proof helper retries a Linux `ETXTBSY` launch failure against the
+same verified private executable within its original total execution budget.
+This covers a staging write descriptor temporarily retained by another process.
+Other launch errors and rejected or malformed proof responses still fail.
+
+A collector configured for proof-only runtime reads and bounded evidence reuse
+can combine its retained parent code nodes with a small `:heappages` proof from
+the next block. It verifies the new auxiliary proof first, then proves the same
+code against the new block's state root. A runtime change, missing code branch
+or combined-proof size limit triggers the ordinary full code proof at that exact
+block. Invalid auxiliary proofs and verifier failures remain errors. Node and
+byte limits also bound accumulated proof nodes; replaying an external archive
+always consumes and verifies that archive's own value claim. The same selected
+native reader recovers each historical block's event bytes directly from its
+proof, avoiding a separate event-value RPC while preserving the event limits
+and downstream native check. Reuse supplies no finality or current authority
+and is discarded on restart.
+
+Within a running provider, identical proof-backed runtime code reuses the already
+validated immutable metadata from the pinned executor. This bounded reuse avoids
+decoding the same helper response for every block. Every caller still supplies
+its own native code proof and receives a fresh mutable runtime codec bound to
+that snapshot. Different code or a different executor digest cannot reuse the
+entry; failed validation is not retained.
 
 Private R2 replication uses the [copy service and timer templates](../../deploy/standing-reward-replication/)
 with [rclone's R2 backend](https://developers.cloudflare.com/r2/examples/rclone/).
@@ -579,8 +668,8 @@ For remote delivery, explicitly install `intake_review_routes` on a private host
 API and use `IntakeReviewHTTPClient` at the reviewer. The route is
 `POST /internal/cohorts/intake-review`; it requires a private bearer credential,
 bounds request size and allows one export at a time. The client accepts a
-configured HTTPS origin, refuses redirects and bounds received bytes. Both ends
-drain cancelled operations before releasing capacity. The public intake API does
+configured private review origin, refuses redirects and bounds received bytes.
+Both ends drain cancelled operations before releasing capacity. The public intake API does
 not enable this route or load a wallet. The enclosing host must supply its
 approved export signer, private transport credential and original registration
 archive delivery. The owner's signature authenticates local service observations;
@@ -646,8 +735,8 @@ Earlier versions keep their original canonical bytes.
 Select the full standing series,
 manifest, competition policy, all cohort/authority bindings, named evaluator
 hotkey, owned chain configuration with two backup proof RPCs, allowed tracks,
-trusted owner hotkey and HTTPS origin. Configure explicit resource capacities
-and separate signing, chain, promotion, input and proof-import directories.
+trusted owner hotkey and private review origin. Configure explicit resource
+capacities and separate signing, chain, promotion, input and proof-import directories.
 Keep the key and both credentials outside those directories.
 
 The service loads the named unlocked hotkey using the existing mode-`0400`
@@ -655,14 +744,82 @@ key-file reader. `owner_token_file` and `vote_token_file` are distinct, root-own
 mode-`0400` or `0440` files containing a 32–256 character bearer token, optionally
 followed by one newline. Grant the service account read access through its
 private group when using `0440`. The listener binds only to `127.0.0.1` or `::1`
-on the selected port. Put it behind the deployment's private HTTPS proxy and
-configure the coordinator's `PhaseVotePeer` with the vote credential. Keep the
-owner export credential separate. The HTTP client verifies TLS, disables
-environment proxies and never follows redirects.
+on the selected port. Configure the coordinator's `PhaseVotePeer` with the vote
+credential and keep the owner export credential separate.
+
+Private review origins support HTTPS or direct HTTP to a cohosted listener.
+Direct HTTP must explicitly name `http://127.0.0.1:PORT` or `http://[::1]:PORT`,
+with a port from 1 through 65535 and an optional trailing `/`. Hostnames,
+alternative address spellings, credentials, queries, fragments and other paths
+are rejected for HTTP. Select the address family and port actually bound by the
+native listener. Other hosts require the deployment's private HTTPS proxy; its
+response budget must cover the complete native operation, including export and
+independent replay. The private clients disable environment proxies and never
+follow redirects. HTTPS retains certificate verification. Both transports retain
+bearer authentication, byte bounds and all native signature and authority checks.
+Public readiness and miner origins retain their separate validation rules.
+
+When changing a cohosted deployment to direct HTTP, update the reviewer's
+`owner_origin` and the coordinator's reviewer origins together. A token file
+shared by `model_review_peers` and `admission_owner.reviewers` must name the same
+signer and exact origin in both lists; update any endpoint reviewer copies as
+well. Check the complete configuration before selection. Keep the original
+series, authority, signer, signed clocks and state directories. Transport changes
+reopen the existing journals and reuse completed votes without reissuing evidence.
+
 Unavailable phase exports report `phase_owner_http_STATUS` in bounded failure
 details. Use the numeric HTTP status to distinguish authentication, validation,
 owner availability and proxy failures; response bodies, credentials and private
 URLs are excluded. The failure remains retryable and authorizes no phase change.
+
+For aggregate phase reviews, select the same optional `phase_review_budget` on
+the admission owner, each reviewer service and its coordinator peer. This local
+`umi-cohort-phase-review-budget/1` profile pins `policy_sha256`, the policy's
+`evaluation_runtime_sha256`, and `maximum_aggregate_evidence_bytes`. Set explicit
+positive integer allowances in seconds for `export_seconds`, `replay_seconds`,
+`authority_seconds`, `signing_seconds`, `transport_seconds` and
+`vote_queue_seconds`, plus `export_queue_slots` covering all selected reviewers.
+Choose them from retained timings on the selected hosts at the aggregate
+capacity and intended concurrency. Signed inference and snapshot-age limits do
+not describe aggregate proof-replay throughput. The profile is an operating
+allowance, not evidence of resource qualification or a completion-time promise.
+
+The owner uses `export_seconds` for its complete export operation. A reviewer
+allows `export_queue_slots * export_seconds + transport_seconds` for each owner
+exchange. Progress voting includes two full exchanges and replays; decision
+voting includes three. Each vote adds the selected authority, signing and signer
+queue allowances. The coordinator adds another queue and transport allowance to
+cover the route semaphore, which precedes the reviewer's operation timer.
+`replay_seconds` includes parsing, native replay and evidence checks associated
+with one read; `authority_seconds` covers additional proof and current-authority
+work. `signing_seconds` must cover the configured native signing timeout.
+Allow for admission queues, response transfer and host contention in the
+selected components. Finite allowances do not bound an uncontrolled backlog;
+operate with the selected concurrency and investigate repeated queue growth.
+
+Before cutover, the deployment adapter must call
+`competition_cohort_review_preflight.validate_selected_phase_review_path(owner, reviewer)`
+for every selected voting reviewer candidate. An available reviewer outside the
+owner's selected quorum uses `validate_reviewer_export_path(owner, reviewer)`;
+that check does not add a voting peer or claim to validate its incoming vote
+path. Preserve the owner's existing quorum selection. The complete check compares exact selected
+identities, policy/runtime/capacity, export and complete-vote budgets and direct
+loopback listener bindings. Managed HTTPS paths additionally require explicit
+`owner_proxy_seconds` and `vote_proxy_seconds` from the actual managed proxy
+configuration. Missing proxy timeouts do not establish unlimited responses.
+Validate those settings against the proxy's supported behavior and test the
+complete path; a configuration comparison does not establish live readiness.
+The reviewer `check` command reports effective deadlines but cannot qualify
+other hosts or their proxies.
+
+Omitting the profile preserves historical canonical configuration bytes and
+legacy timeout behavior. Selecting it changes only phase export and phase vote
+allowances; ordinary readiness, model, service, chain and signing limits retain
+their explicit selections. Existing owner/reviewer journals, authority, state
+directories and signed cohort clocks remain in place. Timed-out owned native
+work drains before its lock is released, so a late HTTP 503 can occur after the
+nominal deadline. A retry reuses a completed durable vote; interrupted review
+before signing intent must still complete its independent checks.
 
 Deliver these canonical private files under `inputs_directory`:
 
@@ -759,6 +916,25 @@ recheck certified history and native registration/Axon proofs against the origin
 queue assignment. A valid closure is retained before execution is refused, so a
 stale history cannot reopen work. Supply renewable media/window inputs and
 terminal signing separately.
+After window capture, the configured dispatcher requires its registration
+observation to reach the current owned finalized head. An otherwise age-valid
+cached observation must not predate request issuance. A lagging provider keeps
+the work pending; the dispatcher neither backdates the request nor relaxes its
+current-authority check.
+
+Worker reports separate preparation waits for inputs, current authority, media
+delivery, retained request lineage, the issuance window and journal persistence.
+`preparation_contention` identifies a retry after a busy journal. These names and
+elapsed times are operational diagnostics; they expose no work payloads and do
+not change request deadlines or authorize completion.
+
+`service_transport_pending` identifies a failed grant or retirement exchange by
+operation, miner hotkey, exact request-body digest and numeric HTTP status. A
+status of `0` means no HTTP response was available; `failure` distinguishes
+timeout, HTTP transport, operating-system and response-bound failures. Logs omit
+response bodies, headers, addresses and exception messages. A pending exchange
+does not authorize replacement work or establish an inference failure; the worker
+continues the original recovery and retirement procedure.
 
 Select `umi-cohort-service-work-catalog/2` for new series before intake opens.
 It commits the fixed work, policy, cohort, authority and service terms without
@@ -786,9 +962,16 @@ bounded `SignedServiceWorkClaim` from an original prepared participant. Preserve
 the claim nonce on retry. The queue commits the accepted claim and original proof
 bytes together before acknowledging it; insufficient capacity accepts no new work.
 Accepted duplicates recover without live RPC, history or preparation calls.
-New claims check the local full/sealed queue fence before collecting owner
-history, registration proofs or the roster. The admission commit still rechecks
-capacity atomically; the local check never grants execution or reward authority.
+New claims check the local admission fence before waiting for another claim or
+collecting owner history, registration proofs or the roster. An authenticated
+seal or durable cohort tail fence returns HTTP409 with detail
+`reason_code: admission_closed`, `closure_reason: sealed` or `tail_fenced`,
+`retryable: false`, and `accepted_claim_recovery: true`. Repeating a never-accepted
+claim cannot reopen admission. Exact accepted receipts, including a concurrent
+acceptance committed before the fence, still recover first. Capacity and owner
+input holds retain HTTP503. The native admission commit rechecks the fence and
+capacity atomically; these status responses do not change original cutoff clocks,
+accepted evidence, earned credit, certification or reward authority.
 `GET /v1/competition/service-work/CATALOG_SHA256/readiness?nonce=32_HEX_DIGITS`
 checks current admission inputs and capacity. This is admission readiness only;
 the request-phase service clock must also check actual dispatch. Readiness,
@@ -800,7 +983,7 @@ For automatic admission review, select `umi-cohort-service-admission-host/4`
 and its `admission_owner` configuration (`umi-cohort-admission-owner/1`). Set a
 private process-lock `directory`, `owner_hotkey`, `owner_key_file`,
 `export_token_file`, and loopback `listen_host`/`listen_port`. Each `reviewers`
-entry supplies an authorized signer, an explicit HTTPS origin, a private
+entry supplies an authorized signer, an explicit private review origin, a private
 `token_file` and a bounded request timeout. The reviewer set must cover the
 policy's independent control-group quorum. Keep all these paths disjoint from
 the intake, finality, queue and model stores; owner-export and reviewer-vote
@@ -810,9 +993,9 @@ when model participation is enabled.
 The intake service starts the private listener and one recurring admission
 worker per reviewer, and drains them before closing its finality provider.
 Expose only the authenticated admission-history, intake-review and
-preparation-review routes to the selected reviewers through the private HTTPS
-proxy. The listener never binds a public interface. Reviewers independently
-verify the original registration proofs in their configured proof inboxes.
+preparation-review routes to the selected reviewers through direct same-host
+HTTP or the private HTTPS proxy. The listener never binds a public interface.
+Reviewers independently verify the original registration proofs in their configured proof inboxes.
 Configure proof replication separately; a signed owner export does not replace
 those proofs. An unavailable peer cannot stop another peer's loop. Restart
 reuses retained votes and certificates without operator resubmission.
@@ -838,6 +1021,103 @@ proofs before the settlement history becomes visible. Pending files, proofs or
 votes retry without replacing original decisions. Each cohort has its own
 control connection and loop; a waiting cohort does not stop another cohort.
 
+Request-tail adoption and plan `/4` work with `host_memory_admission` omitted.
+When a host selects memory admission, request preparation, native sampling and
+cleanup share one transient grant. Cancellation drains the owned work before
+releasing it. The request-tail rule does not require a requests-only memory
+policy, a new measurement gate or a settlement hold; ordinary settlement remains
+enabled.
+
+Select aggregate evidence capacity for the complete request-to-reward path.
+Set `admission_owner.maximum_aggregate_evidence_bytes` and each phase reviewer's
+`maximum_aggregate_evidence_bytes` to the same qualified budget, and use that
+budget for every settlement and standing reward service's
+`maximum_package_bytes`. The accepted aggregate configuration range is 1 KiB through 4 GiB; qualify
+the selected budget on its actual hosts before treating it as operational.
+The request owner uses its selection for completion-file replay, native closure,
+signed export and HTTP response capacity; reviewers use theirs for terminal
+publication, HTTP reception and independent native replay. Settlement input
+assembly, package files and downstream reward replay use the package selection.
+Include signed envelope, original participation records and service observations
+when measuring the required capacity: the sum of raw endpoint objects alone is
+a lower bound. Leave room for retained replacement ancestry and later evidence.
+
+Omitting the new request setting preserves the existing `maximum_export_bytes`
+selection, the original 256 MiB local replay/completion-file limits, and historical
+configuration serialization. That existing field still
+controls intake/preparation exports and source declarations. The aggregate
+selection does not enlarge individual 16 MiB endpoint objects, ordinary private
+files, promotion records, witnesses, record counts or local journal quotas.
+Signed policy, plans, clocks, cutoff evidence and directory bindings remain the
+same. Changing a completion-file budget makes its private verification cache
+miss and requires native replay of the retained originals.
+
+Before changing services, validate every selected configuration with the target
+runtime, compare the complete path's explicit budgets, and qualify its peak
+memory and disk use with the configured replay concurrency. Run the native
+request export/reviewer and settlement/reward tests at that budget. The isolated
+`tests/benchmark_cohort_aggregate_memory.py` checks actual aggregate bytes above
+the older 256 MiB and 512 MiB ceilings; it uses synthetic content and does not
+certify a cohort. Increasing a capacity does not assert that the full cohort
+will fit, pass independent replay, or meet a latency target. Retain the original
+service state and exact signed evidence when updating only these local limits.
+
+Settlement services retain the original private input file and its natively
+verified digest after replay. They release the full parsed package between ticks
+and replicate the exact retained bytes when publishing to peers. Keep the
+original file available: a matching outbox copy does not replace it. Missing or
+changed originals remain pending and must be restored from their verified
+replica; never rebuild them from a different input selection. This reduces
+resident copies but does not by itself bound concurrent aggregate replay.
+
+For a legacy plan with `original_plan.sequence > 5`, the existing owner can append the
+12-hour completed-miner rule while the cohort is in intake or preparation. Deploy
+recovery transition `/3` and authenticated rule resolution to every history
+consumer first. The signed plan, authority, retained participation and directory
+bindings stay in place. This migration remains necessary while an admitted
+eligible legacy-plan cohort needs the rule; new plans select it directly with
+plan `/4`. Keep its historical decoder while a retained cohort or reward package
+contains an adoption transition.
+
+To enable the owner control routes, set
+`lifecycle.request_tail_operator_token_file` to a dedicated root-controlled
+private credential file. Its token must differ from owner exports and reviewer
+votes. With this field omitted, these owner mutation routes are absent. Keep
+them on the existing private listener and restrict proxy access to the operator.
+The typed routes under `/internal/cohorts/request-tail-adoption` are:
+
+1. `POST /prepare`: `RequestTailAdoptionPrepare` pins the selected series,
+   cohort and current predecessor. The existing lifecycle owner captures native
+   finality and returns an unsigned `RequestTailAdoptionProposal`.
+2. `POST /reserve`: submit that exact proposal. The owner refuses a changed tip,
+   conflicting reservation, sealed intake or observation older than a retained participation.
+   Intake durably gates new receipts before the control journal reserves the
+   same transition. Accepted exact retries continue to work. A restart or lost
+   acknowledgement reconciles the same reservation before ordinary phase work.
+3. `POST /vote` on each configured reviewer: send the reserved proposal using
+   its reviewer credential. Each reviewer fetches challenge-bound owner history,
+   replays the original authority and phases, checks native finality and confirms
+   the history again. It then requests a fresh owner-signed proof at
+   `POST /reservation` using the export credential. The proof binds a fresh
+   challenge, exact transition and history to matching durable reservations in
+   both owner journals; a prior response cannot be replayed. Votes share the
+   ordinary phase decision slot, so a reviewer cannot sign adoption and closure
+   for the same predecessor.
+4. Assemble the exact votes with `assemble_request_tail_adoption`; it checks the
+   original policy quorum. `POST /commit` accepts `RequestTailAdoptionCommit`
+   only for the owner's exact reservation and publishes through the ordinary
+   history path. Retry these same bytes after an interrupted acknowledgement.
+
+The request and response models live in
+`umi.competition_cohort_request_rule_api`; the helper does not load a wallet or
+open another process's journal. Confirm the adoption certificate through the
+normal authenticated history export before starting requests. An unsigned
+proposal, local reservation or partial vote set has no authority to change the
+rule. Plans with `original_plan.sequence <= 5` cannot use this adoption operation.
+Adoption after requests have opened
+is refused, and the original certified request opening remains the sole clock
+for the 12-hour threshold.
+
 Select `umi-cohort-service-admission-host/6` to also run accepted-service dispatch
 in the owner process. It requires the version-five selections and a `dispatch`
 object with schema `umi-cohort-service-dispatch-config/1`. Configure `origins`
@@ -856,12 +1136,16 @@ again. Reviewers read the selected originals at the authenticated
 drains workers before releasing keys, clients and process locks.
 
 Clip delivery verifies the local digest, retains the URL before uploading, and
-verifies the downloaded bytes before request selection. Lost acknowledgements
-reuse that URL; missing objects are republished at the same URL. New requests
-after a long outage can use a fresh bounded capability for the same clip. Signed
-requests and past delivery records remain unchanged. The existing clip Worker
-must be deployed with the matching upload credential; private clip replication
-and retention remain separate deployment requirements.
+verifies the downloaded bytes once before recording completion. Subsequent
+requests, including after restart, reuse that exact completion record while its
+delivery window remains valid; they do not reread or download the clip again.
+Incomplete publications recover lost acknowledgements or republish missing bytes
+at their original URL. A new delivery window requires its own verified publication.
+Signed requests and past delivery records remain unchanged. The existing clip
+Worker must use the matching upload credential and retain completed objects for
+their full capability lifetime: completed publications are not probed for deletion
+on each request. Private clip replication and retention remain deployment
+requirements.
 
 Benchmark evaluator startup and private evidence replication still require their
 own running services. Accepted-service dispatch alone does not establish full
@@ -876,6 +1160,29 @@ dispatch readiness route. Missing, stale or mismatched responses count as
 unavailable request time. Do not substitute a static success response or ordinary
 HTTP health check. The lifecycle remains pending until native work and delivered
 terminals satisfy closure; it does not start evaluator processes itself.
+
+A progress attempt without a retained fence finishes driver setup and dispatch
+readiness, retrieves the original opening proof, and prepares the accepted
+inventory under admission leases before collecting its finalized observation.
+One owned thread retains native preparation, sampling and cleanup across that
+collection. The sampler is single-use and cannot outlive its context. Readiness
+must match the eventual capture and nonce before it can establish availability.
+The native owner holds those admission leases through collection and closure replay;
+transient admission contention remains retryable. Intake remains available to
+registration-retention callbacks during collection. Native history authenticates
+under intake ownership after capture, with admission leases still held. These
+leases release on collection failure or cancellation. They do not themselves
+close admissions: the native request-window or qualified-tail decision must still
+select a cutoff. If opening-proof retrieval fails, an already-authenticated fence
+may finish sealing at this attempt's observation, but no new cutoff or progress
+is selected and the original error remains retryable. When a native fence is
+already present, the attempt instead captures finality once and authenticates and
+finishes that fence before awaiting readiness or the opening proof. A suspended
+probe cannot delay the existing seal. Fence presence is only a scheduling hint;
+full native history and fence verification still precede sealing. Progress retained
+for quorum review keeps its exact observation across restarts; it does not fetch new
+readiness, recapture finality or reset the opening clock. This scheduling preserves
+existing authenticated fences and every signed opening clock across supported cohorts.
 
 Use `ServiceWorkReviewer` for independent request and retry votes. Configure its
 own finality/history and registration archive sources, pinned cohort authorities,
@@ -931,7 +1238,7 @@ not cached. Miners independently verify the response using their pinned owner
 and replay phase authority. Their startup configuration is documented in the
 [miner model guide](../miners/model.md).
 
-Configure `ServiceVotePeer` for each independent reviewer's HTTPS origin and vote
+Configure `ServiceVotePeer` for each independent reviewer's private origin and vote
 credential. Pass `ServiceWorkPeerReviews.reviewers` and `.retry` to the recurring
 service worker. Request votes remain in its original queue; partial retry votes
 and certificates are retained there before acknowledgement. A restarted worker
@@ -950,6 +1257,31 @@ without repeating inference. Poll reports contain bounded counts and failure
 types. Independent request closure and quality replay still determine completion
 and service credit. Preserve the queue and its worker binding across restart;
 changing the evaluator requires an authorized migration, not a configuration edit.
+
+The owner reuses successful validation of exact retained request and grant bytes
+within a process, with bounded memory. Finding the latest attempt checks its
+complete parent chain once, rather than repeating that walk for every earlier
+attempt. Each read still checks current journal
+conflicts, the accepted assignment and complete replacement ancestry. Changed
+bytes, policy, transport or journal identity require validation again; missing
+records remain missing. This reuse grants no current authority and does not
+change signed request clocks, reviewer quorum or reward eligibility.
+
+Before replaying an unsealed paid queue for closure, the owner checks that its
+captured block still reaches the queue's retained finalized head. A stale capture
+returns to the coordinator for a fresh collection before full inventory replay.
+This precheck does not advance the journal head or replace the captured input.
+Sealing keeps its final monotonic check, and an existing immutable seal continues
+to recover through its original native evidence.
+Signed paid partial inventory is read under the original admission leases after
+the native seal is established. Pending partial evidence keeps closure pending
+without reopening admissions; complete progress still requires the full native
+closure and independent review. Head-regression logs identify the
+inventory precheck or seal-history stage, catalog, capture block and retained
+highwater without exposing private paths or evidence.
+Static service-body proof reuse retains up to 512 exact bodies, including retry
+parents, within its existing 64 MiB serialized-value budget. This does not bound
+total process memory or waive current authority and signature checks.
 
 The endpoint cohort dispatcher and paid-service transport permit one durable
 retransmission of the same selected request when the signed policy allows at
@@ -1085,6 +1417,11 @@ missing endpoint responses and busy execution locks stay pending. Retries reuse
 the original terminal signature, and the durable scan cursor revisits pending
 work without blocking other assignments. Export reports describe the current
 batch. They do not confirm remote delivery or successful reward submission.
+Export uses the live owned finality provider's verified block height without
+collecting a new subnet membership proof. Its observer, freshness and rollback
+checks still apply, and work beyond that finalized height stays pending. The
+closure reviewer separately checks membership, authority and the certified
+request interval; export does not replace any of those checks.
 Successful local publication verification is retained in a bounded private
 `.publication-verification/` cache, so restarting an exporter does not replay
 unchanged exports. Reuse requires the same policy and capacity, a verification
@@ -1752,6 +2089,20 @@ existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming
 the operational switch is complete.
 
+When all proof providers fail, the phase report retains each provider's index,
+request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
+transport category such as `timeout` or `connection_closed`. Inspect every
+provider entry: a rate-limit refusal from the last fallback does not establish
+why the authenticated primary failed. Reports omit remote text, headers and
+credentials. These diagnostics do not change fallback or proof-validation rules.
+
+Persistent proof connections are reused only while their WebSocket state is
+open. A socket closed during an idle period is discarded before the next read,
+which opens a connection with the same endpoint and method-specific limits. A
+disconnect during a request follows the existing provider fallback; without
+backups, that read fails and a later collection opens a fresh connection. This
+does not add request retries or change proof validation or collection timeouts.
+
 <a id="successor-supervisor-upgrade--acceptance-checks"></a>
 
 ### Acceptance checks
@@ -1885,13 +2236,25 @@ many total operations. Endpoint scheduling similarly bounds dispatch, recovery
 and retirement, and certification separately, with one additional discovery
 operation. An operation yields at a retained phase boundary before entering the
 next phase; these counts are not counts of miners actively performing inference.
-Paid work still runs at most one job per miner within its queue. Miner-side
-concurrency and active-window limits remain unchanged.
+Paid work permits one transport operation per miner within its queue: dispatch
+and response recovery/retirement share that slot. Request preparation and terminal
+certification each have a separate per-miner slot, so a slow new request cannot
+block already answered work. Preparation yields before delivery; certification
+uses retained retirement evidence or a terminal intent. Global phase capacities,
+miner-side concurrency and shared active-window limits remain unchanged.
+Terminal preparation retries local journal contention within the existing operation
+budget and recollects current authority after each wait. It retains the original
+response and retirement evidence without redispatching work. Invalid evidence and
+storage failures remain errors rather than being retried as lock contention.
 Discovery also resumes interrupted aggregate completion after the last endpoint
 case was retained. It authenticates the original case decisions and builds the
 missing archive without repeating inference or creating new signed requests.
-The existing private cursor advances only through considered admissions and
-survives restart. The worker retains its process lease until all outstanding
+The private discovery cursor rotates bounded admission pages. Within each page,
+work that has never started, or started least recently, gets the next available
+turn. Only a started operation advances its retained turn; skipped busy-miner or
+full-phase jobs keep their priority across polls and restarts. This operational
+metadata preserves original FIFO admission identities, signed request clocks and
+terminal evidence. The worker retains its process lease until all outstanding
 sends, signatures and journal writes finish cooperative cancellation. Reports
 include in-flight operation counts, phase capacity, aggregate native stages and the age of the
 oldest stage. Stage state is removed after completion, failure or cooperative
@@ -1954,6 +2317,22 @@ Admission-status, reviewer-queue and intake-readiness reads use the same snapsho
 path. They can finish while a publisher owns the writer gate, and a later read
 sees newly committed certificates and intake fences. Certificate assembly and
 publication still reserve the writer and validate the current generation.
+Request-export paging and execution-start inspection also use read-only snapshots
+of the execution journal. They can inspect committed results while another case
+is being retained; updating the export cursor still uses its separate writer.
+Paid-service discovery and endpoint recovery polling also read their cursors and
+queues through read-only snapshots. Their later cursor updates and response
+retention continue to use writer transactions.
+Paid request/terminal preparation and authority observation retry classified
+SQLite BUSY/LOCKED contention within their existing operation budgets. Each
+retry refreshes mutable authority; other database failures still propagate.
+Local idempotent journal operations, including replacement-certificate retention,
+also retry classified SQLite contention within the same budgets. Retries preserve
+the original signed inputs and drain their owned thread before cancellation.
+The cohort and standing-reward systemd templates signal the main process first
+(`KillMode=mixed`, `SendSIGKILL=no`, `TimeoutStopSec=infinity`), allowing its
+cooperative shutdown to finish an owned proof operation before closing children.
+Existing installed units need these settings retained during service upgrades.
 Writers retain their exclusive transaction and generation checks. The owner
 still signs each fresh response; cached historical proofs do not grant current
 execution authority.
@@ -1971,3 +2350,23 @@ and entries, and changes to the recipient, policy, process or journal
 materialization require verification again. It does not retain an authority,
 terminal decision or permission to execute; current journal and history checks
 remain required by the execution worker.
+
+Request reviewers release the first full evidence object inventory before proof
+RPC waits and the second owner fetch. A canonical protocol digest pins the entire
+first export; the second response must pass its own signature, challenge and
+native replay checks and match both that digest and the compact replay result.
+This retains both independent observations while avoiding two resident export
+graphs during the second replay.
+
+Settlement retains its native input inventory while its current phase is pending,
+so repeated polls reuse completed replay. Reference inputs are released before
+scoring inputs are constructed. After the coordinator durably publishes its
+native reward package and selected history, it releases the inventory, native
+reviews and phase closures. A terminal reviewer retains only authenticated
+request checks and recovery of its already signed vote deliveries; it never
+creates a new vote for a closed phase. Revocation, failed initialization and
+cooperative shutdown also release native state after owned work drains. Original
+input files, identity records, result journals and signing journals remain
+mandatory for restart. These lifetime boundaries do not themselves prove an RSS
+limit; host admission must reserve active inventories across pending polls and
+account for all simultaneously selected cohorts and other consumers.

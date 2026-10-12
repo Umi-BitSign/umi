@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
@@ -17,12 +18,21 @@ from .competition_cohort_endpoint_archive import MAX_ARCHIVE_OBJECT_BYTES, read_
 from .competition_cohort_execution_journal import CohortExecutionJournal
 from .competition_cohort_order_signer import order_slot
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
-from .competition_cohort_quality_signing import SignedClosedQualityVote, sign_closed_quality
+from .competition_cohort_quality_signing import (
+    SignedClosedQualityVote,
+    retained_quality_vote,
+    sign_closed_quality,
+)
 from .competition_cohort_reward_package import RewardPackageObject
-from .competition_cohort_service_certification import ServiceAllocationVote, sign_service_allocation
+from .competition_cohort_service_certification import (
+    ServiceAllocationVote,
+    retained_service_allocation_vote,
+    sign_service_allocation,
+)
 from .competition_cohort_settlement_inputs import ReplayedSettlementInputs
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
+from .host_memory_request_bounds import stage_limit
 from .open_competition import Signature, digest, identity, verify_signature
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .private_files import read_private_model as read
@@ -42,7 +52,11 @@ class SettlementEvidenceFiles:
         return self.root / (key + ".json")
 
     def __call__(self, key: str) -> bytes:
-        item = read(self._path(key), RewardPackageObject, maximum_bytes=MAX_DELIVERY_BYTES)
+        item = read(
+            self._path(key),
+            RewardPackageObject,
+            maximum_bytes=stage_limit("maximum_object_bytes", MAX_DELIVERY_BYTES),
+        )
         if item.sha256 != key or digest(item.value) != key:
             raise ValueError("settlement object delivery changed its identity")
         return read_endpoint_object(lambda _: canonical_json_bytes(item.value), key)
@@ -71,11 +85,28 @@ class ModelReviewEvidenceFiles:
             value = read(
                 self.root / (sha + ".json"),
                 RootModel[dict[str, JsonValue]],
-                maximum_bytes=MAX_ARCHIVE_OBJECT_BYTES,
+                maximum_bytes=stage_limit("maximum_object_bytes", MAX_ARCHIVE_OBJECT_BYTES),
             )
             return canonical_json_bytes(value)
 
         return read_endpoint_object(source, key)
+
+
+@dataclass(frozen=True)
+class RetainedResultVoteDelivery:
+    """Compact reference to an exact natively signed journal original."""
+
+    original: Callable[[], SignedClosedQualityVote | ServiceAllocationVote | None]
+    sha256: str
+    destination: Path
+
+    def publish(self) -> None:
+        value = self.original()
+        if value is None:
+            raise FileNotFoundError("settlement result delivery lacks its signed original")
+        if digest(value) != self.sha256:
+            raise ValueError("settlement result delivery changes its signed original")
+        publish_private_model(self.destination, value, maximum_bytes=MAX_DELIVERY_BYTES)
 
 
 class SettlementResultVotes:
@@ -91,6 +122,7 @@ class SettlementResultVotes:
         outbox: Path,
     ):
         self.inputs, self.hotkey, self.account = inputs, hotkey, identity(hotkey)
+        self.retained_deliveries: tuple[RetainedResultVoteDelivery, ...] = ()
         if inputs.quality is None or inputs.service is None:
             raise ValueError("result votes require certified reference reveal")
         self.executions, self.journal, self.sign = executions, journal, sign
@@ -130,6 +162,7 @@ class SettlementResultVotes:
         return found[0], slot
 
     async def publish(self) -> None:
+        deliveries = []
         for participant in self.inputs.quality.closure.participants:
             result = await run_owned_thread(
                 self.inputs.quality.outcome, participant.submission_sha256
@@ -147,6 +180,13 @@ class SettlementResultVotes:
                     maximum_bytes=MAX_DELIVERY_BYTES,
                 )
             )
+            deliveries.append(
+                RetainedResultVoteDelivery(
+                    partial(retained_quality_vote, owner, slot),
+                    digest(vote),
+                    self._quality_path(self.outbox, result.submission_sha256, self.account),
+                )
+            )
         vote = await sign_service_allocation(
             self.journal, self.inputs.service, self.hotkey, self.sign
         )
@@ -158,6 +198,19 @@ class SettlementResultVotes:
                 maximum_bytes=MAX_DELIVERY_BYTES,
             )
         )
+        deliveries.append(
+            RetainedResultVoteDelivery(
+                partial(
+                    retained_service_allocation_vote,
+                    self.journal,
+                    self.inputs.service.slot,
+                    self.hotkey,
+                ),
+                digest(vote),
+                self._service_path(self.outbox, self.account),
+            )
+        )
+        self.retained_deliveries = tuple(deliveries)
 
     def collect(
         self,

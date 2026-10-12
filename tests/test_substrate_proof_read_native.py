@@ -68,6 +68,24 @@ def test_native_read_matches_independently_verified_claims(native_verifier, proo
     assert native_verifier.verify_many(state_root=root, items=result, proof=nodes)
 
 
+def test_native_success_reuse_rejects_changed_claims_roots_and_proofs(native_verifier, proof):
+    raw, items, nodes = proof
+    request = dict(state_root=bytes.fromhex(raw["state_root"][2:]), items=items, proof=nodes)
+    assert native_verifier.verify_many(**request)
+    assert native_verifier.verify_many(**request)
+    key = next(key for key, value in items if value)
+    changed = tuple((k, v + b"\x00" if k == key else v) for k, v in items)
+    for fault in (
+        {"state_root": bytes(32)},
+        {"items": changed},
+        {"proof": nodes[:-1]},
+        {"proof": (bytes([nodes[0][0] ^ 1]) + nodes[0][1:], *nodes[1:])},
+    ):
+        with pytest.raises(SubstrateProofVerifierError):
+            native_verifier.verify_many(**(request | fault))
+    assert native_verifier.verify_many(**request)
+
+
 @pytest.mark.parametrize("fault", ["root", "missing-node", "changed-node", "limit"])
 def test_native_read_rejects_invalid_proofs_without_returning_claims(native_verifier, proof, fault):
     raw, items, nodes = proof

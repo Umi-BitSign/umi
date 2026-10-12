@@ -54,7 +54,7 @@ class CohortHistoryExporter:
                 {
                     t.transition.evidence_sha256
                     for t in history.transitions
-                    if t.transition.operation != "revoke"
+                    if t.transition.requires_progress_evidence
                 }
             )
             decisions, size = [], len(canonical_json_bytes(history))
@@ -97,7 +97,12 @@ class CohortHistoryExporter:
 
 def cohort_history_routes(exporter: CohortHistoryExporter, *, token: str):
     return phase_review_routes(
-        exporter, token=token, path=PATH, request_model=CohortHistoryRequest, concurrency=4
+        exporter,
+        admission_lane="owner_export",
+        token=token,
+        path=PATH,
+        request_model=CohortHistoryRequest,
+        concurrency=4,
     )
 
 

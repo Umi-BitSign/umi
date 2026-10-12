@@ -68,12 +68,15 @@ from .test_competition_cohort_service_authority import (
 from .test_competition_cohort_service_authority import service_owner as service_owner
 from .test_competition_cohort_service_authority import shared_control_group as shared_control_group
 from .test_competition_cohort_service_grants import fresh_window
+from .test_competition_cohort_service_worker import contention_error as contention_error
 from .test_competition_cohort_service_worker import finish, history_tip, wallet
 from .test_competition_cohort_service_worker import loop as loop
 from .test_competition_historical_registration import change_block
 
 
-async def test_service_owner_lookup_waits_for_actual_queue_contention(reviewed, monkeypatch):
+async def test_service_owner_lookup_waits_for_actual_queue_contention(
+    reviewed, monkeypatch, contention_error
+):
     original = reviewed.c.queue.assignment
     attempts = 0
 
@@ -81,7 +84,7 @@ async def test_service_owner_lookup_waits_for_actual_queue_contention(reviewed, 
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise PrivateStateBusyError("round_journal_lock", "ab" * 32, 11)
+            raise contention_error
         return original(claim)
 
     monkeypatch.setattr(reviewed.c.queue, "assignment", assignment)
@@ -403,12 +406,25 @@ async def test_http_votes_complete_original_work_without_local_signer_callbacks(
     assert recovered == terminal and len(s.deliveries) == 2
 
 
-async def test_partial_retry_votes_survive_restart_and_finish_through_http(networked, monkeypatch):
+async def test_partial_retry_votes_survive_restart_and_finish_through_http(
+    networked, monkeypatch, contention_error
+):
     s = networked
     review = await retired_attempt(s, monkeypatch)
+    original = s.peer_reviews._prepare
+    attempts = []
+
+    def prepare(value):
+        attempts.append(value)
+        if len(attempts) == 1:
+            raise contention_error
+        return original(value)
+
+    monkeypatch.setattr(s.peer_reviews, "_prepare", prepare)
     s.unavailable.add("Dave")
     with pytest.raises(ValueError):
         await s.retry(review.grant, review.retirement)
+    assert attempts == [review, review]
     assert s.signatures == 3
     s.unavailable = {"Charlie"}
     peer_reviews = ServiceWorkPeerReviews(s.requests, s.peers)
@@ -583,7 +599,7 @@ async def test_concurrent_retry_waiters_preserve_one_native_certificate(networke
 async def test_retry_peer_write_waits_for_native_queue_owner(networked, monkeypatch):
     import os
 
-    from umi.private_files import PrivateStateBusyError, lock_private_file
+    from umi.private_files import lock_private_file
 
     s = networked
     review = await retired_attempt(s, monkeypatch)

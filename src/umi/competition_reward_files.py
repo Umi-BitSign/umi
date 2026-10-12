@@ -7,6 +7,8 @@ package, chain proof and opportunity interval before granting authority.
 
 from pathlib import Path
 
+from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
+from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_digest
 from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardControlDecision
@@ -25,13 +27,14 @@ from .protocol import canonical_json_bytes
 class StandingRewardFiles:
     def __init__(self, root: Path, *, maximum_package_bytes: int, maximum_witness_bytes: int):
         self.root = Path(private_path(str(root)))
-        self.maximum_package_bytes = maximum_package_bytes
+        self.maximum_package_bytes = check_aggregate_evidence_bytes(maximum_package_bytes)
         self.maximum_witness_bytes = maximum_witness_bytes
         ensure_private_directory(self.root)
 
     def _read(self, kind, sha, model, maximum):
         checked_digest(sha)
-        value = read_private_model(self.root / kind / (sha + ".json"), model, maximum_bytes=maximum)
+        reader = read_aggregate_model if kind == "packages" else read_private_model
+        value = reader(self.root / kind / (sha + ".json"), model, maximum_bytes=maximum)
         # Decisions are addressed by their signed body, independently of the
         # envelope's signature ordering. Other objects use their complete body.
         selected = value.decision if kind == "decisions" else value
@@ -45,7 +48,7 @@ class StandingRewardFiles:
     def retain_package(self, package: CohortRewardPackage) -> None:
         """Retain immutable package bytes; presence does not replace native replay."""
         package = CohortRewardPackage.model_validate_json(canonical_json_bytes(package))
-        publish_private_model(
+        publish_aggregate_model(
             self.root / "packages" / (digest(package) + ".json"),
             package,
             maximum_bytes=self.maximum_package_bytes,

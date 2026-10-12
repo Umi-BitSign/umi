@@ -32,6 +32,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_publication import retain_standing_reward_inputs
 from .competition_round_journal import RecordReservation, RoundJournal
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
+from .host_memory_runtime import run_memory_thread
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
 from .protocol import canonical_json_bytes
 
@@ -304,4 +305,4 @@ class RewardDecisionSigner:
 
         async with self.serial:
             with self.journal.journal.locked():
-                return await run_owned_thread(retain)
+                return await run_memory_thread(retain)

@@ -19,6 +19,7 @@ from .competition_cohort_coordinator import CohortDecisionInput, CohortPhaseProg
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_recovery import CohortRecoveryTransition
+from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_export import review_export_limits, review_selection
 from .competition_cohort_review_http import PhaseReviewHTTPClient, phase_review_routes
 from .concurrency import wait_for_owned
@@ -79,11 +80,25 @@ class _VoteResponder:
 
 
 def phase_vote_routes(
-    signer: CohortProgressSigner, *, phase: Phase, token: str, timeout_seconds: int = 2400
+    signer: CohortProgressSigner,
+    *,
+    phase: Phase,
+    token: str,
+    timeout_seconds: int = 2400,
+    budget: PhaseReviewBudget | None = None,
 ) -> APIRouter:
-    responder = _VoteResponder(signer, phase, timeout_seconds)
+    if budget is not None:
+        budget = checked_budget(
+            budget,
+            signer.policy,
+            budget.maximum_aggregate_evidence_bytes,
+            signing_seconds=signer.config.signing_timeout_seconds,
+        )
     router = APIRouter()
     for kind, model in (("progress", ProgressVoteRequest), ("decision", DecisionVoteRequest)):
+        responder = _VoteResponder(
+            signer, phase, timeout_seconds if budget is None else budget.vote_seconds(kind)
+        )
         router.include_router(
             phase_review_routes(
                 responder,
@@ -91,6 +106,16 @@ def phase_vote_routes(
                 path=_path(phase, kind),
                 request_model=model,
                 maximum_request_bytes=MAX_REQUEST_BYTES,
+                admission_operation=(
+                    "requests_review" if kind == "progress" else "requests_decision"
+                )
+                if phase == "requests"
+                else None,
+                admission_scope=lambda request: (
+                    (request.progress.cohort_sha256, request.progress.phase)
+                    if isinstance(request, ProgressVoteRequest)
+                    else (request.transition.cohort_sha256, request.transition.phase)
+                ),
             )
         )
     return router
@@ -110,10 +135,19 @@ class PhaseVotePeer:
         phase: Phase,
         token: str,
         timeout_seconds: int = 2400,
+        budget: PhaseReviewBudget | None = None,
     ):
         self.policy, self.cohorts, _account = review_selection(policy, cohorts, signer)
         self.config = PhaseVotePeerIdentity(signer=signer, phase=phase)
         self.timeout_seconds = timeout_seconds
+        if budget is not None:
+            budget = checked_budget(budget, policy, budget.maximum_aggregate_evidence_bytes)
+        self.progress_timeout_seconds = (
+            timeout_seconds if budget is None else budget.vote_exchange_seconds("progress")
+        )
+        self.decision_timeout_seconds = (
+            timeout_seconds if budget is None else budget.vote_exchange_seconds("decision")
+        )
         self.progress_transport = PhaseReviewHTTPClient[ProgressVoteRequest](
             client,
             origin,
@@ -121,7 +155,7 @@ class PhaseVotePeer:
             path=_path(phase, "progress"),
             maximum_bytes=MAX_VOTE_BYTES,
             maximum_request_bytes=MAX_REQUEST_BYTES,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=self.progress_timeout_seconds,
         )
         self.decision_transport = PhaseReviewHTTPClient[DecisionVoteRequest](
             client,
@@ -130,7 +164,7 @@ class PhaseVotePeer:
             path=_path(phase, "decision"),
             maximum_bytes=MAX_VOTE_BYTES,
             maximum_request_bytes=MAX_REQUEST_BYTES,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=self.decision_timeout_seconds,
         )
 
     def _vote(self, raw: bytes, body: StrictProtocolModel) -> Signature:
@@ -148,7 +182,9 @@ class PhaseVotePeer:
         request = ProgressVoteRequest(
             schema="umi-cohort-progress-vote-request/1", progress=progress
         )
-        raw = await wait_for_owned(self.progress_transport(request), timeout=self.timeout_seconds)
+        raw = await wait_for_owned(
+            self.progress_transport(request), timeout=self.progress_timeout_seconds
+        )
         return self._vote(raw, progress)
 
     async def certify(
@@ -162,5 +198,7 @@ class PhaseVotePeer:
         request = DecisionVoteRequest(
             schema="umi-cohort-decision-vote-request/1", transition=transition, evidence=evidence
         )
-        raw = await wait_for_owned(self.decision_transport(request), timeout=self.timeout_seconds)
+        raw = await wait_for_owned(
+            self.decision_transport(request), timeout=self.decision_timeout_seconds
+        )
         return self._vote(raw, transition)

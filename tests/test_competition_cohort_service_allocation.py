@@ -145,6 +145,30 @@ def test_zero_credit_stratum_burns_its_fixed_budget():
     assert amounts(empty) == {} and empty.burn_weight == 32767
 
 
+def test_tail_dispositions_cannot_earn_credit_or_remove_completed_paid_credit():
+    selected = terms()
+    completed = (work(1, hotkey(1)), work(2, hotkey(2), stratum="continuous"))
+    original = allocate(completed, selected)
+    quality = ClosedServiceQuality(
+        schema="umi-cohort-service-quality/2",
+        terms_sha256=digest(selected),
+        request_closure_sha256="ab" * 32,
+        reference_reveal_sha256="cd" * 32,
+        work=completed,
+        skipped_work=("ff" * 32,),
+    )
+    result = allocate_service_quality(quality, selected)
+    assert result.recipients == original.recipients
+    assert result.burn_weight == original.burn_weight
+    for changes in (
+        {"skipped_work": (completed[0].work_sha256,)},
+        {"skipped_work": ("ff" * 32, "ff" * 32)},
+        {"schema_": "umi-cohort-service-quality/1"},
+    ):
+        with pytest.raises(ValueError):
+            allocate_service_quality(quality.model_copy(update=changes), selected)
+
+
 def test_linear_quality_does_not_reward_variance_or_uid_average():
     a, b = hotkey(1), hotkey(2)
     result = allocate(

@@ -1,7 +1,9 @@
 """Owned artifact admission and real intake fencing with synthetic finality."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,12 +31,14 @@ from umi.competition_cohort_model_acceptance import (
     CertifiedModelArtifactAcceptance,
     ModelAcceptancePublication,
     ModelArtifactReviewInputs,
+    ModelReviewRequest,
 )
 from umi.competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
 from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
+from umi.competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from umi.open_competition import digest, identity, sign_object
 from umi.private_files import publish_private_model, read_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
@@ -123,6 +127,80 @@ def test_model_export_replays_only_its_original_participant(prepared, tmp_path, 
     monkeypatch.setattr(acceptance_module, "read_participation", observe_record)
     assert owner.export(cohort, digest(target), tmp_path / "export") == expected
     assert seen and set(seen) == {identity(target.hotkey)}
+    path = tmp_path / "export/model-reward-preparation" / cohort / (digest(target) + ".json")
+    request = read_private_model(path, ModelReviewRequest)
+    assert request == owner.review_request(cohort, digest(target))
+    original = path.read_bytes()
+    assert owner.export(cohort, digest(target), tmp_path / "export") == expected
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("fault", [None, "certificate", "admission", "authority", "record"])
+async def test_export_is_usable_before_closure_but_requires_certified_bindings(
+    prepared, tmp_path, fault
+):
+    owner, cohort, subs, inputs = prepared
+    target = subs[0]
+    publication = owner.publish(certify(owner, cohort, target, inputs), capture_at(220))
+    root = tmp_path / "export"
+    owner.export(cohort, digest(target), root)
+    request_path = root / "model-reward-preparation" / cohort / (digest(target) + ".json")
+    certificate_path = root / "model-reward-acceptances" / cohort / (digest(target) + ".json")
+    request = read_private_model(request_path, ModelReviewRequest)
+    if fault == "certificate":
+        certificate_path.unlink()
+        publish_private_model(
+            certificate_path,
+            publication.certificate.model_copy(
+                update={"signatures": publication.certificate.signatures[:1]}
+            ),
+        )
+    elif fault in {"admission", "record"}:
+        request_path.unlink()
+        change = (
+            {
+                "admission": request.admission.model_copy(
+                    update={"signatures": request.admission.signatures[:1]}
+                )
+            }
+            if fault == "admission"
+            else {
+                "record": request.record.model_copy(
+                    update={
+                        "proposed_admission": request.record.proposed_admission.model_copy(
+                            update={"snapshot_sha256": "01" * 32}
+                        )
+                    }
+                )
+            }
+        )
+        publish_private_model(request_path, request.model_copy(update=change))
+    history = owner.intake.history(cohort)
+    config = SimpleNamespace(
+        policy=owner.intake.policy,
+        series=SimpleNamespace(
+            recovery=(
+                history.authority
+                if fault != "authority"
+                else SimpleNamespace(authority={"unexpected": "authority"})
+            ),
+            cohorts=(history.plan,),
+        ),
+    )
+    prep = SettlementArtifactPreparation(config, SimpleNamespace(directory=root), {})
+    # Keep original local materialization; no final handoff, label reveal or RPC.
+    prep.archive = owner.archive
+    key = "accepted/" + cohort + "/" + digest(target)
+    if fault:
+        with pytest.raises(ValueError):
+            prep._accepted(key, request_path)
+    else:
+        participant, certificate = prep._accepted(key, request_path)
+        assert certificate == publication.certificate
+        assert participant.record == request.record
+        report = await prep.poll_once(asyncio.Event())
+        assert report["entries_pending"] == 0 and report["entries_ready"] == 2
+        assert not report["chain_submission_authorized"]
 
 
 @pytest.mark.parametrize("index", ["hotkey", "track", "recovery_tip"])
@@ -390,6 +468,21 @@ def test_direct_acceptance_retains_exact_owner_reservation_without_local_archive
     direct.publish(publication, capture_at(220))
     assert direct.retained(cohort, digest(subs[0])).certificate == publication.certificate
     assert verified == [acceptance.direct_artifact.reservation.payload.upload_sha256] * 2
+
+    def offline(*args):
+        raise AssertionError("retained preparation must not reread delivery or RPC")
+
+    resumed = CohortModelAcceptances(
+        owner.intake,
+        tmp_path / "no-local-candidate-archive",
+        verify_request=offline,
+        review_artifact=offline,
+    )
+    assert (
+        resumed.review_request(cohort, digest(subs[0])).direct_artifact
+        == acceptance.direct_artifact
+    )
+    assert resumed.export(cohort, digest(subs[0]), tmp_path / "resumed-export") == publication
 
 
 def test_concurrent_identical_proposals_keep_one_position(prepared, monkeypatch):
