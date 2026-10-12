@@ -5660,3 +5660,77 @@ async def test_settlement_releases_parsed_package_after_native_replay(
     assert a.package_reference[1] == digest(h.c.package)
     assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
     assert a.data is not None and a.phases is not None
+
+
+def test_settlement_serialization_scope_preserves_native_checks_and_package_bytes(
+    original_settlement_inputs, monkeypatch, caplog
+):
+    from umi import canonical_reuse as reuse
+    from umi import open_competition as protocol
+    from umi.competition_cohort_settlement_inputs import (
+        prepare_settlement_inputs,
+        replay_settlement_inputs,
+    )
+
+    case, results = original_settlement_inputs, []
+    b = case.b
+    verify = protocol.verify_response_signature
+    count = 0
+
+    def counted_signature(*args, **kwargs):
+        nonlocal count
+        count += 1
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(protocol, "verify_response_signature", counted_signature)
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    for budget in (0, 64 * 1024**2):
+        start = count
+        read_keys = []
+
+        def source(key, read_keys=read_keys):
+            read_keys.append(key)
+            return b["objects"][key]
+
+        with reuse.canonical_json_reuse(maximum_bytes=budget, maximum_entries=65536):
+            cache = reuse._ACTIVE.get()
+            package = prepare_settlement_inputs(
+                case.package.inputs,
+                b["policy"],
+                case.requirement,
+                source,
+                b["decisions"].__getitem__,
+                iter(b["records"]),
+                lambda _: RetainedRevealPulse(**pulse_record()),
+                expected_tip_sha256=tip(case.package.inputs.history),
+                current_block=1000000,
+            )
+            replayed = replay_settlement_inputs(
+                package,
+                b["policy"],
+                case.requirement,
+                package.inputs.history,
+                expected_package_sha256=digest(package),
+                expected_tip_sha256=tip(package.inputs.history),
+                current_block=1000000,
+            )
+            results.append(
+                (
+                    canonical_json_bytes(package),
+                    canonical_json_bytes(replayed.inputs),
+                    tuple(read_keys),
+                    count - start,
+                )
+            )
+        assert cache.closed and not cache.entries and cache.size == 0
+        assert reuse._ACTIVE.get() is None
+    assert results[0] == results[1]
+    assert results[0][-1] > 0 and results[0][-2]
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    ]
+    names = {event.get("operation_name") for event in events}
+    assert {"settlement_prepare", "settlement_replay"} <= names
+    assert all(event["certification_authority"] is False for event in events)

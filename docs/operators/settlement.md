@@ -18,6 +18,18 @@ Request review also identifies its review attempt and read cycle. Restarted work
 gets a new identity; logs are diagnostics and do not replace retained votes or
 create a replay checkpoint.
 
+Settlement assembly, input preparation, input replay and native phase review
+also identify `operation_name`, `operation_id` and `parent_operation_id`. These
+labels distinguish repeated closure traversals without combining their counts
+or forecasting overall completion. Each synchronous operation reuses only exact
+canonical serialization bytes with a 64 MiB retained key/output budget and
+65,536 entries. Nested preparation shares the assembly budget; the cache clears
+on success or failure before later waits. This is not a process RSS limit: Python
+bookkeeping, transient snapshots and input models consume additional memory.
+Schema, signature, authority and source checks still execute on every replay;
+aggregate streaming remains uncached. Oversize values use ordinary serialization
+and are not rejected by this optimization.
+
 Finite substages report `completed`, `total`, `unit`, `percent`,
 `elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
 item returns successfully. Preparation and intake count original participation

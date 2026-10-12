@@ -323,3 +323,77 @@ def test_unequal_validation_steps_report_counts_without_extrapolating_eta(events
             assert events[-1]["eta_assumption"] is None
     assert events[-1]["state"] == "completed"
     assert events[-1]["eta_seconds"] == 0 and events[-1]["eta_basis"] == "completed"
+
+
+def test_sync_operation_attributes_nested_and_repeated_work_without_merging_counts(events):
+    @progress.work_operation("settlement_prepare")
+    def prepare():
+        return list(
+            progress.progress_items([1, 2], stage="closure_benchmark_entries", unit="entries")
+        )
+
+    @progress.work_operation("settlement_assembly")
+    def assembly():
+        parent = progress._CONTEXT.get().copy()
+        assert prepare() == [1, 2]
+        assert progress._CONTEXT.get() == parent
+        return prepare()
+
+    with progress.review_scope("progress_vote", "a" * 64, reads=0):
+        parent = progress._CONTEXT.get().copy()
+        assert assembly() == [1, 2]
+        assert progress._CONTEXT.get() == parent
+    starts = [event for event in events if event["state"] == "started"]
+    assert len(starts) == 2
+    assert len({event["operation_id"] for event in starts}) == 2
+    assert len({event["parent_operation_id"] for event in starts}) == 1
+    assert all(event["operation_name"] == "settlement_prepare" for event in starts)
+    assert all(event["review_id"] == parent["review_id"] for event in starts)
+    assert all(event["total"] == 2 and event["completed"] == 0 for event in starts)
+    assert all(event["eta_seconds"] is None for event in starts)
+    assert progress._CONTEXT.get() is None
+
+
+async def test_sync_operation_owned_thread_restores_context_and_original_failure(events):
+    failure = ValueError("private validation detail")
+
+    @progress.work_operation("settlement_replay")
+    def replay():
+        list(progress.progress_items([1], stage="closure_paid_terminals", unit="items"))
+        raise failure
+
+    with progress.review_scope("decision_vote", "b" * 64, reads=0):
+        parent = progress._CONTEXT.get().copy()
+        with pytest.raises(ValueError) as caught:
+            await run_owned_thread(replay)
+        assert caught.value is failure
+        assert progress._CONTEXT.get() == parent
+    assert events[0]["operation_name"] == "settlement_replay"
+    assert events[0]["review_id"] == parent["review_id"]
+    assert str(failure) not in json.dumps(events)
+    assert progress._CONTEXT.get() is None
+
+
+def test_sync_operation_redacts_invalid_name_and_rejects_lazy_functions(events):
+    secret = "https://private.example/capability"
+
+    @progress.work_operation(secret)
+    def safe():
+        return list(progress.progress_items([1], stage="safe_stage", unit="items"))
+
+    assert safe() == [1]
+    assert events[0]["operation_name"] == "unknown"
+    assert secret not in json.dumps(events)
+
+    async def coroutine():
+        pass
+
+    def generator():
+        yield None
+
+    async def async_generator():
+        yield None
+
+    for lazy in (coroutine, generator, async_generator):
+        with pytest.raises(TypeError, match="eager synchronous"):
+            progress.work_operation("scope")(lazy)

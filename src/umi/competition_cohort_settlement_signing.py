@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_coordinator import (
     AttestedCohortPhaseProgress,
     CohortDecisionInput,
@@ -26,6 +27,7 @@ from .competition_cohort_reward_package import RewardReplayInputs
 from .competition_cohort_settlement import CohortSettlement
 from .competition_execution import ExecutionBoundary
 from .competition_round_journal import RecordReservation, RoundJournal
+from .competition_work_progress import work_operation
 from .concurrency import await_owned_task, wait_for_owned
 from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
 from .protocol import StrictProtocolModel, canonical_json_bytes, sha256_hex
@@ -38,6 +40,8 @@ def phase_slot(cohort_sha256: str, recovery_tip_sha256: str) -> str:
 class SettlementPhaseReview:
     """Recompute progress from this reviewer's own selected native sources."""
 
+    @work_operation("settlement_phase_review")
+    @canonical_json_reuse(maximum_bytes=64 * 1024**2, maximum_entries=65536)
     def __init__(
         self,
         owner: CohortSettlement,

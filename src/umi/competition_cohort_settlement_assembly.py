@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_coordinator import replay_cohort_decisions
 from .competition_cohort_endpoint_archive import EndpointObjectSource
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
@@ -28,12 +29,15 @@ from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_inputs import SettlementInputPackage, prepare_settlement_inputs
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
+from .competition_work_progress import work_operation
 from .open_competition import CompetitionPolicy, EvaluationSuite, digest
 from .policy import ScoringPolicy
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, read_private_model
 from .protocol import canonical_json_bytes
 
 
+@work_operation("settlement_assembly")
+@canonical_json_reuse(maximum_bytes=64 * 1024**2, maximum_entries=65536)
 def assemble_settlement_inputs(
     sources: SettlementOriginalSources,
     policy: CompetitionPolicy,

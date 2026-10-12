@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from .canonical_reuse import canonical_json_reuse
 from .canonical_stream import canonical_json_size
 from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
 from .competition_cohort_aggregate_model import AggregateProtocolModel
@@ -44,6 +45,7 @@ from .competition_cohort_service_certification import ServiceAllocationReview
 from .competition_cohort_service_quality import build_service_reference_reveal
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
+from .competition_work_progress import work_operation
 from .open_competition import CompetitionPolicy, digest
 from .policy import scoring_policy_hash
 from .protocol import Hex32, canonical_json_bytes
@@ -165,6 +167,8 @@ def _reviews(
     return quality, service
 
 
+@work_operation("settlement_prepare")
+@canonical_json_reuse(maximum_bytes=64 * 1024**2, maximum_entries=65536)
 def prepare_settlement_inputs(
     inputs: RewardReplayInputs,
     policy: CompetitionPolicy,
@@ -247,6 +251,8 @@ def prepare_settlement_inputs(
     return package
 
 
+@work_operation("settlement_replay")
+@canonical_json_reuse(maximum_bytes=64 * 1024**2, maximum_entries=65536)
 def replay_settlement_inputs(
     package: SettlementInputPackage,
     policy: CompetitionPolicy,
