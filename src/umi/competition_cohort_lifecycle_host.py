@@ -43,7 +43,7 @@ from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
 from .competition_round_journal import RoundJournal
-from .concurrency import run_owned_thread
+from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import bounded_stage_declarations, check_stage_json, stage_count
 from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .open_competition import digest
@@ -163,6 +163,15 @@ class LifecycleHost:
     async def decision(self, cohort, key):
         # All control SQLite connections belong to this event loop.
         return self.stores[cohort].source(cohort, key, CohortDecisionInput)
+
+    async def _publication_block(self):
+        budget = self.service.config.admission_owner.phase_review_budget
+        block = await wait_for_owned(
+            self.provider.current_finalized_block(), timeout=budget.authority_seconds
+        )
+        if type(block) is not int or not 0 <= block <= 2**53 - 1:
+            raise ValueError("lifecycle publication owned block is invalid")
+        return block
 
     async def _intake(self):
         authorize_memory(None, None, "intake")
@@ -339,11 +348,19 @@ class LifecycleHost:
                 settlement_store(self.root / cohort / "control", self.config.maximum_state_bytes)
             )
         store = self.stores[cohort]
+        owned_publication = (
+            self._publication_block
+            if plan.sequence > 5
+            and self.service.config.admission_owner.phase_review_budget is not None
+            else None
+        )
         if not store.has_published_history(cohort):
-            capture = await self.provider.collect()
-            store.publish_history(
-                original.history, self.policy, current_block=execution_boundary(capture).block
+            current_block = (
+                await owned_publication()
+                if owned_publication is not None
+                else execution_boundary(await self.provider.collect()).block
             )
+            store.publish_history(original.history, self.policy, current_block=current_block)
         current = store.published_history(cohort)
         shared = min(len(current.transitions), len(original.history.transitions))
         if (
@@ -397,7 +414,12 @@ class LifecycleHost:
             self.policy,
             current.genesis_signatures,
             self.provider,
-            CohortIntakePublisher(self.service.intake, self.provider.collect, self.decision),
+            CohortIntakePublisher(
+                self.service.intake,
+                self.provider.collect,
+                self.decision,
+                current_block=owned_publication,
+            ),
             {
                 "intake": self._intake,
                 "preparation": self._preparation,

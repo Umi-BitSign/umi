@@ -1776,7 +1776,7 @@ def _effective_inference_concurrency(
 def _read_startup_file(
     path: str | Path, *, label: str = "scoring policy", maximum_bytes: int = 1024 * 1024
 ) -> bytes:
-    """Read bounded operator-owned canonical JSON without following the final link."""
+    """Read bounded account-owned JSON from an account- or root-controlled parent."""
 
     resolved = Path(path).expanduser().absolute()
     try:
@@ -1786,7 +1786,7 @@ def _read_startup_file(
     if (
         stat.S_ISLNK(parent.st_mode)
         or not stat.S_ISDIR(parent.st_mode)
-        or parent.st_uid != os.geteuid()
+        or parent.st_uid not in {0, os.geteuid()}
         or parent.st_mode & 0o022
     ):
         raise RuntimeError(f"{label} parent is unsafe")

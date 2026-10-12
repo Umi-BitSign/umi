@@ -756,6 +756,12 @@ def test_model_only_upgrade_records_intent_without_touching_endpoint(
     monkeypatch.setattr(upgrade.sys, "platform", "linux")
     monkeypatch.setattr(upgrade.shutil, "which", lambda *_args: "/bin/systemctl")
     monkeypatch.setattr(upgrade.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(upgrade, "acquire_upgrade_lock", lambda: None)
+    monkeypatch.setattr(
+        upgrade,
+        "unit_controls",
+        lambda entry: {"files": {}, "working_directory": str(entry.working_directory)},
+    )
     monkeypatch.setattr(upgrade.os, "chown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(upgrade, "secure_root", lambda *_args: None)
     monkeypatch.setattr(upgrade, "install_launcher", launcher_installs.append)
@@ -905,6 +911,12 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     monkeypatch.setattr(upgrade.sys, "platform", "linux")
     monkeypatch.setattr(upgrade.shutil, "which", lambda *_args: "/bin/systemctl")
     monkeypatch.setattr(upgrade.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(upgrade, "acquire_upgrade_lock", lambda: None)
+    monkeypatch.setattr(
+        upgrade,
+        "unit_controls",
+        lambda entry: {"files": {}, "working_directory": str(entry.working_directory)},
+    )
     monkeypatch.setattr(upgrade.os, "chown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(upgrade, "secure_root", lambda p: p.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(upgrade, "install_launcher", lambda *_args: None)
@@ -913,6 +925,7 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
         upgrade, "install_runtime", lambda *_args: calls.append("runtime") or target_python
     )
     monkeypatch.setattr(upgrade, "prepare_sidecar", lambda command, *_args: (None, command, None))
+    monkeypatch.setattr(upgrade, "validate_startup", lambda *_args: None)
     monkeypatch.setattr(
         upgrade,
         "runtime_limits",
@@ -929,10 +942,11 @@ def test_same_policy_rerun_updates_changed_runtime_without_losing_state(
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--public-model-track", public_track])
     upgrade.main()
     report = json.loads(capsys.readouterr().out)
+    already_upgraded = prior_runtime == "current" and layout == "manual_cohort"
     assert report["status"] == (
-        "already_upgraded" if prior_runtime == "current" else "miner_upgrade_verified"
+        "already_upgraded" if already_upgraded else "miner_upgrade_verified"
     )
-    assert len(calls) == (0 if prior_runtime == "current" else 2)
+    assert len(calls) == (0 if already_upgraded else 2)
     if calls:
         command = json.loads(calls[-1]["miner_command_path"].read_bytes())["arguments"]
         assert command[0] == str(target_python)
@@ -1153,7 +1167,16 @@ def test_root_run_miner_is_discovered_without_account_migration(monkeypatch):
 
 def test_manual_relative_paths_use_running_service_working_directory(tmp_path):
     manifest = _manifest()
-    raw = upgrade.startup(manifest, Path("state"), "miner-hotkey", "10" * 32, "https://miner")
+    from umi.competition_cohort_miner_startup import CohortMinerStartupConfig
+
+    raw = upgrade.startup(
+        manifest,
+        tmp_path / "state",
+        wallet("//Bob").hotkey.ss58_address,
+        "10" * 32,
+        "https://miner",
+    )
+    CohortMinerStartupConfig.model_validate_json(raw)
     (tmp_path / "startup.json").write_bytes(raw)
     arguments = [
         "/old/python",

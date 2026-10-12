@@ -256,7 +256,14 @@ async def admission_owner_app(
                 token=token,
             )
         )
-        app.state.history_exporter = CohortHistoryExporter(intake, c.owner_hotkey, sign)
+        app.state.history_exporter = CohortHistoryExporter(
+            intake,
+            c.owner_hotkey,
+            sign,
+            timeout_seconds=(
+                2400 if c.phase_review_budget is None else phase_export_timeout_seconds
+            ),
+        )
         app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
         if lifecycle is not None:
             app.include_router(request_tail_reservation_routes(lifecycle, token=token))

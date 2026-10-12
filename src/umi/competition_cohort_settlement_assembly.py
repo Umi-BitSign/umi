@@ -10,6 +10,7 @@ from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_reward_package import (
     MAX_PACKAGE_OBJECTS,
     DecisionSource,
+    PulseSource,
     ReplayObjectCollector,
     RewardReplayInputs,
     _check_bound,
@@ -43,6 +44,7 @@ def assemble_settlement_inputs(
     current_block: int,
     maximum_bytes: int,
     retained_objects: EndpointObjectSource | None = None,
+    pulses: PulseSource | None = None,
 ) -> SettlementInputPackage:
     """No signer or inference port; incomplete original evidence stays pending.
 
@@ -176,7 +178,7 @@ def assemble_settlement_inputs(
         objects,
         decisions,
         records,
-        pulse,
+        pulse if pulses is None else pulses,
         expected_tip_sha256=history_tip(original),
         current_block=current_block,
         maximum_bytes=maximum_bytes,

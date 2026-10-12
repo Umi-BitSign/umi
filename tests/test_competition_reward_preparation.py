@@ -4118,7 +4118,9 @@ async def test_reference_service_resumes_original_intent_without_fresh_observati
 @pytest.mark.parametrize(
     "fault", ["missing", "changed", "superseded", "round", "catalog", "pulse", "revoked"]
 )
-async def test_automatic_settlement_incomplete_sources_never_sign(recurring_settlement_case, fault):
+async def test_automatic_settlement_incomplete_sources_never_sign(
+    recurring_settlement_case, fault, monkeypatch
+):
     from pathlib import Path
 
     from umi.competition_cohort_intake_records import read_participation
@@ -4139,6 +4141,12 @@ async def test_automatic_settlement_incomplete_sources_never_sign(recurring_sett
         path = Path(s.catalogs_directory) / (h.c.requirement.catalog_sha256s[0] + ".json")
     elif fault == "pulse":
         path = next(Path(s.pulses_directory).glob("*.json"))
+        from umi.drand import QuicknetClient
+
+        async def unavailable(self, number):
+            raise FileNotFoundError("original Quicknet pulse temporarily unavailable")
+
+        monkeypatch.setattr(QuicknetClient, "fetch", unavailable)
     elif fault == "superseded":
         key = next(
             k
@@ -4185,6 +4193,66 @@ async def test_automatic_settlement_incomplete_sources_never_sign(recurring_sett
         digest(h.c.package),
     )
     assert a.package_reference[0].read_bytes() == canonical_json_bytes(h.c.package)
+
+
+@pytest.mark.parametrize("outage", [False, True])
+async def test_automatic_settlement_fetches_missing_original_pulse_and_resumes(
+    recurring_settlement_case, monkeypatch, outage
+):
+    from pathlib import Path
+
+    import bittensor as bt
+    import httpx
+
+    from umi import competition_cohort_settlement_pulses as pulse_module
+    from umi.drand import DrandVerificationError, QuicknetClient
+
+    from .test_drand import ROUND, info_record, json_response
+
+    h = recurring_settlement_case
+    h.assemble_inputs = True
+    a = await h.start("Charlie")
+    path = Path(a.config.original_sources.pulses_directory) / (str(ROUND) + ".json")
+    original = path.read_bytes()
+    path.unlink()
+    calls, available = [], not outage
+
+    def handler(request):
+        calls.append(request.url.path)
+        if not available:
+            return httpx.Response(503)
+        return json_response(
+            info_record() if request.url.path.endswith("/info") else pulse_record()
+        )
+
+    client = QuicknetClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(pulse_module, "QuicknetClient", lambda: client)
+    # The admission fixture freezes selection before the retained BLS vector's
+    # reveal. Advance only the local publication clock, keeping signed history
+    # and the requested original round unchanged.
+    monkeypatch.setattr(bt.timelock, "current_round", lambda: ROUND + 1)
+    original_history = await a._handoff()
+    if outage:
+        with pytest.raises(DrandVerificationError):
+            await a._start(original_history)
+        assert not h.calls and not path.exists()
+        assert a.journal.get("settlement_input", "original") is None
+        h.clock.block += 100000  # Delay is not a new request/reveal clock.
+        a = await h.start("Charlie")
+        assert await a._handoff() == original_history
+        available = True
+    await a._start(original_history)
+    package_path = Path(a.config.inputs_directory) / (a.cohort + ".json")
+    assert path.read_bytes() == original
+    assert package_path.read_bytes() == canonical_json_bytes(h.c.package)
+    assert a.package_reference == (package_path, digest(h.c.package))
+    assert len(calls) == (4 if outage else 2)
+    assert all(p.endswith("/info") or p.endswith("/" + str(ROUND)) for p in calls)
+    before = len(calls)
+    a = await h.start("Charlie")
+    await a._start(await a._handoff())
+    assert len(calls) == before
+    assert package_path.read_bytes() == canonical_json_bytes(h.c.package)
 
 
 @pytest.mark.parametrize("where", ["before_input", "after_input", "export"])

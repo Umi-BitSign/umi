@@ -246,32 +246,51 @@ def test_owner_export_includes_superseded_consent_and_bounds_complete_inventory(
     assert restored.export_records(cohort, maximum_bytes=1024**2, maximum_records=2) == original
 
 
-def test_closed_intake_rejects_new_work_but_keeps_exact_receipt(intake, scenario):
+@pytest.fixture(params=[False, True], ids=["capture", "owned-height"])
+def publish_history(intake, request):
+    def publish(history, block, **kwargs):
+        if request.param:
+            return intake.publish_at_block(history, block, **kwargs)
+        return intake.publish(history, capture_at(block), **kwargs)
+
+    return publish
+
+
+@pytest.mark.parametrize("height", [True, 2.0, "210", -1, 2**53])
+def test_owned_publication_requires_an_exact_valid_height(intake, scenario, height):
+    history = scenario["intake_history"]
+    before = canonical_json_bytes(intake.history(digest(history.plan)))
+    with pytest.raises(ValueError, match="owned block"):
+        intake.publish_at_block(history, height)
+    assert canonical_json_bytes(intake.history(digest(history.plan))) == before
+
+
+def test_closed_intake_rejects_new_work_but_keeps_exact_receipt(intake, scenario, publish_history):
     request = request_for(scenario)
     receipt = intake.retain(request, capture_at(210))
     history, evidence, _ = seal_and_close(intake, scenario)
-    intake.publish(history, capture_at(310), closure_input=evidence)
+    publish_history(history, 310, closure_input=evidence)
     assert intake.receipt(request) == receipt
     with pytest.raises(ValueError, match="not open"):
         intake.retain(request_for(scenario, sequence=2, block=310), capture_at(310))
 
 
-def test_published_history_cannot_roll_back_or_fork(intake, scenario):
+def test_published_history_cannot_roll_back_or_fork(intake, scenario, publish_history):
     original = scenario["intake_history"]
     current = transition(original, scenario["policy"], "extend", 300, extension=20)
     cohort = digest(original.plan)
-    intake.publish(current, capture_at(310))
-    intake.publish(current, capture_at(310))
+    publish_history(current, 310)
+    publish_history(current, 310)
     for candidate in (
         original,
         transition(original, scenario["policy"], "extend", 300, extension=30),
     ):
         with pytest.raises(ValueError, match=r"rolls back|forks"):
-            intake.publish(candidate, capture_at(310))
+            publish_history(candidate, 310)
     assert intake.history(cohort) == current
 
 
-def test_failed_multiphase_import_is_atomic(intake, scenario):
+def test_failed_multiphase_import_is_atomic(intake, scenario, publish_history):
     cohort = digest(scenario["intake_history"].plan)
     intake.retain(request_for(scenario), capture_at(210))
     closed, evidence, _ = seal_and_close(intake, scenario)
@@ -281,11 +300,11 @@ def test_failed_multiphase_import_is_atomic(intake, scenario):
         db.execute("""CREATE TRIGGER stop_import BEFORE INSERT ON cohort_recovery_decisions
             WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'simulated interruption'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="interruption"):
-        intake.publish(complete, capture_at(1800), closure_input=evidence)
+        publish_history(complete, 1800, closure_input=evidence)
     assert intake.history(cohort) == scenario["intake_history"]
     with sqlite3.connect(path) as db:
         db.execute("DROP TRIGGER stop_import")
-    intake.publish(complete, capture_at(1800), closure_input=evidence)
+    publish_history(complete, 1800, closure_input=evidence)
     assert intake.history(cohort) == complete
 
 
@@ -392,15 +411,17 @@ def test_state_overlap_is_rejected_by_service_config(config, intake):
         type(config).model_validate_json(canonical_json_bytes(invalid))
 
 
-def test_publication_cannot_retroactively_invalidate_accepted_work(intake, scenario):
+def test_publication_cannot_retroactively_invalidate_accepted_work(
+    intake, scenario, publish_history
+):
     request = request_for(scenario, block=310)
     receipt = intake.retain(request, capture_at(310))
     history = transition(scenario["intake_history"], scenario["policy"], "close_phase", 300)
     with pytest.raises(ValueError, match="predates retained"):
-        intake.publish(history, capture_at(320))
+        publish_history(history, 320)
     assert intake.receipt(request) == receipt
     current, evidence, _ = seal_and_close(intake, scenario, block=320)
-    intake.publish(current, capture_at(320), closure_input=evidence)
+    publish_history(current, 320, closure_input=evidence)
     assert intake.receipt(request) == receipt
 
 

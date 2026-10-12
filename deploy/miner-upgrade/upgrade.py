@@ -17,10 +17,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -43,6 +44,188 @@ UV_BOOTSTRAP_VERSION = "0.12.9"
 HEX32 = re.compile(r"^[0-9a-f]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.:@-]+\.service$")
+PROGRESS = None
+
+
+class MigrationProgress:
+    """Count completed stages and expose elapsed time without imposing a deadline."""
+
+    def __init__(self):
+        self.started = time.monotonic()
+        self.stage_started = self.started
+        self.current = None
+        self.stages = [
+            "manifest",
+            "installed_layout",
+            "inputs",
+            "runtime",
+            "startup_validation",
+            "sidecar",
+            "activation",
+            "enrollment",
+        ]
+        self.durations = {}
+        self.history = {}
+        # Operator planning ranges, not timeout settings or guarantees. Replace
+        # them with same-host measured stages when a successful receipt exists.
+        self.planning = {
+            "manifest": (1, 30),
+            "installed_layout": (1, 10),
+            "inputs": (1, 30),
+            "runtime": (30, 900),
+            "startup_validation": (1, 30),
+            "sidecar": (1, 30),
+            "activation": (10, 600),
+            "enrollment": (1, 30),
+            "client_install": (30, 900),
+        }
+        self.attempt = 1
+        self.write_failures = 0
+        self.lock = threading.RLock()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self.lock_fd = None
+
+    def _heartbeat(self):
+        while not self.stop.wait(30):
+            self.emit("waiting")
+
+    def select(self, stages):
+        with self.lock:
+            self.stages = list(stages)
+
+    def advance(self, name):
+        with self.lock:
+            now = time.monotonic()
+            if self.current is not None:
+                self.durations[self.current] = now - self.stage_started
+            self.current = name
+            self.stage_started = now
+            self.emit("retrying" if self.attempt > 1 else "running")
+
+    def snapshot(self, status="running"):
+        with self.lock:
+            now = time.monotonic()
+            elapsed = max(0.0, now - self.stage_started)
+            remaining = [name for name in self.stages if name not in self.durations]
+            known = remaining and all(name in self.history for name in remaining)
+            estimate = sum(self.history[name] for name in remaining) - elapsed if known else None
+            stage_estimate = self.history.get(self.current)
+            overdue = stage_estimate is not None and elapsed > stage_estimate
+            valid_estimate = estimate is not None and estimate >= 0 and not overdue
+            plan_known = remaining and all(name in self.planning for name in remaining)
+            stage_plan = self.planning.get(self.current)
+            plan_overdue = stage_plan is not None and elapsed > stage_plan[1]
+            planned = (
+                [
+                    round(
+                        max(0.0, sum(self.planning[name][bound] for name in remaining) - elapsed), 3
+                    )
+                    for bound in (0, 1)
+                ]
+                if plan_known and not plan_overdue
+                else None
+            )
+            if not known and planned is not None:
+                estimate = sum(planned) / 2
+            completed = sum(name in self.durations for name in self.stages)
+            done = status == "complete"
+            return {
+                "schema": "umi-miner-migration-progress/1",
+                "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "status": "waiting_beyond_estimate"
+                if status == "waiting" and (overdue or plan_overdue)
+                else status,
+                "stage": self.current,
+                "attempt": self.attempt,
+                "retrying": self.attempt > 1,
+                "progress_write_failures": self.write_failures,
+                "completed_stages": len(self.stages) if done else completed,
+                "total_stages": len(self.stages),
+                "percent": 100.0 if done else round(100 * completed / len(self.stages), 1),
+                "percent_basis": "completed_stages_not_work_volume",
+                "elapsed_seconds": round(max(0.0, now - self.started), 3),
+                "stage_elapsed_seconds": round(elapsed, 3),
+                "stage_eta_seconds": 0.0
+                if done
+                else round(stage_estimate - elapsed, 3)
+                if stage_estimate is not None and not overdue
+                else round(max(0.0, sum(stage_plan) / 2 - elapsed), 3)
+                if stage_estimate is None and stage_plan is not None and not plan_overdue
+                else None,
+                "eta_seconds": 0.0
+                if done
+                else round(estimate, 3)
+                if valid_estimate or (not known and planned is not None)
+                else None,
+                "planning_eta_range_seconds": [0.0, 0.0] if done else planned,
+                "eta_confidence": "low" if not done else "observed_complete",
+                "planning_assumptions": [
+                    "network_and_package_mirror_available",
+                    "no_prolonged_active_work_drain",
+                    "no_additional_retries",
+                ],
+                "eta_basis": "complete"
+                if done
+                else "previous_completed_upgrade"
+                if valid_estimate
+                else "previous_duration_exceeded"
+                if known
+                else "planning_estimate_not_deadline"
+                if planned is not None
+                else "planning_range_exceeded"
+                if plan_overdue
+                else "no_comparable_completed_stage_timings",
+                "stage_seconds": dict(self.durations),
+            }
+
+    def emit(self, status):
+        try:
+            print(canonical(self.snapshot(status)).decode(), file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            # A closed SSH/logging pipe is not a migration or rollback decision.
+            self.write_failures += 1
+
+    def finish(self, status):
+        self.stop.set()
+        if self.thread.is_alive():
+            self.thread.join()
+        with self.lock:
+            if status == "complete" and self.current is not None:
+                self.durations[self.current] = time.monotonic() - self.stage_started
+            self.emit(status)
+
+
+def progress_stage(name):
+    if PROGRESS is not None:
+        PROGRESS.advance(name)
+
+
+def progress_plan(*stages):
+    if PROGRESS is not None:
+        PROGRESS.select(stages)
+
+
+def progress_history(report):
+    if PROGRESS is not None and isinstance(report, dict):
+        history = report.get("migration_progress", {})
+        value = history.get("stage_seconds", {}) if isinstance(history, dict) else {}
+        if isinstance(value, dict):
+            PROGRESS.history = {
+                name: seconds
+                for name, seconds in value.items()
+                if isinstance(name, str)
+                and type(seconds) in (int, float)
+                and 0 <= seconds < float("inf")
+            }
+
+
+def progress_limits(limits):
+    if PROGRESS is not None:
+        PROGRESS.planning["activation"] = (
+            10,
+            max(600, limits["startup_seconds"] + limits["inference_seconds"]),
+        )
 
 
 def canonical(value: object) -> bytes:
@@ -404,7 +587,28 @@ def migration_startup(
     directory = authority.get("directory")
     if not isinstance(directory, str) or not directory:
         raise ValueError("installed grant directory is missing; miner unchanged")
+    grant_path = Path(directory)
+    if (
+        not grant_path.is_absolute()
+        or grant_path == Path(grant_path.anchor)
+        or ".." in grant_path.parts
+    ):
+        raise ValueError("unsupported installed grant directory; miner unchanged")
     expected["authority"]["directory"] = directory
+    # These are the optional local limits in the supported native /1 schema,
+    # excluded from the grant journal's authority binding. Preserve each exact
+    # supplied value and omission; never replace it with an updater default.
+    local_limits = {
+        "maximum_grants": (1, 65536),
+        "maximum_bytes": (1024, 16 * 1024**3),
+        "read_timeout_seconds": (1, 3600),
+    }
+    for name, (minimum, maximum) in local_limits.items():
+        if name in authority:
+            value = authority[name]
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError("unsupported installed cohort local limit; miner unchanged")
+            expected["authority"][name] = value
     if current != expected:
         # The journal binds this authority, including its policy and roster.
         # A future cohort/policy transition needs its explicit native migration;
@@ -454,6 +658,10 @@ def cmdline(pid: int) -> list[str]:
     return [os.fsdecode(value) for value in raw.rstrip(b"\0").split(b"\0")]
 
 
+class ServiceNotRunning(ValueError):
+    """The unit has no current process; malformed live layouts are separate errors."""
+
+
 def service(name: str) -> Service:
     if SYSTEMD_UNIT.fullmatch(name) is None:
         raise ValueError("systemd unit name differs")
@@ -465,7 +673,7 @@ def service(name: str) -> Service:
     pid = int(values.get("MainPID", "0"))
     user = values.get("User") or "root"
     if pid <= 0:
-        raise ValueError(f"{name} is not one running service")
+        raise ServiceNotRunning(f"{name} is not one running service")
     working_directory = Path(os.readlink(f"/proc/{pid}/cwd"))
     if not working_directory.is_absolute() or not working_directory.is_dir():
         raise ValueError("running service working directory is unavailable")
@@ -511,7 +719,18 @@ def write_private(path: Path, raw: bytes, account: pwd.struct_passwd) -> None:
     pending.write_bytes(raw)
     os.chown(pending, account.pw_uid, account.pw_gid)
     pending.chmod(0o600)
+    with pending.open("rb") as stream:
+        os.fsync(stream.fileno())
     os.replace(pending, path)
+    fsync_directory(path.parent)
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def command_file(path: Path, arguments: list[str], account: pwd.struct_passwd) -> str:
@@ -558,24 +777,42 @@ def override(
     command_sha256: str,
     launcher_python: Path,
     startup_seconds: float,
+    working_directory: Path | None = None,
 ) -> Path:
     if not launcher_python.is_absolute():
         raise ValueError("launcher interpreter is not absolute")
     path = SYSTEMD_ROOT / f"{service_name}.d" / "90-umi-cohort-upgrade.conf"
-    raw = (
+    raw = override_bytes(
+        command_path, command_sha256, launcher_python, startup_seconds, working_directory
+    )
+    _root_file(path, raw, 0o644)
+    return path
+
+
+def override_bytes(
+    command_path, command_sha256, launcher_python, startup_seconds, working_directory=None
+):
+    directory = ""
+    if working_directory is not None:
+        value = str(working_directory)
+        if (
+            not Path(value).is_absolute()
+            or any(ord(character) < 32 for character in value)
+            or value != value.rstrip()
+            or value.endswith("\\")
+        ):
+            raise ValueError("unsupported service working directory; services unchanged")
+        # WorkingDirectory takes the entire literal value, not a shell-quoted
+        # token. Quotes are filename characters; only systemd specifiers expand.
+        directory = "WorkingDirectory=" + value.replace("%", "%%") + "\n"
+    return (
         "[Service]\n"
         + COOPERATIVE_SERVICE_SETTINGS
+        + directory
         + f"TimeoutStartSec={startup_seconds}s\nExecStart=\n"
         f"ExecStart={launcher_python} -I -B {LAUNCHER} --run-command "
         f"{command_path} {command_sha256}\n"
     ).encode()
-    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    pending = path.with_name(path.name + ".pending")
-    pending.write_bytes(raw)
-    os.chown(pending, 0, 0)
-    pending.chmod(0o644)
-    os.replace(pending, path)
-    return path
 
 
 def unit_for_pid(pid: int) -> str | None:
@@ -629,6 +866,70 @@ def runtime_inference_seconds(arguments: list[str], state: Path) -> float:
     return runtime_limits(arguments, state)["inference_seconds"]
 
 
+def validate_startup(
+    arguments: list[str],
+    account: pwd.struct_passwd,
+    working_directory: Path,
+    hotkey: str,
+    manifest: dict,
+) -> None:
+    """Read and check native startup as the retained account, before service changes.
+
+    No wallet, authority or journal is opened. The selected interpreter applies
+    its own secure reader and schemas to the exact paths the service will use.
+    """
+    selected = {
+        "cwd": str(working_directory),
+        "hotkey": hotkey,
+        "model": option(arguments, "--model-revision"),
+        "origin": option(arguments, "--serving-origin"),
+        "policy": option(arguments, "--competition-policy"),
+        "policy_sha256": manifest["policy"]["sha256"],
+        "transport": option(arguments, "--policy"),
+        "transport_sha256": manifest["transport"]["sha256"],
+        "startup": option(arguments, "--competition-cohort-config"),
+        "state_files": [
+            option(arguments, name)
+            for name in ("--nonce-db", "--assignment-db", "--finality-state")
+        ],
+    }
+    code = """
+import hashlib,json,os,sys
+from umi.miner import _read_startup_file
+from umi.competition_authorization import validate_transport_cohort
+from umi.competition_cohort_miner_startup import CohortMinerStartupConfig
+from umi.open_competition import CompetitionPolicy
+from umi.policy import ScoringPolicy
+v=json.loads(sys.argv[1])
+os.chdir(v['cwd'])
+p=_read_startup_file(v['policy'],label='competition policy')
+t=_read_startup_file(v['transport'],label='scoring policy')
+if hashlib.sha256(p).hexdigest()!=v['policy_sha256']:
+    raise ValueError('installed competition policy differs from selected manifest')
+if hashlib.sha256(t).hexdigest()!=v['transport_sha256']:
+    raise ValueError('installed scoring policy differs from selected manifest')
+p=CompetitionPolicy.model_validate_json(p)
+t=ScoringPolicy.model_validate_json(t)
+validate_transport_cohort(p,t)
+c=CohortMinerStartupConfig.model_validate_json(
+    _read_startup_file(v['startup'],label='cohort miner configuration'))
+c.check(policy=p,transport=t,miner_hotkey=v['hotkey'],model_revision=v['model'],
+        serving_origin=v['origin'],state_files=v['state_files'])
+"""
+    run(
+        "runuser",
+        "--user",
+        account.pw_name,
+        "--",
+        miner_python(arguments),
+        "-I",
+        "-B",
+        "-c",
+        code,
+        canonical(selected).decode(),
+    )
+
+
 def prepare_sidecar(
     arguments: list[str], state: Path, account: pwd.struct_passwd, transport: str
 ) -> tuple[Service | None, list[str], Path | None]:
@@ -653,7 +954,7 @@ def prepare_sidecar(
         raise ValueError("miner and model sidecar use different service accounts")
     config_path = option(sidecar.arguments, "--config")
     expected = option(sidecar.arguments, "--expected-config-sha256")
-    raw = Path(config_path).read_bytes()
+    raw = installed_path(config_path, sidecar.working_directory).read_bytes()
     if sha256(raw) != expected:
         raise ValueError("model sidecar configuration differs from its command")
     config = document(raw, label="model sidecar configuration")
@@ -743,6 +1044,28 @@ def secure_root(path: Path) -> None:
     ):
         raise ValueError(f"unsafe root directory: {path}")
     path.chmod(0o755)
+    fsync_directory(path)
+    fsync_directory(path.parent)
+
+
+def acquire_upgrade_lock():
+    secure_root(ROOT)
+    fd = os.open(ROOT / "upgrade.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("unsafe miner upgrade lock; services unchanged")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def service_directory(path: Path, account: pwd.struct_passwd) -> None:
@@ -1262,6 +1585,7 @@ def activate_services(
     transport: str,
     model: str,
     startup_seconds: float,
+    previous_overrides: dict | None = None,
 ) -> dict:
     miner_dropin = SYSTEMD_ROOT / f"{miner.name}.d" / "90-umi-cohort-upgrade.conf"
     sidecar_dropin = (
@@ -1275,6 +1599,12 @@ def activate_services(
         if sidecar_dropin is not None and sidecar_dropin.exists()
         else None
     )
+    if previous_overrides is not None:
+        value = previous_overrides[miner.name]
+        previous_miner = bytes.fromhex(value) if value is not None else None
+        if sidecar is not None:
+            value = previous_overrides[sidecar.name]
+            previous_sidecar = bytes.fromhex(value) if value is not None else None
     services = (miner,) if sidecar is None else (miner, sidecar)
     with cooperative_upgrade(services):
         try:
@@ -1282,7 +1612,12 @@ def activate_services(
             if sidecar is not None:
                 run("systemctl", "stop", sidecar.name, timeout=None)
             override(
-                miner.name, miner_command_path, miner_command_sha, launcher_python, startup_seconds
+                miner.name,
+                miner_command_path,
+                miner_command_sha,
+                launcher_python,
+                startup_seconds,
+                miner.working_directory,
             )
             if (
                 sidecar is not None
@@ -1295,6 +1630,7 @@ def activate_services(
                     sidecar_command_sha,
                     launcher_python,
                     startup_seconds,
+                    sidecar.working_directory,
                 )
             run("systemctl", "daemon-reload")
             if sidecar is not None:
@@ -1313,10 +1649,10 @@ def activate_services(
                     continue
                 if raw is None:
                     path.unlink(missing_ok=True)
+                    if path.parent.exists():
+                        fsync_directory(path.parent)
                 else:
-                    path.write_bytes(raw)
-                    os.chown(path, 0, 0)
-                    path.chmod(0o644)
+                    _root_file(path, raw, 0o644)
             run("systemctl", "daemon-reload", check=False)
             if sidecar is not None:
                 run("systemctl", "start", sidecar.name, check=False, timeout=None)
@@ -1808,7 +2144,348 @@ def _root_file(path: Path, raw: bytes, mode: int) -> None:
     pending.write_bytes(raw)
     os.chown(pending, 0, 0)
     pending.chmod(mode)
+    with pending.open("rb") as stream:
+        os.fsync(stream.fileno())
     os.replace(pending, path)
+    fsync_directory(path.parent)
+
+
+def service_record(entry: Service) -> dict:
+    return {
+        "name": entry.name,
+        "pid": entry.pid,
+        "user": entry.user,
+        "arguments": entry.arguments,
+        "working_directory": str(entry.working_directory),
+    }
+
+
+def record_service(value: dict) -> Service:
+    if not isinstance(value, dict) or set(value) != {
+        "name",
+        "pid",
+        "user",
+        "arguments",
+        "working_directory",
+    }:
+        raise ValueError("unsupported activation service record; services unchanged")
+    if (
+        SYSTEMD_UNIT.fullmatch(str(value["name"])) is None
+        or type(value["pid"]) is not int
+        or value["pid"] <= 0
+        or not isinstance(value["user"], str)
+        or not value["user"]
+        or not isinstance(value["arguments"], list)
+        or not value["arguments"]
+        or any(not isinstance(item, str) or "\0" in item for item in value["arguments"])
+        or not Path(value["working_directory"]).is_absolute()
+        or not Path(value["working_directory"]).is_dir()
+    ):
+        raise ValueError("unsupported activation service layout; services unchanged")
+    return Service(**{**value, "working_directory": Path(value["working_directory"])})
+
+
+def unit_controls(entry):
+    """Bind loaded unit source files, excluding only this updater's two overrides."""
+    output = run(
+        "systemctl", "show", entry.name, "--property=FragmentPath,DropInPaths,WorkingDirectory"
+    ).stdout
+    values = dict(line.split("=", 1) for line in output.splitlines())
+    fragment = values.get("FragmentPath")
+    if not fragment or not Path(fragment).is_absolute():
+        raise ValueError("unsupported systemd unit source; services unchanged")
+    paths = [Path(fragment), *(Path(value) for value in shlex.split(values.get("DropInPaths", "")))]
+    ignored = {
+        SYSTEMD_ROOT / (entry.name + ".d") / "90-umi-cohort-upgrade.conf",
+        SYSTEMD_RUNTIME_ROOT / (entry.name + ".d") / "zz-umi-cohort-upgrade-drain.conf",
+    }
+    result = {}
+    for path in paths:
+        if path in ignored:
+            continue
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("unsupported systemd control file; services unchanged")
+        result[str(path)] = sha256(path.read_bytes())
+    return {"files": result, "working_directory": values.get("WorkingDirectory") or "/"}
+
+
+def retain_activation(state, manifest, account, summary, activation):
+    path = state / "activation-recovery.json"
+    if path.exists():
+        raise ValueError(
+            "an activation recovery already exists; resume it before preparing another"
+        )
+    saved = dict(activation)
+    previous = {}
+    controls = {}
+    original_arguments = {}
+    for key in ("miner", "sidecar"):
+        entry = saved[key]
+        if entry is None:
+            continue
+        controls[entry.name] = unit_controls(entry)
+        override_bytes(
+            activation[key + "_command_path"],
+            activation[key + "_command_sha"],
+            activation["launcher_python"],
+            activation["startup_seconds"],
+            entry.working_directory,
+        )
+        original = service(entry.name) if key == "sidecar" else entry
+        original_arguments[entry.name] = original.arguments
+        saved[key] = service_record(entry)
+        dropin = SYSTEMD_ROOT / (entry.name + ".d") / "90-umi-cohort-upgrade.conf"
+        if dropin.is_symlink():
+            raise ValueError("unsupported symlink activation override; services unchanged")
+        previous[entry.name] = dropin.read_bytes().hex() if dropin.exists() else None
+    for key, value in saved.items():
+        if isinstance(value, Path):
+            saved[key] = str(value)
+    record = {
+        "schema": "umi-miner-activation-recovery/1",
+        "manifest_sha256": sha256(canonical(manifest)),
+        "uid": account.pw_uid,
+        "gid": account.pw_gid,
+        "summary": summary,
+        "activation": saved,
+        "previous_overrides": previous,
+        "attempt": 1,
+        "inputs_sha256": activation_input_hashes(activation),
+        "unit_controls": controls,
+        "original_arguments": original_arguments,
+    }
+    _root_file(path, canonical(record), 0o600)
+    return record
+
+
+def read_activation(state, manifest):
+    path = state / "activation-recovery.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    for parent in (ROOT, state):
+        metadata = parent.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or metadata.st_mode & 0o022
+        ):
+            raise ValueError("unsafe activation recovery directory; services unchanged")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size <= 0
+        ):
+            raise ValueError("unsafe activation recovery file; services unchanged")
+        # This is root-owned local control metadata, never miner evidence. Read
+        # its exact recorded size; do not introduce a cohort execution ceiling.
+        raw = stream.read(metadata.st_size + 1)
+        if (
+            len(raw) != metadata.st_size
+            or os.fstat(stream.fileno()).st_mtime_ns != metadata.st_mtime_ns
+        ):
+            raise ValueError("activation recovery changed while reading; services unchanged")
+    record = document(raw, label="activation recovery")
+    if (
+        canonical(record) != raw
+        or set(record)
+        != {
+            "schema",
+            "manifest_sha256",
+            "uid",
+            "gid",
+            "summary",
+            "activation",
+            "previous_overrides",
+            "attempt",
+            "inputs_sha256",
+            "unit_controls",
+            "original_arguments",
+        }
+        or record["schema"] != "umi-miner-activation-recovery/1"
+        or record["manifest_sha256"] != sha256(canonical(manifest))
+        or type(record["attempt"]) is not int
+        or record["attempt"] <= 0
+    ):
+        raise ValueError("unsupported activation recovery binding; services unchanged")
+    return record
+
+
+def activation_arguments(record, state, account):
+    saved = record["activation"]
+    keys = {
+        "miner",
+        "sidecar",
+        "miner_command_path",
+        "miner_command_sha",
+        "sidecar_command_path",
+        "sidecar_command_sha",
+        "launcher_python",
+        "new_socket",
+        "port",
+        "policy",
+        "transport",
+        "model",
+        "startup_seconds",
+    }
+    if not isinstance(saved, dict) or set(saved) != keys:
+        raise ValueError("unsupported activation recovery arguments; services unchanged")
+    if record["uid"] != account.pw_uid or record["gid"] != account.pw_gid:
+        raise ValueError("activation service account changed; services unchanged")
+    result = dict(saved)
+    for key in ("miner", "sidecar"):
+        if saved[key] is not None:
+            result[key] = record_service(saved[key])
+    for key in ("miner_command_path", "sidecar_command_path", "launcher_python", "new_socket"):
+        if saved[key] is not None:
+            result[key] = Path(saved[key])
+    commands = {}
+    for name in ("miner", "sidecar"):
+        entry = result[name]
+        if entry is None:
+            continue
+        if entry.user != account.pw_name:
+            raise ValueError("activation service account differs; services unchanged")
+        path = result[name + "_command_path"]
+        if path is None or path.parent != state / "inputs":
+            raise ValueError("activation command path differs; services unchanged")
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != account.pw_uid
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("activation command file differs; services unchanged")
+        raw = path.read_bytes()
+        value = document(raw, label="activation command")
+        if (
+            sha256(raw) != result[name + "_command_sha"]
+            or canonical(value) != raw
+            or set(value) != {"schema", "arguments"}
+            or value["schema"] != "umi-miner-upgrade-command/1"
+            or not isinstance(value["arguments"], list)
+            or not value["arguments"]
+            or any(not isinstance(item, str) or "\0" in item for item in value["arguments"])
+        ):
+            raise ValueError("activation command binding differs; services unchanged")
+        commands[name] = value["arguments"]
+    if set(record["previous_overrides"]) != {
+        entry.name for entry in (result["miner"], result["sidecar"]) if entry is not None
+    }:
+        raise ValueError("activation rollback bindings differ; services unchanged")
+    result["previous_overrides"] = record["previous_overrides"]
+    if activation_input_hashes(result) != record["inputs_sha256"]:
+        raise ValueError("activation startup inputs changed; services unchanged")
+    return result, commands
+
+
+def activation_input_hashes(activation):
+    result = {}
+    for name in ("miner", "sidecar"):
+        entry = activation[name]
+        if entry is None:
+            continue
+        raw = activation[name + "_command_path"].read_bytes()
+        arguments = document(raw, label="activation command")["arguments"]
+        flags = (
+            (
+                "--policy",
+                "--competition-policy",
+                "--competition-cohort-config",
+                "--competition-chain-config",
+            )
+            if name == "miner"
+            else ("--config",)
+        )
+        for flag in flags:
+            value = option(arguments, flag, required=False)
+            if value is not None:
+                path = installed_path(value, entry.working_directory)
+                result[str(path)] = sha256(path.read_bytes())
+    return result
+
+
+def check_recovery_services(activation, record, commands):
+    """Qualify unchanged account, cwd and original-or-selected override before writes."""
+    for name in ("miner", "sidecar"):
+        entry = activation[name]
+        if entry is None:
+            continue
+        recorded_controls = record["unit_controls"][entry.name]
+        if unit_controls(entry)["files"] != recorded_controls["files"]:
+            raise ValueError("installed service controls changed; services unchanged")
+        output = run("systemctl", "show", entry.name, "--property=User,WorkingDirectory").stdout
+        values = dict(line.split("=", 1) for line in output.splitlines())
+        if (values.get("User") or "root") != entry.user or (
+            values.get("WorkingDirectory") or "/"
+        ) not in {recorded_controls["working_directory"], str(entry.working_directory)}:
+            raise ValueError(
+                "installed activation account or working directory changed; services unchanged"
+            )
+        dropin = SYSTEMD_ROOT / (entry.name + ".d") / "90-umi-cohort-upgrade.conf"
+        if dropin.is_symlink():
+            raise ValueError("installed activation override is a symlink; services unchanged")
+        actual = dropin.read_bytes() if dropin.exists() else None
+        previous = activation["previous_overrides"][entry.name]
+        previous = bytes.fromhex(previous) if previous is not None else None
+        selected = override_bytes(
+            activation[name + "_command_path"],
+            activation[name + "_command_sha"],
+            activation["launcher_python"],
+            activation["startup_seconds"],
+            entry.working_directory,
+        )
+        if actual not in (previous, selected):
+            raise ValueError("installed activation override changed; services unchanged")
+        try:
+            current = service(entry.name)
+        except ServiceNotRunning:
+            continue
+        if (
+            current.user != entry.user
+            or current.working_directory != entry.working_directory
+            or current.arguments not in (record["original_arguments"][entry.name], commands[name])
+        ):
+            raise ValueError("running service command changed; services unchanged")
+
+
+def observe_selected_activation(activation, commands):
+    """Adopt an already selected healthy process after an interrupted observation."""
+    for name in ("miner", "sidecar"):
+        expected = activation[name]
+        if expected is None:
+            continue
+        try:
+            current = service(expected.name)
+        except ServiceNotRunning:
+            return None
+        if (
+            current.user != expected.user
+            or current.working_directory != expected.working_directory
+            or current.arguments != commands[name]
+        ):
+            return None
+    if activation["sidecar"] is not None:
+        wait_capacity(
+            activation["new_socket"],
+            activation["transport"],
+            activation["model"],
+            seconds=activation["startup_seconds"],
+        )
+    return wait_health(
+        activation["port"],
+        activation["policy"],
+        activation["transport"],
+        activation["model"],
+        seconds=activation["startup_seconds"],
+    )
 
 
 def install_endpoint_enrollment(
@@ -1868,7 +2545,60 @@ def install_endpoint_enrollment(
     return {"retry_seconds": 900, "status": "endpoint_enrollment_retry_scheduled"}
 
 
-def main() -> None:
+def finish_upgrade(
+    *,
+    state,
+    summary,
+    manifest,
+    account,
+    miner,
+    updated,
+    observed,
+    effective_limits,
+    runtime_python,
+    hotkey,
+    model,
+    origin,
+    public_model_track,
+):
+    progress_stage("enrollment")
+    report = {
+        **summary,
+        "health": observed,
+        "effective_limits": effective_limits,
+        "runtime_revision": manifest["runtime"]["revision"],
+        "state_root": str(state),
+        "status": "miner_upgrade_verified",
+    }
+    if PROGRESS is not None:
+        report["migration_progress"] = PROGRESS.snapshot()
+    receipt = state / "upgrade-receipt.json"
+    # Durably record successful cutover before removing its recovery intent or
+    # invoking enrollment. A restart then validates the live service and only
+    # schedules the retained request again, without a second cutover.
+    write_private(receipt, canonical(report), account)
+    (state / "activation-recovery.json").unlink(missing_ok=True)
+    fsync_directory(state)
+    policy_raw = (state / "inputs/competition-policy.json").read_bytes()
+    if sha256(policy_raw) != manifest["policy"]["sha256"]:
+        raise ValueError("retained competition policy digest differs")
+    report["endpoint_enrollment"] = install_endpoint_enrollment(
+        state=state,
+        account=account,
+        runtime_python=runtime_python,
+        config_raw=endpoint_enrollment_config(
+            updated, manifest, hotkey, model, origin, public_model_track, miner.working_directory
+        ),
+        policy_raw=policy_raw,
+    )
+    if PROGRESS is not None:
+        PROGRESS.durations["enrollment"] = time.monotonic() - PROGRESS.stage_started
+        report["migration_progress"] = PROGRESS.snapshot("complete")
+    write_private(receipt, canonical(report), account)
+    print(canonical(report).decode())
+
+
+def _main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--public-model-track", choices=("yes", "no"))
     parser.add_argument(
@@ -1892,6 +2622,7 @@ def main() -> None:
         args.public_model_track = "yes"
     elif args.public_model_track is None:
         parser.error("--public-model-track is required for endpoint upgrades")
+    progress_stage("manifest")
     manifest_raw = fetch(args.manifest_url)
     manifest = document(manifest_raw, label="upgrade manifest")
     if manifest_raw not in {canonical(manifest), canonical(manifest) + b"\n"}:
@@ -1901,6 +2632,8 @@ def main() -> None:
     manifest_raw = canonical(manifest)
     validate_manifest(manifest, status, args.public_model_track)
     if args.install_model_client:
+        progress_plan("manifest", "client_install")
+        progress_stage("client_install")
         if args.dry_run:
             report = {
                 "status": "model_client_preflight_passed",
@@ -1916,10 +2649,14 @@ def main() -> None:
         raise ValueError("the automatic upgrader requires a Linux systemd miner")
     if os.geteuid() != 0 and not args.dry_run:
         raise ValueError("run the upgrade with sudo")
-    miner = discover_miner()
+    if not args.dry_run:
+        PROGRESS.lock_fd = acquire_upgrade_lock()
+    progress_stage("installed_layout")
+    state = ROOT / (manifest["policy"]["value_sha256"][:16])
+    recovery = read_activation(state, manifest)
+    miner = record_service(recovery["activation"]["miner"]) if recovery else discover_miner()
     account = pwd.getpwnam(miner.user)
     hotkey, model, origin = miner_identity(miner.arguments, miner.user, miner.working_directory)
-    state = ROOT / (manifest["policy"]["value_sha256"][:16])
     receipt = state / "upgrade-receipt.json"
     port = int(option(miner.arguments, "--port"))
     model_only = manifest["eligible_tracks"] == ["model"]
@@ -1946,10 +2683,83 @@ def main() -> None:
         "status": "upgrade_preflight_passed",
     }
     if args.dry_run:
+        progress_plan("manifest", "installed_layout")
+        summary["activation_recovery_pending"] = recovery is not None
         print(canonical(summary).decode())
+        return
+    if recovery is not None:
+        activation, commands = activation_arguments(recovery, state, account)
+        updated = commands["miner"]
+        if activation["policy"] != manifest["policy"]["value_sha256"] or (
+            activation["transport"] != manifest["transport"]["value_sha256"]
+            or activation["model"] != model
+            or activation["port"] != port
+        ):
+            raise ValueError("activation scope differs; services unchanged")
+        progress_plan(
+            "manifest",
+            "installed_layout",
+            "runtime",
+            "startup_validation",
+            "activation",
+            "enrollment",
+        )
+        if PROGRESS is not None:
+            PROGRESS.attempt = recovery["attempt"] + 1
+        if receipt.exists():
+            with suppress(OSError, ValueError):
+                progress_history(document(receipt.read_bytes(), label="prior upgrade timings"))
+        progress_stage("runtime")
+        runtime_python = install_runtime(
+            miner_python(miner.arguments),
+            manifest["runtime"],
+            account,
+            state / "inputs/transport-policy.json",
+        )
+        if runtime_python != activation["launcher_python"] or miner_python(updated) != str(
+            runtime_python
+        ):
+            raise ValueError("activation interpreter binding differs; services unchanged")
+        progress_stage("startup_validation")
+        validate_startup(updated, account, miner.working_directory, hotkey, manifest)
+        effective_limits = runtime_limits(updated, state)
+        progress_limits(effective_limits)
+        if effective_limits["startup_seconds"] != activation["startup_seconds"]:
+            raise ValueError("activation startup budget differs; services unchanged")
+        check_recovery_services(activation, recovery, commands)
+        recovery["attempt"] += 1
+        _root_file(state / "activation-recovery.json", canonical(recovery), 0o600)
+        install_launcher(Path(__file__))
+        progress_stage("activation")
+        observed = observe_selected_activation(activation, commands)
+        if observed is None:
+            observed = activate_services(**activation)
+        else:
+            services = tuple(
+                entry for entry in (activation["miner"], activation["sidecar"]) if entry is not None
+            )
+            with cooperative_upgrade(services):
+                pass
+        finish_upgrade(
+            state=state,
+            summary={**summary, "activation_resumed": True},
+            manifest=manifest,
+            account=account,
+            miner=miner,
+            updated=updated,
+            observed=observed,
+            effective_limits=effective_limits,
+            runtime_python=runtime_python,
+            hotkey=hotkey,
+            model=model,
+            origin=origin,
+            public_model_track=args.public_model_track == "yes",
+        )
         return
     secure_root(ROOT)
     if model_only:
+        progress_plan("manifest", "installed_layout", "inputs")
+        progress_stage("inputs")
         if receipt.exists():
             prior = document(receipt.read_bytes(), label="upgrade receipt")
             if (
@@ -1988,6 +2798,7 @@ def main() -> None:
         return
     if receipt.exists():
         prior = document(receipt.read_bytes(), label="upgrade receipt")
+        progress_history(prior)
         retained_transport = state / "inputs/transport-policy.json"
         selected_python = None
         if retained_transport.exists():
@@ -1998,12 +2809,17 @@ def main() -> None:
             )
         if (
             selected_python is not None
+            and migration == "cohort_runtime_in_place"
+            and prior.get("status") == "miner_upgrade_verified"
             and prior.get("policy_sha256") == manifest["policy"]["value_sha256"]
             and prior.get("runtime_revision") == manifest["runtime"]["revision"]
             and Path(miner_python(miner.arguments)).resolve() == selected_python.resolve()
             and python_module_miner(miner.arguments)
             and {"-I", "-B"}.issubset(miner.arguments[1 : miner.arguments.index("-m")])
         ):
+            progress_plan("manifest", "installed_layout", "startup_validation", "enrollment")
+            progress_stage("startup_validation")
+            validate_startup(miner.arguments, account, miner.working_directory, hotkey, manifest)
             observed = wait_health(
                 port,
                 manifest["policy"]["value_sha256"],
@@ -2015,6 +2831,7 @@ def main() -> None:
             if sha256(policy_raw) != manifest["policy"]["sha256"]:
                 raise ValueError("retained competition policy digest differs")
             install_launcher(Path(__file__))
+            progress_stage("enrollment")
             enrollment = install_endpoint_enrollment(
                 state=state,
                 account=account,
@@ -2045,6 +2862,7 @@ def main() -> None:
                 ).decode()
             )
             return
+    progress_stage("inputs")
     secure_root(state)
     secure_root(state / "inputs")
     for name in ("grants", "model", "protocol"):
@@ -2054,14 +2872,11 @@ def main() -> None:
         ("policy", "competition-policy.json"),
         ("transport", "transport-policy.json"),
     )
-    retained_policy_raw = None
     for key, filename in policy_files:
         raw = fetch(manifest[key]["url"])
         if sha256(raw) != manifest[key]["sha256"]:
             raise ValueError(f"{key} file digest differs")
         write_private(inputs / filename, raw, account)
-        if key == "policy":
-            retained_policy_raw = raw
     write_private(inputs / "upgrade-manifest.json", manifest_raw, account)
     write_private(
         inputs / "miner-startup.json",
@@ -2080,6 +2895,7 @@ def main() -> None:
         ),
         account,
     )
+    progress_stage("runtime")
     runtime_python = install_runtime(
         miner_python(miner.arguments),
         manifest["runtime"],
@@ -2087,10 +2903,14 @@ def main() -> None:
         inputs / "transport-policy.json",
     )
     updated = miner_command(miner.arguments, str(runtime_python), state, manifest)
+    progress_stage("startup_validation")
+    validate_startup(updated, account, miner.working_directory, hotkey, manifest)
+    progress_stage("sidecar")
     sidecar, updated, new_socket = prepare_sidecar(
         updated, state, account, manifest["transport"]["value_sha256"]
     )
     effective_limits = runtime_limits(updated, state)
+    progress_limits(effective_limits)
     miner_command_path = inputs / ("miner-command-" + sha256(canonical(updated)) + ".json")
     miner_command_sha = command_file(miner_command_path, updated, account)
     sidecar_command_path = None
@@ -2100,7 +2920,7 @@ def main() -> None:
         sidecar_command_path = inputs / ("model-command-" + sha256(canonical(prepared)) + ".json")
         sidecar_command_sha = command_file(sidecar_command_path, prepared, account)
     install_launcher(Path(__file__))
-    observed = activate_services(
+    activation = dict(
         miner=miner,
         sidecar=sidecar,
         miner_command_path=miner_command_path,
@@ -2115,37 +2935,41 @@ def main() -> None:
         model=model,
         startup_seconds=effective_limits["startup_seconds"],
     )
-    if retained_policy_raw is None:
-        raise ValueError("competition policy was not retained")
-    report = {
-        **summary,
-        "health": observed,
-        "effective_limits": effective_limits,
-        "runtime_revision": manifest["runtime"]["revision"],
-        "state_root": str(state),
-        "status": "miner_upgrade_verified",
-    }
-    # Record the successful service cutover before enrollment invokes the
-    # network. A later rerun can finish enrollment without repeating cutover.
-    write_private(receipt, canonical(report), account)
-    enrollment = install_endpoint_enrollment(
+    retained = retain_activation(state, manifest, account, summary, activation)
+    progress_stage("activation")
+    observed = activate_services(**activation, previous_overrides=retained["previous_overrides"])
+    finish_upgrade(
         state=state,
+        summary=summary,
+        manifest=manifest,
         account=account,
+        miner=miner,
+        updated=updated,
+        observed=observed,
+        effective_limits=effective_limits,
         runtime_python=runtime_python,
-        config_raw=endpoint_enrollment_config(
-            updated,
-            manifest,
-            hotkey,
-            model,
-            origin,
-            args.public_model_track == "yes",
-            miner.working_directory,
-        ),
-        policy_raw=retained_policy_raw,
+        hotkey=hotkey,
+        model=model,
+        origin=origin,
+        public_model_track=args.public_model_track == "yes",
     )
-    report["endpoint_enrollment"] = enrollment
-    write_private(receipt, canonical(report), account)
-    print(canonical(report).decode())
+
+
+def main() -> None:
+    global PROGRESS
+    PROGRESS = MigrationProgress()
+    PROGRESS.thread.start()
+    try:
+        _main()
+    except BaseException:
+        PROGRESS.finish("interrupted_or_failed")
+        raise
+    else:
+        PROGRESS.finish("complete")
+    finally:
+        if PROGRESS.lock_fd is not None:
+            os.close(PROGRESS.lock_fd)
+        PROGRESS = None
 
 
 if __name__ == "__main__":

@@ -41,18 +41,23 @@ class PhaseReviewBudget(StrictProtocolModel):
     def export_exchange_seconds(self) -> int:
         return self.export_queue_slots * self.export_seconds + self.transport_seconds
 
-    def vote_seconds(self, kind: Literal["progress", "decision"]) -> int:
-        if kind not in ("progress", "decision"):
+    def vote_seconds(self, kind: Literal["progress", "decision", "adoption"]) -> int:
+        if kind not in ("progress", "decision", "adoption"):
             raise ValueError("unsupported phase review operation")
+        # Adoption has three exchanges, but only two history validation/replay
+        # allowances. Reservation is a small signed proof, not a third history
+        # replay; its verification belongs to the additional authority work.
         reads = 2 if kind == "progress" else 3
+        replays = 2 if kind == "adoption" else reads
         return (
-            reads * (self.export_exchange_seconds + self.replay_seconds)
+            reads * self.export_exchange_seconds
+            + replays * self.replay_seconds
             + self.authority_seconds
             + self.signing_seconds
             + self.vote_queue_seconds
         )
 
-    def vote_exchange_seconds(self, kind: Literal["progress", "decision"]) -> int:
+    def vote_exchange_seconds(self, kind: Literal["progress", "decision", "adoption"]) -> int:
         # The route queues before its operation timer; the signer's serial
         # queue is inside it. Give each queue its explicit selected allowance.
         return self.vote_seconds(kind) + self.vote_queue_seconds + self.transport_seconds
@@ -63,6 +68,7 @@ class PhaseReviewBudget(StrictProtocolModel):
             self.export_exchange_seconds,
             self.vote_exchange_seconds("progress"),
             self.vote_exchange_seconds("decision"),
+            self.vote_exchange_seconds("adoption"),
         ):
             check_review_seconds(value)
         return self
@@ -90,6 +96,8 @@ class PhaseReviewBudget(StrictProtocolModel):
             "decision_vote_seconds": self.vote_seconds("decision"),
             "progress_exchange_seconds": self.vote_exchange_seconds("progress"),
             "decision_exchange_seconds": self.vote_exchange_seconds("decision"),
+            "adoption_vote_seconds": self.vote_seconds("adoption"),
+            "adoption_exchange_seconds": self.vote_exchange_seconds("adoption"),
         }
 
 
@@ -152,7 +160,7 @@ def validate_phase_review_path(
     _proxy_budget(vote_proxy_seconds, direct_vote)
     if _pins(reviewer) != _pins(peer):
         raise ValueError("phase review path changes policy, runtime or capacity")
-    for kind in ("progress", "decision"):
+    for kind in ("progress", "decision", "adoption"):
         if peer.vote_exchange_seconds(kind) < reviewer.vote_exchange_seconds(kind):
             raise ValueError("coordinator peer shortens the complete reviewer allowance")
         if not direct_vote and vote_proxy_seconds < peer.vote_exchange_seconds(kind):

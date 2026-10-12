@@ -57,8 +57,13 @@ keeps the existing service account, including an existing root-run installation.
 It inspects the installed startup schema and authority before choosing a migration.
 For a runtime update under the same cohort authority, it retains the exact startup
 bytes, grant directory, nonce database, assignment database and finality database
-in place, including custom paths. Relative paths keep the service's existing
-working directory. The updater does not copy a directory-bound grant journal or
+in place, including custom paths and explicit local grant-count, byte and history
+read-timeout settings. A grant directory must be absolute and dedicated; relative
+CLI paths keep the service's existing
+working directory, including a model sidecar's configuration path. The updater
+pins that effective directory in the selected unit, including installations whose
+old launcher changed directory before starting Python. It
+does not copy a directory-bound grant journal or
 change accounts as part of an upgrade. A same-authority cohort runtime update also
 retains an explicit `--competition-chain-config`, including its owned observer
 state and selected proof-provider budgets.
@@ -75,8 +80,13 @@ state bindings; a different deployment or profile is refused before cutover.
 It selects the exact root-owned CPython patch version and
 scoring package versions required by the signed transport policy for this host.
 It checks the installed source, Python, package contents and scoring profile as
-the miner service user before switching services. A missing compatible Python or
-failed runtime check stops the upgrade while the existing miner remains selected.
+the miner service user before switching services. It also uses the selected
+runtime's native secure reader and startup schemas under that account and working
+directory to check the exact policy, transport and cohort startup files and the
+separate grant-directory binding. Generated files remain owned by the service
+account inside a root-controlled configuration directory that other users cannot
+write. A missing compatible Python or failed runtime check stops the upgrade while
+the existing miner remains selected.
 
 The runtime installs beside the old runtime, with its directory bound to both
 the source revision and scoring profile. The private state namespace remains
@@ -84,9 +94,12 @@ bound to the current transport policy. Nonce, assignment,
 finality, grant and model-sidecar state from earlier policies remain intact.
 
 Rerunning the command installs a changed runtime even within the same cohort.
-An existing receipt skips cutover only when its revision and the running miner's
-interpreter match the selected deployment and scoring profile. An older runtime
-launch without isolated Python imports also requires cutover, even if its receipt
+An existing successful upgrade receipt skips cutover only when the running miner
+already uses the supported cohort configuration, its revision and interpreter
+match the selected deployment and scoring profile, and native startup validation
+passes under its retained service account. A legacy miner still requires migration
+even if its current interpreter and a stale receipt name the target revision. An
+older runtime launch without isolated Python imports also requires cutover, even if its receipt
 names the selected revision. An older runtime for the same source revision is
 preserved and replaced by the verified policy
 profile instead of being reused merely because its revision matches. Retained
@@ -119,10 +132,31 @@ resolved budgets in its receipt. Before stopping an installed miner, it verifies
 cooperative service shutdown settings and waits for the miner to drain before
 stopping its model service. There is no separate five-minute stop-command cutoff
 or systemd forced-kill timer. The selected service retains cooperative shutdown
-and the resolved startup allowance for subsequent boots. If interrupted during
-drain, the temporary protection stays in place until the service settles; rerun
-the updater to complete the upgrade. Existing grants, responses and state paths
-remain in place.
+and the resolved startup allowance for subsequent boots. Before its first stop,
+the updater durably records the selected manifest, original service accounts and
+working directories, exact command and startup input hashes, and original unit
+overrides and control files. An interrupted run can therefore resume even while the miner or
+sidecar is stopped. Rerun the same upgrade: it validates those bindings before
+service changes, retains the cooperative drain protection, and adopts an already
+selected healthy runtime without restarting it. Once the successful cutover
+receipt is durable, retries only resume enrollment. A changed manifest, account,
+working directory, command, startup input or unrelated unit override is refused;
+preserve the recovery record and resolve that mismatch without resetting state.
+Existing grants, signed requests, responses and state paths remain in place.
+Only one endpoint upgrade or recovery can run at a time.
+
+The updater writes structured progress to stderr at each stage change and every
+30 seconds while waiting. It reports completed-stage percentage, total and stage
+elapsed time, recovery attempt, and ETA. The percentage counts stages rather than
+bytes or inference work. A first run gives a low-confidence planning range,
+assuming available network/package mirrors, no prolonged active-work drain and no
+additional retries. The activation range reflects the selected runtime's startup
+and inference budgets. Comparable completed-stage timings supersede the planning
+estimate on later runs, including recovery. A stage that exceeds its estimate is
+reported as waiting beyond estimate with an unknown ETA; a recovery attempt is
+explicitly marked as retrying. These observations do not add an execution deadline.
+A disconnected progress stream does not abort the upgrade. The successful receipt retains
+the stage timings; the final result remains a JSON object on stdout.
 An unsupported sidecar layout stops the upgrade before services change. Check any
 external proxy's request timeout as well: a healthy `/healthz` alone does not prove
 that the proxy can carry a full-length translation.

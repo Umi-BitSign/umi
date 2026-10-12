@@ -478,3 +478,15 @@ def test_adoption_preserves_native_service_outage_chain(original, policy, tmp_pa
         assert reopened._last(h.cohort, "intake") == after
     finally:
         h.db.close()
+
+
+def test_owned_height_helper_preserves_original_proposal_bytes(original, policy):
+    from umi.competition_cohort_request_rule import prepare_request_tail_adoption_at_block
+
+    history, _ = original
+    assert canonical_json_bytes(prepare_request_tail_adoption(history, policy, boundary(450))) == (
+        canonical_json_bytes(prepare_request_tail_adoption_at_block(history, policy, 450))
+    )
+    for invalid in (True, False, 450.0, "450", -1, 2**53):
+        with pytest.raises(ValueError, match="current block"):
+            prepare_request_tail_adoption_at_block(history, policy, invalid)

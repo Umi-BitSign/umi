@@ -317,6 +317,93 @@ async def test_current_finalized_block_does_not_collect_registration_membership(
 
 
 @pytest.mark.parametrize(
+    "fault",
+    [
+        "closed",
+        "dead",
+        "startup_floor",
+        "minimum",
+        "stale",
+        "future",
+        "genesis",
+        "class",
+        "offline",
+        "policy",
+        "chain",
+        "verifier",
+        "height",
+        "hash",
+        "root",
+        "block_type",
+        "snapshot_type",
+        "rollback",
+        "same_height_fork",
+    ],
+)
+async def test_owned_height_rejects_invalid_finality_without_membership(chain, monkeypatch, fault):
+    provider, finality = chain.provider, chain.finality
+    block = await finality.verified_block_at(_HEIGHT)
+    if fault == "closed":
+        await provider.aclose()
+    elif fault in {"dead", "startup_floor"}:
+        provider._owned = True
+        provider._task = SimpleNamespace(done=lambda: fault == "dead")
+        provider._startup_floor = _HEIGHT
+    elif fault == "minimum":
+        provider.config = provider.config.model_copy(
+            update={"minimum_finalized_block": _HEIGHT + 1}
+        )
+    elif fault in {"stale", "future"}:
+        chain.clock.now += chain.config.maximum_head_age_ms + 1 if fault == "stale" else -31_002
+    elif fault in {"genesis", "class", "offline"}:
+        evidence = json.loads(block.finality_evidence)
+        key, value = {
+            "genesis": ("genesis_hash", _hash(99)),
+            "class": ("evidence_class", "rpc_finalized"),
+            "offline": ("offline_finality_proof", True),
+        }[fault]
+        evidence[key] = value
+        raw = canonical_json_bytes(evidence)
+        block = replace(
+            block, finality_evidence=raw, finality_evidence_sha256=hashlib.sha256(raw).hexdigest()
+        )
+    elif fault in {"policy", "chain", "verifier", "height", "hash", "root"}:
+        key, value = {
+            "policy": ("scoring_policy_hash", "99" * 32),
+            "chain": (
+                "chain_observation",
+                block.chain_observation.model_copy(update={"runtime_spec_version": 999}),
+            ),
+            "verifier": ("finality_verifier_sha256", "99" * 32),
+            "height": ("height", _HEIGHT + 1),
+            "hash": ("block_hash", _hash(99)),
+            "root": ("state_root", _hash(99)),
+        }[fault]
+        block = replace(block, **{key: value})
+    elif fault == "block_type":
+        block = SimpleNamespace(height=block.height, block_hash=block.block_hash)
+    elif fault == "snapshot_type":
+        finality.ref = SimpleNamespace(block_number=_HEIGHT)
+    elif fault in {"rollback", "same_height_fork"}:
+        with sqlite3.connect(provider._path) as db:
+            db.execute(
+                "INSERT INTO observed_head VALUES(?,?,?)",
+                (1, _HEIGHT + (fault == "rollback"), _hash(99)),
+            )
+
+    async def changed_block(_):
+        return block
+
+    monkeypatch.setattr(finality, "verified_block_at", changed_block)
+    with pytest.raises(ValueError):
+        await provider.current_finalized_block()
+    assert chain.rpc.calls == []
+    assert chain.verifier.checked == []
+    with sqlite3.connect(provider._path) as db:
+        assert db.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "stale",

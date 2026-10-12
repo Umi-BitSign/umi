@@ -570,6 +570,39 @@ async def test_restart_retains_host_selection_and_allows_capacity_change(selecte
     assert providers.events[-1] == "closed"
 
 
+@pytest.mark.parametrize("selected_profile", [False, True])
+async def test_boot_selects_adoption_route_and_readers_from_same_profile(
+    selected, providers, monkeypatch, selected_profile
+):
+    from .test_competition_cohort_review_budget import profile, select
+
+    c = selected.config
+    if selected_profile:
+        c = select(c, profile(c.policy))
+    selected_routes = []
+    native = boot.request_tail_adoption_vote_routes
+
+    def routes(signer, series, **kwargs):
+        selected_routes.append((signer, kwargs))
+        return native(signer, series, **kwargs)
+
+    monkeypatch.setattr(boot, "request_tail_adoption_vote_routes", routes)
+    async with boot.phase_review_app(c) as app:
+        signer, kwargs = selected_routes[0]
+        assert kwargs["budget"] == c.phase_review_budget
+        reviewer = signer.reviewer.adoption
+        assert reviewer.budget == c.phase_review_budget
+        assert reviewer.history.timeout == (
+            c.phase_review_budget.export_exchange_seconds if selected_profile else 2400
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://local"
+        ) as client:
+            assert (
+                await client.post("/internal/cohorts/request-tail-adoption/vote", json={})
+            ).status_code == 401
+
+
 def test_private_owner_origin_matches_peer_and_transport_boundaries(selected):
     from .test_competition_cohort_review_origin import ACCEPTED, REJECTED
 

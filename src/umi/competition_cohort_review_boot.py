@@ -177,6 +177,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 config.series,
                 token=vote_token,
                 timeout_seconds=config.review_timeout_seconds,
+                budget=config.phase_review_budget,
             )
         )
         for phase in ("intake", "preparation", "requests"):
