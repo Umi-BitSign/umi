@@ -16,6 +16,7 @@ from pydantic import JsonValue, RootModel
 
 from .competition_cohort_endpoint_archive import MAX_ARCHIVE_OBJECT_BYTES, read_endpoint_object
 from .competition_cohort_execution_journal import CohortExecutionJournal
+from .competition_cohort_object_codec import endpoint_object_bytes
 from .competition_cohort_order_signer import order_slot
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_quality_signing import (
@@ -57,9 +58,9 @@ class SettlementEvidenceFiles:
             RewardPackageObject,
             maximum_bytes=stage_limit("maximum_object_bytes", MAX_DELIVERY_BYTES),
         )
-        if item.sha256 != key or digest(item.value) != key:
+        if item.sha256 != key:
             raise ValueError("settlement object delivery changed its identity")
-        return read_endpoint_object(lambda _: canonical_json_bytes(item.value), key)
+        return read_endpoint_object(lambda _: endpoint_object_bytes(item.value, key), key)
 
     def publish(self, key: str, source) -> None:
         raw = read_endpoint_object(source, key)

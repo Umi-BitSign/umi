@@ -7,7 +7,6 @@ Missing objects prevent completion; retrieval never creates absence evidence.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterator
 from typing import Literal
 
@@ -30,6 +29,7 @@ from .competition_cohort_endpoint_terminal import EndpointTerminalCase, Endpoint
 from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_miner_case import verify_replacement_parent
+from .competition_cohort_object_codec import endpoint_object_bytes, validate_endpoint_object_bytes
 from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
@@ -59,9 +59,7 @@ def read_endpoint_object(source: EndpointObjectSource, sha256: str) -> bytes:
     ):
         raise ValueError("endpoint archive object differs from its bounded identity")
     check_stage_json(raw, kind="object")
-    value = json.loads(raw)
-    if canonical_json_bytes(value) != raw or digest(value) != sha256:
-        raise ValueError("endpoint archive object differs from its bounded identity")
+    validate_endpoint_object_bytes(raw, sha256)
     return raw
 
 
@@ -83,7 +81,7 @@ class JournalEndpointObjects:
         value = self.journal.get("endpoint_replay_object", sha256)
         if value is None:
             raise FileNotFoundError("endpoint archive object is unavailable")
-        return canonical_json_bytes(value)
+        return endpoint_object_bytes(value, sha256)
 
 
 def endpoint_archive_header(

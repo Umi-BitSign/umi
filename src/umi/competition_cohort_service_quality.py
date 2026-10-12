@@ -18,6 +18,7 @@ from .competition_cohort_quality import ExactQuality, exact_quality
 from .competition_cohort_recovery import verify_cohort_service_pool
 from .competition_cohort_service_closure import verify_certified_service_request_closure
 from .competition_cohort_service_grant import ServiceMinerGrant
+from .competition_cohort_service_reference import ServiceReference, ServiceStratum
 from .competition_cohort_service_terminal import SignedServiceTerminal
 from .competition_endpoint_content import decrypt_endpoint_content
 from .competition_endpoint_execution import RetainedRevealPulse
@@ -27,16 +28,8 @@ from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse
 from .open_competition import EvaluationSuite, Hotkey, digest, validate_suite_profile
 from .policy import scoring_policy_hash
-from .protocol import (
-    Hex32,
-    StrictProtocolModel,
-    canonical_json_bytes,
-    normalized_grapheme_count,
-    normalized_token_count,
-)
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .validator import validate_response_envelope
-
-ServiceStratum = Literal["fingerspelling", "continuous"]
 
 
 class ServiceTerms(StrictProtocolModel):
@@ -56,26 +49,6 @@ class ServiceTerms(StrictProtocolModel):
     def strata(self):
         if set(self.stratum_weights) != {"fingerspelling", "continuous"}:
             raise ValueError("service terms require both task strata")
-        return self
-
-
-class ServiceReference(StrictProtocolModel):
-    schema_: Literal["umi-cohort-service-reference/1"] = Field(alias="schema")
-    case_id: Hex32
-    video_sha256: Hex32
-    stratum: ServiceStratum
-    salt: Hex32
-    reference: Annotated[str, Field(min_length=1, max_length=4096)]
-
-    @model_validator(mode="after")
-    def nonempty(self):
-        count = (
-            normalized_grapheme_count
-            if self.stratum == "fingerspelling"
-            else normalized_token_count
-        )
-        if count(self.reference) == 0:
-            raise ValueError("service reference must contain normalized scoring units")
         return self
 
 
