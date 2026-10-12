@@ -17,12 +17,15 @@ translation requests under the corresponding release and policy.
 
 ### Model files for recoverable cohorts
 
-For an open cohort that advertises model uploads, use the model participation
+First [install or update the model submission client](connection.md#install-or-update-the-model-submission-client).
+Endpoint enrollment and model-track intent alone do not update a separately
+installed CLI. For an open cohort that advertises model uploads, use the model participation
 request produced by `sign-cohort-consent` and the exact directory declared by
 its bundle manifest:
 
 ```sh
-umi-competition --policy competition-policy.json submit-cohort-model \
+"$HOME/.local/share/umi/model-client/umi-model-client" \
+  --policy competition-policy.json submit-cohort-model \
   --request model-participation.json --source /absolute/path/to/model \
   --origin https://REVIEWED_INTAKE_HOST \
   --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import platform
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -970,6 +972,210 @@ def install_launcher(source: Path) -> None:
     os.replace(pending, LAUNCHER)
 
 
+def model_client_run(*arguments: str) -> subprocess.CompletedProcess:
+    """Keep a user's endpoint environment out of the separate client install."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("PYTHON", "PIP_", "UV_", "GIT_")) and key != "VIRTUAL_ENV"
+    }
+    environment.update(
+        PYTHONDONTWRITEBYTECODE="1",
+        PIP_CONFIG_FILE=os.devnull,
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
+    result = subprocess.run(arguments, text=True, capture_output=True, env=environment)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise RuntimeError(f"model client installation failed: {detail}")
+    return result
+
+
+def model_client_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise ValueError("model client directory ownership or mode differs")
+
+
+def model_client_write(path: Path, raw: bytes, mode: int = 0o600) -> None:
+    """Never truncate a selected command or receipt during a repeat installation."""
+    pending = path.with_name(path.name + ".pending")
+    pending.unlink(missing_ok=True)
+    descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(pending, path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def install_model_client(manifest: dict, directory: Path) -> dict:
+    """Install a locked CLI without discovering or changing any endpoint service."""
+    if sys.platform not in {"linux", "darwin"} or not (3, 10) <= sys.version_info[:2] < (3, 15):
+        raise ValueError("the model client requires Linux/macOS and Python 3.10 through 3.14")
+    if not directory.is_absolute() or directory.resolve() != directory:
+        raise ValueError("the model client directory must be an absolute, non-symlink path")
+    marker = directory / "model-client.json"
+    marker_raw = canonical({"schema": "umi-model-client-installation/1"})
+    if directory.exists() and not marker.exists() and any(directory.iterdir()):
+        raise ValueError("refusing to reuse an unrelated model client directory")
+    model_client_directory(directory)
+    if marker.exists() and (marker.is_symlink() or marker.read_bytes() != marker_raw):
+        raise ValueError("model client installation marker differs")
+    descriptor = os.open(directory / "install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        model_client_write(marker, marker_raw)
+        return _install_model_client(manifest, directory)
+
+
+def _install_model_client(manifest: dict, directory: Path) -> dict:
+    revision = manifest["runtime"]["revision"]
+    identity = revision + "-" + platform.python_implementation().lower() + platform.python_version()
+    model_client_directory(directory / "releases")
+    target = directory / "releases" / identity
+    model_client_directory(target)
+    source = target / "source"
+    if not source.exists():
+        staging = target / "source.pending"
+        if staging.exists():
+            model_client_directory(staging)
+            shutil.rmtree(staging)
+        model_client_directory(staging)
+        print(
+            "Installing the selected model client source and locked dependencies…", file=sys.stderr
+        )
+        model_client_run(
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            manifest["runtime"]["repository"],
+            str(staging),
+        )
+        model_client_run("git", "-C", str(staging), "checkout", "--detach", revision)
+        os.replace(staging, source)
+    model_client_directory(source)
+    if model_client_run("git", "-C", str(source), "rev-parse", "HEAD").stdout.strip() != revision:
+        raise ValueError("model client source revision differs")
+    if model_client_run("git", "-C", str(source), "status", "--porcelain").stdout.strip():
+        raise ValueError("model client source has local changes")
+    bootstrap = directory / ("installer-uv-" + UV_BOOTSTRAP_VERSION)
+    model_client_directory(bootstrap)
+    if not (bootstrap / "bin/python").exists():
+        model_client_run(sys.executable, "-I", "-B", "-m", "venv", str(bootstrap))
+    bootstrap_python = bootstrap / "bin/python"
+    model_client_run(
+        str(bootstrap_python),
+        "-I",
+        "-B",
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-cache-dir",
+        "--no-input",
+        "--index-url",
+        "https://pypi.org/simple",
+        "uv==" + UV_BOOTSTRAP_VERSION,
+    )
+    python = target / "venv/bin/python"
+    sync = (
+        str(bootstrap_python),
+        "-I",
+        "-B",
+        "-m",
+        "uv",
+        "--no-config",
+        "--no-cache",
+        "sync",
+        "--locked",
+        "--no-editable",
+        "--no-dev",
+        "--no-default-groups",
+        "--project",
+        str(source),
+        "--python",
+        sys.executable,
+        "--no-python-downloads",
+    )
+    # uv's explicit environment selection is scoped to this subprocess, never the
+    # running endpoint's VIRTUAL_ENV. Keep the final venv path stable after install.
+    sync = ("/usr/bin/env", "UV_PROJECT_ENVIRONMENT=" + str(target / "venv"), *sync)
+    receipt = target / "installation.json"
+    model_client_run(*sync, *(("--check",) if receipt.exists() else ()))
+    model_client_run(
+        str(bootstrap_python),
+        "-I",
+        "-B",
+        "-m",
+        "uv",
+        "--no-config",
+        "--no-cache",
+        "pip",
+        "check",
+        "--python",
+        str(python),
+    )
+    verification = (
+        "import hashlib,importlib.metadata as m,json,sys;from pathlib import Path;import umi;"
+        "root=Path(sys.argv[1]);installed=Path(umi.__file__).parent;"
+        "assert installed.is_relative_to(Path(sys.prefix));"
+        "files=list((root/'src/umi').rglob('*.py'));"
+        "assert files and all((installed/p.relative_to(root/'src/umi')).read_bytes()"
+        "==p.read_bytes() "
+        "for p in files);"
+        "url=json.loads(m.distribution('umi-subnet').read_text('direct_url.json'));"
+        "assert not url.get('dir_info',{}).get('editable',False);"
+        "print(json.dumps({'module':str(installed),'python':sys.version.split()[0],"
+        "'source_files':len(files),'lock_sha256':hashlib.sha256((root/'uv.lock').read_bytes()).hexdigest()}))"
+    )
+    verified = document(
+        model_client_run(str(python), "-I", "-B", "-c", verification, str(source)).stdout.encode(),
+        label="installed model client verification",
+    )
+    model_client_run(
+        str(python), "-I", "-B", "-m", "umi.competition_cli", "submit-cohort-model", "--help"
+    )
+    command = target / "umi-model-client"
+    model_client_write(
+        command,
+        (
+            "#!/bin/sh\nexec " + shlex.quote(str(python)) + ' -I -B -m umi.competition_cli "$@"\n'
+        ).encode(),
+        0o700,
+    )
+    report = {
+        "schema": "umi-model-client-installation-receipt/1",
+        "status": "model_client_installed",
+        "runtime_revision": revision,
+        "deployment_revision": manifest["runtime"].get("deployment_revision", revision),
+        "policy_sha256": manifest["policy"]["value_sha256"],
+        "endpoint_service_unchanged": True,
+        "command": str(directory / "umi-model-client"),
+        "runtime_python": str(python),
+        "verification": verified,
+    }
+    model_client_write(receipt, canonical(report))
+    selected = directory / "umi-model-client"
+    if selected.exists() and not selected.is_symlink():
+        raise ValueError("refusing to replace a non-client command")
+    pending = directory / "umi-model-client.pending"
+    pending.unlink(missing_ok=True)
+    pending.symlink_to(command)
+    os.replace(pending, selected)
+    return report
+
+
 @contextmanager
 def cooperative_upgrade(services: tuple[Service, ...]):
     """Protect the installed version before its first stop, including rollback.
@@ -1664,11 +1870,28 @@ def install_endpoint_enrollment(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--public-model-track", required=True, choices=("yes", "no"))
+    parser.add_argument("--public-model-track", choices=("yes", "no"))
+    parser.add_argument(
+        "--install-model-client",
+        action="store_true",
+        help="install a separate model upload CLI without changing endpoint services",
+    )
+    parser.add_argument(
+        "--model-client-directory",
+        type=Path,
+        default=Path.home() / ".local/share/umi/model-client",
+        help="absolute, dedicated model client installation directory",
+    )
     parser.add_argument("--manifest-url", default=DEFAULT_MANIFEST, help=argparse.SUPPRESS)
     parser.add_argument("--status-url", default=DEFAULT_STATUS, help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.install_model_client:
+        if args.public_model_track == "no":
+            parser.error("--install-model-client requires public-model participation")
+        args.public_model_track = "yes"
+    elif args.public_model_track is None:
+        parser.error("--public-model-track is required for endpoint upgrades")
     manifest_raw = fetch(args.manifest_url)
     manifest = document(manifest_raw, label="upgrade manifest")
     if manifest_raw not in {canonical(manifest), canonical(manifest) + b"\n"}:
@@ -1677,6 +1900,18 @@ def main() -> None:
     manifest = deployed_manifest(manifest, status)
     manifest_raw = canonical(manifest)
     validate_manifest(manifest, status, args.public_model_track)
+    if args.install_model_client:
+        if args.dry_run:
+            report = {
+                "status": "model_client_preflight_passed",
+                "runtime_revision": manifest["runtime"]["revision"],
+                "endpoint_service_unchanged": True,
+                "directory": str(args.model_client_directory),
+            }
+        else:
+            report = install_model_client(manifest, args.model_client_directory)
+        print(canonical(report).decode())
+        return
     if sys.platform != "linux" or shutil.which("systemctl") is None:
         raise ValueError("the automatic upgrader requires a Linux systemd miner")
     if os.geteuid() != 0 and not args.dry_run:

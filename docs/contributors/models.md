@@ -58,6 +58,10 @@ completion alone is not acceptance. The owner and each independent reviewer
 read the exact object, verify its full stream and declared files, and retain the
 ordinary signed artifact decision before the entry can qualify.
 
+Use the [current model client installation](../miners/connection.md#install-or-update-the-model-submission-client)
+before signing, resuming delivery or querying admission. It installs the published
+compatible client independently of endpoint services and existing protocol state.
+
 The released S1 reference declares Apache-2.0 for code and CC BY-SA 4.0 for its
 weights and portable bundle. The separate
 [community candidate](https://github.com/Umi-BitSign/umi-reference-model/blob/main/community/README.md)

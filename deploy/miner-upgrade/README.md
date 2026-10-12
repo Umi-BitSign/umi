@@ -10,6 +10,13 @@ under the same cohort authority preserve existing startup bytes, journals and
 custom directory bindings in place, including root-run miners. Unsupported
 transitions stop before cutover.
 
+`--install-model-client` is an independent user installation mode for Linux and
+macOS with Python 3.10 through 3.14. It validates the same manifest/status binding,
+then installs the exact source and locked dependencies without discovering an
+endpoint or using its environment. See the connection guide for its commands,
+repeat-install behavior and retained release directories. Model-only track intent
+keeps its existing no-service-change behavior and does not install this client.
+
 `current.json` is the canonical profile for policy, transport, track and authority
 bindings. A matching live deployment can supply a newer compatible source
 revision. An explicit `runtime.deployment_revision` instead binds the exact
@@ -27,3 +34,5 @@ Qualification lives in `tests/test_miner_upgrade.py`, including older startup
 layouts, repeated updates, custom paths, root services, policy-pin refusal and a
 PATH-shadowed `env` executable. Existing protocol state must never be reset to
 work around an unsupported upgrade.
+Standalone client isolation, repeat installation, failed selection and endpoint
+preservation are covered by `tests/test_model_client_install.py`.

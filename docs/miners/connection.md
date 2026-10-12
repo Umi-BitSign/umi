@@ -166,7 +166,10 @@ sudo /usr/local/libexec/umi-miner-upgrade --public-model-track yes
 If the published manifest offers only public-model participation, the updater rejects
 `no`, records model-track intent, and leaves the existing endpoint service
 unchanged as a recoverable prior deployment. The model submission still requires
-the operator's signed rights declaration and selected bundle. Published manifests,
+the operator's signed rights declaration and selected bundle. Recording intent
+does not install or update the model submission command: use the separate
+[model client installation](#install-or-update-the-model-submission-client) below.
+Published manifests,
 rather than cohort numbers baked into the script, enforce the profile published
 before intake. No cohort-specific replacement script is needed.
 
@@ -197,6 +200,65 @@ location, retaining its proxy settings. A smaller location-level value overrides
 a server-level allowance. Validate and reload with
 `sudo nginx -t && sudo systemctl reload nginx`; the miner and its state can stay
 in place.
+
+## Install or update the model submission client
+
+Model contributors can install the submission CLI separately from any endpoint
+miner. This path supports Linux and macOS with Python 3.10 through 3.14, Git,
+Python's `venv`/pip support and access to GitHub and PyPI. Run it as the existing
+account that owns the submission wallet. An existing root-owned wallet can keep
+its root account; do not move wallets or switch accounts to install this client:
+
+```sh
+(
+  umi_client_installer="$(mktemp "${TMPDIR:-/tmp}/umi-model-client.XXXXXX")" || exit
+  trap 'rm -f "$umi_client_installer"' EXIT
+  curl -fsSLo "$umi_client_installer" \
+    https://raw.githubusercontent.com/Umi-BitSign/umi/main/deploy/miner-upgrade/upgrade.py \
+    && python3 -I -B "$umi_client_installer" --install-model-client
+)
+```
+
+The installer verifies the current manifest against public status and requires
+the model track to be available. It installs the selected exact source revision
+and its locked dependencies in a separate, noneditable virtual environment under
+`~/.local/share/umi/model-client`. It verifies the installed source, dependency
+lock and submission command before selecting the new command. A maintenance
+release can update this client while retaining the live cohort's policy, tracks,
+authority and explicit deployment binding.
+
+Use the installed command explicitly, including for consent signing, upload
+resume and admission queries:
+
+```sh
+"$HOME/.local/share/umi/model-client/umi-model-client" --help
+```
+
+The command uses its selected absolute interpreter with isolated Python imports.
+An older checkout, activated endpoint environment or inherited `PYTHONPATH`
+cannot select a different client. The JSON installation receipt reports the
+exact revision, interpreter, command path and source verification. An alternate
+location requires `--model-client-directory /absolute/dedicated/path`; the
+installer refuses an unrelated existing directory.
+
+Rerun the same installation command for a new published release. Each revision
+and Python patch gets its own environment; an unchanged release is checked
+without reinstalling its runtime. The old command stays selected if installation
+or verification fails. Previously installed releases remain available for
+already-running uploads and recovery. Do not remove their directories while a
+process uses them. A failed new installation does not erase earlier releases.
+
+This mode does not discover, stop or change an endpoint service. It does not read
+wallets, migrate a startup file, change service accounts, move grant or protocol
+journals, sign consent or enroll a model. It works alongside an older, manual,
+systemd or launchd endpoint installation and on a host without an endpoint. The
+Linux endpoint updater remains the supported endpoint migration path; installing
+this client does not qualify or perform a macOS endpoint upgrade.
+
+Keep existing signed requests, receipts and model files unchanged when moving to
+the new command. Follow [model delivery](model.md#model-files-for-recoverable-cohorts)
+with the same request, source, wallet and policy to resume an interrupted upload.
+Always check current intake readiness before creating a new submission.
 
 ## Check the running miner
 
