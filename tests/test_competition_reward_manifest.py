@@ -202,13 +202,16 @@ def test_rebound_reader_is_not_an_independent_approval(manifest_case):
 
 
 def test_preparation_rejects_manifest_change_before_reading_current_control(
-    manifest_case, monkeypatch
+    manifest_case, monkeypatch, tmp_path
 ):
     c = manifest_case
-    # Only the store's policy binding participates in this early configuration
-    # check; native package/store replay is covered by the integration suite.
+    # This configuration check needs the store's policy binding and owned
+    # verification directory; native package/store replay is covered separately.
     owner = StandingRewardPreparation(
-        c.reader, SimpleNamespace(policy=c.policy), c.manifest, maximum_promotion_bytes=1_000_000
+        c.reader,
+        SimpleNamespace(policy=c.policy, directory=tmp_path / "promotions"),
+        c.manifest,
+        maximum_promotion_bytes=1_000_000,
     )
 
     def forbidden(*args):
