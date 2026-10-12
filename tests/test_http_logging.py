@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import io
 import logging
+from contextlib import nullcontext
 
 import httpcore
 import httpx
 import pytest
+from uvicorn.logging import AccessFormatter
 
 from umi.http_logging import (
     install_http_log_redaction,
@@ -218,6 +220,62 @@ def test_factory_chaining_idempotence_and_late_child_direct_handler():
     assert_private(output.getvalue())
     assert "preserved receive_response_headers.complete" in output.getvalue()
     assert "preserved request https://objects.example/v1/clips/[redacted]" in output.getvalue()
+
+
+@pytest.mark.parametrize("installation", ["explicit", "during_fetch", "after_fetch"])
+@pytest.mark.parametrize("use_colors", [False, True])
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("/health", "/health"),
+        (f"/health?token={QUERY}#{COOKIE}", "/health?[redacted]#[redacted]"),
+        (f"/health#{COOKIE}", "/health#[redacted]"),
+        (f"{PATH}?signature={QUERY}", "/v1/clips/[redacted]"),
+        (f"{PATH.replace('/', '%2F')}?token={QUERY}", "/v1/clips/[redacted]"),
+        (
+            f"https://alice:{QUERY}@objects.example/public?key={CAP}#{COOKIE}",
+            "https://redacted@objects.example/public?[redacted]#[redacted]",
+        ),
+        (
+            f"//alice:{QUERY}@objects.example/public?key={CAP}#{COOKIE}",
+            "//redacted@objects.example/public?[redacted]#[redacted]",
+        ),
+        (f"https://[broken/{CAP}?key={QUERY}", "[redacted-target]"),
+    ],
+)
+def test_uvicorn_access_formatter_keeps_redacted_structured_arguments(
+    installation, use_colors, target, expected
+):
+    if installation == "explicit":
+        install_http_log_redaction()
+    elif installation == "after_fetch":
+        with video_fetch_logging():
+            pass
+    context = video_fetch_logging() if installation == "during_fetch" else nullcontext()
+    original_args = ("127.0.0.1:1234", "GET", target, "1.1", 200)
+    with context:
+        record = logging.getLogger("uvicorn.access").makeRecord(
+            "uvicorn.access",
+            logging.INFO,
+            __file__,
+            0,
+            '%s - "%s %s HTTP/%s" %d',
+            original_args,
+            None,
+        )
+    assert record.args == ("127.0.0.1:1234", "GET", expected, "1.1", 200)
+    assert type(record.args[-1]) is int
+    assert original_args[2] == target
+    formatter = AccessFormatter(
+        '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+        use_colors=use_colors,
+    )
+    rendered = formatter.format(record)
+    assert f"GET {expected} HTTP/1.1" in rendered
+    assert "200 OK" in rendered
+    assert_private(rendered)
+    assert_private(logging.Formatter("%(message)s").format(record))
+    assert_private(repr(vars(record)))
 
 
 @pytest.mark.asyncio

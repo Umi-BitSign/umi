@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi.competition_chain import FinalizedRegistrationProvider
+from umi.competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from umi.competition_reward_control_journal import RewardControlTransactionJournal
 from umi.competition_reward_control_publisher import StandingControlPublisher
 from umi.competition_reward_coordinator import (
@@ -44,7 +45,9 @@ from .test_competition_reward_preparation import current_control_finality
 from .test_open_competition import wallet
 
 
-async def run_activation(owner, settled, root, monkeypatch, signatures, *, admission_probe=None):
+async def run_activation(
+    owner, settled, root, monkeypatch, signatures, *, admission_probe=None, direct=None
+):
     ensure_private_directory(root)
     series, manifest = owner.config.series, owner.config.manifest
     package, policy = settled.package, owner.h.intake.policy
@@ -172,6 +175,22 @@ async def run_activation(owner, settled, root, monkeypatch, signatures, *, admis
     async def no_opportunity(_):
         pytest.fail("first activation requires the legacy fence, not predecessor coverage")
 
+    direct_verifiers = {}
+
+    def model_verifier(role, promotion):
+        if direct is None:
+            return None
+        # Each native consumer gets an independent receipt directory and reader.
+        # A restarted reviewer reuses only its own authenticated native receipts;
+        # the cold validator must read and verify the provider object itself.
+        verifier = DirectModelSettlementVerifier(
+            direct.artifact_reader(role),
+            promotion.directory / "model-reward-artifacts",
+            root / "direct-model-receipts" / role,
+        )
+        direct_verifiers[role] = verifier
+        return verifier
+
     def build():
         def signer(name):
             async def sign(body):
@@ -202,6 +221,9 @@ async def run_activation(owner, settled, root, monkeypatch, signatures, *, admis
                 opportunity=no_opportunity,
                 maximum_promotion_bytes=1024**2,
                 maximum_history_blocks=4096,
+                model_artifacts=model_verifier(
+                    name + "-reward-review", settled.nodes[name].promotion
+                ),
             )
             for name in ("Charlie", "Dave")
         }
@@ -298,6 +320,7 @@ async def run_activation(owner, settled, root, monkeypatch, signatures, *, admis
             manifest,
             maximum_promotion_bytes=1024**2,
             maximum_package_bytes=owner.config.admission_owner.request_evidence_bytes,
+            model_artifacts=model_verifier("cold-validator", settled.nodes["Dave"].promotion),
         )
         if admission_probe is None:
             native_history = await history.reader.verified_prefix(end)
@@ -322,6 +345,15 @@ async def run_activation(owner, settled, root, monkeypatch, signatures, *, admis
         assert not result.chain_submission_authorized
         assert max(signatures.values()) == 1
         assert not any(method.startswith("author_") for method in history.rpc_calls)
+        if direct is not None:
+            assert set(direct_verifiers) == {
+                "Charlie-reward-review",
+                "Dave-reward-review",
+                "cold-validator",
+            }
+            for verifier in direct_verifiers.values():
+                assert verifier.artifacts.multipart.read_calls > 0
+                assert list(verifier.receipts.rglob("*.json"))
         publish_private_model(
             root / "result.json",
             {
@@ -342,6 +374,22 @@ async def run_activation(owner, settled, root, monkeypatch, signatures, *, admis
                 "chain_inclusion": "synthetic_rpc_fixture",
                 "transaction_submitted": False,
                 "installed_host_qualified": False,
+                **(
+                    {}
+                    if direct is None
+                    else {
+                        "direct_model_consumers": {
+                            role: {
+                                "provider_read_calls": verifier.artifacts.multipart.read_calls,
+                                "provider_bytes_read": verifier.artifacts.multipart.bytes_read,
+                                "native_verification_receipts": len(
+                                    list(verifier.receipts.rglob("*.json"))
+                                ),
+                            }
+                            for role, verifier in direct_verifiers.items()
+                        }
+                    }
+                ),
             },
         )
     finally:

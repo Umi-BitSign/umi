@@ -37,7 +37,7 @@ def copy_originals(origin, target):
 
 
 async def run_settlement(
-    o, evaluators, root, signatures, interrupt, *, mixed=False, admission_probe=None
+    o, evaluators, root, signatures, interrupt, *, mixed=False, admission_probe=None, direct=None
 ):
     h, series = o.h, o.config.series
     plan = next(plan for plan in series.cohorts if digest(plan) == h.cohort)
@@ -48,9 +48,13 @@ async def run_settlement(
         config = configs.setdefault(
             name,
             SettlementServiceConfig(
-                schema="umi-cohort-settlement-config/2"
-                if name == "Charlie"
-                else "umi-cohort-settlement-config/1",
+                schema="umi-cohort-settlement-config/4"
+                if direct is not None
+                else (
+                    "umi-cohort-settlement-config/2"
+                    if name == "Charlie"
+                    else "umi-cohort-settlement-config/1"
+                ),
                 role="coordinator" if name == "Charlie" else "reviewer",
                 original_sources=o.config.lifecycle.sources if name == "Charlie" else None,
                 series=series,
@@ -75,10 +79,11 @@ async def run_settlement(
                 exchange_inbox=str(base / "exchange-in"),
                 exchange_outbox=str(base / "exchange-out"),
                 maximum_package_bytes=o.config.admission_owner.request_evidence_bytes,
-                maximum_promotion_bytes=1024**2,
+                maximum_promotion_bytes=1024**2 if direct is None else 16 * 1024**2,
                 maximum_state_bytes=128 * 1024**2,
                 poll_seconds=1,
                 host_memory_admission=o.config.admission_owner.host_memory_admission,
+                **({} if direct is None else direct.settlement_options(name, base)),
             ),
         )
         if name in stacks:
@@ -95,7 +100,9 @@ async def run_settlement(
             outbox=Path(config.proof_export_directory),
         )
         promotion = CompetitionStore(Path(config.promotion_directory), h.intake.policy)
-        if not (promotion.directory / "model-reward-artifacts" / digest(h.model)).exists():
+        if direct is not None:
+            direct.settlement_baseline(promotion, base, h.intake.policy)
+        elif not (promotion.directory / "model-reward-artifacts" / digest(h.model)).exists():
             archive = base / "model-archive"
             preserve_bundle(
                 h.model,
@@ -124,6 +131,11 @@ async def run_settlement(
             promotion=promotion,
             executions=(evaluators[name].execution,),
             sign=sign,
+            **(
+                {}
+                if direct is None
+                else {"model_artifacts": direct.settlement_verifier(name, base, promotion)}
+            ),
         )
         nodes[name] = node
         return node
