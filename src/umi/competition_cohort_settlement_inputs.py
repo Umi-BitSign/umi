@@ -45,10 +45,12 @@ from .competition_cohort_service_certification import ServiceAllocationReview
 from .competition_cohort_service_quality import build_service_reference_reveal
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
+from .competition_verification_reuse import RetainedObjectInventory, verified_replay
+from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .competition_work_progress import work_operation
 from .open_competition import CompetitionPolicy, digest
 from .policy import scoring_policy_hash
-from .protocol import Hex32, canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class SettlementInputPackage(AggregateProtocolModel):
@@ -73,6 +75,21 @@ class SettlementInputPackage(AggregateProtocolModel):
             if keys != sorted(set(keys)):
                 raise ValueError("settlement input inventory must be unique and ordered")
         return self
+
+
+class VerifiedSettlementInventory(StrictProtocolModel):
+    package_sha256: Hex32
+
+
+@verified_replay("settlement_inventory", VerifiedSettlementInventory)
+def _verify_settlement_inventory(package: SettlementInputPackage, policy: CompetitionPolicy):
+    # This exact package is already bound to independently selected policy and
+    # digest by replay_settlement_inputs. A private local receipt preserves the
+    # complete native object verification across later replay and restart.
+    inventory = {o.sha256: endpoint_object_bytes(o.value, o.sha256) for o in package.objects}
+    for key in inventory:
+        read_endpoint_object(inventory.__getitem__, key)
+    return VerifiedSettlementInventory(package_sha256=digest(package))
 
 
 @dataclass(frozen=True)
@@ -267,14 +284,19 @@ def replay_settlement_inputs(
 ) -> ReplayedSettlementInputs:
     """Replay a replica against owned selections after arbitrary processing delay."""
     _check_bound(maximum_bytes)
-    raw = canonical_json_bytes(package)
-    if len(raw) > maximum_bytes:
-        raise ValueError("settlement input package exceeds its byte bound")
-    package = SettlementInputPackage.model_validate_json(raw)
-    del raw
+    snapshot = package if isinstance(package, VerifiedPackageSnapshot) else None
+    if snapshot is not None:
+        snapshot.check(snapshot.package, expected_package_sha256, maximum_bytes)
+        package = snapshot.package
+    else:
+        raw = canonical_json_bytes(package)
+        if len(raw) > maximum_bytes:
+            raise ValueError("settlement input package exceeds its byte bound")
+        package = SettlementInputPackage.model_validate_json(raw)
+        del raw
     original = package.inputs.history
     if (
-        digest(package) != expected_package_sha256
+        (snapshot is None and digest(package) != expected_package_sha256)
         or package.policy_sha256 != digest(policy)
         or original.plan != current_history.plan
         or original.authority != current_history.authority
@@ -316,10 +338,15 @@ def replay_settlement_inputs(
     )
     if view.state.phase not in allowed:
         raise ValueError("settlement input history is not active after reference reveal")
-    inventory = {o.sha256: endpoint_object_bytes(o.value, o.sha256) for o in package.objects}
-    captured = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
-    for key in inventory:
-        read_endpoint_object(inventory.__getitem__, key)
+    if snapshot is not None:
+        inventory = snapshot.records
+        captured = snapshot.collector(maximum_bytes)
+    else:
+        verified = _verify_settlement_inventory(package, policy)
+        inventory = {o.sha256: endpoint_object_bytes(o.value, o.sha256) for o in package.objects}
+        captured = ReplayObjectCollector(
+            RetainedObjectInventory(inventory, verified.package_sha256), maximum_bytes
+        )
     original_decisions = {
         item.transition.evidence_sha256
         for item in original.transitions

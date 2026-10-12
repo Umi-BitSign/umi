@@ -42,6 +42,7 @@ from .competition_reward_opportunity import (
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
 from .competition_round_journal import RoundJournal
+from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -390,7 +391,7 @@ class RewardCoverageJournal:
                 package_sha256 = (
                     retained_package_sha256(preparation, package)
                     if type(package) is RetainedCoveragePackage
-                    else await run_owned_thread(digest, package)
+                    else await run_owned_thread(verified_package_digest, package)
                 )
                 if package_sha256 != frame["package"]:
                     raise ValueError("coverage endpoint requires its original package")

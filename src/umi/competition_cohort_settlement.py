@@ -54,6 +54,7 @@ from .competition_cohort_service_quality import build_service_reference_reveal
 from .competition_reward_manifest import RewardReplayRequirement
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationSourceChanged
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -66,6 +67,59 @@ class NativeSettlementResult:
     status: str
     progress: CohortPhaseProgress | None = None
     package: CohortRewardPackage | None = None
+
+
+class _SettlementObjects:
+    """Preserve archive priority when forwarding an external source capability."""
+
+    def __init__(self, owner):
+        self.owner = owner
+
+    def __call__(self, key):
+        try:
+            return self.owner.archive(key)
+        except FileNotFoundError:
+            return self.owner.external(key)
+
+    def _external(self, key):
+        # Presence and conflict checks do not read or decode immutable bodies.
+        # A journal entry, including a malformed/null entry, must take the
+        # ordinary archive path; it cannot borrow the external source's trust.
+        with self.owner.journal.read_transaction() as db:
+            if db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone():
+                raise ValueError("round journal conflict held")
+            present = db.execute(
+                "SELECT 1 FROM records WHERE kind=? AND id=?",
+                ("endpoint_replay_object", key),
+            ).fetchone()
+        return None if present else self.owner.external
+
+    def verification_identity(self, key):
+        source = self._external(key)
+        if any(
+            not hasattr(source, method)
+            for method in ("verification_sha256", "verification_size", "verification_replay")
+        ):
+            return None
+        identity = getattr(source, "verification_identity", None)
+        return None if identity is None else identity(key)
+
+    def _capability(self, key, method):
+        source = self._external(key)
+        selected = getattr(source, method, None)
+        identity = getattr(source, "verification_identity", None)
+        if selected is None or identity is None or identity(key) is None:
+            raise VerificationSourceChanged("settlement source changed its trusted selection")
+        return selected(key)
+
+    def verification_sha256(self, key):
+        return self._capability(key, "verification_sha256")
+
+    def verification_size(self, key):
+        return self._capability(key, "verification_size")
+
+    def verification_replay(self, key):
+        return self._capability(key, "verification_replay")
 
 
 class CohortSettlement:
@@ -115,11 +169,9 @@ class CohortSettlement:
         self.promotion_bytes, self.package_bytes = maximum_promotion_bytes, maximum_package_bytes
         self.verify_model_artifact = verify_model_artifact
 
-    def _object(self, key: str) -> bytes:
-        try:
-            return self.archive(key)
-        except FileNotFoundError:
-            return self.external(key)
+    @property
+    def _object(self):
+        return _SettlementObjects(self)
 
     def _closed(self, view: RecoveryHistoryView, phase: Phase, result: StrictProtocolModel) -> None:
         closed = view.closure(phase)

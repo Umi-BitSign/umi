@@ -1,0 +1,87 @@
+"""Source compatibility must be explicit while unrelated releases preserve work."""
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from umi import competition_verification_rules as rules
+
+
+def test_selected_dependency_manifest_is_complete_and_qualified():
+    source = Path(rules.__file__).parent
+    manifest = json.loads((source / "competition_verification_rules.json").read_bytes())
+    assert (
+        rules.verify_dependency_manifest(source, manifest)
+        == hashlib.sha256(rules.VERIFICATION_SEMANTICS.encode()).hexdigest()
+    )
+    for module in (
+        "competition_verification_reuse.py",
+        "competition_cohort_request_closure.py",
+        "competition_cohort_endpoint_archive.py",
+        "competition_cohort_service_closure.py",
+        "competition_cohort_endpoint_decision.py",
+        "competition_cohort_service_terminal.py",
+        "endpoint_response_recovery.py",
+        "open_competition.py",
+        "protocol.py",
+    ):
+        assert module in manifest["sources"]
+
+
+def test_unrelated_change_preserves_receipts_but_verifier_change_requires_qualification(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(rules, "distribution_version", lambda _: "1.0")
+    native = tmp_path / "native.py"
+    native.write_bytes(b"original native rule")
+    manifest = {
+        "schema": "umi-native-verification-dependencies/1",
+        "abi": rules.VERIFICATION_SEMANTICS,
+        "compatibility_basis": "qualified native fixture parity",
+        "sources": {native.name: hashlib.sha256(native.read_bytes()).hexdigest()},
+        "external_distributions": {"native-library": ["1.0"]},
+    }
+    original = rules.verify_dependency_manifest(tmp_path, manifest)
+    (tmp_path / "unrelated.py").write_bytes(b"unrelated release")
+    assert rules.verify_dependency_manifest(tmp_path, manifest) == original
+    native.write_bytes(b"unreviewed native rule")
+    with pytest.raises(RuntimeError, match="without qualified ABI compatibility"):
+        rules.verify_dependency_manifest(tmp_path, manifest)
+    # A reviewed compatible change may retain its ABI; changed accepted semantics
+    # require changing the ABI in code and this manifest together.
+    manifest["sources"][native.name] = hashlib.sha256(native.read_bytes()).hexdigest()
+    assert rules.verify_dependency_manifest(tmp_path, manifest) == original
+    manifest["abi"] = "incompatible"
+    with pytest.raises(RuntimeError, match="qualified dependency manifest"):
+        rules.verify_dependency_manifest(tmp_path, manifest)
+
+
+def test_external_version_drift_requires_qualification_without_discarding_completed_abi(
+    tmp_path, monkeypatch
+):
+    native = tmp_path / "native.py"
+    native.write_bytes(b"same native semantics")
+    manifest = {
+        "schema": "umi-native-verification-dependencies/1",
+        "abi": rules.VERIFICATION_SEMANTICS,
+        "compatibility_basis": "qualified native fixture parity",
+        "sources": {native.name: hashlib.sha256(native.read_bytes()).hexdigest()},
+        "external_distributions": {"native-library": ["1.0"]},
+    }
+    monkeypatch.setattr(rules, "distribution_version", lambda _: "1.0")
+    original = rules.verify_dependency_manifest(tmp_path, manifest)
+    monkeypatch.setattr(rules, "distribution_version", lambda _: "2.0")
+    with pytest.raises(RuntimeError, match="external dependency changed without qualified"):
+        rules.verify_dependency_manifest(tmp_path, manifest)
+    # A separately reviewed compatible library version retains completed work.
+    manifest["external_distributions"]["native-library"].append("2.0")
+    assert rules.verify_dependency_manifest(tmp_path, manifest) == original
+
+    def unavailable(name):
+        raise rules.PackageNotFoundError(name)
+
+    monkeypatch.setattr(rules, "distribution_version", unavailable)
+    with pytest.raises(RuntimeError, match="dependency is unavailable"):
+        rules.verify_dependency_manifest(tmp_path, manifest)

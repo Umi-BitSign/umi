@@ -20,7 +20,6 @@ from .competition_cohort_endpoint_archive import (
     read_endpoint_object,
 )
 from .competition_cohort_endpoint_quality import replay_endpoint_archive_quality
-from .competition_cohort_execution import replay_execution_steps
 from .competition_cohort_execution_journal import CohortExecutionAssignment
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_orders import recoverable_order_job
@@ -29,7 +28,11 @@ from .competition_cohort_request_closure import (
     CohortRequestClosure,
     verify_certified_request_closure,
 )
-from .competition_cohort_request_terminal import RequestExecutionArchive, SignedRequestTerminal
+from .competition_cohort_request_terminal import (
+    RequestExecutionArchive,
+    SignedRequestTerminal,
+    replay_archived_execution,
+)
 from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_closure import (
     CohortServiceRequestClosure,
@@ -38,7 +41,6 @@ from .competition_cohort_service_closure import (
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
-from .competition_execution import ExecutionStep
 from .open_competition import (
     CaseOutput,
     CompetitionPolicy,
@@ -304,12 +306,10 @@ class ClosedQualityReview:
             archive = RequestExecutionArchive.model_validate_json(
                 read_endpoint_object(self.objects, terminal.execution_archive_sha256)
             )
-            outputs = replay_execution_steps(
+            outputs = replay_archived_execution(
                 job,
-                (
-                    ExecutionStep.model_validate_json(read_endpoint_object(self.objects, key))
-                    for key in archive.steps
-                ),
+                archive,
+                self.objects,
                 self.policy,
                 started_after=self.opened_at,
                 finished_by=self.closed_at,

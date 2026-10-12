@@ -10,7 +10,6 @@ from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
-from .competition_cohort_aggregate_files import read_aggregate_model
 from .competition_cohort_aggregate_replica import replicate_verified_aggregate
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
@@ -54,6 +53,8 @@ from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationReuse, verification_owner_operation
+from .competition_verification_snapshot import VerificationPackageStore, VerifiedPackageSnapshot
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import (
     compact_memory_error,
@@ -113,6 +114,15 @@ class CohortSettlementService:
             "role": config.role,
             "proposer": identity(config.proposer_hotkey),
         }
+        self.verification_reuse = VerificationReuse(
+            promotion.directory / "verification" / digest(config.series) / "native",
+            owner={
+                "series": digest(config.series),
+                "policy": digest(config.policy),
+                "reader": digest(config.chain),
+            },
+        )
+        self.verified_packages = VerificationPackageStore(root / "verification" / "packages")
         self.journal = RoundJournal(
             root / "results",
             binding,
@@ -367,7 +377,7 @@ class CohortSettlementService:
         try:
             package = await run_owned_thread(
                 partial(
-                    read_aggregate_model,
+                    self.verified_packages.load,
                     path,
                     SettlementInputPackage,
                     maximum_bytes=self.config.maximum_package_bytes,
@@ -408,7 +418,16 @@ class CohortSettlementService:
             logger.info(
                 "settlement_inputs cohort=%s phase=%s status=retained", self.cohort, state.phase
             )
-        package_sha256 = await run_owned_thread(digest, package)
+        if type(package) is not VerifiedPackageSnapshot:
+            package = await run_owned_thread(
+                partial(
+                    self.verified_packages.load,
+                    path,
+                    SettlementInputPackage,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                )
+            )
+        package_sha256 = package.sha256
         if prior is not None and prior != {"sha256": package_sha256}:
             raise ValueError("settlement inputs changed after their first native review")
         self.data = await run_owned_thread(
@@ -444,6 +463,16 @@ class CohortSettlementService:
                 except FileNotFoundError:
                     return model_documents(key)
 
+        def object_identity(key):
+            try:
+                return self.data.objects.verification_identity(key)
+            except (FileNotFoundError, KeyError):
+                return None
+
+        objects.verification_identity = object_identity
+        objects.verification_replay = self.data.objects.verification_replay
+        objects.verification_sha256 = self.data.objects.verification_sha256
+        objects.verification_size = self.data.objects.verification_size
         owner = CohortSettlement(
             plan=self.plan,
             authority=self.config.series.recovery,
@@ -687,12 +716,14 @@ class CohortSettlementService:
         self.reviewed_terminal_tip = state.tip_sha256
         return "reviewing"
 
+    @verification_owner_operation
     async def maintain(self):
         self.provider.ensure_observer_running()
         history = await self._selected_history()
         state, _ = self.store.status(self.cohort)
         return await self._maintain_selected(history, state)
 
+    @verification_owner_operation
     async def tick(self) -> str:
         self.provider.ensure_observer_running()
         history = await self._selected_history()

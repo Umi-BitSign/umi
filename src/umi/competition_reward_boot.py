@@ -460,7 +460,7 @@ async def run_installed_standing_rewards(
                 digest(c.chain): providers[digest(c.chain)] for c in config.legacy_chains
             },
             history=history,
-            packages=files.package,
+            packages=files.verified_package,
             decisions=files.decision,
             opportunity=collection.opportunity,
             coverage=collection,

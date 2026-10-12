@@ -25,6 +25,7 @@ from .competition_cohort_orders import verify_recoverable_order
 from .competition_endpoint_content import decrypt_endpoint_content
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_scoring import score_single_reference
+from .competition_verification_reuse import verified_replay
 from .config import Limits
 from .open_competition import (
     BURN_POLICY_SCHEMA,
@@ -118,6 +119,14 @@ def replay_endpoint_archive_quality(
         != [(c.case_id, c.video_sha256, c.stratum) for c in job.cases]
     ):
         raise ValueError("endpoint quality suite differs from the complete assignment")
+    return _endpoint_content_quality(
+        archive, source, suite, policy, job, opened, closed, pulses=pulses
+    )
+
+
+@verified_replay("endpoint_content_quality", EndpointArchiveQuality)
+def _endpoint_content_quality(archive, source, suite, policy, job, opened, closed, *, pulses):
+    """Pure original content replay after the caller's fresh authority checks."""
     outputs = []
     reviews = endpoint_archive_cases(archive, source, policy, request_interval=(opened, closed))
     for case, review in zip(suite.cases, reviews, strict=True):

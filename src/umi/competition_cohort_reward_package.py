@@ -8,8 +8,9 @@ Legacy competition packages and their admission deadlines are unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -47,6 +48,8 @@ from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationSourceChanged
+from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .competition_work_progress import progress_items
 from .host_memory_request_bounds import (
     check_stage_json,
@@ -122,35 +125,135 @@ class CohortRewardPackage(AggregateProtocolModel):
         return self
 
 
+class _ReplayObjects(Mapping):
+    """Consumed coverage is cheap; exporting new package bytes materializes it."""
+
+    def __init__(self, collector):
+        self.collector = collector
+
+    def __iter__(self):
+        return iter(self.collector._sizes)
+
+    def __len__(self):
+        return len(self.collector._sizes)
+
+    def __contains__(self, key):
+        return key in self.collector._sizes
+
+    def __getitem__(self, key):
+        if key not in self.collector._sizes:
+            raise KeyError(key)
+        return self.collector(key)
+
+
 class ReplayObjectCollector:
     """Bound and authenticate each source before retaining or replaying it."""
 
     def __init__(self, source: EndpointObjectSource, maximum_bytes: int):
         _check_bound(maximum_bytes)
         self.source, self.maximum_bytes = source, maximum_bytes
-        self.values: dict[str, bytes] = {}
+        self._values: dict[str, bytes] = {}
+        self._sizes: dict[str, int] = {}
+        self._identities: dict[str, str | None] = {}
+        self._retained: set[str] = set()
+        self.values = _ReplayObjects(self)
         self.used = 0
 
     def __call__(self, key: str) -> bytes:
-        if key not in self.values:
-            stage_count("maximum_objects", len(self.values) + 1)
-            remaining = stage_limit("maximum_input_bytes", self.maximum_bytes) - self.used
+        if key not in self._values:
+            count = len(self.values) + (key not in self.values)
+            if count > MAX_PACKAGE_OBJECTS:
+                raise ValueError("reward package evidence exceeds its bound")
+            stage_count("maximum_objects", count)
+            identity = self.verification_identity(key)
+            remaining = (
+                min(self.maximum_bytes, stage_limit("maximum_input_bytes", self.maximum_bytes))
+                - self.used
+                + self._sizes.get(key, 0)
+            )
             with stage_object_budget(remaining):
-                self._remember(key, read_endpoint_object(self.source, key))
-        return self.values[key]
+                raw = (
+                    self.source(key)
+                    if identity is not None
+                    else read_endpoint_object(self.source, key)
+                )
+                if self.verification_identity(key) != identity:
+                    raise VerificationSourceChanged("reward package source changed while reading")
+                self._remember(key, raw)
+                self._identities[key] = identity
+        return self._values[key]
+
+    def verification_identity(self, key):
+        if key in self._retained:
+            return None
+        identity = getattr(self.source, "verification_identity", None)
+        selected = None if identity is None else identity(key)
+        if key in self._identities and self._identities[key] != selected:
+            raise VerificationSourceChanged("reward package source changed its selected identity")
+        return selected
+
+    def verification_sha256(self, key):
+        method = getattr(self.source, "verification_sha256", None)
+        if self.verification_identity(key) is not None and method is not None:
+            return method(key)
+        return hashlib.sha256(self(key)).hexdigest()
+
+    def verification_size(self, key):
+        method = getattr(self.source, "verification_size", None)
+        if self.verification_identity(key) is not None and method is not None:
+            return method(key)
+        return len(self(key))
+
+    def verification_replay(self, key):
+        identity = self.verification_identity(key)
+        replay = getattr(self.source, "verification_replay", None)
+        size_method = getattr(self.source, "verification_size", None)
+        if identity is None or replay is None or size_method is None:
+            self(key)
+            return
+        size = size_method(key)
+        self._check_size(key, size)
+        remaining = (
+            min(self.maximum_bytes, stage_limit("maximum_input_bytes", self.maximum_bytes))
+            - self.used
+            + self._sizes.get(key, 0)
+        )
+        with stage_object_budget(remaining):
+            replay(key)
+        if self.verification_identity(key) != identity:
+            raise VerificationSourceChanged("reward package source changed during replay")
+        if key not in self._sizes:
+            self._sizes[key] = size
+            self.used += size
+        self._identities[key] = identity
+
+    def _check_size(self, key, size):
+        if type(size) is not int or size < 1:
+            raise ValueError("reward package source has invalid byte size")
+        if key in self._sizes:
+            if self._sizes[key] != size:
+                raise VerificationSourceChanged("reward package source changed its byte size")
+            count, used = len(self._sizes), self.used
+        else:
+            count, used = len(self._sizes) + 1, self.used + size
+        if count > MAX_PACKAGE_OBJECTS or used > self.maximum_bytes:
+            raise ValueError("reward package evidence exceeds its bound")
+        stage_count("maximum_objects", count)
+        stage_count("maximum_input_bytes", used)
 
     def _remember(self, key: str, raw: bytes) -> None:
-        if key in self.values:
-            if self.values[key] != raw:
+        if key in self._values:
+            if self._values[key] != raw:
                 raise ValueError("reward package source changed")
             return
-        if len(self.values) >= MAX_PACKAGE_OBJECTS or self.used + len(raw) > self.maximum_bytes:
-            raise ValueError("reward package evidence exceeds its bound")
-        stage_count("maximum_objects", len(self.values) + 1)
-        stage_count("maximum_input_bytes", self.used + len(raw))
+        if not isinstance(raw, bytes):
+            raise TypeError("reward package source must return bytes")
+        self._check_size(key, len(raw))
         check_stage_json(raw, kind="object")
-        self.values[key] = raw
-        self.used += len(raw)
+        self._values[key] = raw
+        if key not in self._sizes:
+            self._sizes[key] = len(raw)
+            self.used += len(raw)
 
     def retain(self, value: StrictProtocolModel | JsonValue) -> str:
         if stage_bounds() is not None:
@@ -160,6 +263,7 @@ class ReplayObjectCollector:
         raw = canonical_json_bytes(value)
         key = digest(value)
         self._remember(key, read_endpoint_object({key: raw}.__getitem__, key))
+        self._retained.add(key)
         return key
 
 
@@ -384,6 +488,9 @@ def _validated_reward_snapshot(
 ) -> CohortRewardPackage:
     """Own one validated snapshot; do not retain its temporary canonical bytes."""
     _check_bound(maximum_bytes)
+    if isinstance(package, VerifiedPackageSnapshot):
+        package.check(package.package, package.sha256, maximum_bytes)
+        return package
     raw = canonical_json_bytes(package)
     if len(raw) > maximum_bytes:
         raise ValueError("reward package exceeds its byte bound")
@@ -414,31 +521,39 @@ def _replay_detached_reward_package(
     verifies finality and promotion history. Missing evidence remains pending.
     """
     _check_bound(maximum_bytes)
+    snapshot = package if isinstance(package, VerifiedPackageSnapshot) else None
+    if snapshot is not None:
+        snapshot.check(snapshot.package, expected_package_sha256, maximum_bytes)
+        package = snapshot.package
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     if (
-        digest(package) != expected_package_sha256
+        (snapshot is None and digest(package) != expected_package_sha256)
         or package.policy_sha256 != digest(policy)
         or digest(package.inputs.history.plan) != expected_cohort_sha256
     ):
         raise ValueError("reward package differs from selected identity or policy")
-    inventory = {
-        o.sha256: endpoint_object_bytes(o.value, o.sha256)
-        for o in progress_items(
+    if snapshot is not None:
+        inventory = snapshot.records
+        source = snapshot.collector(maximum_bytes)
+    else:
+        inventory = {
+            o.sha256: endpoint_object_bytes(o.value, o.sha256)
+            for o in progress_items(
+                package.objects,
+                stage="reward_package_inventory",
+                unit="objects",
+                cohort=expected_cohort_sha256,
+            )
+        }
+        source = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
+        # Check every declared object, including those missing from a replay traversal.
+        for item in progress_items(
             package.objects,
-            stage="reward_package_inventory",
+            stage="reward_package_object_integrity",
             unit="objects",
             cohort=expected_cohort_sha256,
-        )
-    }
-    source = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
-    # Check every declared object, including those missing from a replay traversal.
-    for item in progress_items(
-        package.objects,
-        stage="reward_package_object_integrity",
-        unit="objects",
-        cohort=expected_cohort_sha256,
-    ):
-        read_endpoint_object(inventory.__getitem__, item.sha256)
+        ):
+            read_endpoint_object(inventory.__getitem__, item.sha256)
     pulse_refs = {p.round: p.pulse_sha256 for p in package.pulses}
     used_pulses: set[int] = set()
     original_decisions = {

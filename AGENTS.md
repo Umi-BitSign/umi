@@ -34,6 +34,15 @@
   Before enough samples exist, report a labeled planning range with assumptions.
   Keep substage estimates separate from overall completion, revise stale ranges,
   and qualify telemetry without adding execution watchdogs.
+- Successful expensive verification is durable owner state. Reuse it across
+  stages and restart for unchanged evidence and validation context. Bind reuse to
+  actual immutable local/R2 identities, policy, lineage, owner and signed clocks;
+  never accept a caller-supplied digest as proof. Preserve exact collector coverage
+  and resource accounting without rereading/rehashing trusted unchanged payloads.
+  Initial semantic verification remains required. Version native/shape rules when
+  accepted validation semantics change; unrelated releases preserve verdicts.
+  Ship atomic checkpointing, interruption recovery, invalidation/repair telemetry
+  and actual consuming-stage tests with every reuse or retained-format change.
 - Existing validators and miners must not be stopped or replaced for a cleanup.
   Test changes in an isolated workspace before any separately qualified deployment.
 - Clean up task-created remote build/test/rehearsal directories after use. Check

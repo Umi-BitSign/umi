@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_cohort_endpoint_decision import (
     EndpointCaseReview,
@@ -34,6 +34,7 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_orders import recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_round_journal import RoundJournal
+from .competition_verification_reuse import verified_replay
 from .host_memory_request_bounds import check_stage_json, stage_limit
 from .open_competition import CompetitionPolicy, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -84,6 +85,12 @@ class JournalEndpointObjects:
         return endpoint_object_bytes(value, sha256)
 
 
+@verified_replay(
+    "endpoint_archive_header",
+    TypeAdapter(
+        tuple[CohortExecutionAssignment, EndpointTerminalSelection, RecoverableExecutionJob]
+    ),
+)
 def endpoint_archive_header(
     archive: EndpointReplayArchive, source: EndpointObjectSource, policy: CompetitionPolicy
 ) -> tuple[CohortExecutionAssignment, EndpointTerminalSelection, RecoverableExecutionJob]:
@@ -139,6 +146,7 @@ def endpoint_archive_cases(
         yield final
 
 
+@verified_replay("endpoint_case", TypeAdapter(tuple[EndpointCaseReview, str]))
 def read_endpoint_case(
     assignment: CohortExecutionAssignment,
     ref: EndpointTerminalCase,

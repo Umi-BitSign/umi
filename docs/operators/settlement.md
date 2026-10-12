@@ -26,7 +26,7 @@ canonical serialization bytes with a 64 MiB retained key/output budget and
 65,536 entries. Nested preparation shares the assembly budget; the cache clears
 on success or failure before later waits. This is not a process RSS limit: Python
 bookkeeping, transient snapshots and input models consume additional memory.
-Schema, signature, authority and source checks still execute on every replay;
+The serialization cache is separate from durable native verification below;
 aggregate streaming remains uncached. Oversize values use ordinary serialization
 and are not rejected by this optimization.
 
@@ -66,6 +66,83 @@ object inventory as completed certification. Use the native certified phase
 history, verified reward package and finalized chain observation to establish
 those milestones. These log records explicitly carry
 `certification_authority: false`.
+
+## Durable native verification
+
+Settlement and reward owners retain completed closure, participant, terminal,
+endpoint ancestry/content, execution and paid-work verification under private
+state. A restart or later phase reuses a result
+only for the same original evidence, policy and lineage, owner, signed interval
+and native verification rules. Each independent owner establishes its own result.
+Current history, finality, authority, signature creation and chain selection keep
+their native checks. A stored object alone does not establish valid miner work.
+
+The first package read imports its exact native envelope and original object bytes
+into a private immutable snapshot. Subsequent reads compare the actual package and
+object file identities and metadata; unchanged payloads need no repeated hashing
+or evidence replay. Dependency coverage and resource budgets are still counted
+when a verdict is reused. Payloads are read when a new consumer actually needs them.
+A completed participant's verdict survives interruption before full closure.
+
+The default verdict location is
+`promotion_directory/verification/<series-sha256>/native`. A reviewer and its
+predecessor preparation share that location and verification context. Separate
+role promotion directories do not share state automatically. To reuse native
+facts across roles of the **same validator authority**, explicitly set
+`UMI_NATIVE_VERIFICATION_DIRECTORY` to one private directory visible to all of
+those services. Each series/policy/chain-reader context gets a separate child
+directory. Preserve each service's promotion roots, journals and configured
+bindings; for a service with `RootDirectory`, expose the same host directory
+with an explicit service-manager bind. Independent validator authorities must
+have separate private directories. Qualify ownership, access, restart and
+role-to-role reuse before enabling the override.
+
+Enabling this override reads an existing completed local verdict and copies its
+metadata into shared state before reuse; it does not repeat native verification
+or delete the local record. Retain that fallback reader while a supported owner
+still has completed verdicts only in its former default directory. A private
+nonblocking owner lock prevents simultaneous workers from repeating the same
+first verification; contention reports `waiting_for_owner` and remains pending.
+
+Existing installations need no reset or signed format conversion. Their first
+successful native review records the missing private verdicts; original packages,
+journals, account paths, clocks and signatures remain unchanged. Interrupted import
+resumes completed object checkpoints. Invalid private metadata is reported as
+`repair_required` and rebuilt from originals; changed or missing immutable objects
+require restoration from the unchanged selected package. Unsupported signed inputs
+remain errors. Retain this compatibility path while installed owners have original
+packages without snapshots; it may be removed only after those owners have imported
+and qualified their retained inputs.
+
+`umi-native-verification-reuse/1` events report misses, retained results, hits,
+invalidation and required repair. Completion markers distinguish a lost completed
+record from a first read. Snapshot preparation emits a labeled capacity planning
+range before measured object import/identity and dependency accounting
+also emit ordinary counted progress, elapsed time and substage ETA. Receipt writes
+are atomic and publication failures remain visible; completed verdicts are not
+silently evicted or dropped. These records do not certify a cohort or authorize
+weights. There is no independent receipt or snapshot metadata size ceiling;
+native selected evidence capacities and per-operation accounting still apply.
+Native verification and JSON shape rule identifiers change only when accepted
+validation semantics change, so unrelated releases preserve completed work.
+
+`competition_verification_rules.json` binds the verifier's source dependency
+closure to its explicit semantic ABI. The runtime refuses an unqualified source
+change before reading verdicts. For a compatible implementation change, regenerate
+the candidate manifest with `python tools/verification_manifest.py`, retain the ABI,
+and qualify native historical/restart/reward parity before release. Change the ABI
+when accepted semantics change. A manifest refresh alone is not qualification.
+Storage identity is separate from the native ABI, so a verifier rule change does
+not force unchanged immutable package objects to be extracted again.
+
+The same manifest lists qualified external distribution versions, including their
+installed dependency closure. Missing or unqualified versions stop the owner
+before receipt access. A normal manifest refresh preserves those allowlists and
+refuses new versions. Use `python tools/verification_manifest.py
+--candidate-external-versions` to add candidate installed versions, then separately
+qualify compatibility before release. Compatible external versions retain the
+same native ABI and completed verdicts; accepted semantic changes require an ABI
+change. Validate the installed wheel and dependency inventory before cutover.
 
 ## Recoverable cohort model awards
 

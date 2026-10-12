@@ -140,7 +140,7 @@ class StandingRewardCoverageService:
             journal=self.journal,
             history=self.history,
             preparation=self.preparation,
-            package_loader=partial(self.files.package, activation.package_sha256),
+            package_loader=partial(self.files.verified_package, activation.package_sha256),
             package_sha256=activation.package_sha256,
             package_guard=self._package_guard,
             decisions=self.files.decision,

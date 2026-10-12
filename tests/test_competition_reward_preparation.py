@@ -5734,3 +5734,58 @@ def test_settlement_serialization_scope_preserves_native_checks_and_package_byte
     names = {event.get("operation_name") for event in events}
     assert {"settlement_prepare", "settlement_replay"} <= names
     assert all(event["certification_authority"] is False for event in events)
+
+
+async def test_durable_snapshot_preparation_reuses_native_work_across_all_consumers(
+    historical_preparation_case, tmp_path, monkeypatch
+):
+    """Installed file loader, fresh/restarted writer, predecessor and initial replay."""
+    from umi import competition_cohort_endpoint_archive as archive_module
+    from umi import competition_cohort_endpoint_quality as endpoint_module
+    from umi import competition_cohort_request_terminal as terminal_module
+    from umi import competition_cohort_service_quality as service_module
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p, _, chosen, historical_args = historical_preparation_case
+    files = StandingRewardFiles(
+        tmp_path / "durable-inputs",
+        maximum_package_bytes=64 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    package_sha = digest(p.package)
+    before = (files.root / "packages" / (package_sha + ".json")).read_bytes()
+    counts = {"cases": 0, "endpoint_content": 0, "paid_content": 0, "execution": 0}
+    for module, name, key in (
+        (archive_module, "verify_case_decision", "cases"),
+        (endpoint_module, "decrypt_endpoint_content", "endpoint_content"),
+        (service_module, "decrypt_endpoint_content", "paid_content"),
+        (terminal_module, "replay_execution_steps", "execution"),
+    ):
+        native = getattr(module, name)
+
+        def counted(*args, _native=native, _key=key, **kwargs):
+            counts[_key] += 1
+            return _native(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+    snapshot = files.verified_package(package_sha)
+    ready = await p.preparation.prepare(snapshot, **replay_args(await p.observations()))
+    assert ready.allocation == p.allocation
+    cold = counts.copy()
+    assert all(value > 0 for value in cold.values())
+    restored = p.reopen()
+    snapshot = files.verified_package(package_sha)
+    again = await restored.prepare(snapshot, **replay_args(await p.observations()))
+    assert again.allocation == p.allocation
+    assert counts == cold
+    predecessor = await p.reopen().prepare_historical(snapshot, **historical_args)
+    chosen.current = replace(chosen.current, initial_selection=chosen.current.selection)
+    initial = await p.reopen().prepare_initial(snapshot, **historical_args)
+    assert predecessor.allocation == initial.allocation == ready.allocation
+    assert counts == cold
+    fresh = await p.observations()
+    projected = await restored.project(again, **fresh)
+    assert sum(projected.projection.weights) == 65535
+    assert not projected.chain_submission_authorized
+    assert (files.root / "packages" / (package_sha + ".json")).read_bytes() == before

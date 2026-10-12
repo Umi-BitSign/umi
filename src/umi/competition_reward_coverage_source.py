@@ -22,6 +22,7 @@ from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryPending
 from .host_memory_runtime import memory_operation, selected_memory
@@ -146,7 +147,7 @@ class NativeRewardCoverageSource:
             except CoveragePackageReplayRequired:
                 pass
         package = await run_owned_thread(self._package_loader)
-        if await run_owned_thread(digest, package) != self._package_sha256:
+        if await run_owned_thread(verified_package_digest, package) != self._package_sha256:
             raise ValueError("coverage package loader changed the selected original")
         endpoint = await review(package)
         self._retained_package = RetainedCoveragePackage(endpoint.prepared)

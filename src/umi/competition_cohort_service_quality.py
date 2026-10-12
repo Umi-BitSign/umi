@@ -9,7 +9,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Annotated, Literal
 
-from pydantic import Field, model_serializer, model_validator
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 
 from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import read_endpoint_object
@@ -23,6 +23,7 @@ from .competition_cohort_service_terminal import SignedServiceTerminal
 from .competition_endpoint_content import decrypt_endpoint_content
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_scoring import score_single_reference
+from .competition_verification_reuse import verified_replay
 from .competition_work_progress import progress_items
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse
@@ -65,7 +66,8 @@ class ServiceReferenceReveal(StrictProtocolModel):
     catalogs: Annotated[tuple[CatalogReferences, ...], Field(min_length=1, max_length=64)]
 
 
-def _committed_references(catalogs, objects):
+@verified_replay("committed_references", TypeAdapter(dict[str, ServiceReference]))
+def _committed_references(catalogs, objects, policy):
     references = {}
     for catalog in catalogs:
         for item in progress_items(
@@ -134,7 +136,7 @@ def build_service_reference_reveal(
     validate_suite_profile(suite, policy)
     if digest(suite) != roster.round.suite_sha256 or suite.policy_sha256 != digest(policy):
         raise ValueError("revealed suite differs from certified preparation")
-    _committed_references(expected_catalogs, objects)
+    _committed_references(expected_catalogs, objects, policy)
     return ServiceReferenceReveal(
         schema="umi-cohort-service-reference-reveal/1",
         policy_sha256=digest(policy),
@@ -265,14 +267,32 @@ def replay_closed_service_quality(
     for declared, catalog in zip(reveal.catalogs, expected_catalogs, strict=True):
         if declared.references != tuple(w.reference_sha256 for w in catalog.catalog.work):
             raise ValueError("service reveal substituted its committed reference inventory")
-    references = _committed_references(expected_catalogs, objects)
+    return _review_service_quality(
+        closure,
+        objects,
+        policy,
+        transport,
+        terms,
+        reveal,
+        expected_catalogs=expected_catalogs,
+        pulses=pulses,
+        cohort=roster.round.cohort_sha256,
+    )
+
+
+@verified_replay("service_quality", ClosedServiceQuality)
+def _review_service_quality(
+    closure, objects, policy, transport, terms, reveal, *, expected_catalogs, pulses, cohort
+):
+    """Pure immutable replay; certified history/reveal checks stay with the caller."""
+    references = _committed_references(expected_catalogs, objects, policy)
     outcomes = []
     for catalog_closure in closure.catalogs:
         for key in progress_items(
             catalog_closure.terminals,
             stage="quality_paid_service_terminals",
             unit="terminals",
-            cohort=roster.round.cohort_sha256,
+            cohort=cohort,
         ):
             terminal = SignedServiceTerminal.model_validate_json(
                 read_endpoint_object(objects, key)

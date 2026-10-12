@@ -39,6 +39,7 @@ from .competition_reward_opportunity import VerifiedRewardOpportunity
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_signing import RewardDecisionSigner, RewardQuorumPending
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .host_memory_runtime import memory_operation, run_memory_thread
@@ -115,7 +116,16 @@ class StandingRewardDecisionReviewer:
         self.maximum_history_blocks = maximum_history_blocks
         self.opportunity, self.maximum_promotion_bytes = opportunity, maximum_promotion_bytes
         self.model_artifacts = model_artifacts
+        self.verification_reuse = VerificationReuse(
+            promotion_store.directory / "verification" / digest(reader.series) / "native",
+            owner={
+                "series": digest(reader.series),
+                "policy": digest(reader.policy),
+                "reader": reader.chain_config_sha256,
+            },
+        )
 
+    @verification_owner_operation
     async def review(self, body: RewardControlDecision, prefix: Prefix) -> ReviewedRewardDecision:
         p = self
         body = verify_reward_decision_proposal(p.reader.series, p.reader.policy, prefix, body)
@@ -153,7 +163,9 @@ class StandingRewardDecisionReviewer:
         p = self
         package = None
         if body.activation is not None:
-            package = await run_owned_thread(p.files.package, body.activation.package_sha256)
+            package = await run_owned_thread(
+                p.files.verified_package, body.activation.package_sha256
+            )
             if p.model_artifacts is not None and package.allocation.model_award is not None:
                 completed = {
                     a.acceptance.submission_sha256

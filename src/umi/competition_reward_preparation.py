@@ -55,6 +55,8 @@ from .competition_reward_transactions import (
     standing_weight_call,
 )
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationReuse, verification_owner_operation
+from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
 from .open_competition import digest, identity
@@ -129,6 +131,14 @@ class StandingRewardPreparation:
         self.maximum_promotion_bytes = maximum_promotion_bytes
         self.maximum_package_bytes = maximum_package_bytes
         self.model_artifacts = model_artifacts
+        self.verification_reuse = VerificationReuse(
+            promotion_store.directory / "verification" / self.series_sha256 / "native",
+            owner={
+                "series": self.series_sha256,
+                "policy": self.policy_sha256,
+                "reader": reader.chain_config_sha256,
+            },
+        )
         self._lock = asyncio.Lock()
         self._owner = object()
         self._prepared: dict[str, PreparedStandingReward] = {}
@@ -154,6 +164,7 @@ class StandingRewardPreparation:
             raise ValueError("standing control has no active reward package")
         return current
 
+    @verification_owner_operation
     async def prepare(
         self,
         package: CohortRewardPackage,
@@ -178,6 +189,7 @@ class StandingRewardPreparation:
         assert activation is not None
         return self._prepare_allocation(package, activation, control.snapshot.block_number)
 
+    @verification_owner_operation
     async def prepare_historical(
         self,
         package: CohortRewardPackage,
@@ -204,6 +216,7 @@ class StandingRewardPreparation:
             raise ValueError("historical control has no effective reward package")
         return self._prepare_allocation(package, selected.activation, control.snapshot.block_number)
 
+    @verification_owner_operation
     async def prepare_initial(
         self,
         package: CohortRewardPackage,
@@ -242,7 +255,7 @@ class StandingRewardPreparation:
         requirement = self.manifest.requirement(activation.cohort_sha256)
         package = _validated_reward_snapshot(package, self.maximum_package_bytes)
         if (
-            digest(package) != activation.package_sha256
+            verified_package_digest(package) != activation.package_sha256
             or digest(package.allocation) != activation.allocation_sha256
             or digest(package.inputs.history.plan) != activation.cohort_sha256
             or digest(package.inputs.history.authority.authority)

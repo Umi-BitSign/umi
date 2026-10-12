@@ -28,6 +28,7 @@ from .competition_cohort_service_grant import (
 from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_work import ServiceWorkAssignment, review_service_assignment
 from .competition_execution import ExecutionBoundary
+from .competition_verification_reuse import verified_replay
 from .config import Limits
 from .endpoint_response_recovery import RecoveredEndpointResponse, verify_recovered_response
 from .endpoint_retirement import SignedEndpointRetirementReceipt, verify_retirement_receipt
@@ -130,6 +131,7 @@ def review_service_terminal(
     return grant
 
 
+@verified_replay("service_terminal", ServiceMinerGrant)
 def read_service_terminal(signed, objects, policy, transport, *, request_interval=None):
     signed = SignedServiceTerminal.model_validate_json(canonical_json_bytes(signed))
     grant = review_service_terminal(

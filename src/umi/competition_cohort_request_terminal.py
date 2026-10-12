@@ -10,7 +10,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from .competition_cohort_endpoint_archive import (
     EndpointObjectSource,
@@ -25,8 +25,16 @@ from .competition_cohort_execution_journal import CohortExecutionAssignment, Coh
 from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_orders import recoverable_order_job
 from .competition_execution import ExecutionStep
+from .competition_verification_reuse import verified_replay
 from .concurrency import run_owned_thread, wait_for_owned
-from .open_competition import CompetitionPolicy, Signature, digest, identity, verify_signature
+from .open_competition import (
+    CaseOutput,
+    CompetitionPolicy,
+    Signature,
+    digest,
+    identity,
+    verify_signature,
+)
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -49,6 +57,21 @@ class SignedRequestTerminal(StrictProtocolModel):
     signature: Signature
 
 
+@verified_replay("archived_execution", TypeAdapter(dict[str, list[CaseOutput]]))
+def replay_archived_execution(job, archive, objects, policy, *, started_after, finished_by):
+    return replay_execution_steps(
+        job,
+        (
+            ExecutionStep.model_validate_json(read_endpoint_object(objects, key))
+            for key in archive.steps
+        ),
+        policy,
+        started_after=started_after,
+        finished_by=finished_by,
+    )
+
+
+@verified_replay("request_terminal", CohortExecutionAssignment)
 def read_request_terminal(
     signed: SignedRequestTerminal,
     objects: EndpointObjectSource,
@@ -79,12 +102,10 @@ def read_request_terminal(
     )
     if execution.assignment_sha256 != body.assignment_sha256:
         raise ValueError("request execution archive changed its assignment")
-    replay_execution_steps(
+    replay_archived_execution(
         job,
-        (
-            ExecutionStep.model_validate_json(read_endpoint_object(objects, key))
-            for key in execution.steps
-        ),
+        execution,
+        objects,
         policy,
         started_after=opened_at_block,
         finished_by=completed_by_block,
