@@ -428,14 +428,14 @@ class ServiceAdmissionHost:
             loaded = load_r2_credentials(Path(direct.r2_credentials_file))
             signer = R2SigV4(loaded.endpoint, direct.r2_bucket, loaded.credentials)
             multipart = R2MultipartClient(signer, timeout_seconds=direct.r2_timeout_seconds)
-            key = load_named_hotkey(Path(direct.owner_key_file), direct.owner_hotkey)
+            direct_signer_key = load_named_hotkey(Path(direct.owner_key_file), direct.owner_hotkey)
 
             async def authorize(request):
                 observed = await capture()
                 await run_owned_thread(authorize_model_delivery, intake, request, observed)
 
             async def sign(body):
-                return await run_owned_thread(sign_object, body, key)
+                return await run_owned_thread(sign_object, body, direct_signer_key)
 
             owners = {}
             for plan in c.series.cohorts:

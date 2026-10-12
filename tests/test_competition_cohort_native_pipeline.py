@@ -309,7 +309,7 @@ async def accept_model(o, scenario):
     return h.model, request
 
 
-def configure_owner(o, orders, chain_config, root, monkeypatch):
+def configure_owner(o, orders, chain_config, root, monkeypatch, *, overrides=None):
     dispatch = ServiceDispatchConfig(
         schema="umi-cohort-service-dispatch-config/1",
         origins=chain_config.model_copy(
@@ -337,6 +337,7 @@ def configure_owner(o, orders, chain_config, root, monkeypatch):
                 directory=str(root / "uploads"), maximum_reserved_bytes=1024**2
             ),
             "poll_seconds": 1,
+            **(overrides or {}),
         }
     )
     previous = o.service
@@ -645,6 +646,7 @@ async def run_pipeline(
     expected_recovered_jobs=None,
     activate=True,
     admission_probe=None,
+    direct=None,
 ):
     o, h = host, host.h
     orders = OrderHostConfig(
@@ -660,8 +662,17 @@ async def run_pipeline(
         ),
         poll_seconds=1,
     )
-    configure_owner(o, orders, chain_config, tmp_path / "native-owner", monkeypatch)
-    model, submitted = await accept_model(o, scenario)
+    configure_owner(
+        o,
+        orders,
+        chain_config,
+        tmp_path / "native-owner",
+        monkeypatch,
+        overrides=None if direct is None else direct.owner_config(o),
+    )
+    model, submitted = await (
+        accept_model(o, scenario) if direct is None else direct.accept_model(o, scenario)
+    )
     inputs = SettlementEvidenceFiles(Path(o.config.lifecycle.sources.objects_directory))
     for value in (scenario["suite"], runtime, model):
         inputs.publish(digest(value), lambda _, value=value: canonical_json_bytes(value))
@@ -688,9 +699,14 @@ async def run_pipeline(
         "CohortCpuSandbox",
         lambda *a, **kw: SimpleNamespace(invoke=invoke, reconcile=reconcile),
     )
+    if direct is not None:
+        direct.inference(monkeypatch, invoke)
     configs = {n: evaluator_config(o, n, tmp_path / n) for n in ("Charlie", "Dave")}
     async with httpx.AsyncClient() as client, AsyncExitStack() as stack:
-        configure_model_reviews(o, tmp_path / "artifact-review", client, signatures)
+        if direct is None:
+            configure_model_reviews(o, tmp_path / "artifact-review", client, signatures)
+        else:
+            direct.configure_model_reviews(o, client, signatures)
 
         # Independent artifact acceptance is required even for a baseline copy.
         o.outages.add("dave.example")
@@ -728,7 +744,15 @@ async def run_pipeline(
                 signatures[(name, digest(body))] += 1
                 return sign_object(body, wallet(name))
 
-            return BenchmarkHost(configs[name], h.provider, client, "e" * 32, "v" * 32, sign)
+            return BenchmarkHost(
+                configs[name],
+                h.provider,
+                client,
+                "e" * 32,
+                "v" * 32,
+                sign,
+                **({} if direct is None else direct.benchmark_options(name)),
+            )
 
         nodes = {name: evaluator(name) for name in configs}
         for name, node in nodes.items():
@@ -950,6 +974,7 @@ async def run_pipeline(
                 interrupt,
                 mixed=mixed,
                 admission_probe=admission_probe,
+                direct=direct,
             )
             assert max(inference.values()) == max(signatures.values()) == 1
             # Reopened workers can recover all completed originals offline.
@@ -979,7 +1004,7 @@ async def run_pipeline(
                     is not None
                 )
             assert (dict(inference), dict(signatures)) == counts
-            if activate and mixed and not interrupt:
+            if activate and mixed and (not interrupt or direct is not None):
                 # The actual recurring settlement output feeds reward discovery.
                 # Finality/RPC remain fixtures; reward review and replay do not.
                 with monkeypatch.context() as reward_patches:
@@ -990,5 +1015,6 @@ async def run_pipeline(
                         reward_patches,
                         signatures,
                         admission_probe=admission_probe,
+                        direct=direct,
                     )
             return settled

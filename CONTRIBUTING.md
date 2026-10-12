@@ -20,6 +20,15 @@ make check
 `uv.lock` is the release dependency lock. Run `uv lock --check` before testing;
 update and review the lock whenever `pyproject.toml` changes.
 
+`pytest tests/test_competition_cohort_native_direct.py` exercises a synthetic
+successor cohort from signed-history discovery and two-part model upload through
+independent artifact review, preserved-object downloads, paid work, request
+closure, certification and reward preparation. It retains the original requests
+and receipts across provider reply loss and worker restarts. Object storage,
+finality, inference and scratch filesystem capacity are fixture ports; a pass
+does not qualify a live R2 account, installed scratch volume or chain submission.
+The existing signed C6 plan continues to select its original upload mechanism.
+
 ## Safety rules
 
 - Keep `component_test_no_weight`, `shadow_rehearsal_no_weight`, and
