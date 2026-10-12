@@ -122,6 +122,25 @@ checks run. Final cohort quality decisions, allocation and signatures still
 require the original certified request closure and reference release. Background
 preparation cannot replace missing work or move those signed boundaries.
 
+Reference reveal preserves the commitments in the original signed service
+catalogs. Retained materializer references can use plain SHA256 of sorted,
+compact, ASCII-escaped JSON. Native readers accept that historical encoding only
+for a fully validated `umi-cohort-service-reference/1`, reconstruct its exact
+committed bytes from private wrappers and replay packages, and verify its catalog
+case, video and stratum bindings. Other objects keep their native canonical bytes
+and domain-separated identities. Restore missing originals without changing
+catalogs, reference text, salts or hashes; answers remain private until certified
+reference release. Retain this decoder while any signed catalog or replay package
+depends on that encoding.
+
+Before advancing intake or preparation for a cohort with paid service work, the
+lifecycle owner reads the selected terms, signed catalogs and every committed
+reference from its configured private settlement sources. Missing, changed or
+unreadable inputs hold progression before new requests open; a prior bootstrap
+receipt cannot satisfy this check. The check repeats after restart and bypasses
+signed model-only cohorts. Already running requests and settlement recovery keep
+their existing evidence rules and do not acquire a new startup gate.
+
 During legacy upload completion, each finished staging file likewise retains a
 private verification record. Later completion passes and restarted uploaders
 reuse it while other files are still arriving. These temporary records are

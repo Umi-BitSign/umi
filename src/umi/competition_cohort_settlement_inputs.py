@@ -26,6 +26,7 @@ from .competition_cohort_endpoint_archive import (
     read_endpoint_object,
 )
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
+from .competition_cohort_object_codec import endpoint_object_bytes
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
@@ -309,7 +310,7 @@ def replay_settlement_inputs(
     )
     if view.state.phase not in allowed:
         raise ValueError("settlement input history is not active after reference reveal")
-    inventory = {o.sha256: canonical_json_bytes(o.value) for o in package.objects}
+    inventory = {o.sha256: endpoint_object_bytes(o.value, o.sha256) for o in package.objects}
     captured = ReplayObjectCollector(inventory.__getitem__, maximum_bytes)
     for key in inventory:
         read_endpoint_object(inventory.__getitem__, key)

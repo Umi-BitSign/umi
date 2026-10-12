@@ -28,6 +28,7 @@ from .competition_cohort_preparation_phase import NativePreparationProgressSourc
 from .competition_cohort_preparation_publisher import CohortPreparationPublisher
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_readiness import LiveIntakePhaseObserver
+from .competition_cohort_reference_preflight import preflight_service_references
 from .competition_cohort_request_export import RequestReviewExporter
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_request_inventory import RequestInventoryCutoff
@@ -368,6 +369,28 @@ class LifecycleHost:
 
         if adoption_compatible:
             await reconcile_request_tail_adoption()
+
+        async def preflight_before_tick():
+            if adoption_compatible:
+                await reconcile_request_tail_adoption()
+            state, _ = node.controller.store.status(cohort)
+            if state.phase not in {"intake", "preparation"}:
+                return
+            # The control journal belongs to the event-loop thread. Snapshot
+            # verified selections here; only independent private files go to a
+            # worker, which must never acquire this live SQLite connection.
+            history, state, _, _ = node.controller._history()
+            await run_owned_thread(
+                partial(
+                    preflight_service_references,
+                    self.config.sources,
+                    history,
+                    self.service.config.manifest.requirement(cohort),
+                    self.policy,
+                    phase=state.phase,
+                )
+            )
+
         node = CohortLifecycleService(
             store,
             cohort,
@@ -381,7 +404,7 @@ class LifecycleHost:
                 "requests": partial(self._requests, cohort),
             },
             request_start=self.gate,
-            before_tick=reconcile_request_tail_adoption if adoption_compatible else None,
+            before_tick=preflight_before_tick,
         )
         self.nodes[cohort] = node
         return node

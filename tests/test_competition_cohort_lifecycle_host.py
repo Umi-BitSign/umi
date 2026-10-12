@@ -1,7 +1,11 @@
 """Configured owner factories and native HTTP votes; synthetic finality/readiness."""
 
 import asyncio
+import hashlib
+import json
+import os
 import socket
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,13 +21,17 @@ from umi.competition_cohort_order_host import OrderHostConfig
 from umi.competition_cohort_order_queue import CohortOrderQueueConfig
 from umi.competition_cohort_phase_vote_http import phase_vote_routes
 from umi.competition_cohort_readiness import intake_readiness
+from umi.competition_cohort_reference_preflight import preflight_service_references
 from umi.competition_cohort_request_readiness import LiveRequestPhaseObserver, RequestReadiness
 from umi.competition_cohort_request_start import RequestStartConfig
 from umi.competition_cohort_review_http import CohortReviewPeerConfig
 from umi.competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
+from umi.competition_cohort_service_quality import ServiceReference, ServiceTerms
 from umi.competition_cohort_settlement_config import SettlementOriginalSources
+from umi.competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from umi.competition_execution import execution_boundary
 from umi.open_competition import digest
+from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_lifecycle import intake as intake
@@ -37,8 +45,38 @@ from .test_competition_cohort_lifecycle import scenario as scenario
 from .test_competition_service import chain_config as chain_config
 from .test_open_competition import wallet
 
+
+def precommit_complete_service_inventory(h):
+    h.service_reference = ServiceReference(
+        schema="umi-cohort-service-reference/1",
+        case_id="91" * 32,
+        video_sha256="92" * 32,
+        stratum="fingerspelling",
+        salt="94" * 32,
+        reference="caf\u00e9",
+    )
+    h.service_reference_raw = json.dumps(
+        h.service_reference.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    h.service_terms = ServiceTerms(
+        schema="umi-cohort-service-terms/1",
+        policy_sha256=digest(h.intake.policy),
+        transport_policy_sha256="95" * 32,
+        service_pool_bps=7000,
+        stratum_weights={"fingerspelling": 3, "continuous": 10},
+    )
+    precommit_service_inventory(
+        h,
+        service_terms_sha256=digest(h.service_terms),
+        service_reference_sha256=hashlib.sha256(h.service_reference_raw).hexdigest(),
+    )
+
+
 pytestmark = pytest.mark.parametrize(
-    "lifecycle_before_intake", [precommit_service_inventory], indirect=True
+    "lifecycle_before_intake", [precommit_complete_service_inventory], indirect=True
 )
 
 
@@ -125,6 +163,22 @@ def test_peer_origin_migration_preserves_shared_token_bindings(lifecycle, tmp_pa
 async def host(lifecycle, tmp_path, monkeypatch):
     h = lifecycle
     c = configured(h, tmp_path / "host")
+    if hasattr(h, "service_reference_raw"):
+        # This module's complete inventory owns these originals. Connected
+        # pipeline fixtures install their own explicitly selected inputs later;
+        # never replace or rekey their committed references here.
+        objects = SettlementEvidenceFiles(Path(c.lifecycle.sources.objects_directory))
+        originals = {
+            digest(h.service_terms): canonical_json_bytes(h.service_terms),
+            hashlib.sha256(h.service_reference_raw).hexdigest(): h.service_reference_raw,
+        }
+        for key in originals:
+            objects.publish(key, originals.__getitem__)
+        for catalog in h.catalogs:
+            publish_private_model(
+                Path(c.lifecycle.sources.catalogs_directory) / (digest(catalog.catalog) + ".json"),
+                catalog,
+            )
     h.timestamp = getattr(h, "timestamp", 1_000_000)
     h.provider.config = SimpleNamespace(maximum_head_age_ms=120_000, maximum_future_skew_ms=30_000)
     collect = h.provider.collect
@@ -190,6 +244,102 @@ async def host(lifecycle, tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("damage", ["missing", "tampered", "public", "unreadable", "binding"])
+async def test_reference_preflight_checks_actual_private_originals_on_every_read(host, damage):
+    h, sources = host.h, host.config.lifecycle.sources
+    requirement = host.config.manifest.requirement(h.cohort)
+
+    def check():
+        return preflight_service_references(
+            sources, h.history, requirement, h.intake.policy, phase="preparation"
+        )
+
+    assert check() == 1
+    key = hashlib.sha256(h.service_reference_raw).hexdigest()
+    path = Path(sources.objects_directory) / (key + ".json")
+    if damage == "missing":
+        path.unlink()
+    elif damage == "tampered":
+        path.write_bytes(path.read_bytes().replace(b"caf", b"bad"))
+    elif damage == "public":
+        path.chmod(0o644)
+    elif damage == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root overrides the service account's discretionary read permission")
+        path.chmod(0)
+    else:
+        # Keep a correctly committed reference; change the selected signed
+        # catalog's video binding and require the native signature quorum.
+        from .test_competition_cohort_lifecycle import signatures
+
+        catalog = h.catalogs[0]
+        item = catalog.catalog.work[0].model_copy(update={"video_sha256": "96" * 32})
+        body = catalog.catalog.model_copy(update={"work": (item,)})
+        catalog = catalog.model_copy(update={"catalog": body, "signatures": signatures(body)})
+        publish_private_model(Path(sources.catalogs_directory) / (digest(body) + ".json"), catalog)
+        requirement = requirement.model_copy(update={"catalog_sha256s": (digest(body),)})
+    with pytest.raises((OSError, ValueError)):
+        check()
+
+
+async def test_reference_preflight_does_not_gate_model_only_or_existing_recovery(host):
+    h = host.h
+    sources = host.config.lifecycle.sources.model_copy(
+        update={
+            "objects_directory": "/unavailable/private-references",
+            "eligible_tracks": ("endpoint", "model"),
+        }
+    )
+    requirement = host.config.manifest.requirement(h.cohort)
+    for phase in ("requests", "reference_reveal", "evidence", "certification", "complete"):
+        assert (
+            preflight_service_references(
+                sources, h.history, requirement, h.intake.policy, phase=phase
+            )
+            == 0
+        )
+    plan = h.history.plan.model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/2",
+            "sequence": 6,
+            "eligible_tracks": ("model",),
+            "service_pool_bps": 0,
+        }
+    )
+    history = h.history.model_copy(update={"plan": plan})
+    for phase in ("intake", "preparation"):
+        assert (
+            preflight_service_references(
+                sources, history, requirement, h.intake.policy, phase=phase
+            )
+            == 0
+        )
+
+
+async def test_lifecycle_rechecks_references_before_new_phase_work(host, monkeypatch):
+    o, h = host, host.h
+    async with o.open() as app:
+        node = await app.state.lifecycle.node(h.cohort)
+        original_history, owner_thread = node.controller._history, threading.get_ident()
+        history_reads = []
+
+        def owned_history():
+            assert threading.get_ident() == owner_thread
+            history_reads.append(threading.get_ident())
+            return original_history()
+
+        monkeypatch.setattr(node.controller, "_history", owned_history)
+        await node.before_tick()
+        assert history_reads
+        before = node.controller.store.status(h.cohort)[0]
+        key = hashlib.sha256(h.service_reference_raw).hexdigest()
+        (Path(o.config.lifecycle.sources.objects_directory) / (key + ".json")).unlink()
+        with pytest.raises(FileNotFoundError):
+            await node.tick()
+        assert node.controller.store.status(h.cohort)[0] == before
+        assert not node.drivers
+
+
 async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(host):
     o, h = host, host.h
     for worker in h.admissions:
@@ -224,6 +374,18 @@ async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(ho
     o.outages.clear()
     async with o.open() as app:
         node = await app.state.lifecycle.node(h.cohort)
+        before = node.controller.store.status(h.cohort)[0]
+        assert before.phase == "preparation"
+        # The request-rest gate is now ready. A lost reference must still stop
+        # opening requests, then exact restoration resumes the signed clock.
+        key = hashlib.sha256(h.service_reference_raw).hexdigest()
+        objects = SettlementEvidenceFiles(Path(o.config.lifecycle.sources.objects_directory))
+        original = objects(key)
+        (Path(o.config.lifecycle.sources.objects_directory) / (key + ".json")).unlink()
+        with pytest.raises(FileNotFoundError):
+            await node.tick()
+        assert node.controller.store.status(h.cohort)[0] == before
+        objects.publish(key, lambda _: original)
         await node.tick()
         assert node.controller.store.status(h.cohort)[0].phase == "requests"
         assert Path(o.config.lifecycle.sources.round_directory, h.cohort + ".json").is_file()

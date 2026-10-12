@@ -31,6 +31,7 @@ from .competition_cohort_endpoint_archive import (
 )
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_model_award import ModelArtifactVerifier
+from .competition_cohort_object_codec import endpoint_object_bytes
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest
 from .competition_cohort_reward_allocation import CohortRewardAllocation
@@ -421,7 +422,7 @@ def _replay_detached_reward_package(
     ):
         raise ValueError("reward package differs from selected identity or policy")
     inventory = {
-        o.sha256: canonical_json_bytes(o.value)
+        o.sha256: endpoint_object_bytes(o.value, o.sha256)
         for o in progress_items(
             package.objects,
             stage="reward_package_inventory",
