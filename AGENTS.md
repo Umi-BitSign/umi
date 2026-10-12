@@ -25,6 +25,15 @@
   preserve an oversized module.
 - Refactors must preserve signed bytes, published schemas, command arguments,
   and durable journal semantics. Test historical inputs and failure paths.
+- Schema or encoding changes must include the compatibility reader, migration or
+  repair needed by supported installations and retained evidence. Qualify the
+  original signed artifacts through every consuming publication, certification,
+  reward and restart/replay stage; preserve their bytes and state bindings.
+- Every preparation, validation, migration, recovery and execution stage must
+  expose counted progress, elapsed time, ETA basis and stalled/retrying status.
+  Before enough samples exist, report a labeled planning range with assumptions.
+  Keep substage estimates separate from overall completion, revise stale ranges,
+  and qualify telemetry without adding execution watchdogs.
 - Existing validators and miners must not be stopped or replaced for a cleanup.
   Test changes in an isolated workspace before any separately qualified deployment.
 - Clean up task-created remote build/test/rehearsal directories after use. Check

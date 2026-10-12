@@ -1,6 +1,7 @@
 """Host-only review allowances preserve supported layouts and durable bindings."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +74,8 @@ def test_complete_serial_budget_counts_exports_replays_and_both_queues(policy):
         "decision_vote_seconds": 40064,
         "progress_exchange_seconds": 27095,
         "decision_exchange_seconds": 40106,
+        "adoption_vote_seconds": 35064,
+        "adoption_exchange_seconds": 35106,
     }
     assert budget.vote_seconds("decision") - budget.vote_seconds("progress") == 13011
     with pytest.raises(ValueError, match="unsupported"):
@@ -276,3 +279,24 @@ def test_owner_export_is_independent_of_short_ordinary_peer_timeout(selected, tm
     assert host.readiness_timeout_seconds == 17
     assert host.timeout_seconds == (4000 if use_budget else 17)
     assert host.maximum_bytes == host.request_replay_bytes == GIB4
+
+
+@pytest.mark.parametrize("selected_profile", [False, True])
+def test_adoption_history_and_reservation_readers_share_export_profile(selected, selected_profile):
+    from umi.competition_cohort_review_selection import SelectedPhaseReviewer
+    from umi.competition_store import CompetitionStore
+
+    original = selected.config.model_copy(update={"review_timeout_seconds": 17})
+    config = select(original, profile(original.policy)) if selected_profile else original
+    promotion = CompetitionStore(Path(config.promotion_directory), config.policy)
+    reviewer = SelectedPhaseReviewer(
+        config, SimpleNamespace(policy=config.policy), None, "x" * 32, None, promotion
+    )
+    expected = config.phase_review_budget.export_exchange_seconds if selected_profile else 2400
+    assert reviewer.adoption.history.timeout == expected
+    assert reviewer.adoption.history.fetch.timeout_seconds == expected
+    assert reviewer.adoption.reservation.transport.timeout_seconds == expected
+    assert reviewer.adoption.reservation.complete_exchange is selected_profile
+    assert reviewer.adoption.budget == config.phase_review_budget
+    assert canonical_json_bytes(config.series) == canonical_json_bytes(original.series)
+    assert config.signing == original.signing

@@ -784,11 +784,19 @@ capacity and intended concurrency. Signed inference and snapshot-age limits do
 not describe aggregate proof-replay throughput. The profile is an operating
 allowance, not evidence of resource qualification or a completion-time promise.
 
-The owner uses `export_seconds` for its complete export operation. A reviewer
+The owner uses `export_seconds` separately for each complete export operation,
+including authenticated history exports, and each request-rule prepare, reserve
+or commit operation. A reviewer
 allows `export_queue_slots * export_seconds + transport_seconds` for each owner
 exchange. Progress voting includes two full exchanges and replays; decision
-voting includes three. Each vote adds the selected authority, signing and signer
-queue allowances. The coordinator adds another queue and transport allowance to
+voting includes three. Request-rule adoption has three exchanges (two fresh
+authenticated histories and the dual-journal reservation proof) and two history
+validation/replay allowances. The reservation is a small signed proof, not a
+third history replay; its verification is additional authority work. Adoption
+therefore allows `3 * export_exchange_seconds + 2 * replay_seconds +
+authority_seconds + signing_seconds + vote_queue_seconds` for the vote operation.
+These vote-operation formulas include the selected authority, signing and signer
+queue allowances once. The coordinator adds another queue and transport allowance to
 cover the route semaphore, which precedes the reviewer's operation timer.
 `replay_seconds` includes parsing, native replay and evidence checks associated
 with one read; `authority_seconds` covers additional proof and current-authority
@@ -796,6 +804,33 @@ work. `signing_seconds` must cover the configured native signing timeout.
 Allow for admission queues, response transfer and host contention in the
 selected components. Finite allowances do not bound an uncontrolled backlog;
 operate with the selected concurrency and investigate repeated queue growth.
+
+The adoption operator's `RequestTailAdoptionVotePeer` must receive the selected
+policy and profile. It derives the complete adoption vote exchange allowance;
+the shorter owner export exchange allowance is insufficient for a vote. The
+native reservation reader also enforces a total exchange deadline when a
+profile is selected, in addition to the HTTP client's I/O inactivity timeout.
+Adoption logs identify both history reads, native replay, owned finality and
+reservation verification, with elapsed wait time. A waiting exchange has no
+measured ETA; these configured allowances are not completion estimates. Pure
+native replay and reservation verification run in owned workers, retaining the
+signing lock until cancellation has drained them.
+Owner control journal reads and their native history authentication remain
+synchronous on the SQLite connection's owning event loop. Those sections can
+delay heartbeats and cancellation; the selected outer budget is not a hard
+wall-clock shutdown guarantee. Moving that live connection across threads is
+not a supported way to shorten a pending operation.
+
+Adoption prepare, reserve and review require a fresh verifier-owned finalized
+height. The native provider checks observer liveness, authenticated header
+bindings, policy/runtime verifier pins, startup/minimum floors, freshness and
+durable rollback evidence. For post-C5 lifecycle owners with a selected profile,
+initial history import and intake history publication use that same height port
+under `authority_seconds`; publication preserves authority, decision replay,
+retained participation, closure seals and exact pending-control checks. Failed
+publication can be retried after control commit using the original certificate.
+This height is not registration-membership evidence and cannot authorize public
+admission or service claims. Their registration collection budgets are unchanged.
 
 Before cutover, the deployment adapter must call
 `competition_cohort_review_preflight.validate_selected_phase_review_path(owner, reviewer)`
@@ -813,9 +848,10 @@ The reviewer `check` command reports effective deadlines but cannot qualify
 other hosts or their proxies.
 
 Omitting the profile preserves historical canonical configuration bytes and
-legacy timeout behavior. Selecting it changes only phase export and phase vote
-allowances; ordinary readiness, model, service, chain and signing limits retain
-their explicit selections. Existing owner/reviewer journals, authority, state
+legacy timeout behavior, including the 2,400-second adoption history/reservation
+reader defaults. C5 and lifecycle owners without a profile retain their capture
+publication port. Ordinary readiness, model, service, registration collection
+and signing limits retain their explicit selections. Existing owner/reviewer journals, authority, state
 directories and signed cohort clocks remain in place. Timed-out owned native
 work drains before its lock is released, so a late HTTP 503 can occur after the
 nominal deadline. A retry reuses a completed durable vote; interrupted review

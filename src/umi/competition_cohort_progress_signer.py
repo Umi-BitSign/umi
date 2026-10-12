@@ -169,6 +169,7 @@ class CohortProgressSigner:
         slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
         return await self._vote("phase_decision", slot, transition, review)
 
+    @log_phase("cohort_request_tail_adoption_vote")
     async def certify_request_tail_adoption(self, transition):
         transition = require_adoption(transition)
         if transition.cohort_sha256 not in {c.cohort_sha256 for c in self.config.cohorts}:

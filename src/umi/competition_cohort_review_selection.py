@@ -80,6 +80,11 @@ class SelectedPhaseReviewer:
             timeout_seconds=phase_export_timeout,
         )
         self.archive = archive
+        adoption_export_timeout = (
+            config.phase_review_budget.export_exchange_seconds
+            if config.phase_review_budget is not None
+            else 2400
+        )
         self.adoption = RequestTailAdoptionReviewer(
             config.series,
             self.policy,
@@ -90,17 +95,19 @@ class SelectedPhaseReviewer:
                     client,
                     config.owner_origin,
                     token=token,
-                    timeout_seconds=config.review_timeout_seconds,
+                    timeout_seconds=adoption_export_timeout,
                 ),
-                timeout_seconds=config.review_timeout_seconds,
+                timeout_seconds=adoption_export_timeout,
             ),
             RequestTailReservationReader(
                 client,
                 config.owner_origin,
                 token=token,
                 owner=config.owner_hotkey,
-                timeout_seconds=config.review_timeout_seconds,
+                timeout_seconds=adoption_export_timeout,
+                complete_exchange=config.phase_review_budget is not None,
             ),
+            budget=config.phase_review_budget,
         )
 
     @bounded_stage_declarations

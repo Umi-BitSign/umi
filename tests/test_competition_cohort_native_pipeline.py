@@ -364,9 +364,12 @@ def configure_owner(o, orders, chain_config, root, monkeypatch, *, overrides=Non
     SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
         digest(o.h.terms), lambda _: canonical_json_bytes(o.h.terms)
     )
-    SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
-        digest(o.h.reference), lambda _: canonical_json_bytes(o.h.reference)
+    reference_objects = getattr(
+        o.h, "reference_objects", {digest(o.h.reference): canonical_json_bytes(o.h.reference)}
     )
+    reference_files = SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory))
+    for key in reference_objects:
+        reference_files.publish(key, reference_objects.__getitem__)
     o.open = lambda: admission_module.admission_owner_app(
         config.admission_owner, o.service.preparation, o.h.provider, service_host=o.service
     )
@@ -645,6 +648,8 @@ async def run_pipeline(
     cohort_index=0,
     expected_recovered_jobs=None,
     activate=True,
+    activate_after_interruption=False,
+    service_claim_count=1,
     admission_probe=None,
     direct=None,
 ):
@@ -854,9 +859,13 @@ async def run_pipeline(
                 service.window()
                 service.reviewers(nodes, client)
                 await service.miner(stack)
-                catalog_key = await service.claim(endpoint_request, client)
-                service_worker = await app.state.dispatch.worker(catalog_key)
-                service_assignment = service_worker.queue.assignment(service.claimed)
+                service_assignments = []
+                for claim_index in range(service_claim_count):
+                    catalog_key = await service.claim(
+                        endpoint_request, client, nonce=f"{97 + claim_index:02x}" * 32
+                    )
+                    service_worker = await app.state.dispatch.worker(catalog_key)
+                    service_assignments.append(service_worker.queue.assignment(service.claimed))
 
             # The actual recurring host owns the remaining execution and export
             # work. This loop advances only the synthetic chain, never a stage.
@@ -884,12 +893,17 @@ async def run_pipeline(
                         # Rolling reports describe only this poll. A completed
                         # item leaves the scheduling queue, so a later zero is
                         # not evidence that its durable terminal disappeared.
-                        service_complete = not service or (
-                            await service_worker._local(
-                                service_worker.terminals.read, service_assignment
+                        service_complete = not service
+                        if service:
+                            service_complete = all(
+                                [
+                                    await service_worker._local(
+                                        service_worker.terminals.read, assignment
+                                    )
+                                    is not None
+                                    for assignment in service_assignments
+                                ]
                             )
-                            is not None
-                        )
                         if (
                             all(
                                 node.files.terminal(certificate, node.config.orders.signer)
@@ -959,7 +973,8 @@ async def run_pipeline(
             assert max(inference.values()) == max(signatures.values()) == 1
             assert sum(inference.values()) == 12 + 6 * mixed
             if service:
-                assert len(service.calls) == 7 and max(service.calls.values()) == 1
+                assert len(service.calls) == 6 + service_claim_count
+                assert max(service.calls.values()) == 1
                 assert service.lost_replies == int(interrupt)
                 service.reveal()
             await certify_requests(
@@ -1004,7 +1019,11 @@ async def run_pipeline(
                     is not None
                 )
             assert (dict(inference), dict(signatures)) == counts
-            if activate and mixed and (not interrupt or direct is not None):
+            if (
+                activate
+                and mixed
+                and (not interrupt or direct is not None or activate_after_interruption)
+            ):
                 # The actual recurring settlement output feeds reward discovery.
                 # Finality/RPC remain fixtures; reward review and replay do not.
                 with monkeypatch.context() as reward_patches:

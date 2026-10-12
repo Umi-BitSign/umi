@@ -116,11 +116,17 @@ class CohortIntakePublisher:
         intake: CohortIntake,
         capture: Callable[[], Awaitable[RegistrationCapture]],
         decision_source: Callable[[str, str], Awaitable[CohortDecisionInput]] | None = None,
+        *,
+        current_block: Callable[[], Awaitable[int]] | None = None,
     ):
         self.intake, self.capture, self.decision_source = intake, capture, decision_source
+        self.current_block = current_block
 
     async def __call__(self, history: CohortRecoveryHistory) -> None:
-        capture = await self.capture()
+        if self.current_block is None:
+            observation, publish = await self.capture(), self.intake.publish
+        else:
+            observation, publish = await self.current_block(), self.intake.publish_at_block
         if self.decision_source is not None:
             inputs = tuple(
                 [
@@ -129,9 +135,7 @@ class CohortIntakePublisher:
                     if s.transition.requires_progress_evidence
                 ]
             )
-            await run_owned_thread(
-                partial(self.intake.publish, history, capture, decision_inputs=inputs)
-            )
+            await run_owned_thread(partial(publish, history, observation, decision_inputs=inputs))
             return
         closure = next(
             (
@@ -143,7 +147,7 @@ class CohortIntakePublisher:
         )
         if closure is not None:
             raise ValueError("intake closure publication requires retained decision evidence")
-        await run_owned_thread(self.intake.publish, history, capture)
+        await run_owned_thread(publish, history, observation)
 
 
 class CohortIntake:
@@ -356,9 +360,26 @@ class CohortIntake:
         closure_input: CohortDecisionInput | None = None,
         decision_inputs: tuple[CohortDecisionInput, ...] | None = None,
     ):
+        return self.publish_at_block(
+            history,
+            execution_boundary(capture).block,
+            closure_input=closure_input,
+            decision_inputs=decision_inputs,
+        )
+
+    def publish_at_block(
+        self,
+        history: CohortRecoveryHistory,
+        current_block: int,
+        *,
+        closure_input: CohortDecisionInput | None = None,
+        decision_inputs: tuple[CohortDecisionInput, ...] | None = None,
+    ):
+        """Publish using an owned verified height; this is not membership evidence."""
+        if type(current_block) is not int or not 0 <= current_block <= 2**53 - 1:
+            raise ValueError("intake publication owned block is invalid")
         cohort = digest(history.plan)
         self._allowed(cohort)
-        observation = execution_boundary(capture)
         if digest(history.authority.authority) != self.bindings[cohort]:
             raise ValueError("cohort history has another configured authority")
         if decision_inputs is not None:
@@ -404,7 +425,7 @@ class CohortIntake:
                     verify_intake_closure(seal, closing, closure_input, self.policy)
                     # Retain the closure input before publishing its referencing history.
                     store.retain_source(cohort, closure_input)
-            state = store.publish_history(history, self.policy, current_block=observation.block)
+            state = store.publish_history(history, self.policy, current_block=current_block)
             # Retried publication fills any inputs lost after history adoption.
             # Native phase observation refuses missing inputs in the meantime.
             for evidence in decision_inputs or ():

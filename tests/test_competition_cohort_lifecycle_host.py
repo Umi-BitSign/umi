@@ -340,6 +340,36 @@ async def test_lifecycle_rechecks_references_before_new_phase_work(host, monkeyp
         assert not node.drivers
 
 
+async def test_c5_publication_keeps_capture_with_selected_review_profile(host, monkeypatch):
+    from .test_competition_cohort_review_budget import profile
+
+    h = host.h
+    assert h.history.plan.sequence == 5
+    budget = profile(h.intake.policy)
+    c = host.config
+    owner = c.admission_owner.model_copy(
+        update={
+            "phase_review_budget": budget,
+            "reviewers": tuple(
+                peer.model_copy(update={"phase_review_budget": budget})
+                for peer in c.admission_owner.reviewers
+            ),
+        }
+    )
+    host.service.config = c.model_copy(update={"admission_owner": owner})
+
+    async def forbidden():
+        pytest.fail("C5 publication retains its original capture path")
+
+    monkeypatch.setattr(h.provider, "current_finalized_block", forbidden)
+    async with boot.admission_owner_app(
+        owner, host.service.preparation, h.provider, service_host=host.service
+    ) as app:
+        node = await app.state.lifecycle.node(h.cohort)
+        assert node.publish_history.current_block is None
+        await node._publish(h.history)
+
+
 async def test_configured_phase_owner_recovers_quorum_and_holds_request_start(host):
     o, h = host, host.h
     for worker in h.admissions:

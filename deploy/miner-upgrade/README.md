@@ -8,7 +8,16 @@ running systemd miner, inspects its runtime, startup schema, service account and
 state paths, and selects a supported migration before changing services. Updates
 under the same cohort authority preserve existing startup bytes, journals and
 custom directory bindings in place, including root-run miners. Unsupported
-transitions stop before cutover.
+transitions stop before cutover. Explicit supported local grant and history limits
+are retained byte-for-byte. Before cutover and repeat recognition, the selected
+runtime checks native startup inputs as the existing service account in its
+working directory, without opening wallets or journals.
+Endpoint activation retains a root-owned recovery intent before stopping a
+service. A retry validates its exact command/configuration bindings and resumes a
+stopped service or adopts an already healthy selected runtime. Original rollback
+overrides survive interruptions; successful cutover is recorded before enrollment.
+Stage counts, elapsed time and historical-duration ETA are emitted without a new
+execution deadline.
 
 `--install-model-client` is an independent user installation mode for Linux and
 macOS with Python 3.10 through 3.14. It validates the same manifest/status binding,
@@ -30,8 +39,10 @@ verifies source and scoring pins before promotion. A failed runtime or health
 check keeps or restores the previous selected installation. Enrollment retries
 retain the exact signed request and claim instead of creating new signatures.
 
-Qualification lives in `tests/test_miner_upgrade.py`, including older startup
-layouts, repeated updates, custom paths, root services, policy-pin refusal and a
+Qualification lives in `tests/test_miner_upgrade.py`,
+`tests/test_miner_upgrade_historical.py`, `tests/test_miner_upgrade_recovery.py` and
+`tests/test_miner_startup_ownership.py`,
+including older startup layouts, repeated updates, custom paths, root services, policy-pin refusal and a
 PATH-shadowed `env` executable. Existing protocol state must never be reset to
 work around an unsupported upgrade.
 Standalone client isolation, repeat installation, failed selection and endpoint

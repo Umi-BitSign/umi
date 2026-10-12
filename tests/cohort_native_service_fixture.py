@@ -139,6 +139,7 @@ class NativeService:
         self.lose_reply, self.lost_replies = lose_reply, 0
         self.bytes = {c.video_sha256: media(c) for c in scenario["suite"].cases}
         self.bytes[SERVICE_SHA] = SERVICE_BYTES
+        self.bytes.update(getattr(self.h, "service_media", {}))
         self.blocks = None
         owner = self
 
@@ -460,7 +461,7 @@ class NativeService:
                 service_vote_routes(reviewer, token="v" * 32)
             )
 
-    async def claim(self, request, client):
+    async def claim(self, request, client, *, nonce="61" * 32):
         cohort_index = tuple(digest(plan) for plan in self.o.config.series.cohorts).index(
             self.h.cohort
         )
@@ -471,7 +472,7 @@ class NativeService:
             catalog_sha256=key,
             hotkey=request.signed_submission.submission.hotkey,
             submission_sha256=digest(request.signed_submission.submission),
-            nonce="61" * 32,
+            nonce=nonce,
         )
         self.claimed = SignedServiceWorkClaim(
             claim=body, signature=sign_object(body, wallet("Bob"))

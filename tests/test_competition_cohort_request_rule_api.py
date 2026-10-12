@@ -166,6 +166,12 @@ def api(original, policy, tmp_path, request):
         )
         h.app.include_router(request_tail_reservation_routes(h.host, token="h" * 32))
 
+    async def current_finalized_block():
+        if h.fail_collect:
+            raise OSError("synthetic owned finality unavailable")
+        return h.block
+
+    h.current_finalized_block = current_finalized_block
     h.reopen = reopen
     reopen()
     yield h
@@ -595,3 +601,416 @@ async def test_native_sealed_intake_refuses_adoption_without_reopening_membershi
     assert h.intake.pending_request_tail_adoption(h.cohort) is None
     assert h.intake.sealed(h.cohort) == progress.seal
     assert h.intake.receipt(request) == receipt
+
+
+async def test_profile_covers_slow_history_finality_reservation_and_complete_vote(
+    api, tmp_path, caplog, monkeypatch
+):
+    """Every staged delay exceeds the legacy scalar; native proof/signature checks remain."""
+    import asyncio
+    import json
+    import logging
+
+    from umi import competition_work_progress as progress
+    from umi.competition_cohort_review_budget import PhaseReviewBudget
+
+    h = api
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    monkeypatch.setattr(progress, "_HEARTBEAT_SECONDS", 0.05)
+    p = proposal(h)
+    h.intake.reserve_request_tail_adoption(p.transition)
+    h.store.reserve_exact(p.transition)
+    budget = PhaseReviewBudget(
+        schema="umi-cohort-phase-review-budget/1",
+        policy_sha256=digest(h.policy),
+        evaluation_runtime_sha256=h.policy.evaluation_runtime_sha256,
+        maximum_aggregate_evidence_bytes=4 * 1024**3,
+        export_seconds=2,
+        replay_seconds=2,
+        authority_seconds=2,
+        signing_seconds=1,
+        transport_seconds=1,
+        vote_queue_seconds=1,
+        export_queue_slots=2,
+    )
+    stages = []
+
+    async def owned_block():
+        stages.append("owned_height")
+        await asyncio.sleep(1.05)
+        return h.block
+
+    async def forbidden_membership():
+        pytest.fail("adoption must use verified owned height, never membership collection")
+
+    h.current_finalized_block = owned_block
+    h.collect = forbidden_membership
+
+    async def delayed_owner_sign(body):
+        stages.append("history" if hasattr(body, "source") else "reservation")
+        await asyncio.sleep(1.05)
+        return sign_object(body, wallet("Charlie"))
+
+    h.host.sign = delayed_owner_sign
+    h.host.timeout_seconds = budget.export_seconds
+    owner_app = FastAPI()
+    owner_app.include_router(
+        cohort_history_routes(
+            CohortHistoryExporter(
+                h.intake,
+                wallet("Charlie").hotkey.ss58_address,
+                delayed_owner_sign,
+                timeout_seconds=budget.export_seconds,
+            ),
+            token="h" * 32,
+        )
+    )
+    owner_app.include_router(request_tail_reservation_routes(h.host, token="h" * 32))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=owner_app)) as owner_client:
+        native_history = CohortHistoryReader(
+            wallet("Charlie").hotkey.ss58_address,
+            CohortHistoryHTTPClient(
+                owner_client,
+                "https://owner.example",
+                token="h" * 32,
+                timeout_seconds=budget.export_exchange_seconds,
+            ),
+            timeout_seconds=budget.export_exchange_seconds,
+        )
+        native_reservation = RequestTailReservationReader(
+            owner_client,
+            "https://owner.example",
+            token="h" * 32,
+            owner=wallet("Charlie").hotkey.ss58_address,
+            timeout_seconds=budget.export_exchange_seconds,
+            complete_exchange=True,
+        )
+
+        reviewer = SimpleNamespace(
+            policy=h.policy,
+            cohorts=h.intake.config.cohorts,
+            adoption=RequestTailAdoptionReviewer(
+                h.series, h.policy, h, native_history, native_reservation, budget=budget
+            ),
+        )
+
+        async def sign(body):
+            stages.append("sign")
+            return sign_object(body, wallet("Charlie"))
+
+        config = CohortProgressSignerConfig(
+            schema="umi-cohort-progress-signer-config/1",
+            directory=str(tmp_path / "profile-signer"),
+            policy_sha256=digest(h.policy),
+            signer=wallet("Charlie").hotkey.ss58_address,
+            cohorts=h.intake.config.cohorts,
+            signing_timeout_seconds=1,
+        )
+        signer = CohortProgressSigner(config, reviewer, sign)
+        app = FastAPI()
+        app.include_router(
+            request_tail_adoption_vote_routes(
+                signer, h.series, token="v" * 32, timeout_seconds=1, budget=budget
+            )
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+            peer = RequestTailAdoptionVotePeer(
+                client,
+                "https://review.example",
+                signer=config.signer,
+                token="v" * 32,
+                timeout_seconds=1,
+                policy=h.policy,
+                budget=budget,
+            )
+            assert peer.timeout_seconds == peer.transport.timeout_seconds == 25
+            vote = await peer.certify(p)
+            assert stages == ["history", "owned_height", "history", "reservation", "sign"]
+            assert vote.hotkey == config.signer
+            # The actual signed proposal and durable vote are reused unchanged.
+            assert await peer.certify(p) == vote
+            assert stages == ["history", "owned_height", "history", "reservation", "sign"]
+            assert h.store.status(h.cohort)[1] == p.transition
+    events = [json.loads(r.message) for r in caplog.records if r.name == "umi.competition.progress"]
+    expected = {
+        "adoption_history_before",
+        "adoption_history_replay",
+        "adoption_owned_finality",
+        "adoption_history_after",
+        "adoption_reservation_proof",
+    }
+    assert expected <= {e.get("stage") for e in events if e.get("state") == "completed"}
+    waiting = [e for e in events if e.get("state") == "waiting"]
+    assert {
+        "adoption_history_before",
+        "adoption_owned_finality",
+        "adoption_history_after",
+        "adoption_reservation_proof",
+    } <= {e["stage"] for e in waiting}
+    assert all(e["eta_seconds"] is None and e["percent"] == 0 for e in waiting)
+    assert all(e["elapsed_seconds"] > 0 for e in waiting)
+    assert any(e.get("phase") == "cohort_request_tail_adoption_vote" for e in events)
+
+
+@pytest.mark.parametrize("failure", ["owned_finality", "lost_reply"])
+async def test_native_owned_height_publication_recovers_exact_committed_adoption(api, failure):
+    from umi.competition_cohort_intake import CohortIntakePublisher
+    from umi.competition_cohort_lifecycle_host import LifecycleHost
+
+    from .test_competition_cohort_review_budget import profile
+
+    h = api
+    original = canonical_json_bytes(h.intake.history(h.cohort))
+    p = proposal(h, block=h.block)
+    h.host.service.config.admission_owner.phase_review_budget = profile(h.policy)
+    fail = True
+
+    async def owned_height():
+        if fail and failure == "owned_finality":
+            raise OSError("fresh owned finality unavailable")
+        return h.block
+
+    async def forbidden_membership():
+        pytest.fail("profile-selected publication must not collect membership")
+
+    h.current_finalized_block, h.collect = owned_height, forbidden_membership
+    native = CohortIntakePublisher(
+        h.intake, h.collect, current_block=lambda: LifecycleHost._publication_block(h.host)
+    )
+
+    async def publish(history):
+        await native(history)
+        if fail:
+            raise OSError("publication acknowledgement lost")
+
+    h.node.publish_history = publish
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=h.app), base_url="https://owner.example"
+    ) as client:
+        # Reservation needs fresh finality before introducing any durable intent.
+        fail = False
+        assert (await post(client, ROOT + "/reserve", p)).status_code == 200
+        fail = True
+        signed = signed_transition(p.transition)
+        commit = RequestTailAdoptionCommit(
+            schema="umi-request-tail-adoption-commit/1",
+            series_sha256=digest(h.series),
+            certificate=signed,
+        )
+        assert (await post(client, ROOT + "/commit", commit)).status_code == 503
+        assert h.store.status(h.cohort)[1] is None  # Native commit preceded publication.
+        if failure == "owned_finality":
+            assert canonical_json_bytes(h.intake.history(h.cohort)) == original
+            assert h.intake.pending_request_tail_adoption(h.cohort) == p.transition
+        else:
+            assert h.intake.history(h.cohort).transitions == (signed,)
+        fail = False
+        first = await post(client, ROOT + "/commit", commit)
+        assert first.status_code == 200
+        assert (await post(client, ROOT + "/commit", commit)).content == first.content
+    assert h.intake.history(h.cohort).transitions == (signed,)
+    assert h.intake.pending_request_tail_adoption(h.cohort) is None
+    assert h.state.targets == original_targets(h)
+
+
+async def test_adoption_replay_keeps_event_loop_live_and_drains_before_unlock(api, tmp_path):
+    import asyncio
+    import threading
+
+    h = api
+    p = proposal(h, block=h.block)
+    entered, release = threading.Event(), threading.Event()
+    source = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, None).read(
+        h.cohort
+    )
+
+    async def history(_):
+        return source
+
+    async def forbidden(*_):
+        pytest.fail("cancelled review cannot reserve or sign")
+
+    adoption = RequestTailAdoptionReviewer(h.series, h.policy, h, history, forbidden)
+    native_replay = adoption._replay
+    loop_thread = threading.get_ident()
+
+    def blocked(value):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(5)
+        return native_replay(value)
+
+    adoption._replay = blocked
+    config = CohortProgressSignerConfig(
+        schema="umi-cohort-progress-signer-config/1",
+        directory=str(tmp_path / "cancel-vote"),
+        policy_sha256=digest(h.policy),
+        signer=wallet("Charlie").hotkey.ss58_address,
+        cohorts=h.intake.config.cohorts,
+    )
+    signer = CohortProgressSigner(
+        config,
+        SimpleNamespace(policy=h.policy, cohorts=h.intake.config.cohorts, adoption=adoption),
+        forbidden,
+    )
+    task = asyncio.create_task(signer.certify_request_tail_adoption(p.transition))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert not task.done() and signer.serial.locked()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not signer.serial.locked()
+    slot = digest({"cohort": h.cohort, "tip": p.transition.predecessor_sha256})
+    assert signer.journal.get("phase_decision_intent", slot) is None
+    assert signer.journal.get("phase_decision_vote", slot) is None
+
+
+@pytest.mark.parametrize("selected_profile", [False, True])
+async def test_real_lifecycle_node_seeds_and_publishes_with_selected_finality(
+    api, tmp_path, selected_profile
+):
+    from contextlib import ExitStack
+
+    from umi.competition_cohort_lifecycle_host import LifecycleHost
+
+    from .test_competition_cohort_review_budget import profile
+
+    h = api
+    assert h.plan.sequence > 5
+    original = CohortHistoryExporter(h.intake, wallet("Charlie").hotkey.ss58_address, None).read(
+        h.cohort
+    )
+    calls = []
+    failed = selected_profile
+
+    async def history(_):
+        return original
+
+    async def owned_height():
+        calls.append("height")
+        if failed:
+            raise OSError("owned height unavailable")
+        return h.block
+
+    async def membership():
+        calls.append("membership")
+        assert not selected_profile
+        return capture_at(h.block)
+
+    h.host.service.config.admission_owner.phase_review_budget = (
+        profile(h.policy) if selected_profile else None
+    )
+    h.host.service.history = history
+    h.current_finalized_block, h.collect = owned_height, membership
+    host = LifecycleHost.__new__(LifecycleHost)
+    host.service, host.policy, host.provider = h.host.service, h.policy, h
+    host.config = SimpleNamespace(maximum_state_bytes=1024**3)
+    host.root, host.nodes, host.stores, host.gate = tmp_path / "native-lifecycle", {}, {}, None
+    with ExitStack() as host.resources:
+        if selected_profile:
+            with pytest.raises(OSError, match="owned height"):
+                await host.node(h.cohort)
+            assert not host.stores[h.cohort].has_published_history(h.cohort)
+            assert h.cohort not in host.nodes
+            assert calls == ["height"]
+            calls.clear()
+            failed = False
+        node = await host.node(h.cohort)
+        assert (node.publish_history.current_block is not None) == selected_profile
+        await node._publish(original.history)
+        assert calls == (["height", "height"] if selected_profile else ["membership"] * 2)
+        assert canonical_json_bytes(host.stores[h.cohort].published_history(h.cohort)) == (
+            canonical_json_bytes(original.history)
+        )
+        assert canonical_json_bytes(h.intake.history(h.cohort)) == canonical_json_bytes(
+            original.history
+        )
+
+
+async def test_profile_reservation_exchange_timeout_drains_its_owned_transport(api):
+    import asyncio
+
+    h = api
+    p = proposal(h)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+
+    class Transport:
+        timeout_seconds = 0.02  # Synthetic clock-scale I/O budget.
+
+        async def __call__(self, request):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleaning.set()
+                await release.wait()
+                raise
+
+    reader = RequestTailReservationReader(
+        None,
+        "https://owner.example",
+        token="h" * 32,
+        owner=wallet("Charlie").hotkey.ss58_address,
+        complete_exchange=True,
+    )
+    reader.transport = Transport()
+    task = asyncio.create_task(reader(p.transition, h.intake.history(h.cohort)))
+    try:
+        await asyncio.wait_for(cleaning.wait(), timeout=1)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.TimeoutError):
+        await task
+
+
+def test_adoption_route_and_peer_reject_incompatible_selected_profile(api):
+    from .test_competition_cohort_review_budget import profile
+
+    h = api
+    budget = profile(h.policy)
+    peer = dict(signer=wallet("Charlie").hotkey.ss58_address, token="v" * 32)
+    with pytest.raises(ValueError, match="selected policy"):
+        RequestTailAdoptionVotePeer(None, "https://review.example", budget=budget, **peer)
+    bad = budget.model_copy(update={"evaluation_runtime_sha256": "ff" * 32})
+    with pytest.raises(ValueError, match="runtime"):
+        RequestTailAdoptionVotePeer(
+            None, "https://review.example", policy=h.policy, budget=bad, **peer
+        )
+    signer = SimpleNamespace(
+        policy=h.policy, config=SimpleNamespace(signing_timeout_seconds=budget.signing_seconds + 1)
+    )
+    with pytest.raises(ValueError, match="signing"):
+        request_tail_adoption_vote_routes(signer, h.series, token="v" * 32, budget=budget)
+
+
+@pytest.mark.parametrize("kind", ["prepare", "reserve"])
+async def test_owned_finality_failure_refuses_control_without_membership_fallback(api, kind):
+    h = api
+
+    async def failed():
+        raise ValueError("owned finalized head failed freshness or rollback checks")
+
+    async def forbidden():
+        pytest.fail("an unavailable owned height cannot fall back to membership/RPC labels")
+
+    h.current_finalized_block, h.collect = failed, forbidden
+    value = (
+        proposal(h)
+        if kind == "reserve"
+        else RequestTailAdoptionPrepare(
+            schema="umi-request-tail-adoption-prepare/1",
+            series_sha256=digest(h.series),
+            cohort_sha256=h.cohort,
+            predecessor_sha256=h.state.tip_sha256,
+        )
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=h.app), base_url="https://owner.example"
+    ) as client:
+        assert (await post(client, ROOT + "/" + kind, value)).status_code == 503
+    assert h.store.status(h.cohort)[1] is None
+    assert h.intake.pending_request_tail_adoption(h.cohort) is None

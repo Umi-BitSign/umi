@@ -20,10 +20,11 @@ from .competition_cohort_recovery import (
     propose_recovery_transition,
     verify_recovery_quorum,
 )
-from .competition_cohort_request_rule import prepare_request_tail_adoption
+from .competition_cohort_request_rule import prepare_request_tail_adoption_at_block
+from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_http import PhaseReviewHTTPClient, phase_review_routes
-from .competition_execution import execution_boundary
-from .concurrency import run_owned_thread
+from .competition_work_progress import await_progress
+from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import Signature, digest, identity, verify_signature
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -81,13 +82,46 @@ def assemble_request_tail_adoption(proposal, signatures, policy):
     return SignedCohortRecoveryTransition(transition=proposal.transition, signatures=votes)
 
 
+def _owner_budget(host):
+    selected = getattr(host.service.config.admission_owner, "phase_review_budget", None)
+    return (
+        None
+        if selected is None
+        else checked_budget(selected, host.policy, selected.maximum_aggregate_evidence_bytes)
+    )
+
+
+async def _owned_block(provider, budget):
+    # The native method verifies observer liveness, authenticated finalized
+    # header, startup/minimum floors, freshness and rollback guards. Adoption
+    # needs no membership capture; never fabricate a RegistrationCapture or
+    # accept a height from the operator/RPC as a substitute.
+    work = provider.current_finalized_block()
+    block = (
+        await work
+        if budget is None
+        else await wait_for_owned(work, timeout=budget.authority_seconds)
+    )
+    if type(block) is not int or not 0 <= block <= 2**53 - 1:
+        raise ValueError("request-rule adoption owned block is invalid")
+    return block
+
+
 class RequestTailAdoptionReviewer:
-    def __init__(self, series, policy, provider, history, reservation):
+    def __init__(self, series, policy, provider, history, reservation, *, budget=None):
         self.series, self.policy = series, policy
         self.provider, self.history = provider, history
+        self.budget = (
+            None
+            if budget is None
+            else checked_budget(budget, policy, budget.maximum_aggregate_evidence_bytes)
+        )
         self.reservation = reservation
         if provider.policy != policy:
             raise ValueError("request-rule reviewer finality has another policy")
+
+    def _replay(self, source):
+        return replay_cohort_decisions(source.history, self.policy, source.inputs().__getitem__)
 
     async def __call__(self, transition):
         transition = require_adoption(transition)
@@ -95,14 +129,20 @@ class RequestTailAdoptionReviewer:
         plan = next((p for p in self.series.cohorts if digest(p) == cohort), None)
         if plan is None:
             raise ValueError("request-rule adoption is outside selected series")
-        source = await self.history(cohort)
+        source = await await_progress(
+            self.history(cohort), stage="adoption_history_before", cohort=cohort
+        )
         if source.history.plan != plan or source.history.authority != self.series.recovery:
             raise ValueError("request-rule adoption changed original series authority")
-        state, _, _ = replay_cohort_decisions(
-            source.history, self.policy, source.inputs().__getitem__
+        state, _, _ = await await_progress(
+            run_owned_thread(self._replay, source), stage="adoption_history_replay", cohort=cohort
         )
-        observation = execution_boundary(await self.provider.collect())
-        if observation.block < transition.observed_at_block:
+        block = await await_progress(
+            _owned_block(self.provider, self.budget),
+            stage="adoption_owned_finality",
+            cohort=cohort,
+        )
+        if block < transition.observed_at_block:
             raise ValueError("request-rule adoption is ahead of owned finality")
         expected = propose_recovery_transition(
             state,
@@ -114,15 +154,21 @@ class RequestTailAdoptionReviewer:
         )
         if canonical_json_bytes(expected) != canonical_json_bytes(transition):
             raise ValueError("request-rule adoption differs from selected native proposal")
-        current = await self.history(cohort)
+        current = await await_progress(
+            self.history(cohort), stage="adoption_history_after", cohort=cohort
+        )
         if current.history != source.history:
             raise OSError("request-rule history changed during independent review")
-        await self.reservation(transition, current.history)
+        await await_progress(
+            self.reservation(transition, current.history),
+            stage="adoption_reservation_proof",
+            cohort=cohort,
+        )
         # Fresh challenges and later finality heads validate the same intent.
         # Keep its retained audit identity stable across a lost signing reply.
         return {
             "series_sha256": digest(self.series),
-            "history_sha256": digest(source.history),
+            "history_sha256": await run_owned_thread(digest, source.history),
             "proposal_sha256": digest(transition),
             "review_rule": "owned_finality_and_same_tip_dual_reservation/1",
         }
@@ -143,7 +189,17 @@ class _AdoptionVoteResponder:
         )
 
 
-def request_tail_adoption_vote_routes(signer, series, *, token, timeout_seconds=2400):
+def request_tail_adoption_vote_routes(
+    signer, series, *, token, timeout_seconds=2400, budget: PhaseReviewBudget | None = None
+):
+    if budget is not None:
+        budget = checked_budget(
+            budget,
+            signer.policy,
+            budget.maximum_aggregate_evidence_bytes,
+            signing_seconds=signer.config.signing_timeout_seconds,
+        )
+        timeout_seconds = budget.vote_seconds("adoption")
     return phase_review_routes(
         _AdoptionVoteResponder(signer, series, timeout_seconds),
         token=token,
@@ -154,8 +210,25 @@ def request_tail_adoption_vote_routes(signer, series, *, token, timeout_seconds=
 
 
 class RequestTailAdoptionVotePeer:
-    def __init__(self, client, origin, *, signer, token, timeout_seconds=2400):
+    def __init__(
+        self,
+        client,
+        origin,
+        *,
+        signer,
+        token,
+        timeout_seconds=2400,
+        budget: PhaseReviewBudget | None = None,
+        policy=None,
+    ):
+        if budget is not None:
+            if policy is None:
+                raise ValueError("adoption vote budget requires its selected policy")
+            budget = checked_budget(budget, policy, budget.maximum_aggregate_evidence_bytes)
+            timeout_seconds = budget.vote_exchange_seconds("adoption")
         self.signer = identity(signer)
+        self.budget = budget
+        self.timeout_seconds = timeout_seconds
         self.transport = PhaseReviewHTTPClient(
             client,
             origin,
@@ -168,7 +241,11 @@ class RequestTailAdoptionVotePeer:
 
     async def certify(self, proposal):
         proposal = RequestTailAdoptionProposal.model_validate_json(canonical_json_bytes(proposal))
-        raw = await self.transport(proposal)
+        raw = (
+            await self.transport(proposal)
+            if self.budget is None
+            else await wait_for_owned(self.transport(proposal), timeout=self.timeout_seconds)
+        )
         vote = Signature.model_validate_json(raw)
         if canonical_json_bytes(vote) != raw or identity(vote.hotkey) != self.signer:
             raise ValueError("request-rule vote changed canonical bytes or selected signer")
@@ -207,8 +284,8 @@ class RequestTailAdoptionOwner:
             if self.kind == "prepare":
                 if history_tip(history) != request.predecessor_sha256 or pending is not None:
                     raise ValueError("request-rule preparation lost its selected predecessor")
-                observation = execution_boundary(await host.provider.collect())
-                transition = prepare_request_tail_adoption(history, host.policy, observation)
+                block = await _owned_block(host.provider, _owner_budget(host))
+                transition = prepare_request_tail_adoption_at_block(history, host.policy, block)
             elif self.kind == "reserve":
                 prior = any(s.transition == transition for s in history.transitions)
                 if not prior:
@@ -225,8 +302,8 @@ class RequestTailAdoptionOwner:
                     if expected != transition:
                         raise ValueError("request-rule reservation lost its selected control tip")
                 if not prior and pending != transition:
-                    observation = execution_boundary(await host.provider.collect())
-                    if observation.block < transition.observed_at_block:
+                    block = await _owned_block(host.provider, _owner_budget(host))
+                    if block < transition.observed_at_block:
                         raise ValueError("request-rule reservation is ahead of owned finality")
                 # Hold lifecycle progress while the intake owner atomically
                 # validates receipt heights and gates fresh participation.

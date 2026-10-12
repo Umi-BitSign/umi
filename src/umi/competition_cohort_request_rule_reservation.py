@@ -85,8 +85,11 @@ def request_tail_reservation_routes(lifecycle, *, token):
 
 
 class RequestTailReservationReader:
-    def __init__(self, client, origin, *, token, owner, timeout_seconds=2400):
+    def __init__(
+        self, client, origin, *, token, owner, timeout_seconds=2400, complete_exchange=False
+    ):
         self.owner = identity(owner)
+        self.complete_exchange = complete_exchange
         self.transport = PhaseReviewHTTPClient(
             client,
             origin,
@@ -103,7 +106,16 @@ class RequestTailReservationReader:
             transition=transition,
             challenge=secrets.token_hex(32),
         )
-        raw = await self.transport(request)
+        # HTTPX's scalar bounds I/O inactivity. Selected complete-path profiles
+        # also own the total exchange, matching the history reader's boundary.
+        raw = (
+            await wait_for_owned(self.transport(request), timeout=self.transport.timeout_seconds)
+            if self.complete_exchange
+            else await self.transport(request)
+        )
+        return await run_owned_thread(self._verify, raw, request, history)
+
+    def _verify(self, raw, request, history):
         signed = SignedRequestTailReservationProof.model_validate_json(raw)
         if (
             canonical_json_bytes(signed) != raw

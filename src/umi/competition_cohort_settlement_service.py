@@ -48,6 +48,7 @@ from .competition_cohort_settlement_inputs import (
     replay_settlement_inputs,
 )
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
+from .competition_cohort_settlement_pulses import SettlementPulseSource
 from .competition_cohort_settlement_signing import SettlementPhaseSigner
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
@@ -380,6 +381,7 @@ class CohortSettlementService:
             logger.info(
                 "settlement_inputs cohort=%s phase=%s status=assembling", self.cohort, state.phase
             )
+            pulses = SettlementPulseSource(Path(self.config.original_sources.pulses_directory))
             package = await run_owned_thread(
                 partial(
                     assemble_settlement_inputs,
@@ -391,7 +393,9 @@ class CohortSettlementService:
                     current_block=block,
                     maximum_bytes=self.config.maximum_package_bytes,
                     retained_objects=JournalEndpointObjects(self.journal),
-                )
+                    pulses=pulses,
+                ),
+                on_cancel=pulses.cancel,
             )
             await run_owned_thread(
                 partial(

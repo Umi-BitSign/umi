@@ -44,8 +44,22 @@ def prepare_request_tail_adoption(
     native verified observation and reconcile the current tip before reservation.
     Adoption is only supported before the original request opening exists.
     """
-    state = _verified_state(history, policy)
     observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
+    return prepare_request_tail_adoption_at_block(history, policy, observation.block)
+
+
+def prepare_request_tail_adoption_at_block(
+    history: CohortRecoveryHistory, policy: CompetitionPolicy, current_block: int
+) -> CohortRecoveryTransition:
+    """Build the same proposal from the caller's native owned finalized height.
+
+    Adoption uses only the observed height, not registration membership. The
+    caller must obtain it from its verifier-owned current_finalized_block(); an
+    unverified RPC height is never an allowed authority source.
+    """
+    if type(current_block) is not int or not 0 <= current_block <= 2**53 - 1:
+        raise ValueError("request-rule adoption current block is invalid")
+    state = _verified_state(history, policy)
     adoption = CohortRequestTailAdoption(
         schema="umi-cohort-request-tail-adoption/1",
         original_plan=history.plan,
@@ -55,7 +69,7 @@ def prepare_request_tail_adoption(
         state,
         history.authority.authority,
         operation="adopt_request_tail_rule",
-        observed_at_block=observation.block,
+        observed_at_block=current_block,
         evidence_sha256=digest(adoption),
         request_tail_adoption=adoption,
     )

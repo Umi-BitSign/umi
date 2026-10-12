@@ -18,6 +18,18 @@ Request review also identifies its review attempt and read cycle. Restarted work
 gets a new identity; logs are diagnostics and do not replace retained votes or
 create a replay checkpoint.
 
+Settlement assembly, input preparation, input replay and native phase review
+also identify `operation_name`, `operation_id` and `parent_operation_id`. These
+labels distinguish repeated closure traversals without combining their counts
+or forecasting overall completion. Each synchronous operation reuses only exact
+canonical serialization bytes with a 64 MiB retained key/output budget and
+65,536 entries. Nested preparation shares the assembly budget; the cache clears
+on success or failure before later waits. This is not a process RSS limit: Python
+bookkeeping, transient snapshots and input models consume additional memory.
+Schema, signature, authority and source checks still execute on every replay;
+aggregate streaming remains uncached. Oversize values use ordinary serialization
+and are not rejected by this optimization.
+
 Finite substages report `completed`, `total`, `unit`, `percent`,
 `elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
 item returns successfully. Preparation and intake count original participation
@@ -34,6 +46,19 @@ steps with different costs deliberately retain a `null` ETA. Owner exports,
 quorum votes, native review workers and history publication emit waiting
 heartbeats with a `null` ETA: an external dependency has no measured finish time.
 Those waits retain their native timeouts, cancellation and drain behavior.
+
+When a native ETA is `null`, an operational status update must still give a
+labeled planning range, its assumptions and the scope it covers. Use comparable
+retained work measurements where available; identify an uncalibrated estimate
+explicitly. If a dependency or retry invalidates the range, mark the remaining
+ETA unknown and replace the plan. A zero lower bound is not completed work.
+Preparation, migration and recovery tools must report their own started,
+completed, stalled and retrying stages with elapsed time and counted scope.
+No-new-count heartbeats identify missing observable progress; they do not prove
+that a replay worker is deadlocked. Keep RPC exchange allowances separate from
+estimates for complete local replay and cooperative child cleanup. Progress
+output must use a diagnostic channel separate from an exact RPC response or a
+success contract that requires empty stderr.
 
 Report the stage name with every percentage and ETA. Separate nested substages
 and repeated replays; do not add their percentages or describe a completed
@@ -122,6 +147,30 @@ checks run. Final cohort quality decisions, allocation and signatures still
 require the original certified request closure and reference release. Background
 preparation cannot replace missing work or move those signed boundaries.
 
+When assembling original settlement inputs, the settlement service supplies
+missing Quicknet pulses in its own service account and mount namespace. Native
+replay chooses each exact original reveal round; the producer fetches that round
+from the pinned Quicknet chain, verifies the chain information, BLS signature and
+randomness, then atomically retains the canonical pulse in `pulses_directory`.
+Allow that service HTTPS access to `api.drand.sh`. It uses the native
+`QuicknetClient` network profile: 15-second connect/read/write/pool timeouts,
+64 KiB response bodies, 16 KiB headers, no redirects and no proxy environment.
+These are bounds for one exchange, not a cohort completion deadline. An outage
+returns to the service's configured polling loop; retries have no finite count
+or overall elapsed-time cap. Completed pulses survive later failures and restart.
+Cancellation interrupts the active async transfer, drains its HTTP cleanup and
+prevents another round from starting. The HTTPX timeouts are inactivity bounds,
+not a guarantee that a responsive, slowly streaming exchange finishes in 15 seconds.
+
+Each retained pulse is reread and verified; conflicting, corrupt or unsafe files
+hold settlement rather than being replaced. Exact retries preserve bytes and
+repeat publication durability. The producer has no signing or phase-transition
+authority and never substitutes a current round or resets a signed clock.
+Already retained settlement packages use their original embedded pulses without
+network access. A package recorded as reviewed remains restore-only if lost.
+`settlement_pulse` logs expose the original round and `fetching`/`retained` status,
+without private input contents or paths.
+
 Reference reveal preserves the commitments in the original signed service
 catalogs. Retained materializer references can use plain SHA256 of sorted,
 compact, ASCII-escaped JSON. Native readers accept that historical encoding only
@@ -132,6 +181,19 @@ and domain-separated identities. Restore missing originals without changing
 catalogs, reference text, salts or hashes; answers remain private until certified
 reference release. Retain this decoder while any signed catalog or replay package
 depends on that encoding.
+
+Qualify a schema or encoding change with a retained-artifact matrix before
+cutover. Record the producer runtime, original schema and byte/hash pins, each
+consumer runtime and the result at publication, certification, reward replay and
+restart. Run the actual retained signed artifacts through supported readers
+without re-signing or normalizing their bytes; keep private payloads local.
+Synthetic fixtures establish behavior but do not establish that every deployed
+historical generation has been checked. Include both typed and historical
+reference identities in one package, interruption before publication, delayed
+restart after publication, repeat execution and cold downstream replay. Preserve
+existing journals and directory bindings throughout. Retire a compatibility
+reader only after confirming that no deployed or recovery consumer retains its
+historical inputs.
 
 Before advancing intake or preparation for a cohort with paid service work, the
 lifecycle owner reads the selected terms, signed catalogs and every committed

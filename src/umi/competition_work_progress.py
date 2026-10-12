@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -155,6 +156,42 @@ def progress_items(
         progress.finish()
     finally:
         progress.interrupt()
+
+
+def work_operation(name: str):
+    """Attribute existing counters to one synchronous operation, without estimates.
+
+    Nested calls preserve review/read context and identify their immediate parent.
+    No arguments or results are retained, and this adds no completion checkpoint.
+    """
+
+    def decorate(operation):
+        if (
+            inspect.iscoroutinefunction(operation)
+            or inspect.isgeneratorfunction(operation)
+            or inspect.isasyncgenfunction(operation)
+        ):
+            raise TypeError("work_operation requires an eager synchronous function")
+
+        @wraps(operation)
+        def run(*args, **kwargs):
+            parent = _CONTEXT.get() or {}
+            token = _CONTEXT.set(
+                {
+                    **parent,
+                    "operation_name": name if _name(name, 79) else "unknown",
+                    "operation_id": next(_IDS),
+                    "parent_operation_id": parent.get("operation_id"),
+                }
+            )
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                _CONTEXT.reset(token)
+
+        return run
+
+    return decorate
 
 
 _READS: ContextVar[WorkProgress | None] = ContextVar("competition_review_reads", default=None)

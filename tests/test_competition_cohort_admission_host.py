@@ -452,3 +452,27 @@ async def test_owner_request_aggregate_override_preserves_original_selection(own
     restored = changed.model_dump(by_alias=True)
     restored.pop("maximum_aggregate_evidence_bytes")
     assert canonical_json_bytes(boot.AdmissionOwnerConfig.model_validate(restored)) == original
+
+
+@pytest.mark.parametrize("selected_profile", [False, True])
+async def test_owner_history_exporter_uses_selected_profile_and_preserves_legacy_default(
+    owned, selected_profile
+):
+    from .test_competition_cohort_review_budget import profile
+
+    o = owned
+    config = o.config
+    if selected_profile:
+        budget = profile(o.h.queue.policy)
+        config = config.model_copy(
+            update={
+                "phase_review_budget": budget,
+                "reviewers": tuple(
+                    peer.model_copy(update={"phase_review_budget": budget})
+                    for peer in config.reviewers
+                ),
+            }
+        )
+    async with boot.admission_owner_app(config, o.preparation, o.h.archive.reviewer) as app:
+        assert app.state.history_exporter.timeout_seconds == (4000 if selected_profile else 2400)
+        assert app.state.intake_review_exporter.timeout_seconds == (4000 if selected_profile else 2)
