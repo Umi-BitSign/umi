@@ -201,7 +201,7 @@ coordinator/reviewer configurations:
 Omitting this field preserves existing serial behavior and canonical configuration
 bytes. Selecting it does not alter a signed cohort, a clock, the history root or
 its receipts. Current and configured predecessor histories, coverage collection
-and both owner repair commands use the same selection. For C6 and later cohorts,
+and both owner repair commands use the same selection. For each new cohort,
 start the coverage/history owner at launch, retain the complete finalized interval
 from its original authority block, and monitor catch-up during intake, paid work
 and certification. Selecting workers alone does not start a missing capture owner.

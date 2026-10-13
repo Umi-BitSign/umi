@@ -11,6 +11,7 @@ from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairReq
 from umi.competition_reward_proof_archive import RewardProofArchive
 from umi.private_files import PrivateStateBusyError
 
+from .logging_helpers import progress_payloads
 from .test_competition_reward_history import chain as chain
 from .test_competition_reward_history import chain_config as chain_config
 from .test_competition_reward_history import control as control
@@ -22,6 +23,7 @@ from .test_competition_reward_history import series_case as series_case
 pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
 
 
+@pytest.mark.usefixtures("http_log_redaction")
 @pytest.mark.parametrize("damage", ["table", "counter", "trigger"])
 async def test_capacity_repair_preserves_verified_history_and_repeat_reuses_metadata(
     history_case, monkeypatch, caplog, damage
@@ -65,14 +67,18 @@ async def test_capacity_repair_preserves_verified_history_and_repeat_reuses_meta
     with h.reader.journal.read_transaction() as db:
         assert db.execute("SELECT * FROM records ORDER BY kind,id").fetchall() == records
     assert any(
-        record.msg == "round_journal_progress %s" and record.args["state"] == "completed"
-        for record in caplog.records
+        event["state"] == "completed"
+        for event in progress_payloads(
+            caplog.records, logger="umi.competition_round_journal", event="round_journal_progress"
+        )
     )
     caplog.clear()
     h.reader = reopen(repair=True)
     prohibit_proof_replay(monkeypatch, h.reader)
     assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
-    assert not any(record.msg == "round_journal_progress %s" for record in caplog.records)
+    assert not progress_payloads(
+        caplog.records, logger="umi.competition_round_journal", event="round_journal_progress"
+    )
 
 
 def prohibit_proof_replay(monkeypatch, reader):
@@ -218,6 +224,7 @@ async def test_legacy_raw_first_pass_is_checkpointed_without_rewriting_evidence(
     assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
 
 
+@pytest.mark.usefixtures("http_log_redaction")
 async def test_missing_metadata_is_not_a_new_legacy_journal(history_case, caplog):
     h = history_case
     await h.reader.advance(h.item.provider, through_block=h.end)
@@ -235,12 +242,11 @@ async def test_missing_metadata_is_not_a_new_legacy_journal(history_case, caplog
         pytest.raises(HistoryCheckpointRepairRequired, match="metadata lost"),
     ):
         await h.restart()
-    events = [
-        record.args
-        for record in caplog.records
-        if record.name == "umi.competition_reward_history_checkpoint"
-        and record.msg == "reward_history_progress %s"
-    ]
+    events = progress_payloads(
+        caplog.records,
+        logger="umi.competition_reward_history_checkpoint",
+        event="reward_history_progress",
+    )
     assert events
     event = events[-1]
     assert event["state"] == "repair_required"

@@ -326,11 +326,11 @@ async def test_cancellation_drains_capture_proof_before_unlock(historical, monke
 
 @pytest.mark.parametrize("bound", ["MAX_CONTROL_ARCHIVE_BYTES", "MAX_CONTROL_METADATA_BYTES"])
 async def test_capture_keeps_archive_size_bounds(historical, monkeypatch, bound):
-    from umi import competition_reward_control_archive as archive_module
+    from umi import competition_reward_control_evidence as evidence_module
 
     h = historical
     await capture_source(h, monkeypatch)
-    monkeypatch.setattr(archive_module, bound, 1)
+    monkeypatch.setattr(evidence_module, bound, 1)
     with pytest.raises(ValueError, match="exceeds its byte bound"):
         await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
 

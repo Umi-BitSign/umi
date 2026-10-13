@@ -10,6 +10,12 @@ import pytest
 
 import umi.competition_round_journal as rounds
 
+from .logging_helpers import progress_payloads
+
+
+def progress_events(caplog):
+    return progress_payloads(caplog.records, logger=rounds.__name__, event="round_journal_progress")
+
 
 def connection(journal):
     db = sqlite3.connect(journal.path)
@@ -39,6 +45,7 @@ def legacy_metadata(journal):
         db.execute("PRAGMA application_id=0")
 
 
+@pytest.mark.usefixtures("http_log_redaction")
 @pytest.mark.parametrize("reserved", [False, True])
 def test_legacy_migration_preserves_bytes_reservations_and_old_writers(tmp_path, reserved, caplog):
     root, binding = tmp_path / "journal", {"original_signed_clock": 9178000}
@@ -63,9 +70,7 @@ def test_legacy_migration_preserves_bytes_reservations_and_old_writers(tmp_path,
             assert reopened._capacity(db) == usage
     assert reopened.path.stat().st_ino == inode
     assert_usage(reopened)
-    progress = [
-        record.args for record in caplog.records if record.msg == "round_journal_progress %s"
-    ]
+    progress = progress_events(caplog)
     if reserved:
         assert progress == []
     else:
@@ -83,7 +88,7 @@ def test_legacy_migration_preserves_bytes_reservations_and_old_writers(tmp_path,
     assert_usage(reopened)
     caplog.clear()
     rounds.RoundJournal(root, binding)
-    assert not [r for r in caplog.records if r.msg == "round_journal_progress %s"]
+    assert not progress_events(caplog)
 
 
 @pytest.mark.parametrize("reserved", [False, True])
@@ -131,6 +136,7 @@ def test_old_sql_replacement_without_recursive_delete_is_refused_before_mutation
     assert_usage(journal)
 
 
+@pytest.mark.usefixtures("http_log_redaction")
 @pytest.mark.parametrize(
     "damage",
     [
@@ -151,13 +157,13 @@ def test_damage_requires_explicit_metadata_only_repair(tmp_path, damage, caplog)
     caplog.set_level(logging.INFO, logger=rounds.__name__)
     with pytest.raises(rounds.RoundCapacityRepairRequired, match="repair required"):
         rounds.RoundJournal(journal.root, {})
-    assert any(r.args["state"] == "repair_required" for r in caplog.records)
+    assert any(event["state"] == "repair_required" for event in progress_events(caplog))
     recovered = rounds.RoundJournal(journal.root, {}, repair_record_capacity=True)
     assert_usage(recovered)
     with recovered.read_transaction() as db:
         assert db.execute("SELECT * FROM records").fetchall() == before
-    assert caplog.records[-1].args["state"] == "completed"
-    assert caplog.records[-1].args["stage"] == "record_capacity_repair"
+    assert progress_events(caplog)[-1]["state"] == "completed"
+    assert progress_events(caplog)[-1]["stage"] == "record_capacity_repair"
     recovered.put("signed", "next", {})
     assert_usage(recovered)
 
@@ -228,6 +234,7 @@ def test_telemetry_failure_cannot_fail_a_committed_migration(tmp_path, monkeypat
     assert reopened._capacity_migration is None
 
 
+@pytest.mark.usefixtures("http_log_redaction")
 def test_interrupted_migration_rolls_back_only_derived_metadata(tmp_path, monkeypatch, caplog):
     journal = rounds.RoundJournal(tmp_path / "journal", {})
     journal.put("signed", "a", {"original": True})
@@ -241,8 +248,8 @@ def test_interrupted_migration_rolls_back_only_derived_metadata(tmp_path, monkey
         patch.setattr(rounds.RoundJournal, "_record_capacity", staticmethod(interrupted))
         with pytest.raises(RuntimeError, match="before commit"):
             rounds.RoundJournal(journal.root, {})
-    assert caplog.records[-1].args["state"] == "retrying"
-    assert caplog.records[-1].args["eta_seconds"] is None
+    assert progress_events(caplog)[-1]["state"] == "retrying"
+    assert progress_events(caplog)[-1]["eta_seconds"] is None
     with connection(journal) as db:
         assert db.execute("PRAGMA application_id").fetchone() == (0,)
         assert not db.execute(
