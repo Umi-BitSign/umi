@@ -33,6 +33,7 @@ from umi.competition_cohort_settlement_preparation import SettlementArtifactPrep
 from umi.open_competition import digest, sign_object
 from umi.private_files import publish_private_model, read_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
+from umi.r2_sigv4 import R2Credentials, R2SigV4
 
 from .test_competition_cohort_model_acceptance import base_policy as base_policy
 from .test_competition_cohort_model_acceptance import legacy_scenario as legacy_scenario
@@ -51,6 +52,11 @@ pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indir
 class ReadOnlyObject:
     def __init__(self, key: str, payload: bytes):
         self.key, self.payload = key, payload
+        self.signer = R2SigV4(
+            "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "umi-model-artifacts",
+            R2Credentials("0123456789ABCDEF", "test-secret-for-offline-qualification"),
+        )
         self.etag = "read-only-object"
         self.replace_on_read = False
         self.ranges_read = 0
@@ -213,6 +219,113 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, mo
         (materialized / digest(bundle) / "model" / record.path).stat().st_size
         for record in bundle.files
     ) == len(body)
+    durable_root = reviews.root / "remote-byte-results"
+    durable = DirectModelArtifactReviewer(
+        verifier.config,
+        verifier.policy,
+        verifier.owner_hotkey,
+        multipart=source,
+        verification_root=durable_root,
+    )
+    durable_cache = scratch / "durable-materialized"
+    import umi.competition_artifacts as artifacts
+
+    def no_second_weight_read(*args, **kwargs):
+        raise AssertionError("materialization rehashed already transferred model weights")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        await durable.materialize(direct_request, durable_cache)
+        assert await durable.materialized(direct_request, durable_cache)
+    after_materialization = source.ranges_read
+    await durable.verify(direct_request, preserved=True)
+    assert source.ranges_read == after_materialization
+    shutil.rmtree(durable_cache)
+    restarted = DirectModelArtifactReviewer(
+        verifier.config,
+        verifier.policy,
+        verifier.owner_hotkey,
+        multipart=source,
+        verification_root=durable_root,
+    )
+    assert (await restarted.verify(direct_request, preserved=True))[0] == result
+    assert source.ranges_read == after_materialization
+    # A new local copy still authenticates transport bytes once, then downstream
+    # local consumers and semantic review reuse their completed results.
+    with monkeypatch.context() as patch:
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        await restarted.materialize(direct_request, durable_cache)
+        assert await restarted.materialized(direct_request, durable_cache)
+    shutil.rmtree(durable_cache)
+
+    interrupted_cache = scratch / "interrupted-materialization"
+    original_read = source.read_range
+    first_file_bytes = bundle.files[0].size_bytes
+
+    async def interrupt_second_file(key, *, offset, size_bytes, **kwargs):
+        if offset >= first_file_bytes:
+            raise OSError("interrupted materialization transfer")
+        return await original_read(key, offset=offset, size_bytes=size_bytes, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", interrupt_second_file)
+        with pytest.raises(OSError, match="interrupted materialization transfer"):
+            await durable.materialize(direct_request, interrupted_cache)
+    assert (interrupted_cache / digest(bundle) / "model" / bundle.files[0].path).is_file()
+    assert await restarted.resumable(direct_request, interrupted_cache)
+
+    async def remaining_files_only(key, *, offset, size_bytes, **kwargs):
+        assert offset >= first_file_bytes, "completed file was downloaded again after restart"
+        return await original_read(key, offset=offset, size_bytes=size_bytes, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", remaining_files_only)
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        await restarted.materialize(direct_request, interrupted_cache)
+        assert await restarted.materialized(direct_request, interrupted_cache)
+    assert not (interrupted_cache / "materialization-pending.json").exists()
+    shutil.rmtree(interrupted_cache)
+
+    # An interrupted cache may never certify unread ranges of a replacement
+    # same-length R2 object using bytes retained from its previous generation.
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", interrupt_second_file)
+        with pytest.raises(OSError, match="interrupted materialization transfer"):
+            await durable.materialize(direct_request, interrupted_cache)
+    source.etag = "replacement-generation"
+    source.payload = bytes((body[0] ^ 1,)) + body[1:]
+    with pytest.raises(ValueError, match="remote source changed"):
+        await restarted.materialize(direct_request, interrupted_cache)
+    assert not interrupted_cache.exists()
+    with pytest.raises(ValueError, match="differs"):
+        await restarted.materialize(direct_request, interrupted_cache)
+    assert not interrupted_cache.exists()
+    source.etag, source.payload = "read-only-object", body
+
+    original_publish = direct_review.publish_private_model
+
+    def lose_final_marker(path, value):
+        if path.name == "materialization.json":
+            raise OSError("lost final materialization publication")
+        return original_publish(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct_review, "publish_private_model", lose_final_marker)
+        with pytest.raises(OSError, match="lost final materialization publication"):
+            await durable.materialize(direct_request, interrupted_cache)
+    import umi.competition_model_materialization as transfers
+
+    async def no_transfer(*args, **kwargs):
+        raise AssertionError("completed payload was downloaded during finalization recovery")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", no_transfer)
+        patch.setattr(transfers, "_artifact", no_second_weight_read)
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        await restarted.materialize(direct_request, interrupted_cache)
+        assert await restarted.materialized(direct_request, interrupted_cache)
+    shutil.rmtree(interrupted_cache)
+
     changed = next(record for record in bundle.files if record.size_bytes)
     changed_path = materialized / digest(bundle) / "model" / changed.path
     changed_path.chmod(0o600)

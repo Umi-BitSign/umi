@@ -492,7 +492,14 @@ verifies the complete preserved object once before signing. Standing reward
 coordinators, reviewers and validators repeat that check from their own
 read-only credentials before activation review or package replay. Each retains
 a small private receipt under its own state and checks the current object length
-and ETag on replay. Candidate archives are not copied into a
+and ETag on replay. The completed byte result also binds the authenticated R2
+endpoint and bucket, exact object key, signed bundle and payload, policy, cohort,
+owner and qualified verifier semantics. Reuse reads only object metadata and the
+bounded private result, including the original rights documents. It does not
+download or hash the weights again, and one owner's receipt never substitutes
+for another owner's independent verification. Missing or damaged owned results
+trigger explicit native repair with progress and an ETA; unsafe links, ownership
+or permissions are refused. Candidate archives are not copied into a
 `promotion_directory`; the frozen baseline remains in the native local archive.
 A missing or changed preserved R2 object keeps settlement or activation pending
 or held. No consumer falls back to another object, URL or local candidate.
@@ -1567,11 +1574,19 @@ If every model-enabled plan in the installed series is direct, omit
 
 Each independent `umi-cohort-phase-review-service/7` receives a read-only R2
 credential and the same standing review policy. It authenticates the owner's
-signed object reservation, then reads the complete object itself and checks the
-stream digest, every manifest file and the declared rights documents. It does
+signed object reservation, then reads the complete object itself once and checks
+the stream digest, every manifest file and the declared rights documents. It does
 not trust the owner's byte-verification result and does not retain another model
 archive. The R2 reader credential must not allow writes, multipart creation,
 completion, listing outside its selected bucket, or deletion.
+The upload owner retains byte results under its private `byte-verification`
+directory. Phase reviewers, settlement signers, standing reward coordinators
+and reward writers keep theirs under `direct-model-byte-verification` in their
+existing private service state. Keep these directories through upgrades and
+restarts, independently of the disposable benchmark cache. Existing version-two
+materialization and settlement receipts remain readable; installations without
+the new private result build it during their next necessary native check, without
+rewriting signed evidence or resetting retained journals.
 When the signed host selects only the model track, version seven omits the
 endpoint host entirely. A mixed-track selection still configures the endpoint
 host and preserves its ordinary independent request and decision paths.
@@ -1580,9 +1595,23 @@ Benchmark execution necessarily needs the candidate bytes while its offline
 runtime runs. A version-seven reviewer therefore keeps one bounded candidate
 cache under the benchmark workspace. It streams and verifies the selected
 object into that cache, reuses it across that candidate's cases, and removes the
-old candidate before materializing another one. Materialization is serialized
-and capped by `maximum_materialized_bytes`. It also requires the complete payload
-plus `materialization_free_space_reserve_bytes` to be free before writing; the
+old candidate before materializing another one. All active case leases finish
+before a different selection can replace the cache, including a different request
+for the same bundle. Materialization is serialized and capped by
+`maximum_materialized_bytes`. It checks each file and the full payload while
+writing, then publishes the local immutable receipt without rereading the newly
+written weights. A retry retains completed files and their checks. A changed R2
+namespace or object generation invalidates the pending transfer before reuse.
+Completed aggregate verification survives failures during final publication;
+only an unfinished concatenated SHA256 must reread retained local files, without
+redownloading or repeating their completed per-file checks. Missing local results
+receive visible scoped repair. Preparation, transfer, cache validation, lease
+waiting and eviction report counts, elapsed time, ETA basis and retry/stall status.
+
+Before writing, the remaining new allocation plus
+`materialization_free_space_reserve_bytes` must be free. Verified retained files
+and complete files requiring local receipt repair need no second allocation;
+owned partial files are reclaimed before capacity is measured again. The
 baseline remains in the pinned local archive. Put the benchmark workspace on a
 dedicated quota-controlled scratch filesystem. Source schema 2 binds
 `materialization_filesystem_maximum_bytes` and at least one

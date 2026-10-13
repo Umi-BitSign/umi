@@ -312,7 +312,12 @@ async def run_installed_standing_rewards(
         None
         if config.direct_model_review is None
         else DirectModelSettlementVerifier(
-            DirectModelArtifactReviewer(config.direct_model_review, config.policy, None),
+            DirectModelArtifactReviewer(
+                config.direct_model_review,
+                config.policy,
+                None,
+                verification_root=root / "direct-model-byte-verification",
+            ),
             store.directory / "model-reward-artifacts",
             root / "direct-model-reward-receipts",
         )

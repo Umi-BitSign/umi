@@ -233,6 +233,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                         config.direct_model_review,
                         config.policy,
                         config.owner_hotkey,
+                        verification_root=root / "direct-model-byte-verification",
                     )
                 )
                 models = ModelArtifactReviewer(

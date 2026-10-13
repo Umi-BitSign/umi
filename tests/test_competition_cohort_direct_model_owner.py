@@ -876,3 +876,159 @@ def test_mixed_series_routes_each_request_to_its_signed_delivery_profile(direct)
 
     direct_only = CohortModelPayloadRouter((direct_plan,), direct=direct_payloads)
     assert direct_only.maximum_concurrent_uploads == 1
+
+
+async def test_owner_lost_verification_ack_reuses_durable_bytes_after_restart(direct, monkeypatch):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload), now_unix_ms=1_800_000_010_000
+    )
+    original = direct.owner.journal.put
+
+    def interrupted(kind, key, body, **kwargs):
+        if kind == "direct-verification":
+            raise OSError("lost owner acknowledgement")
+        return original(kind, key, body, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct.owner.journal, "put", interrupted)
+        with pytest.raises(OSError, match="lost owner acknowledgement"):
+            await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    reads = direct.multipart.read_calls
+    restarted = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    verified = await restarted.verify(completed.reservation_sha256, now_unix_ms=1_800_000_012_000)
+    assert verified.payload_sha256 == direct.payload.payload.payload_sha256
+    assert direct.multipart.read_calls == reads
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing_result", "corrupt_result", "missing_receipt", "changed_etag"]
+)
+async def test_remote_completed_verification_repairs_are_visible(direct, damage):
+    import json
+    from pathlib import Path
+
+    from umi.competition_remote_model_verification import verify_remote_model
+    from umi.competition_transport_verification import _sha
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/test-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    root = Path(direct.owner.config.directory) / "remote-test"
+    events = []
+
+    async def verify():
+        return await verify_remote_model(
+            direct.multipart,
+            key,
+            bundle,
+            payload,
+            root=root,
+            context={"policy": "a" * 64, "authority": "b" * 64},
+            report=events.append,
+        )
+
+    await verify()
+    reads = direct.multipart.read_calls
+    await verify()
+    assert direct.multipart.read_calls == reads
+    assert events[-1]["restored_bytes"] == payload.total_bytes
+    directory = root / hashlib.sha256(key.encode()).hexdigest()
+    if damage == "missing_result":
+        (directory / "result.json").unlink()
+    elif damage == "corrupt_result":
+        (directory / "result.json").write_text('{"bad": true}')
+    elif damage == "missing_receipt":
+        (directory / (_sha("object") + ".json")).unlink()
+    else:
+        direct.multipart.objects[key] = (payload.total_bytes, "version-two")
+    events.clear()
+    await verify()
+    assert direct.multipart.read_calls > reads
+    assert any(event["status"] == "repair_required" for event in events)
+    assert events[-1]["status"] == "completed" and events[-1]["eta_seconds"] == 0
+    assert (
+        json.loads((directory / "result.json").read_bytes())["payload_sha256"]
+        == payload.payload_sha256
+    )
+    reads = direct.multipart.read_calls
+    await verify()
+    assert direct.multipart.read_calls == reads
+
+
+async def test_remote_incomplete_stream_keeps_completed_file_checkpoints(direct, monkeypatch):
+    from pathlib import Path
+
+    from umi.competition_remote_model_verification import verify_remote_model
+    from umi.competition_transport_verification import ByteCheckpoints
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    assert len(bundle.files) > 1
+    key = "preservation/interrupted-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    root = Path(direct.owner.config.directory) / "remote-test"
+    original_read = direct.multipart.read_range
+    boundary = bundle.files[0].size_bytes
+    remembered = []
+    original_remember = ByteCheckpoints.remember
+
+    def remember(self, slot, identity, result):
+        remembered.append(slot)
+        return original_remember(self, slot, identity, result)
+
+    async def interrupted(key, *, offset, size_bytes):
+        if offset >= boundary:
+            raise OSError("interrupted second file")
+        return await original_read(key, offset=offset, size_bytes=size_bytes)
+
+    monkeypatch.setattr(ByteCheckpoints, "remember", remember)
+    with monkeypatch.context() as patch:
+        patch.setattr(direct.multipart, "read_range", interrupted)
+        with pytest.raises(OSError, match="interrupted second file"):
+            await verify_remote_model(direct.multipart, key, bundle, payload, root=root, context={})
+    assert ["file", bundle.files[0].path] in remembered
+    remembered.clear()
+    await verify_remote_model(direct.multipart, key, bundle, payload, root=root, context={})
+    assert ["file", bundle.files[0].path] not in remembered
+    assert "object" in remembered
+
+
+@pytest.mark.parametrize("change", ["policy", "authority", "bucket", "semantics"])
+async def test_remote_verification_rechecks_only_changed_context(direct, monkeypatch, change):
+    from pathlib import Path
+
+    from umi import competition_remote_model_verification as remote
+    from umi.r2_sigv4 import R2SigV4
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/context-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    root = Path(direct.owner.config.directory) / "remote-test"
+    context = {"policy": "a" * 64, "authority": "b" * 64}
+    await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, root=root, context=context
+    )
+    reads = direct.multipart.read_calls
+    if change in {"policy", "authority"}:
+        context[change] = "c" * 64
+    elif change == "bucket":
+        signer = direct.multipart.signer
+        direct.multipart.signer = R2SigV4(
+            signer.endpoint, "another-model-bucket", signer.credentials
+        )
+    else:
+        monkeypatch.setattr(remote, "verifier_semantics", lambda: ["new-reviewed-semantics"])
+    await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, root=root, context=context
+    )
+    assert direct.multipart.read_calls > reads

@@ -1112,6 +1112,10 @@ async def test_direct_review_boot_uses_independent_r2_reader_and_bounded_sandbox
         artifacts = app.state.benchmark.sandbox.artifacts
         assert artifacts.owner_hotkey == c.owner_hotkey
         assert artifacts.config.r2_bucket == "umi-model-artifacts"
+        assert artifacts.verification_root == (
+            Path(c.signing.directory) / "direct-model-byte-verification"
+        )
+        assert artifacts.verification_root not in app.state.benchmark.sandbox.cache.parents
         assert app.state.benchmark.sandbox.cache.parent == Path(c.benchmark.workspace_directory)
 
 

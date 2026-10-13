@@ -134,6 +134,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 config.direct_model_review,
                 config.policy,
                 config.proposer_hotkey,
+                verification_root=root / "direct-model-byte-verification",
             )
         )
         nodes = []
