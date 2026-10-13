@@ -191,11 +191,13 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
             )
         if config.service_signing is not None:
+            services = SelectedServiceReviewer(config, provider, client, owner_token, archive, sign)
             app.include_router(
                 service_vote_routes(
-                    SelectedServiceReviewer(config, provider, client, owner_token, archive, sign),
+                    services,
                     token=vote_token,
                     timeout_seconds=config.review_timeout_seconds,
+                    budget=services.budget,
                 )
             )
         if config.admission_signing is not None:

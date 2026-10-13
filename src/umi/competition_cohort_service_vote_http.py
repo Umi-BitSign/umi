@@ -8,6 +8,7 @@ from fastapi import APIRouter
 
 from .competition_cohort_review_export import review_export_limits, review_selection
 from .competition_cohort_review_http import PhaseReviewHTTPClient, phase_review_routes
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import (
     ServiceRequestReview,
     ServiceRetryReview,
@@ -41,8 +42,12 @@ class _Responder:
         return canonical_json_bytes(await self.reviewer.attest(request))
 
 
-def service_vote_routes(reviewer: ServiceReviewer, *, token: str, timeout_seconds=2400):
+def service_vote_routes(
+    reviewer: ServiceReviewer, *, token: str, timeout_seconds=2400, budget=None
+):
     router = APIRouter()
+    if budget is not None:
+        timeout_seconds = max(timeout_seconds, budget.vote_seconds)
     responder = _Responder(reviewer, timeout_seconds)
     for kind, model in (("request", ServiceRequestReview), ("retry", ServiceRetryReview)):
         router.include_router(
@@ -59,10 +64,23 @@ def service_vote_routes(reviewer: ServiceReviewer, *, token: str, timeout_second
 
 class ServiceVotePeer:
     def __init__(
-        self, client, origin, *, policy, cohorts, signer: str, token, timeout_seconds=2400
+        self,
+        client,
+        origin,
+        *,
+        policy,
+        cohorts,
+        signer: str,
+        token,
+        timeout_seconds=2400,
+        budget=None,
     ):
         self.policy, self.cohorts, _ = review_selection(policy, cohorts, signer)
         self.signer = signer
+        if budget is not None:
+            budget.verify(policy, budget.maximum_aggregate_evidence_bytes)
+        self.budget = service_execution_budget(budget, vote_seconds=timeout_seconds)
+        timeout_seconds = self.budget.exchange_seconds
         self.requests = PhaseReviewHTTPClient[ServiceRequestReview](
             client,
             origin,

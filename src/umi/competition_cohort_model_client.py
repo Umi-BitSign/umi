@@ -14,7 +14,7 @@ from typing import Annotated, Any, TypeVar
 import httpx
 from pydantic import Field, StrictBool, StrictInt
 
-from .competition_artifacts import _artifact, _directory, verify_bundle_directory
+from .competition_artifacts import _artifact, _directory
 from .competition_client import (
     MAX_SUBMISSION_BYTES,
     CompetitionSubmissionError,
@@ -26,6 +26,8 @@ from .competition_cohort_intake import history_tip
 from .competition_cohort_model_upload import CHUNK_BYTES, ModelUploadChunk
 from .competition_cohort_participation import CohortParticipationReceipt, CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile, cohort_model_delivery
+from .competition_model_source_verification import verify_model_source
+from .competition_transport_verification import TransferProgress, current_progress
 from .concurrency import run_owned_thread
 from .open_competition import (
     BundleFile,
@@ -35,6 +37,7 @@ from .open_competition import (
     identity,
     sign_object,
 )
+from .private_files import PrivateStateBusyError
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _Result = TypeVar("_Result")
@@ -68,13 +71,9 @@ def _snapshot(source: Path, bundle: ModelBundle) -> tuple[_Fingerprint, ...]:
 
 
 def _verify_source(
-    source: Path, bundle: ModelBundle, policy: CompetitionPolicy
+    source: Path, bundle: ModelBundle, policy: CompetitionPolicy, report: _Report | None = None
 ) -> tuple[_Fingerprint, ...]:
-    before = _snapshot(source, bundle)
-    verify_bundle_directory(bundle, source, policy)
-    if before != _snapshot(source, bundle):
-        raise ValueError("model source changed during verification")
-    return before
+    return verify_model_source(source, bundle, policy, _fingerprint, report)
 
 
 def _read_chunk(source: Path, record: BundleFile, expected: _Fingerprint, offset: int) -> bytes:
@@ -122,13 +121,18 @@ async def _retry(
     wait = delay
     while True:
         try:
-            return await operation()
+            result = await operation()
+            if progress := current_progress():
+                progress.emit("running", reason="request_succeeded")
+            return result
         except CompetitionSubmissionError as error:
             if error.reason_code not in {
                 "model_upload_transport_unavailable",
                 "intake_transport_unavailable",
             } and error.status_code not in {408, 429, 500, 502, 503, 504}:
                 raise
+            if progress := current_progress():
+                progress.emit("retrying", reason=error.reason_code)
             report(
                 {
                     "status": "model_delivery_retry",
@@ -139,6 +143,39 @@ async def _retry(
             )
             await asyncio.sleep(wait)
             wait = min(60, wait * 2)
+
+
+async def _verify_source_owned(source, bundle, policy, report, retry_seconds):
+    # Each native attempt drains before cancellation or owner retry. Competing
+    # upload invocations share the same durable file checkpoints.
+    with TransferProgress(
+        "model_source_preparation",
+        1,
+        report,
+        unit="passes",
+        planning_work_bytes=sum(record.size_bytes for record in bundle.files),
+    ) as progress:
+        while True:
+            try:
+                result = await run_owned_thread(_verify_source, source, bundle, policy, report)
+                progress.advance(1)
+                return result
+            except PrivateStateBusyError:
+                progress.emit("waiting", reason="verification_owner_busy")
+                await asyncio.sleep(retry_seconds)
+
+
+async def _admit_model(*, origin, policy, request, transport, retry_seconds, report):
+    with TransferProgress("model_participation_admission", 1, report, unit="receipts") as progress:
+        result = await _retry(
+            lambda: submit_cohort_participation(
+                origin=origin, policy=policy, request=request, transport=transport
+            ),
+            retry_seconds,
+            report,
+        )
+        progress.advance(1)
+        return result
 
 
 async def _exchange(
@@ -178,42 +215,48 @@ async def fetch_model_delivery_profile(
     retry_seconds: float,
     report: _Report,
 ) -> ModelDeliveryProfile:
-    async with httpx.AsyncClient(
-        base_url=origin,
-        transport=transport,
-        timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
-        follow_redirects=False,
-        trust_env=False,
-        headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-    ) as client:
-        raw = await _retry(
-            lambda: _exchange(
-                client,
-                "GET",
-                f"/v1/competition/cohorts/{cohort_sha256}/history",
-            ),
-            retry_seconds,
-            report,
-        )
-    try:
-        history = CohortRecoveryHistory.model_validate_json(raw)
-        current = max(
-            (
-                history.genesis.admitted_at_block,
-                *(transition.transition.observed_at_block for transition in history.transitions),
+    with TransferProgress("model_delivery_profile", 1, report, unit="histories") as progress:
+        async with httpx.AsyncClient(
+            base_url=origin,
+            transport=transport,
+            timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
+            follow_redirects=False,
+            trust_env=False,
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+        ) as client:
+            raw = await _retry(
+                lambda: _exchange(
+                    client,
+                    "GET",
+                    f"/v1/competition/cohorts/{cohort_sha256}/history",
+                ),
+                retry_seconds,
+                report,
             )
-        )
-        verify_cohort_history(
-            history,
-            policy,
-            expected_tip_sha256=history_tip(history),
-            current_block=current,
-        )
-        if digest(history.plan) != cohort_sha256:
-            raise ValueError("cohort history identity differs")
-        return cohort_model_delivery(history.plan)
-    except ValueError as error:
-        raise CompetitionSubmissionError("invalid_model_upload_status") from error
+        try:
+            history = CohortRecoveryHistory.model_validate_json(raw)
+            current = max(
+                (
+                    history.genesis.admitted_at_block,
+                    *(
+                        transition.transition.observed_at_block
+                        for transition in history.transitions
+                    ),
+                )
+            )
+            verify_cohort_history(
+                history,
+                policy,
+                expected_tip_sha256=history_tip(history),
+                current_block=current,
+            )
+            if digest(history.plan) != cohort_sha256:
+                raise ValueError("cohort history identity differs")
+            result = cohort_model_delivery(history.plan)
+            progress.advance(1)
+            return result
+        except ValueError as error:
+            raise CompetitionSubmissionError("invalid_model_upload_status") from error
 
 
 async def submit_cohort_model(
@@ -256,7 +299,7 @@ async def submit_cohort_model(
         raise ValueError("model upload requires matching policy, model request and hotkey")
     bundle = sub.model_bundle
     source = Path(os.path.abspath(source))  # Preserve symlinks for the no-follow reader.
-    fingerprints = await run_owned_thread(_verify_source, source, bundle, policy)
+    fingerprints = await _verify_source_owned(source, bundle, policy, report, retry_seconds)
     if delivery is None:
         delivery = await fetch_model_delivery_profile(
             origin=origin,
@@ -302,70 +345,92 @@ async def submit_cohort_model(
 
             return await _retry(attempt, retry_seconds, report)
 
-        current = await status_request(
-            "POST",
-            f"/v1/competition/cohorts/{request.consent.consent.cohort_sha256}/model-uploads",
-            body=body,
-            headers={"Content-Type": "application/json"},
-        )
-        pending_report_at = 0.0
-        while not current.payload_preserved:
-            previous = current.file_offsets
-            for index, record in enumerate(bundle.files):
-                offset = current.file_offsets[index]
-                if index in current.complete_files or (offset == record.size_bytes and offset > 0):
-                    continue
-                data = await run_owned_thread(
-                    _read_chunk, source, record, fingerprints[index], offset
-                )
-                chunk = ModelUploadChunk(
-                    schema="umi-cohort-model-upload-chunk/1",
-                    upload_sha256=key,
-                    file_index=index,
-                    offset=offset,
-                    size_bytes=len(data),
-                    sha256=hashlib.sha256(data).hexdigest(),
-                )
-                signature = sign_object(chunk, wallet)
-                current = await status_request(
-                    "PUT",
-                    f"{path}/files/{index}?offset={offset}",
-                    body=data,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "Content-Length": str(len(data)),
-                        "X-UMI-Chunk-SHA256": chunk.sha256,
-                        "X-UMI-Signature": canonical_json_bytes(signature).decode(),
-                    },
-                )
-                report(
-                    {
-                        "status": "model_upload_progress",
-                        "upload_sha256": key,
-                        "uploaded_bytes": sum(current.file_offsets),
-                        "total_bytes": sum(f.size_bytes for f in bundle.files),
-                    }
-                )
-            if current.payload_preserved:
-                break
-            uploaded = all(
-                offset == record.size_bytes
-                for offset, record in zip(current.file_offsets, bundle.files, strict=True)
+        with TransferProgress(
+            "model_upload_reservation", 1, report, unit="reservations"
+        ) as reservation:
+            current = await status_request(
+                "POST",
+                f"/v1/competition/cohorts/{request.consent.consent.cohort_sha256}/model-uploads",
+                body=body,
+                headers={"Content-Type": "application/json"},
             )
-            if uploaded and time.monotonic() >= pending_report_at:
-                report({"status": "model_preservation_pending", "upload_sha256": key})
-                pending_report_at = time.monotonic() + 60
-            if current.file_offsets == previous or uploaded:
+            reservation.advance(1)
+        total = sum(f.size_bytes for f in bundle.files)
+        with TransferProgress("model_upload", total, report) as progress:
+            progress.set_completed(sum(current.file_offsets), restored=True)
+            while not current.payload_preserved and (
+                sum(current.file_offsets) < total
+                or any(
+                    record.size_bytes == 0 and index not in current.complete_files
+                    for index, record in enumerate(bundle.files)
+                )
+            ):
+                previous = current.file_offsets
+                for index, record in enumerate(bundle.files):
+                    offset = current.file_offsets[index]
+                    if index in current.complete_files or (
+                        offset == record.size_bytes and offset > 0
+                    ):
+                        continue
+                    data = await run_owned_thread(
+                        _read_chunk, source, record, fingerprints[index], offset
+                    )
+                    chunk = ModelUploadChunk(
+                        schema="umi-cohort-model-upload-chunk/1",
+                        upload_sha256=key,
+                        file_index=index,
+                        offset=offset,
+                        size_bytes=len(data),
+                        sha256=hashlib.sha256(data).hexdigest(),
+                    )
+                    signature = sign_object(chunk, wallet)
+                    current = await status_request(
+                        "PUT",
+                        f"{path}/files/{index}?offset={offset}",
+                        body=data,
+                        headers={
+                            "Content-Type": "application/octet-stream",
+                            "Content-Length": str(len(data)),
+                            "X-UMI-Chunk-SHA256": chunk.sha256,
+                            "X-UMI-Signature": canonical_json_bytes(signature).decode(),
+                        },
+                    )
+                    progress.set_completed(sum(current.file_offsets))
+                    report(
+                        {
+                            "status": "model_upload_progress",
+                            "upload_sha256": key,
+                            "uploaded_bytes": sum(current.file_offsets),
+                            "total_bytes": sum(f.size_bytes for f in bundle.files),
+                        }
+                    )
+                if current.payload_preserved:
+                    break
+                if current.file_offsets == previous:
+                    progress.emit("waiting", reason="model_upload_offsets_unchanged")
+                    await asyncio.sleep(retry_seconds)
+                current = await status_request("GET", path)
+                progress.set_completed(sum(current.file_offsets))
+
+        with TransferProgress("model_payload_preservation", 1, report, unit="payloads") as progress:
+            pending_report_at = 0.0
+            while not current.payload_preserved:
+                progress.emit("waiting", reason="model_preservation_pending")
+                if time.monotonic() >= pending_report_at:
+                    report({"status": "model_preservation_pending", "upload_sha256": key})
+                    pending_report_at = time.monotonic() + 60
                 await asyncio.sleep(retry_seconds)
-            current = await status_request("GET", path)
+                current = await status_request("GET", path)
+            progress.advance(1)
 
     report(
         {"status": "model_payload_preserved", "upload_sha256": key, "model_sha256": digest(bundle)}
     )
-    return await _retry(
-        lambda: submit_cohort_participation(
-            origin=origin, policy=policy, request=request, transport=transport
-        ),
-        retry_seconds,
-        report,
+    return await _admit_model(
+        origin=origin,
+        policy=policy,
+        request=request,
+        transport=transport,
+        retry_seconds=retry_seconds,
+        report=report,
     )

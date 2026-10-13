@@ -60,6 +60,13 @@ estimates for complete local replay and cooperative child cleanup. Progress
 output must use a diagnostic channel separate from an exact RPC response or a
 success contract that requires empty stderr.
 
+Settlement retry events retain the cohort, role, `tick` or `maintenance` boundary
+and bounded causal error types, reason codes and native source locations. They
+omit exception messages, inputs and URLs. The event is emitted before rejected
+input frames are released, including through the series scheduler. A retry
+withdraws the current ETA until progress supplies a new sample; diagnostic sink
+failures cannot change the retry or cancellation result.
+
 Report the stage name with every percentage and ETA. Separate nested substages
 and repeated replays; do not add their percentages or describe a completed
 object inventory as completed certification. Use the native certified phase
@@ -183,15 +190,73 @@ toward completion but do not inflate measured native throughput. These estimates
 cover history review only, not overall reward finality.
 
 Changed source dependencies or damaged successful records stop with
-`repair_required`; they are not silent cache misses. After restoring the exact
-original source, the owning reader can run
-`repair_checkpoints(provider, reason=..., through_block=...)` for the affected scope. Keep
-the repair reason and counted progress, and preserve unaffected completed blocks.
-Missing source-identity tables or the owner marker require recovery of the
-original metadata before reuse; do not recreate an empty success index, move the
-journal to a replacement identity, or treat stored proofs as completed checks.
-Do not open a live service's journal from a separate repair process. Cooperative
-owner shutdown and supported recovery must preserve its existing state bindings.
+`repair_required`; they are not silent cache misses. Restore the exact original
+source and run the bounded owner repair command using the installed interpreter,
+original service account and original configuration. Cooperatively stop the
+applicable owner through its supported service lifecycle first. The repair
+command refuses overlapping ownership; it does not stop services for you.
+
+For a coordinator or reviewer:
+
+```sh
+"$INSTALLED_PYTHON" -m umi.competition_reward_coordinator_cli repair-history --config "$ORIGINAL_CONFIG" --through-block "$LAST_BLOCK" --reason "original source restored"
+```
+
+For the sole reward writer, use its authentic supervisor configuration and
+standing boot configuration, in the same namespace as the installed service:
+
+```sh
+"$INSTALLED_PYTHON" -m umi.competition_supervisor_cli --config "$ORIGINAL_SUPERVISOR_CONFIG" --standing-config "$ORIGINAL_BOOT_CONFIG" --repair-history --through-block "$LAST_BLOCK" --reason "original source restored"
+```
+
+Add `--history predecessor` only to select an explicitly configured predecessor.
+The coordinator holds both current and predecessor service locks and, for its
+publishing role, the original control-writer lock before opening journals. The
+writer uses its native supervisor startup lease and root-approved original boot
+configuration. A coordinator configuration cannot substitute for a writer's
+namespace. Neither route constructs a signer, writer adapter or chain executor.
+
+Repeat the same finite scope to resume after interruption. Completed native facts
+remain in the original journal; unaffected blocks are restored without payload
+reverification. Repair reports its counted scope, elapsed time, ETA basis and
+retry/stall state. The startup planning range covers local open/provider startup
+only; it is not an estimate for the selected history or final reward activation.
+
+An existing original journal is required. Missing source-identity tables or the
+owner marker require restoration of original metadata before reuse. Do not create
+an empty success index, move the journal to a replacement identity, or treat stored
+proofs as completed checks. This command cannot recover an older running reader's
+volatile verified prefix. Keep that owner running through its handoff when
+preserving those completed checks requires it.
+
+## Paid service review budgets and retained capacity
+
+For a cohort whose signed tracks permit endpoint paid work, the selected phase
+review profile also determines paid-history reads, owner export, native review,
+authority refresh, peer exchange, signing and queue/transport allowances. An older
+`service_signing.read_timeout_seconds` value cannot shorten that full selected
+path. Signed assignment response clocks remain unchanged; a larger transport
+allowance cannot extend the remaining signed response interval.
+
+The reviewer configuration check exposes `service_execution_budget`. Treat
+`managed_service_path_qualified: false` as an outstanding deployment check: compare
+actual owner, reviewer, peer, proxy and unit overrides through
+`validate_service_execution_path` before cutover. Printed source-derived budgets
+are operating allowances, not completion estimates or proof of a managed route.
+
+Provision reviewer transport for every admitted catalog sharing that journal,
+including retained predecessors. Each provisioned claim attempt can require both
+a request and a retry intent. `service_review_capacity_requirement` and
+`validate_service_review_capacity` expose the selected claim/attempt assumptions;
+an attempt assumption does not impose a protocol retry cutoff. Exact retries
+reuse the existing intent. Inspect native remaining request/retry/byte capacity
+and increase the existing configured envelope before it is exhausted.
+
+`maximum_votes` can increase beyond the former 65,536 ceiling while retaining
+original journal identity and bytes; the original explicit value remains in force
+until it is provisioned. Byte accounting still applies. This is neither an
+automatic capacity increase nor a model-only cohort eligibility change. Preserve
+all original signed work and already-earned credit through closure and replay.
 
 ## Recoverable cohort model awards
 

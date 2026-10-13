@@ -25,6 +25,7 @@ from .auth import REQUEST_BODY_SHA256_HEADER
 from .competition_cohort_grant_delivery import verify_grant_receipt
 from .competition_cohort_miner import SignedCohortMinerGrantReceipt
 from .competition_cohort_request_admission import CohortRequestWindowAuthority
+from .competition_cohort_review_budget import MAX_REVIEW_SECONDS
 from .competition_cohort_service_grant import service_grant_slot
 from .competition_cohort_service_requests import ServiceWorkRequests
 from .competition_cohort_service_work import ServiceWorkAssignment
@@ -91,21 +92,27 @@ class ServiceWorkTransport:
         origin: ServiceOriginSource,
         *,
         timeout_seconds: float = 2400,
+        authority_timeout_seconds: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         windows=None,
     ):
-        if (
-            isinstance(timeout_seconds, bool)
-            or not math.isfinite(timeout_seconds)
-            or not 0 < timeout_seconds <= 3600
-        ):
-            raise ValueError("service transport timeout is outside bounds")
+        authority_timeout_seconds = (
+            timeout_seconds if authority_timeout_seconds is None else authority_timeout_seconds
+        )
+        for allowance in (timeout_seconds, authority_timeout_seconds):
+            if (
+                isinstance(allowance, bool)
+                or not math.isfinite(allowance)
+                or not 0 < allowance <= MAX_REVIEW_SECONDS
+            ):
+                raise ValueError("service transport timeout is outside bounds")
         self.requests, self.journal = requests, requests.journal
         self.wallet, self.blocks, self.origin = wallet, blocks, origin
         self.evaluator = bt.resolve_signer(wallet, role="hotkey").ss58_address
         if identity(self.evaluator) not in {identity(e.hotkey) for e in requests.policy.evaluators}:
             raise ValueError("service transport signer is outside evaluator policy")
         self.timeout, self.transport = timeout_seconds, transport
+        self.authority_timeout = authority_timeout_seconds
         self.windows = windows
         self.limits = Limits.from_policy(requests.transport)
 
@@ -140,7 +147,9 @@ class ServiceWorkTransport:
         )
 
     async def _capture(self, grant):
-        capture = await wait_for_owned(self.origin(grant.body.assignment), timeout=self.timeout)
+        capture = await wait_for_owned(
+            self.origin(grant.body.assignment), timeout=self.authority_timeout
+        )
         submission = grant.body.assignment.admission.submission.submission
         if (
             capture.submission_sha256 != digest(submission)
@@ -323,7 +332,7 @@ class ServiceWorkTransport:
                 )
                 try:
                     await wait_for_owned(
-                        authority.authorize(grant.body.request), timeout=self.timeout
+                        authority.authorize(grant.body.request), timeout=self.authority_timeout
                     )
                     live = bt.timelock.current_round() < grant.body.request.response_close_round
                 except MinerAdmissionError:
@@ -338,7 +347,7 @@ class ServiceWorkTransport:
                     # Reservation latency cannot extend the original clocks.
                     try:
                         await wait_for_owned(
-                            authority.authorize(grant.body.request), timeout=self.timeout
+                            authority.authorize(grant.body.request), timeout=self.authority_timeout
                         )
                         live = (
                             reservation == "reserved"

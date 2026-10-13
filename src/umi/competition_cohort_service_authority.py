@@ -11,6 +11,7 @@ from .competition_chain import FinalizedRegistrationProvider, RegistrationCaptur
 from .competition_cohort_order_signer import CohortOrderHistory, remember_order_history
 from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_origin_scope import CohortServiceOriginScope, review_origin_recovery_scope
+from .competition_cohort_review_budget import check_review_seconds
 from .competition_cohort_service_queue import ServiceWorkQueue
 from .competition_cohort_service_work import ServiceWorkAssignment
 from .competition_execution import execution_boundary
@@ -36,8 +37,7 @@ class ServiceWorkAuthority:
     ):
         if provider.policy != queue.policy or origins.policy != queue.policy:
             raise ValueError("service authority providers belong to another policy")
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
-            raise ValueError("service authority timeout is outside bounds")
+        check_review_seconds(timeout_seconds)
         self.queue, self.provider, self.history, self.origins = queue, provider, history, origins
         self.timeout = timeout_seconds
 

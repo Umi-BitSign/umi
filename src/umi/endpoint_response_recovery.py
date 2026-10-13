@@ -95,7 +95,7 @@ async def retrieve_endpoint_response(
     if (
         isinstance(timeout_seconds, bool)
         or not math.isfinite(timeout_seconds)
-        or not 0 < timeout_seconds <= 3600
+        or not 0 < timeout_seconds <= 2**53 - 1
     ):
         raise ValueError("response recovery timeout must be bounded and positive")
     request = TranslationRequest.model_validate_json(canonical_json_bytes(request))

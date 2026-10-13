@@ -35,7 +35,10 @@ async def recover(selected, request, transport, **kw):
     )
 
 
-async def test_real_miner_expired_response_is_retrieved_with_new_route_auth(tmp_path, monkeypatch):
+@pytest.mark.parametrize("timeout_seconds", [5, 43200])
+async def test_real_miner_expired_response_is_retrieved_with_new_route_auth(
+    tmp_path, monkeypatch, timeout_seconds
+):
     calls = []
     selected = selected_runtime(tmp_path / "miner.sqlite", translator=CountingTranslator())
     request = challenge_request()
@@ -52,8 +55,8 @@ async def test_real_miner_expired_response_is_retrieved_with_new_route_auth(tmp_
             return await asgi.handle_async_request(wire)
 
     before = time.time_ns()
-    first = await recover(selected, request, Capture())
-    second = await recover(selected, request, Capture())
+    first = await recover(selected, request, Capture(), timeout_seconds=timeout_seconds)
+    second = await recover(selected, request, Capture(), timeout_seconds=timeout_seconds)
     assert first.status == second.status == "recovered"
     assert bytes.fromhex(first.response.envelope_hex) == original.content
     assert first.response.signature == original.headers["x-umi-signature"]
@@ -188,7 +191,7 @@ async def test_nonpublic_or_mixed_origin_never_receives_request(tmp_path, answer
     selected.resource_ledger.close()
 
 
-@pytest.mark.parametrize("bad_timeout", [0, -1, float("nan"), float("inf"), True, 3601])
+@pytest.mark.parametrize("bad_timeout", [0, -1, float("nan"), float("inf"), True, 2**53])
 async def test_invalid_timeout_is_rejected_before_network(tmp_path, bad_timeout):
     selected = selected_runtime(tmp_path / "miner.sqlite")
     with pytest.raises(ValueError, match="timeout"):

@@ -1,5 +1,13 @@
 # Maintenance
 
+- Carry every permanent fix through C6 and subsequent cohorts, including the
+  selected miner/client, coordinator, reviewer, writer and upgrade paths that
+  consume it. Qualify older supported installations, retained artifacts, restart,
+  repair and reward replay before claiming successor readiness. Preserve each
+  already signed plan and its clocks; transport or policy changes need their
+  supported authenticated adoption or a separately signed successor. A C5-only
+  recovery helper or source test is not proof of a future cohort deployment.
+
 - Prefer one consolidated PR for a coherent body of work. Include related fixes,
   integration, tests and documentation, and batch validation before pushing to
   avoid running slow CI for each small change. Split only when an independent

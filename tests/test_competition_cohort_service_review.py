@@ -98,6 +98,38 @@ async def test_service_owner_lookup_waits_for_actual_queue_contention(
     verify_signature(result.response, result.signature)
 
 
+async def test_paid_capacity_increase_preserves_native_vote_and_binding(reviewed):
+    s = reviewed
+    reviewer = s.reviewer("Charlie")
+    request = ServiceRequestReview(body=s.body)
+    vote = await reviewer.attest(request)
+    with reviewer.journal.read_transaction() as db:
+        before = db.execute("SELECT body FROM binding").fetchone()[0]
+    report = reviewer.capacity()
+    assert report["request_intents"] == 1 and report["retry_intents"] == 0
+    assert report["remaining_intents"] == reviewer.config.maximum_votes - 1
+    raised = reviewer.config.model_copy(
+        update={"maximum_votes": 100000, "read_timeout_seconds": 43200}
+    )
+    reopened = ServiceWorkReviewer(
+        raised,
+        reviewer.policy,
+        reviewer.transport,
+        reviewer.provider,
+        reviewer.blocks,
+        reviewer.history,
+        reviewer.owner,
+        reviewer.archive,
+        reviewer.current_round,
+        reviewer.sign,
+    )
+    with reopened.journal.read_transaction() as db:
+        assert db.execute("SELECT body FROM binding").fetchone()[0] == before
+    assert reopened.capacity()["remaining_intents"] == 99999
+    s.offline = True
+    assert await reopened.attest(request) == vote
+
+
 @pytest.mark.parametrize("fresh", [False, True])
 async def test_independent_window_transcripts_preserve_exact_request(reviewed, monkeypatch, fresh):
     from umi.competition_cohort_request_window import capture_cohort_attempt_window

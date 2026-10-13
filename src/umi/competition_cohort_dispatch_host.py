@@ -17,7 +17,9 @@ from .competition_chain import CompetitionChainConfig
 from .competition_cohort_clip_delivery import ClipDeliveryConfig, CohortClipDelivery
 from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_request_window import capture_cohort_attempt_window, capture_request_window
+from .competition_cohort_review_budget import ReviewSeconds
 from .competition_cohort_service_authority import ServiceWorkAuthority
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_export import ServiceWorkExporter, ServiceWorkLookup
 from .competition_cohort_service_peers import ServiceWorkPeerReviews
 from .competition_cohort_service_requests import ServiceWorkRequests
@@ -28,6 +30,7 @@ from .competition_cohort_service_worker import _RETRY, ServiceRequestInputs, Ser
 from .competition_reward_service import _close_provider
 from .competition_transport_finality import CompetitionTransportFinality
 from .concurrency import run_owned_thread
+from .config import Limits
 from .open_competition import Hotkey, Signature, digest, identity
 from .private_state_wait import run_private_state_operation
 from .protocol import StrictProtocolModel, Video, canonical_json_bytes
@@ -50,7 +53,7 @@ class ServiceDispatchConfig(StrictProtocolModel):
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
     concurrency: Annotated[int, Field(ge=1, le=32)] = 4
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
-    operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+    operation_timeout_seconds: ReviewSeconds = 2400
 
     @model_serializer(mode="wrap")
     def preserve_legacy_window_config(self, handler):
@@ -101,7 +104,16 @@ class ServiceDispatchHost:
         # The private exporter can replay retained request evidence before it
         # returns one assignment. Keep that replay inside the same generous
         # operation budget as the worker that consumes it.
-        self.timeout_seconds = self.config.operation_timeout_seconds
+        self.budget = service_execution_budget(
+            service.config.admission_owner.phase_review_budget,
+            operation_seconds=self.config.operation_timeout_seconds,
+        )
+        self.operation_timeout_seconds = (
+            self.config.operation_timeout_seconds
+            if service.config.admission_owner.phase_review_budget is None
+            else max(self.config.operation_timeout_seconds, self.budget.call_seconds)
+        )
+        self.timeout_seconds = self.budget.export_seconds
 
     async def respond(self, request: ServiceWorkLookup) -> bytes:
         # The request can select only an already configured queue. Native
@@ -111,7 +123,10 @@ class ServiceDispatchHost:
         if queue is None:
             raise ValueError("service lookup catalog is outside selected manifest")
         return await ServiceWorkExporter(
-            queue, self.service.config.admission_owner.owner_hotkey, self.sign
+            queue,
+            self.service.config.admission_owner.owner_hotkey,
+            self.sign,
+            timeout_seconds=self.timeout_seconds,
         ).respond(request)
 
     async def worker(self, key: str) -> ServiceWorkWorker:
@@ -127,7 +142,7 @@ class ServiceDispatchHost:
             finality,
             self.service.history,
             self.origins,
-            timeout_seconds=self.config.operation_timeout_seconds,
+            timeout_seconds=self.operation_timeout_seconds,
         )
         blocks = CompetitionTransportFinality(finality, source.transport)
 
@@ -159,7 +174,7 @@ class ServiceDispatchHost:
                     requests.latest,
                     assignment.admission.claim,
                     transport.evaluator,
-                    timeout=self.config.operation_timeout_seconds,
+                    timeout=self.operation_timeout_seconds,
                 )
                 number = 1 if latest is None else latest.attempt_number + 1
                 worker._stage(work, "preparation_window")
@@ -184,6 +199,7 @@ class ServiceDispatchHost:
                     signer=peer.signer,
                     token=token,
                     timeout_seconds=peer.timeout_seconds,
+                    budget=peer.phase_review_budget,
                 )
                 for peer, token in zip(
                     self.service.config.admission_owner.reviewers, self.credentials, strict=True
@@ -195,7 +211,11 @@ class ServiceDispatchHost:
             self.key,
             blocks,
             authority.origin,
-            timeout_seconds=self.config.operation_timeout_seconds,
+            timeout_seconds=max(
+                self.config.operation_timeout_seconds,
+                Limits.from_policy(source.transport).inference_timeout_seconds,
+            ),
+            authority_timeout_seconds=self.budget.dispatch_seconds,
             windows=self.windows,
         )
         worker = await run_owned_thread(

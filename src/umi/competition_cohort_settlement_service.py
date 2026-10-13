@@ -51,6 +51,7 @@ from .competition_cohort_settlement_pulses import SettlementPulseSource
 from .competition_cohort_settlement_signing import SettlementPhaseSigner
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
+from .competition_progress import report_settlement_retry
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
@@ -803,6 +804,10 @@ class CohortSettlementService:
                     report = await self.tick()
                 except Exception as error:
                     report = "retry:" + type(error).__name__
+                    report_settlement_retry(
+                        cohort=self.cohort, role=self.config.role, stage="tick", error=error
+                    )
+                    discard_error_frames(error)
                 if report != self.last_report:
                     logger.info(
                         "settlement_status cohort=%s role=%s status=%s",
@@ -854,12 +859,15 @@ class SettlementSeriesScheduler:
             node.last_report = report
 
     @staticmethod
-    async def _attempt(operation):
+    async def _attempt(node, operation, *, stage):
         failure = None
         try:
             result = await operation()
         except Exception as error:
             failure = "retry:" + type(error).__name__
+            report_settlement_retry(
+                cohort=node.cohort, role=node.config.role, stage=stage, error=error
+            )
             discard_error_frames(error)
         # End the original exception's scope before releasing any reservation:
         # rejected inputs can live in error args independently of tracebacks.
@@ -880,7 +888,7 @@ class SettlementSeriesScheduler:
         ready = False
         for node in self.nodes:
             async with self._locks[node]:
-                okay, status = await self._attempt(node.maintain)
+                okay, status = await self._attempt(node, node.maintain, stage="maintenance")
             if not okay or status is None:
                 candidate, ready = node, okay
                 if not okay:
@@ -904,7 +912,7 @@ class SettlementSeriesScheduler:
             ):
                 self._suspend()
                 return
-            _, status = await self._attempt(candidate.tick)
+            _, status = await self._attempt(candidate, candidate.tick, stage="tick")
         self._report(candidate, status)
 
     async def maintain_completed(self):
@@ -916,7 +924,7 @@ class SettlementSeriesScheduler:
             async with self._locks[node]:
                 if node is self.active:
                     continue
-                okay, status = await self._attempt(node.maintain)
+                okay, status = await self._attempt(node, node.maintain, stage="maintenance")
             if not okay or status is None:
                 self.recovery_requested.add(node.cohort)
                 if not okay:

@@ -22,6 +22,7 @@ from .competition_cohort_progress_signer import CohortProgressSignerConfig
 from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
 from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_origin import private_review_origin
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
 from .competition_reward_boot import _disjoint
@@ -260,6 +261,19 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         ):
             raise ValueError("admission review changes host signer or scope")
         service = self.service_signing
+        if service is not None:
+            checked_budget(
+                self.phase_review_budget,
+                self.policy,
+                self.request_evidence_bytes,
+                signing_seconds=service.signing_timeout_seconds,
+            )
+            service_execution_budget(
+                self.phase_review_budget,
+                read_seconds=service.read_timeout_seconds,
+                signing_seconds=service.signing_timeout_seconds,
+                vote_seconds=self.review_timeout_seconds,
+            )
         if service is not None and (
             service.cohorts != expected
             or service.policy_sha256 != digest(self.policy)

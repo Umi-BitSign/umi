@@ -8,7 +8,6 @@ verification flags. Reviewer mode never loads the control transaction key.
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Literal
@@ -32,6 +31,7 @@ from .competition_reward_coordinator import (
     StandingRewardCoordinator,
     StandingRewardDecisionReviewer,
 )
+from .competition_reward_coordinator_ownership import owned_reward_state
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import (
@@ -56,11 +56,7 @@ from .concurrency import run_owned_thread
 from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .named_hotkey import load_named_hotkey
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity, sign_object
-from .private_files import (
-    Directory,
-    ensure_private_directory,
-    lock_private_file,
-)
+from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 MAX_CONFIG_BYTES = 8 * 1024**2
@@ -234,11 +230,8 @@ def load_reward_coordinator_config(path: Path) -> RewardCoordinatorConfig:
 
 async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.Event) -> None:
     config = RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
-    root = Path(config.state_directory) / digest(config.series)
-    ensure_private_directory(root)
-    descriptor = lock_private_file(root / "service.lock")
     async with AsyncExitStack() as resources:
-        resources.callback(os.close, descriptor)
+        root = resources.enter_context(owned_reward_state(config))
         resources.enter_context(
             memory_runtime(
                 config.host_memory_admission,
@@ -246,11 +239,6 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 role="reward_coordinator",
             )
         )
-        if config.role == "coordinator":
-            # Series journals are disjoint, but the control hotkey has one
-            # mutable chain slot. Keep one host-wide publisher across series.
-            control_writer = lock_private_file(Path(config.state_directory) / "control-writer.lock")
-            resources.callback(os.close, control_writer)
         files = StandingRewardFiles(
             Path(config.files_directory),
             maximum_package_bytes=config.maximum_package_bytes,

@@ -412,6 +412,7 @@ def _standing_logs():
         "umi.competition_reward_coverage_service",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_history_repair",
     ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))
@@ -430,7 +431,11 @@ def _standing_logs():
 
 @log_phase("host_service")
 async def run_supervisor(
-    config_path: Path, *, stop_event=None, standing_config: Path | None = None
+    config_path: Path,
+    *,
+    stop_event=None,
+    standing_config: Path | None = None,
+    history_repair: dict | None = None,
 ):
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
@@ -444,6 +449,32 @@ async def run_supervisor(
     from .competition_reward_boot import select_standing_boot
 
     standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
+    if history_repair is not None:
+        from .competition_reward_boot import BOOT_FILENAME
+        from .competition_reward_history_repair import run_installed_history_repair
+
+        if standing is None:
+            raise ValueError("history repair requires the approved standing reward configuration")
+        stop = stop_event if stop_event is not None else asyncio.Event()
+        loop, handlers = asyncio.get_running_loop(), []
+        try:
+            if stop_event is None:
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    loop.add_signal_handler(signum, stop.set)
+                    handlers.append(signum)
+            with _standing_logs():
+                return await run_until_stopped(
+                    run_installed_history_repair(
+                        anchor,
+                        standing_config or config_path.with_name(BOOT_FILENAME),
+                        stop,
+                        **history_repair,
+                    ),
+                    stop,
+                )
+        finally:
+            for signum in handlers:
+                loop.remove_signal_handler(signum)
     with (
         package_verification_session(
             directory=Path(config.state_root) / "successor-package-verification"
@@ -503,14 +534,48 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         help="root-owned standing reward configuration (default: standing-reward-boot.json "
         "beside the supervisor config, when present)",
     )
+    parser.add_argument(
+        "--repair-history",
+        action="store_true",
+        help="Repair existing standing history under the original supervisor lease",
+    )
+    parser.add_argument("--through-block", type=int, help="Inclusive history repair target")
+    parser.add_argument("--reason", help="Explicit operator repair reason")
+    parser.add_argument("--history", choices=("current", "predecessor"))
     args = parser.parse_args(argv)
+    if args.repair_history:
+        if args.through_block is None or not args.reason or not args.reason.strip():
+            parser.error("--repair-history requires --through-block and a nonempty --reason")
+    elif any(value is not None for value in (args.through_block, args.reason, args.history)):
+        parser.error("history repair options require --repair-history")
     configure_progress_logging()
     try:
         options = {} if args.standing_config is None else {"standing_config": args.standing_config}
-        asyncio.run(run_supervisor(args.config, **options))
+        if args.repair_history:
+            options["history_repair"] = dict(
+                through_block=args.through_block,
+                reason=args.reason,
+                history=args.history or "current",
+            )
+        result = asyncio.run(run_supervisor(args.config, **options))
+        if args.repair_history:
+            print(json.dumps(result or {"status": "interrupted"}), flush=True)
     except KeyboardInterrupt:
         return 130
-    except Exception:
+    except Exception as error:
+        if args.repair_history:
+            from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
+
+            report = {"status": "failed", "error_type": type(error).__name__}
+            if isinstance(error, HistoryCheckpointRepairRequired):
+                report.update(
+                    status="repair_required",
+                    recovery="restore_original_metadata_and_source_in_place_no_reset",
+                )
+            elif isinstance(error, BlockingIOError):
+                report["status"] = "owner_busy"
+            print(json.dumps(report), file=sys.stderr)
+            return 1
         print(
             '{"schema":"umi-successor-host-status/1","status":"holding","reason":"successor_host_failed"}',
             file=sys.stderr,

@@ -81,6 +81,7 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
         "umi.competition.progress",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_history_repair",
     ],
 )
 def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys, name):
@@ -384,4 +385,9 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
         text=True,
         timeout=20,
     )
-    assert result.returncode == 0 and "{check,run}" in result.stdout and "--config" in result.stdout
+    assert (
+        result.returncode == 0
+        and "{check,run,repair-history}" in result.stdout
+        and "--config" in result.stdout
+        and "--through-block" in result.stdout
+    )
