@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import weakref
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -252,6 +253,8 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
         module, "review_reward_decision", lambda *args, **kwargs: "compact-decision"
     )
     owner = object.__new__(module.StandingRewardDecisionReviewer)
+    # Native review is replaced by tiny ports; supply its owner scope explicitly.
+    owner.verification_reuse = SimpleNamespace(selected=nullcontext)
     owner.history = SimpleNamespace(verified_prefix=verified, review_control=control)
     owner.provider = object()
     owner.reader = SimpleNamespace(
@@ -281,7 +284,7 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
             return SimpleNamespace()
 
         owner.opportunity = opportunity
-        owner.files = SimpleNamespace(package=package, maximum_package_bytes=1024)
+        owner.files = SimpleNamespace(verified_package=package, maximum_package_bytes=1024)
         body = SimpleNamespace(
             observed_at_block=1,
             activation=SimpleNamespace(package_sha256="original"),
