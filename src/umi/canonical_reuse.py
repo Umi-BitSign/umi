@@ -124,5 +124,19 @@ def canonical_json_reuse(
 
 
 def canonical_dumps(value) -> bytes:
+    # Retained binary objects use this exact envelope. ASCII alphanumeric
+    # strings need no JSON escaping; the sole key has no ordering ambiguity.
+    # Keep this byte-equivalent shortcut narrower than JSON validation: custom
+    # mappings/strings and every other value retain the ordinary RFC path.
+    if type(value) is dict and len(value) == 1:
+        key, raw = next(iter(value.items()))
+        if (
+            type(key) is str
+            and key == "hex"
+            and type(raw) is str
+            and raw.isascii()
+            and (not raw or raw.isalnum())
+        ):
+            return b"".join((b'{"hex":"', raw.encode("ascii"), b'"}'))
     cache = _ACTIVE.get()
     return rfc8785.dumps(value) if cache is None else cache.dumps(value)

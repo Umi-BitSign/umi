@@ -29,6 +29,10 @@ bookkeeping, transient snapshots and input models consume additional memory.
 The serialization cache is separate from durable native verification below;
 aggregate streaming remains uncached. Oversize values use ordinary serialization
 and are not rejected by this optimization.
+Plain single-field `{"hex":"..."}` objects with ASCII alphanumeric contents use
+direct encoding of the same RFC 8785 bytes. This avoids generic string escaping
+for retained binary evidence without changing its format, signatures or replay
+checks; no migration is needed.
 
 Finite substages report `completed`, `total`, `unit`, `percent`,
 `elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
@@ -172,6 +176,14 @@ verifier semantics. Restart restores the compact verified prefix without rereadi
 rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
 require a fresh owned finalized-chain check. A raw archive frame or a progress
 log is not a successful-verification receipt.
+
+Historical capture reuses the original owned finalized header when it is retained,
+avoiding another target hash/header RPC. An archived target header can also supply
+the final link of a historical ancestry walk; it remains an untrusted hint until
+every link reaches the owned finalized descendant. Missing intermediate headers
+still use normal recovery. Malformed owned records and corrupt durable hints stop
+the operation instead of falling back to replacement data. These optimizations
+preserve the original evidence format, state bindings and current-finality checks.
 
 Supported journals containing only legacy `/1` raw history records receive a
 counted source-identity migration and then a first native checkpoint pass. This

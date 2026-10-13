@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from contextvars import copy_context
 from typing import Any
 
@@ -161,3 +162,85 @@ def test_generated_nested_values_match_original_rfc_bytes():
             item = value(4)
             expected = rfc8785.dumps(item)
             assert canonical_json_bytes(item) == canonical_json_bytes(item) == expected
+
+
+@pytest.mark.parametrize("budget", [None, 0, 8192])
+def test_binary_object_envelopes_match_rfc_bytes_without_generic_escaping(monkeypatch, budget):
+    rng = random.Random(31013)
+    values = ["", "0123456789abcdef", "ABCDEF0123456789", "xyzGHI"]
+    values.extend(rng.randbytes(size).hex() for size in [1, 31, 256, 8193, 1024 * 1024])
+    values.extend(rng.randbytes(rng.randrange(256)).hex() for _ in range(100))
+    expected = [rfc8785.dumps({"hex": value}) for value in values]
+
+    def unexpected(_value):
+        raise AssertionError("plain ASCII envelope needs no generic string escaping")
+
+    monkeypatch.setattr(reuse.rfc8785, "dumps", unexpected)
+    context = nullcontext() if budget is None else reuse.canonical_json_reuse(maximum_bytes=budget)
+    with context:
+        for value, encoded in zip(values, expected, strict=True):
+            assert canonical_json_bytes({"hex": value}) == encoded
+
+
+@pytest.mark.parametrize("budget", [None, 0, 8192])
+def test_other_binary_envelopes_keep_exact_rfc_behavior(monkeypatch, budget):
+    class CustomDict(dict):
+        pass
+
+    class CustomString(str):
+        pass
+
+    values = [
+        {},
+        {"hex": "abc", "other": 1},
+        {"HEX": "abc"},
+        {CustomString("hex"): "abc"},
+        CustomDict(hex="abc"),
+        {"hex": CustomString("abc")},
+        {"hex": None},
+        {"hex": True},
+        {"hex": 2**53},
+        {"hex": float("nan")},
+        {"hex": b"abc"},
+        {"hex": ["abc"]},
+        {"hex": {"hex": "abc"}},
+        {"hex": "é"},
+        {"hex": "\u0661"},
+        {"hex": "😀"},
+        {"hex": "\x00"},
+        {"hex": "\ud800"},
+        {"hex": "\ud83d\ude00"},
+        {1: "abc"},
+    ]
+    values.extend({"hex": "abc" + chr(code)} for code in range(128) if not chr(code).isalnum())
+    original = reuse.rfc8785.dumps
+    calls = []
+
+    def counted(value):
+        calls.append(None)
+        return original(value)
+
+    monkeypatch.setattr(reuse.rfc8785, "dumps", counted)
+    context = nullcontext() if budget is None else reuse.canonical_json_reuse(maximum_bytes=budget)
+    with context:
+        for value in values:
+            before = len(calls)
+            try:
+                expected = original(value)
+            except Exception as error:
+                with pytest.raises(type(error)) as actual:
+                    canonical_json_bytes(value)
+                assert str(actual.value) == str(error)
+            else:
+                assert canonical_json_bytes(value) == expected
+            assert len(calls) > before
+
+
+def test_binary_envelope_mutation_never_reuses_old_bytes():
+    value = {"hex": "abc"}
+    with reuse.canonical_json_reuse():
+        assert canonical_json_bytes(value) == b'{"hex":"abc"}'
+        value["hex"] = "def"
+        assert canonical_json_bytes(value) == b'{"hex":"def"}'
+        value["hex"] = "\n"
+        assert canonical_json_bytes(value) == rfc8785.dumps(value)

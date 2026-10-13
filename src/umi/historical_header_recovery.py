@@ -121,11 +121,12 @@ class HistoricalHeaderRecovery:
                 db.rollback()
                 raise
 
-    async def recover(self, anchor, target: FinalizedSnapshotRef, request):
+    async def recover(self, anchor, target: FinalizedSnapshotRef, request, *, target_header=None):
+        """Use an optional exact target header only as an untrusted final-link hint."""
         if not isinstance(target, FinalizedSnapshotRef):
             raise TypeError("historical recovery requires an exact target")
         async with self._lock:
-            return await self._recover(anchor, target, request)
+            return await self._recover(anchor, target, request, target_header=target_header)
 
     async def recover_height(self, anchor, height: int, request):
         """Derive the historical identity from the owned anchor, never RPC height claims."""
@@ -134,12 +135,21 @@ class HistoricalHeaderRecovery:
         async with self._lock:
             return await self._recover(anchor, height, request)
 
-    async def _recover(self, anchor, target, request):
+    async def _recover(self, anchor, target, request, *, target_header=None):
         if not isinstance(anchor, VerifiedFinalizedBlock):
             raise TypeError("historical recovery requires an owned anchor")
         height = target.block_number if isinstance(target, FinalizedSnapshotRef) else target
         if not 1 <= height < anchor.height:
             raise ValueError("historical recovery target is not before its anchor")
+        if target_header is not None:
+            hint = _decode_header(target_header, maximum_bytes=MAXIMUM_HEADER_BYTES)
+            if (
+                FinalizedSnapshotRef(
+                    hint["number"], hint["hash"], hint["parent_hash"], hint["state_root"]
+                )
+                != target
+            ):
+                raise ValueError("historical header hint differs from the exact target")
         record = json.loads(anchor.finality_evidence)
         if record.get("evidence_class") != EVIDENCE_CLASS:
             raise ValueError("historical recovery needs an original observer anchor")
@@ -186,13 +196,22 @@ class HistoricalHeaderRecovery:
                 break
             block_hash = current["parent_hash"]
             next_encoded = await run_owned_thread(self._load, block_hash)
-            downloaded = next_encoded is None
-            if downloaded:
-                next_encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+            missing = next_encoded is None
+            if missing:
+                # Presence in an archive establishes no ancestry. Supply the
+                # target bytes only when the walk reaches its committed edge;
+                # the same hash/height checks below authenticate that link.
+                # Existing durable hints must still be checked, including
+                # corruption; an archive must not silently replace them.
+                next_encoded = (
+                    target_header
+                    if target_header is not None and current["number"] - 1 == height
+                    else encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+                )
             next_header = _decode_header(next_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
             if (next_header["number"], next_header["hash"]) != (current["number"] - 1, block_hash):
                 raise ValueError("historical header is not the committed parent")
-            if downloaded:
+            if missing:
                 await run_owned_thread(self._save, block_hash, next_encoded)
             # Advance only after the exact hint is durable. Cancellation during
             # persistence leaves the old cursor; retry rechecks the stored hint.

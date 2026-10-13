@@ -25,20 +25,21 @@ def test_large_object_publication_reuses_success_with_unchanged_metadata(
 ):
     archive = RewardProofArchive(tmp_path / "export")
     raw = bytes(range(256)) * 8192
-    serialize = rfc8785.dumps
+    publish = archive._publish_bytes
     calls = []
 
-    def counted(value):
+    def counted(path, value):
         calls.append(None)
-        return serialize(value)
+        return publish(path, value)
 
-    monkeypatch.setattr(rfc8785, "dumps", counted)
+    monkeypatch.setattr(archive, "_publish_bytes", counted)
     sha = archive._retain_bytes(raw)
     path = archive.root / "objects" / (sha + ".json")
     before = path.stat()
     assert archive._retain_bytes(raw) == sha
     assert len(calls) == 1  # A successful unchanged publication is reused.
     assert path.stat().st_ino == before.st_ino
+    assert path.read_bytes() == rfc8785.dumps({"hex": raw.hex()})
     path.write_bytes(b'{"hex":"00"}')
     with pytest.raises(ValueError, match="different bytes"):
         archive._retain_bytes(raw)

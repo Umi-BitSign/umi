@@ -506,9 +506,10 @@ async def test_missing_admission_header_recovers_beyond_2048_after_restart(histo
         pytest.fail("historical admission did not converge")
     check(h, proof)
     assert proof.snapshot.block_number == w.original.height
-    assert len(w.calls) == len(set(w.calls)) == 2050
+    assert len(w.calls) == len(set(w.calls)) == 2049
     assert (await h.item.provider.review_control(w.raw, w.metadata)) == proof
-    assert len(w.calls) == 2050
+    assert len(w.calls) == 2049
+    assert w.original.block_hash not in w.calls
     assert h.blocks.get(w.original.height) is None
 
 
@@ -525,7 +526,30 @@ async def test_corrupt_historical_parent_stays_pending_until_valid_header_return
     w.headers[broken_hash] = saved
     proof = await h.item.provider.review_control(w.raw, w.metadata)
     check(h, proof)
-    assert len(w.calls) == 41
+    assert len(w.calls) == 40
+
+
+async def test_archive_target_header_replays_offline_under_owned_parent_after_restart(
+    historical, monkeypatch
+):
+    h = historical
+    w = await _linked_history(h, monkeypatch, 1)
+
+    async def offline(*_):
+        pytest.fail("retained target header must not be fetched again")
+
+    h.item.provider._registration_rpc.request = offline
+    result = await h.item.provider.review_control(w.raw, w.metadata)
+    check(h, result)
+    assert result.snapshot.block_number == w.original.height
+    assert h.blocks.get(w.original.height) is None
+    assert not w.calls
+    await h.item.provider.aclose()
+    h.item.provider = w.owned(h.reopen())
+    h.item.provider._registration_rpc.request = offline
+    replayed = await h.item.provider.review_control(w.raw, w.metadata)
+    assert replayed == result
+    assert h.blocks.get(w.original.height) is None
 
 
 async def test_migration_selects_original_decoder_separately_from_current_control(

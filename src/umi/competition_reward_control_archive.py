@@ -472,7 +472,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 raise ValueError("reward admission anchor exceeds owned head")
             try:
                 recovered = await self._historical_headers.recover(
-                    anchor, ref, self._registration_rpc.request
+                    anchor, ref, self._registration_rpc.request, target_header=encoded
                 )
             except sqlite3.Error as error:
                 if not is_sqlite_full(error):
@@ -503,22 +503,35 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             if self._closed or not self._owned or self._registration_rpc is None:
                 raise ValueError("historical capture requires the owned chain provider")
             _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
-            request = self._registration_rpc.request
-            block_hash = await request("chain_getBlockHash", (height,))
-            if (
-                type(block_hash) is not str
-                or len(block_hash) != 66
-                or not block_hash.startswith("0x")
-                or any(c not in "0123456789abcdef" for c in block_hash[2:])
-            ):
-                raise ValueError("historical control header hint is invalid")
-            encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+            original = await self._finality.verified_block_at(height)
+            if original is not None:
+                if not isinstance(original, VerifiedFinalizedBlock):
+                    raise ValueError("owned finality evidence is unavailable")
+                self._check_finality_context(original)
+                block_hash = original.block_hash
+                try:
+                    encoded = json.loads(original.finality_evidence)["block"]["scale_header"]
+                except (KeyError, TypeError) as error:
+                    raise ValueError("owned finality header is unavailable") from error
+            else:
+                request = self._registration_rpc.request
+                block_hash = await request("chain_getBlockHash", (height,))
+                if (
+                    type(block_hash) is not str
+                    or len(block_hash) != 66
+                    or not block_hash.startswith("0x")
+                    or any(c not in "0123456789abcdef" for c in block_hash[2:])
+                ):
+                    raise ValueError("historical control header hint is invalid")
+                encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
             header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
             if (header["number"], header["hash"]) != (height, block_hash):
                 raise ValueError("historical control header differs from the requested identity")
             ref = FinalizedSnapshotRef(
                 height, block_hash, header["parent_hash"], header["state_root"]
             )
+            if original is not None:
+                self._check_finality(ref, original)
             timestamp, ceiling = await self._resolve_control_header(ref, encoded)
             runtime = await self._runtime_context(ref)
             self._validate_runtime_context(runtime, ref)
