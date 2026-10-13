@@ -598,9 +598,14 @@ class RewardControlHistoryReader:
                         if prepared is not None:
                             # Drain complete native+checkpoint ownership. A
                             # secondary failure cannot replace the caller's
-                            # publication error or cancellation.
+                            # publication error or cancellation. Retrieving a
+                            # completed failure with result() again would
+                            # replace its original traceback with this cleanup.
                             with suppress(asyncio.CancelledError, Exception):
-                                await await_owned_task(prepared.task)
+                                if not prepared.task.done():
+                                    await await_owned_task(prepared.task)
+                                elif not prepared.task.cancelled():
+                                    prepared.task.exception()
                     self._source_tokens.clear()
                     self._prepared_encodings.clear()
                 history = None

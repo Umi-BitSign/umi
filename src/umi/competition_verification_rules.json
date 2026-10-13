@@ -242,7 +242,7 @@
     "competition_reward_files.py": "574df84b08dae26bec6f3e853dd9c5ba0bc10483997766305a834c0750911e38",
     "competition_reward_handoff.py": "fa73964aa247a202befaa991e0430b92d4f0f58b17683cf2edb8434a11177c22",
     "competition_reward_handoff_models.py": "cbae14533f5b5d71a8ef479320e76d12979c0145a5a21f5966cdd8ce902f81fe",
-    "competition_reward_history.py": "4cbac7ad1d91429cb8bd7abccb41c2b79b3ae3038e6c5d496bfd219d0465d86a",
+    "competition_reward_history.py": "e8188df7f46cc638a7c176200bbf9516ebac02d9acc21f5a8e7fff904cffe7d4",
     "competition_reward_history_checkpoint.py": "510678822604d840bb14fa9e99d98012b14c506d0d3efdf7e24ca1a6587bb592",
     "competition_reward_history_progress.py": "3281e9931bd03fbbfe46d1b724b18db6118c62a3168a3b8aa727bd09bfa8a5f0",
     "competition_reward_history_repair.py": "8101d4a88463e678e53863d7803462268a829a8b170f795495ee36cd5ca8ebd3",
