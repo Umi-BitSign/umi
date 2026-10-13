@@ -181,6 +181,7 @@ class RewardControlHistoryReader:
         maximum_bytes: int = 4 * 1024**3,
         archive: RewardProofArchive | None = None,
         export_archive: RewardProofArchive | None = None,
+        repair_record_capacity: bool = False,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -202,6 +203,7 @@ class RewardControlHistoryReader:
             maximum_rounds=65536,
             maximum_bytes=maximum_bytes,
             maximum_record_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+            repair_record_capacity=repair_record_capacity,
         )
         self.checkpoints = HistoryCheckpoints(self.journal, binding)
         self._source_tokens = {}

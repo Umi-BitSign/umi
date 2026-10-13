@@ -1,6 +1,8 @@
 """Native success survives restart; broken completed work needs explicit repair."""
 
 import asyncio
+import logging
+import sqlite3
 import threading
 
 import pytest
@@ -18,6 +20,59 @@ from .test_competition_reward_history import policy as policy
 from .test_competition_reward_history import series_case as series_case
 
 pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+
+
+@pytest.mark.parametrize("damage", ["table", "counter", "trigger"])
+async def test_capacity_repair_preserves_verified_history_and_repeat_reuses_metadata(
+    history_case, monkeypatch, caplog, damage
+):
+    from umi.competition_reward_history import RewardControlHistoryReader
+    from umi.competition_round_journal import RoundCapacityRepairRequired
+
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    journal = h.reader.journal
+    with journal.read_transaction() as db:
+        records = db.execute("SELECT * FROM records ORDER BY kind,id").fetchall()
+    inode = journal.path.stat().st_ino
+    with sqlite3.connect(journal.path) as db:
+        db.execute(
+            {
+                "table": "DROP TABLE round_record_capacity_kinds",
+                "counter": "UPDATE round_record_capacity SET number=number+1",
+                "trigger": "DROP TRIGGER round_record_capacity_insert",
+            }[damage]
+        )
+
+    def reopen(*, repair=False):
+        return RewardControlHistoryReader(
+            journal.root,
+            control_hotkey=h.reader.hotkey,
+            chain_config_sha256=h.reader.config_sha256,
+            first_block=h.reader.first_block,
+            maximum_bytes=journal.maximum_bytes,
+            repair_record_capacity=repair,
+        )
+
+    with pytest.raises(RoundCapacityRepairRequired):
+        reopen()
+    caplog.set_level(logging.INFO, logger="umi.competition_round_journal")
+    h.reader = reopen(repair=True)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert h.reader.progress.native_completed == 0
+    assert journal.path.stat().st_ino == inode
+    with h.reader.journal.read_transaction() as db:
+        assert db.execute("SELECT * FROM records ORDER BY kind,id").fetchall() == records
+    assert any(
+        record.msg == "round_journal_progress %s" and record.args["state"] == "completed"
+        for record in caplog.records
+    )
+    caplog.clear()
+    h.reader = reopen(repair=True)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert not any(record.msg == "round_journal_progress %s" for record in caplog.records)
 
 
 def prohibit_proof_replay(monkeypatch, reader):
@@ -180,7 +235,14 @@ async def test_missing_metadata_is_not_a_new_legacy_journal(history_case, caplog
         pytest.raises(HistoryCheckpointRepairRequired, match="metadata lost"),
     ):
         await h.restart()
-    event = caplog.records[-1].args
+    events = [
+        record.args
+        for record in caplog.records
+        if record.name == "umi.competition_reward_history_checkpoint"
+        and record.msg == "reward_history_progress %s"
+    ]
+    assert events
+    event = events[-1]
     assert event["state"] == "repair_required"
     assert event["eta_seconds"] is None and event["percent"] is None
 

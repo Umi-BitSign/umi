@@ -189,6 +189,12 @@ time, an ETA and its basis, and retrying or stalled states. Restored blocks coun
 toward completion but do not inflate measured native throughput. These estimates
 cover history review only, not overall reward finality.
 
+Unreserved history journals keep transactional record counts and byte totals, so
+adding a block does not recount the entire retained history. Older unreserved
+journals receive a metadata-only migration in place. Reserved journals retain
+their original accounting and allowances. Migration emits
+`round_journal_progress` with counts, elapsed time, ETA and retry state.
+
 Changed source dependencies or damaged successful records stop with
 `repair_required`; they are not silent cache misses. Restore the exact original
 source and run the bounded owner repair command using the installed interpreter,
@@ -221,6 +227,13 @@ remain in the original journal; unaffected blocks are restored without payload
 reverification. Repair reports its counted scope, elapsed time, ETA basis and
 retry/stall state. The startup planning range covers local open/provider startup
 only; it is not an estimate for the selected history or final reward activation.
+
+These same repair commands also repair damaged record-capacity counters before
+opening the selected history. They rebuild only record lengths and counts under
+the original owner's exclusive locks; signed records and verification results
+are preserved. Healthy counters are reused on repeated commands. Missing native
+verification identities still require their separate restoration in place;
+repairing capacity metadata does not authorize evidence or reset history.
 
 An existing original journal is required. Missing source-identity tables or the
 owner marker require restoration of original metadata before reuse. Do not create

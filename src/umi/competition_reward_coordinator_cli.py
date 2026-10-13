@@ -14,6 +14,7 @@ from .competition_reward_coordinator_boot import (
 )
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_history_repair import run_reward_history_repair
+from .competition_round_journal import RoundCapacityRepairRequired
 from .concurrency import run_until_stopped
 from .open_competition import digest
 from .private_files import PrivateStateBusyError
@@ -36,6 +37,7 @@ def _logs():
             )
         ),
         "umi.competition.progress",
+        "umi.competition_round_journal",
     ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))
@@ -117,7 +119,7 @@ def main(argv=None):
         if args.action == "repair-history":
             if isinstance(error, PrivateStateBusyError):
                 report["status"] = "owner_busy"
-            elif isinstance(error, HistoryCheckpointRepairRequired):
+            elif isinstance(error, (HistoryCheckpointRepairRequired, RoundCapacityRepairRequired)):
                 report.update(
                     status="repair_required",
                     recovery="restore_original_metadata_and_source_in_place_no_reset",

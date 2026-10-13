@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import stat
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +37,99 @@ _OBLIGATION_COLUMNS = (
     "(TYPEOF(maximum_bytes)='integer' AND (TYPEOF(value_sha256)='null' OR "
     "(TYPEOF(value_sha256)='text' AND LENGTH(CAST(value_sha256 AS BLOB))=64)))"
 )
+
+_CAPACITY_APPLICATION_ID = 0x554D5243  # UMRC; user_version still fences reservations.
+_CAPACITY_TABLES = frozenset({"round_record_capacity", "round_record_capacity_kinds"})
+_CAPACITY_SCHEMA = {
+    "round_record_capacity": (
+        "CREATE TABLE round_record_capacity (id INTEGER PRIMARY KEY CHECK(id=1), "
+        "number INTEGER NOT NULL CHECK(TYPEOF(number)='integer' AND number>=0), "
+        "nbytes INTEGER NOT NULL CHECK(TYPEOF(nbytes)='integer' AND nbytes>=0))"
+    ),
+    "round_record_capacity_kinds": (
+        "CREATE TABLE round_record_capacity_kinds (kind TEXT PRIMARY KEY NOT NULL, "
+        "number INTEGER NOT NULL CHECK(TYPEOF(number)='integer' AND number>=0), "
+        "nbytes INTEGER NOT NULL CHECK(TYPEOF(nbytes)='integer' AND nbytes>=0))"
+    ),
+}
+logger = logging.getLogger(__name__)
+
+
+class RoundCapacityRepairRequired(ValueError):
+    """Derived accounting is damaged; the owner must explicitly rebuild metadata."""
+
+
+def _capacity_triggers():
+    insert = (
+        "INSERT INTO round_record_capacity_kinds VALUES (NEW.kind,1,LENGTH(NEW.body)) "
+        "ON CONFLICT(kind) DO UPDATE SET number=number+1,nbytes=nbytes+LENGTH(NEW.body); "
+        "UPDATE round_record_capacity SET number=number+1,nbytes=nbytes+LENGTH(NEW.body) "
+        "WHERE id=1; "
+        "SELECT CASE WHEN changes()!=1 THEN "
+        "RAISE(ABORT,'round record capacity repair required') END; "
+    )
+    delete = (
+        "UPDATE round_record_capacity_kinds SET number=number-1,nbytes=nbytes-LENGTH(OLD.body) "
+        "WHERE kind=OLD.kind; "
+        "SELECT CASE WHEN changes()!=1 THEN "
+        "RAISE(ABORT,'round record capacity repair required') END; "
+        "DELETE FROM round_record_capacity_kinds WHERE kind=OLD.kind AND number=0; "
+        "UPDATE round_record_capacity SET number=number-1,nbytes=nbytes-LENGTH(OLD.body) "
+        "WHERE id=1; "
+        "SELECT CASE WHEN changes()!=1 THEN "
+        "RAISE(ABORT,'round record capacity repair required') END; "
+    )
+    result = {}
+    for action, body in (("INSERT", insert), ("DELETE", delete), ("UPDATE", delete + insert)):
+        name = "round_record_capacity_" + action.lower()
+        result[name] = f"CREATE TRIGGER {name} AFTER {action} ON records BEGIN {body}END"
+    # SQLite omits the implicit DELETE trigger of REPLACE unless recursive
+    # triggers are enabled. Older native writers only insert absent immutable
+    # records, so they remain supported. A conflicting SQL write from an older
+    # connection must fail before changing either records or their accounting.
+    for action in ("INSERT", "UPDATE"):
+        name = "round_record_capacity_replace_" + action.lower()
+        different = " AND rowid!=OLD.rowid" if action == "UPDATE" else ""
+        result[name] = (
+            f"CREATE TRIGGER {name} BEFORE {action} ON records "
+            "WHEN NOT (SELECT recursive_triggers FROM pragma_recursive_triggers) "
+            "AND EXISTS(SELECT 1 FROM records WHERE kind=NEW.kind AND id=NEW.id"
+            f"{different}) BEGIN SELECT "
+            "RAISE(ABORT,'round record replacement requires recursive triggers'); END"
+        )
+    return result
+
+
+def _capacity_progress(state, completed, total, started, operation):
+    elapsed = max(0.0, time.monotonic() - started)
+    rate = completed / elapsed if completed and elapsed else None
+    unavailable = state in {"repair_required", "retrying", "stalled"}
+    # Telemetry cannot turn a committed migration into a failed operation.
+    with suppress(Exception):
+        logger.info(
+            "round_journal_progress %s",
+            {
+                "stage": "record_capacity_" + operation,
+                "state": state,
+                "completed_records": completed,
+                "total_records": total,
+                "percent": 100.0 * completed / total if total else 100.0 if total == 0 else None,
+                "elapsed_seconds": elapsed,
+                "eta_seconds": None
+                if unavailable or total is None
+                else ((total - completed) / rate if rate else 0.0 if total == 0 else None),
+                "planning_eta_seconds": [total / 100000, total / 1000]
+                if total is not None and not completed and not unavailable
+                else None,
+                "eta_basis": "withdrawn_stalled_or_retrying"
+                if unavailable
+                else (
+                    "measured_metadata_records_per_second"
+                    if rate
+                    else "planning_assumption_1000_to_100000_metadata_records_per_second"
+                ),
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +170,7 @@ class RoundJournal:
         maximum_bytes: int = 1024**3,
         maximum_record_bytes: int = MAX_BYTES,
         compatible_bindings: Iterable[object] = (),
+        repair_record_capacity: bool = False,
     ) -> None:
         if (
             type(maximum_rounds) is not int
@@ -82,6 +178,7 @@ class RoundJournal:
             or (type(maximum_bytes) is not int or not 1024 <= maximum_bytes <= self.MAXIMUM_BYTES)
             or type(maximum_record_bytes) is not int
             or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
+            or type(repair_record_capacity) is not bool
         ):
             raise ValueError("round journal requires bounded capacity")
         self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
@@ -91,6 +188,7 @@ class RoundJournal:
         # Serialize this instance's writers. Read-only snapshots own separate
         # connections and must not queue behind unrelated writer work.
         self._transaction_lock = threading.RLock()
+        self._capacity_migration = None
         _private(root)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
@@ -98,7 +196,7 @@ class RoundJournal:
         for path in (self.path, self.lock_path):
             os.close(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
         self._check_files()
-        with self.transaction() as db:
+        with self.transaction(_repair_record_capacity=repair_record_capacity) as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
             raw = canonical_json_bytes(binding)
             if len(raw) > MAX_BYTES:
@@ -142,6 +240,7 @@ class RoundJournal:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS records_capacity_lengths ON records(kind,LENGTH(body))"
             )
+            self._initialize_record_capacity(db, repair=repair_record_capacity)
             db.execute("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS highwater (block INTEGER NOT NULL)")
             db.execute(
@@ -263,7 +362,7 @@ class RoundJournal:
             os.close(descriptor)
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, _repair_record_capacity=False) -> Iterator[sqlite3.Connection]:
         """Own one immediate writer transaction through commit, rollback and close.
 
         Callers must not commit, close or retain the supplied connection.
@@ -274,18 +373,28 @@ class RoundJournal:
             try:
                 db.create_function("umi_round_writer_generation", 0, lambda: 2)
                 db.execute("PRAGMA synchronous=FULL")
+                db.execute("PRAGMA recursive_triggers=ON")
                 db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
                 db.execute("BEGIN IMMEDIATE")
                 version = self._version(db)
                 initial_tables = self._table_names(db)
                 if version == 2:
                     self._fence_tables(db)
+                if not _repair_record_capacity:
+                    self._check_record_capacity_schema(db)
                 yield db
+                self._check_record_capacity_schema(db)
                 if db.execute("PRAGMA user_version").fetchone()[0] == 2:
                     self._fence_tables(db, new_tables=self._table_names(db) - initial_tables)
                 db.commit()
+                migration, self._capacity_migration = self._capacity_migration, None
+                if migration is not None:
+                    _capacity_progress("completed", *migration)
             except BaseException:
                 db.rollback()
+                migration, self._capacity_migration = self._capacity_migration, None
+                if migration is not None:
+                    _capacity_progress("retrying", *migration)
                 raise
             finally:
                 db.close()
@@ -326,6 +435,7 @@ class RoundJournal:
             db.execute("BEGIN")
             if self._version(db) == 2:
                 self._fence_tables(db)
+            self._check_record_capacity_schema(db)
             yield db
         finally:
             db.close()
@@ -393,6 +503,19 @@ class RoundJournal:
     def _enable_reservations(self, db):
         if db.execute("PRAGMA user_version").fetchone()[0] == 2:
             return
+        # Older reservation-capable owners charge every auxiliary table as
+        # retained data. Preserve their already signed capacity accounting:
+        # the reservation transition removes only these derived counters, in
+        # the same commit as its capability fence. History journals never
+        # enable reservations; they retain the constant-work write path.
+        if db.execute("PRAGMA application_id").fetchone()[0] == _CAPACITY_APPLICATION_ID:
+            self._check_record_capacity_schema(db)
+            self._record_capacity(db)
+            for name in _capacity_triggers():
+                db.execute(f"DROP TRIGGER {self._identifier(name)}")
+            for name in _CAPACITY_TABLES:
+                db.execute(f"DROP TABLE {self._identifier(name)}")
+            db.execute("PRAGMA application_id=0")
         db.execute(
             "CREATE TABLE record_reservation_batches (id TEXT PRIMARY KEY, body BLOB NOT NULL)"
         )
@@ -510,6 +633,153 @@ class RoundJournal:
         ).fetchone()
         return None if row is None else cls._decode_obligation(row)
 
+    @staticmethod
+    def _capacity_damage(message):
+        _capacity_progress("repair_required", 0, None, time.monotonic(), "repair")
+        raise RoundCapacityRepairRequired(message)
+
+    @classmethod
+    def _check_record_capacity_schema(cls, db):
+        marker = db.execute("PRAGMA application_id").fetchone()[0]
+        retained = dict(
+            db.execute(
+                "SELECT name,sql FROM sqlite_master WHERE name GLOB 'round_record_capacity*'"
+            )
+        )
+        if marker == 0 and not retained:
+            return  # A genuine legacy journal; only the constructor migrates it.
+        expected = {**_CAPACITY_SCHEMA, **_capacity_triggers()}
+        if (
+            marker != _CAPACITY_APPLICATION_ID
+            or set(retained) != set(expected)
+            or any(
+                " ".join(retained[name].split()) != " ".join(sql.split())
+                for name, sql in expected.items()
+            )
+        ):
+            cls._capacity_damage(
+                "round record capacity metadata missing or changed; repair required"
+            )
+
+    def _initialize_record_capacity(self, db, *, repair):
+        """Migrate v0 in place, or explicitly rebuild only derived accounting.
+
+        The application marker survives loss of the auxiliary tables. Missing
+        counters or triggers are never treated as an empty/legacy journal. The
+        explicit repair reads record lengths, not their signed payloads; it does
+        not bless evidence, rewrite binding bytes, or change reservation fences.
+        Migration and repair are atomic, with counted progress and retry status.
+        """
+        marker = db.execute("PRAGMA application_id").fetchone()[0]
+        if marker not in (0, _CAPACITY_APPLICATION_ID):
+            self._capacity_damage("unsupported round record capacity marker")
+        if self._version(db) == 2:
+            # Existing v2 owners count all metadata tables in their allowance.
+            # Do not introduce an accounting change for those mixed-runtime
+            # consumers. Their bounded reservation validation still scans all
+            # obligations and retains its existing record-accounting path.
+            if (
+                marker
+                or db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name GLOB 'round_record_capacity*' LIMIT 1"
+                ).fetchone()
+            ):
+                self._capacity_damage("reserved journal has unsupported capacity counters")
+            return
+        try:
+            self._check_record_capacity_schema(db)
+            if marker == _CAPACITY_APPLICATION_ID:
+                self._record_capacity(db)
+                return
+        except RoundCapacityRepairRequired:
+            if not repair:
+                raise
+        started = time.monotonic()
+        operation = "repair" if repair else "migration"
+        self._capacity_migration = (0, None, started, operation)
+        _capacity_progress("running", *self._capacity_migration)
+        for name in _capacity_triggers():
+            db.execute(f"DROP TRIGGER IF EXISTS {self._identifier(name)}")
+        for name in _CAPACITY_TABLES:
+            db.execute(f"DROP TABLE IF EXISTS {self._identifier(name)}")
+            db.execute(_CAPACITY_SCHEMA[name])
+        db.execute("INSERT INTO round_record_capacity VALUES (1,0,0)")
+        # Only kind and the indexed byte length cross into Python. An explicit
+        # repair derives lengths from original record metadata, so a damaged
+        # auxiliary covering index cannot become the source of new counters.
+        source = "records NOT INDEXED" if repair else "records INDEXED BY records_capacity_lengths"
+        total = db.execute(f"SELECT COUNT(*) FROM {source}").fetchone()[0]
+        self._capacity_migration = (0, total, started, operation)
+        _capacity_progress("running", *self._capacity_migration)
+        completed = used = 0
+        cursor = db.execute(f"SELECT kind,LENGTH(body) FROM {source}")
+        try:
+            while rows := cursor.fetchmany(4096):
+                batch = {}
+                for kind, size in rows:
+                    if type(kind) is not str or type(size) is not int or size < 0:
+                        raise ValueError("round record capacity source metadata is invalid")
+                    number, nbytes = batch.get(kind, (0, 0))
+                    batch[kind] = (number + 1, nbytes + size)
+                    used += size
+                db.executemany(
+                    "INSERT INTO round_record_capacity_kinds VALUES (?,?,?) "
+                    "ON CONFLICT(kind) DO UPDATE SET number=number+excluded.number,"
+                    "nbytes=nbytes+excluded.nbytes",
+                    ((kind, *values) for kind, values in batch.items()),
+                )
+                completed += len(rows)
+                self._capacity_migration = (completed, total, started, operation)
+                _capacity_progress("running", *self._capacity_migration)
+        finally:
+            cursor.close()
+        db.execute(
+            "UPDATE round_record_capacity SET number=?,nbytes=? WHERE id=1", (completed, used)
+        )
+        for definition in _capacity_triggers().values():
+            db.execute(definition)
+        db.execute(f"PRAGMA application_id={_CAPACITY_APPLICATION_ID}")
+        self._record_capacity(db)
+
+    @classmethod
+    def _record_capacity(cls, db):
+        """Read O(number of record kinds) metadata, independent of history size.
+
+        SQLite changes counters in the same transaction as every native or
+        compatible older writer. No process-local cache can hide another writer,
+        rollback, same-length mutation, deletion or identity-changing update.
+        Reserved journals retain the prior complete accounting path for older
+        owners whose durable allowances include every auxiliary table.
+        """
+        if db.execute("PRAGMA application_id").fetchone()[0] == 0:
+            count, used = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(LENGTH(body)),0) FROM records"
+            ).fetchone()
+            return count, used, dict(db.execute("SELECT kind,COUNT(*) FROM records GROUP BY kind"))
+        totals = db.execute("SELECT id,number,nbytes FROM round_record_capacity LIMIT 2").fetchall()
+        kinds = {}
+        count = used = 0
+        for kind, number, nbytes in db.execute(
+            "SELECT kind,number,nbytes FROM round_record_capacity_kinds"
+        ):
+            if (
+                type(kind) is not str
+                or type(number) is not int
+                or number <= 0
+                or type(nbytes) is not int
+                or nbytes < 0
+                or kind in kinds
+            ):
+                cls._capacity_damage("round record capacity counters damaged; repair required")
+            kinds[kind] = number
+            count += number
+            used += nbytes
+        if totals != [(1, count, used)] or any(
+            type(value) is not int for row in totals for value in row
+        ):
+            cls._capacity_damage("round record capacity counters disagree; repair required")
+        return count, used, kinds
+
     def _capacity(self, db):
         """Logical retained bytes plus outstanding record allowances.
 
@@ -532,10 +802,7 @@ class RoundJournal:
                 self._decode_obligation(row)
         finally:
             cursor.close()
-        count, used = db.execute(
-            "SELECT COUNT(*),COALESCE(SUM(LENGTH(body)),0) FROM records"
-        ).fetchone()
-        kinds = dict(db.execute("SELECT kind,COUNT(*) FROM records GROUP BY kind"))
+        count, used, kinds = self._record_capacity(db)
         pending = (
             " FROM record_reservations o WHERE NOT EXISTS "
             "(SELECT 1 FROM records r WHERE r.kind=o.kind AND r.id=o.id)"
@@ -838,10 +1105,7 @@ class RoundJournal:
                     if reserved:
                         count, used, kinds = self._capacity(db)
                     else:
-                        count, used = db.execute(
-                            "SELECT COUNT(*),COALESCE(SUM(LENGTH(body)),0) FROM records"
-                        ).fetchone()
-                        kinds = dict(db.execute("SELECT kind,COUNT(*) FROM records GROUP BY kind"))
+                        count, used, kinds = self._record_capacity(db)
                 extra_count = 0 if obligation is not None else 1
                 extra_bytes = len(raw) - (obligation[0] if obligation is not None else 0)
                 if kind in {"plan", "prepared", "intent", "suite", "certificate"} and (

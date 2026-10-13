@@ -26,6 +26,7 @@ from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequir
 from .competition_reward_history_repair_journal import HistoryRepairRequest
 from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import _close_provider
+from .competition_round_journal import RoundCapacityRepairRequired
 from .competition_supervisor_runtime import hold_successor_startup_lease
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
@@ -250,6 +251,10 @@ async def _run_owned_history_repair(
                     maximum_bytes=config.maximum_history_bytes,
                     archive=imported,
                     export_archive=exported,
+                    # The explicit owner repair command may reconstruct damaged
+                    # length/count metadata before restoring native verdicts.
+                    # Healthy counters are reused, including on repeat repair.
+                    repair_record_capacity=True,
                 )
 
             reader = await run_owned_thread(open_history)
@@ -287,7 +292,7 @@ async def _run_owned_history_repair(
     except BaseException as error:
         state = (
             "repair_required"
-            if isinstance(error, HistoryCheckpointRepairRequired)
+            if isinstance(error, (HistoryCheckpointRepairRequired, RoundCapacityRepairRequired))
             else "interrupted"
             if isinstance(error, asyncio.CancelledError)
             else "failed"

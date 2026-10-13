@@ -138,6 +138,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
             assert kwargs["control_hotkey"] == selected_series.control_hotkey
             assert kwargs["first_block"] == selected_series.recovery.authority.issued_at_block
             assert kwargs["maximum_bytes"] == config.maximum_history_bytes
+            assert kwargs["repair_record_capacity"] is True
             with pytest.raises(PrivateStateBusyError):
                 lock_private_file(root / "service.lock")
             if failure == "metadata":

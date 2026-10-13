@@ -413,6 +413,7 @@ def _standing_logs():
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
         "umi.competition_reward_history_repair",
+        "umi.competition_round_journal",
     ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))
@@ -565,9 +566,10 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     except Exception as error:
         if args.repair_history:
             from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
+            from .competition_round_journal import RoundCapacityRepairRequired
 
             report = {"status": "failed", "error_type": type(error).__name__}
-            if isinstance(error, HistoryCheckpointRepairRequired):
+            if isinstance(error, (HistoryCheckpointRepairRequired, RoundCapacityRepairRequired)):
                 report.update(
                     status="repair_required",
                     recovery="restore_original_metadata_and_source_in_place_no_reset",

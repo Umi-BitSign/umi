@@ -3213,7 +3213,22 @@ def original_settlement_inputs(service_quality_inputs):
 
 
 @pytest.fixture
-async def recurring_settlement_case(original_settlement_inputs, registered_case, tmp_path, request):
+def settlement_service_umask():
+    # Both deployed settlement and replication units use UMask=0077. These
+    # integration fixtures run their services and copy loop in this process;
+    # pathlib's parents=True otherwise creates intermediate directories with
+    # the pytest runner's umask, unlike either supported service entry point.
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture
+async def recurring_settlement_case(
+    original_settlement_inputs, registered_case, tmp_path, request, settlement_service_umask
+):
     """Real owner journals, signatures, file exchange and native settlement.
 
     Only finality/proof verification and the original fixture model are synthetic.
