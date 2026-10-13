@@ -20,6 +20,24 @@ from .test_competition_host_artifacts import sign as sign_host_artifact
 from .test_competition_host_artifacts import staged as _staged_host_fixture
 
 
+@pytest.fixture(autouse=True)
+def restore_process_progress_logger():
+    # run_cli configures process-lifetime stderr logging. Tests invoke several
+    # synthetic CLIs in one interpreter, with a new captured stderr each time;
+    # do not leave that handler pointing at a closed capture in later tests.
+    logger = logging.getLogger("umi.competition.progress")
+    level, propagate, handlers = logger.level, logger.propagate, tuple(logger.handlers)
+    try:
+        yield
+    finally:
+        for handler in tuple(logger.handlers):
+            if handler not in handlers:
+                logger.removeHandler(handler)
+                handler.close()
+        logger.setLevel(level)
+        logger.propagate = propagate
+
+
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     events = []
@@ -210,7 +228,9 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
         assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
 
 
-@pytest.mark.parametrize("name", ["service", "executor", "coverage_service"])
+@pytest.mark.parametrize(
+    "name", ["service", "executor", "coverage_service", "history_progress", "history_checkpoint"]
+)
 def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys, name):
     logger = logging.getLogger("umi.competition_reward_" + name)
     http = logging.getLogger("httpx")

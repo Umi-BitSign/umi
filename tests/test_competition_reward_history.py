@@ -666,7 +666,8 @@ async def test_one_frame_capture_overlaps_publication_without_advancing_prefix(
         assert h.body_requests == [first, first + 1]
         assert h.reader._next == first
         assert h.reader._tip is None and h.reader._prefixes == {}
-        assert h.reader.journal.get("control_history_block", str(first + 1)) is None
+        # Prefetched proof success now owns its persistence independently of
+        # this blocked predecessor. Neither result advances the ordered prefix.
         assert (h.reader.journal.get("control_history_block", str(first)) is not None) == (
             stage == "export"
         )
@@ -817,6 +818,9 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
     await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
     h.offline_through = first + 1
     h.reader = await h.restart()
+    # Exercise native preparation, rather than the independently tested durable
+    # result restore path, so the injected wrong native height is actually used.
+    monkeypatch.setattr(h.reader.checkpoints, "load", lambda height: None)
     prepare = h.reader._prepare
     requested = []
 
@@ -897,7 +901,9 @@ async def test_repeated_cancellation_drains_publication_and_native_lookahead_bef
         await task
     assert not h.reader._lock.locked() and not h.item.provider._lock.locked()
     assert h.reader._next == first
-    assert h.reader._load(first) is not None and h.reader._load(first + 1) is None
-    h.offline_through = first
+    assert h.reader._load(first) is not None and h.reader._load(first + 1) is not None
+    assert h.reader.checkpoints.load(first) is not None
+    assert h.reader.checkpoints.load(first + 1) is not None
+    h.offline_through = first + 1
     h.reader = await h.restart()
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None

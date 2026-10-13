@@ -142,3 +142,33 @@ def test_interrupted_completion_marker_recovers_existing_result_without_native_r
         assert verify(policy).value == "complete"
     assert len(calls) == 1
     assert list(owner.directory.glob("*.complete"))
+
+
+def test_empty_service_setting_preserves_completed_default_receipts(tmp_path, monkeypatch, policy):
+    monkeypatch.delenv("UMI_NATIVE_VERIFICATION_DIRECTORY", raising=False)
+    calls = []
+
+    @verified_replay("empty_service_setting", Result)
+    def verify(policy):
+        calls.append(1)
+        return Result(value="complete")
+
+    directory = tmp_path / "native"
+    with VerificationReuse(directory, owner="validator").selected():
+        verify(policy)
+    monkeypatch.setenv("UMI_NATIVE_VERIFICATION_DIRECTORY", "")
+    for _ in range(2):
+        owner = VerificationReuse(directory, owner="validator")
+        assert owner.directory == directory
+        with owner.selected():
+            assert verify(policy).value == "complete"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("value", ["relative", ".", "../receipts"])
+def test_relative_shared_setting_refuses_before_state_changes(tmp_path, monkeypatch, value):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UMI_NATIVE_VERIFICATION_DIRECTORY", value)
+    with pytest.raises(ValueError, match="absolute path"):
+        VerificationReuse(tmp_path / "native", owner="validator")
+    assert list(tmp_path.iterdir()) == []

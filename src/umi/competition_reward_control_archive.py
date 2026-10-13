@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .canonical_proof import canonical_proof_matches
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import CompetitionChainConfig, _hotkey, _uint
 from .competition_chain_state import _cache_usage
@@ -38,7 +39,6 @@ from .finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
 from .grandpa_finality import _decode_header
 from .historical_header_recovery import HistoricalHeaderRecovery, HistoricalHeaderRecoveryPending
 from .open_competition import digest
-from .protocol import canonical_json_bytes
 from .runtime_metadata import collect_executed_runtime
 from .sqlite_contention import is_sqlite_full
 from .validator_chain import StorageReadSpec, VerifiedStorageBatch
@@ -140,7 +140,7 @@ class _Archive:
                 "umi-historical-reward-control-observation/1",
             }
             or body["chain_submission_authorized"] is not False
-            or canonical_json_bytes(body) != raw
+            or not canonical_proof_matches(body, raw)
             or hashlib.sha256(metadata).hexdigest() != body["runtime_metadata_sha256"]
         ):
             raise ValueError("reward control archive is not exact native evidence")

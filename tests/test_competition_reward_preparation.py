@@ -1514,7 +1514,7 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
         pytest.fail("native signing history did not converge")
 
     retained = await history()
-    control = h.reader._tip.slot
+    control = await h.reader.review_control(h.item.provider, retained.tip.block_number)
     inputs = dict(
         control=control,
         history=retained,
@@ -1633,7 +1633,7 @@ async def test_native_admission_signs_only_an_empty_reserved_control_history(
             break
     else:
         pytest.fail("native empty control history did not converge")
-    control = h.reader._tip.slot
+    control = await h.reader.review_control(h.item.provider, part.history.tip.block_number)
     assert control.control_sha256 is None and not part.history.writes
     reviewed = review_reward_decision(
         c.reader,
@@ -1714,7 +1714,7 @@ async def test_complete_native_history_package_and_projection_restart_without_co
 
     StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
     captured = await history()
-    archived_control = h.reader._tip.slot
+    archived_control = await h.reader.review_control(h.item.provider, captured.tip.block_number)
     ready, result = await prepare(owner(), captured)
     eligibility_control, captured_eligibility = await current_state(
         h, captured.tip, validator_hotkey=h.validator_hotkey, eligibility_profile=h.item.profile

@@ -140,7 +140,9 @@ def _payload(identity, dependencies, result):
 class VerificationReuse:
     def __init__(self, directory: Path, *, owner):
         self.owner = _identity(owner)
-        shared = os.environ.get("UMI_NATIVE_VERIFICATION_DIRECTORY")
+        shared = os.environ.get("UMI_NATIVE_VERIFICATION_DIRECTORY") or None
+        if shared is not None and not Path(shared).is_absolute():
+            raise ValueError("native verification directory must be an absolute path")
         selected = (
             Path(shared) / _sha(canonical_json_bytes(self.owner))
             if shared is not None

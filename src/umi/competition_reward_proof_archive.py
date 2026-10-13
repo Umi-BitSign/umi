@@ -25,6 +25,7 @@ from .canonical_reuse import canonical_json_reuse
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     MAX_RECIPE_BYTES,
+    PreparedEvidenceEncoding,
     checked_digest,
     checked_size,
     decode_evidence,
@@ -225,18 +226,68 @@ class RewardProofArchive:
             raise ValueError("reward archive object differs from its identity")
         return raw
 
-    def write(self, kind: Kind, key: str, *, context: dict, fields: dict[str, bytes]) -> None:
+    def write(
+        self,
+        kind: Kind,
+        key: str,
+        *,
+        context: dict,
+        fields: dict[str, bytes],
+        prepared_encodings: dict[str, tuple[PreparedEvidenceEncoding, ...]] | None = None,
+    ) -> None:
         path = self._path(kind, key)
         if len(fields) > 4:
             raise ValueError("reward archive field count exceeds its bound")
+        if prepared_encodings is not None and not set(prepared_encodings) <= set(fields):
+            raise ValueError("prepared encodings name another archive field")
+        existing = None
+        if prepared_encodings:
+            # Decoder-valid legacy recipes need not equal the current encoder's
+            # chosen representation. Reuse those only when the already published
+            # frame names exactly that recipe; otherwise retain the old encoder
+            # path, including its immutable-frame conflict behavior.
+            with suppress(FileNotFoundError):
+                existing = read_private_model(path, _Frame, maximum_bytes=MAX_FRAME_BYTES)
+            if existing is not None and (
+                existing.kind != kind
+                or existing.key != key
+                or existing.context != context
+                or set(existing.fields) != set(fields)
+            ):
+                raise ValueError("retained archive frame differs from selected publication")
         refs = {}
         for name, raw in fields.items():
             if type(raw) is not bytes:
                 raise ValueError("reward archive requires original byte evidence")
             checked_size(len(raw), MAX_FIELD_BYTES)
+            prepared = None if prepared_encodings is None else prepared_encodings.get(name)
+            if (
+                prepared is not None
+                and len(prepared) != (len(raw) + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
+            ):
+                raise ValueError("prepared encoding count differs from original archive bytes")
             parts = []
-            for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
+            for number, offset in enumerate(range(0, len(raw), MAX_EVIDENCE_BYTES)):
+                chunk = raw[offset : offset + MAX_EVIDENCE_BYTES]
+                if prepared is not None and type(prepared[number]) is not PreparedEvidenceEncoding:
+                    raise ValueError("archive export requires a codec-owned prepared encoding")
+                encoded = (
+                    encode_evidence(chunk, kind="proof")
+                    if prepared is None
+                    else prepared[number].for_bytes(chunk, kind="proof")
+                )
+                if prepared is not None and not prepared[number].canonical_encoder:
+                    part = _Part(
+                        sha256=encoded.sha256,
+                        expanded_bytes=encoded.expanded_bytes,
+                        recipe_sha256=hashlib.sha256(encoded.recipe).hexdigest(),
+                    )
+                    if (
+                        existing is None
+                        or number >= len(existing.fields[name])
+                        or existing.fields[name][number] != part
+                    ):
+                        encoded = encode_evidence(chunk, kind="proof")
                 for value in encoded.objects.values():
                     self._retain_bytes(value)
                 parts.append(

@@ -11,6 +11,7 @@ import hashlib
 import json
 from typing import Any
 
+from .canonical_proof import canonical_proof_matches
 from .competition_reward_control_archive import (
     MAX_CONTROL_METADATA_BYTES,
     HistoricalRewardControlProvider,
@@ -69,7 +70,7 @@ class _WriteArchive:
             or body["schema"] != "umi-historical-control-writes/1"
             or body["finality_provenance"] != "owned_finalized_ancestry"
             or body["chain_submission_authorized"] is not False
-            or canonical_json_bytes(body) != raw
+            or not canonical_proof_matches(body, raw)
         ):
             raise ValueError("control write archive is not exact native evidence")
         self.body = body

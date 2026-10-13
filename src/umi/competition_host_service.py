@@ -20,6 +20,7 @@ from .competition_host_artifacts import (
     VerifiedHostTree,
     verify_host_artifact_authority,
 )
+from .competition_host_environment import NATIVE_VERIFICATION_ASSIGNMENT
 from .competition_host_upgrade import StoppedSupervisor
 from .competition_worker_cli import (
     WORKER_CHAIN_SPEC,
@@ -219,6 +220,25 @@ def _plan_from_anchor(
         f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
     )
+    # Target-manifest selection preserves exact older transaction/control bytes.
+    # Never choose a new rendering merely because the upgrader itself is newer.
+    environment_contract = next(
+        (
+            item
+            for item in signed_host.manifest.files
+            if item.path == "src/umi/competition_host_environment.py"
+        ),
+        None,
+    )
+    if environment_contract is not None:
+        contract_bytes = Path(__file__).with_name("competition_host_environment.py").read_bytes()
+        if (
+            environment_contract.mode != 0o444
+            or environment_contract.sha256 != hashlib.sha256(contract_bytes).hexdigest()
+        ):
+            raise ValueError("host clean-environment contract is not supported")
+        # systemd expands the configured value as one argument before env -i.
+        env += (NATIVE_VERIFICATION_ASSIGNMENT,)
     command = "/usr/bin/env -i " + " ".join(env) + " "
     manager = f"user@{service_uid}.service"
     cleanup_unit = unit_name.removesuffix(".service") + "-successor-cleanup.service"

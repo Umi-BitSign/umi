@@ -75,8 +75,16 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
         boot.load_reward_coordinator_config(h.path)
 
 
-def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys):
-    logger = logging.getLogger("umi.competition.progress")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "umi.competition.progress",
+        "umi.competition_reward_history_progress",
+        "umi.competition_reward_history_checkpoint",
+    ],
+)
+def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys, name):
+    logger = logging.getLogger(name)
     before = (logger.level, logger.propagate, tuple(logger.handlers))
     with cli._logs():
         logger.info("work_progress completed=1 total=2")

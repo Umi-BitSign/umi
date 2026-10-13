@@ -97,6 +97,18 @@ with an explicit service-manager bind. Independent validator authorities must
 have separate private directories. Qualify ownership, access, restart and
 role-to-role reuse before enabling the override.
 
+For generated systemd successor services, configure this variable through the
+unit's `Environment=` or `EnvironmentFile=` setting. The generated start and stop
+commands explicitly preserve it through their clean environment. An unset or
+empty setting retains the default location; nonempty paths must be absolute.
+Existing generated drop-ins that lack the explicit assignment need a supported
+host upgrade to the new signed environment contract before enabling shared
+reuse. Recovery and drain of older signed hosts retain their original command
+bytes; upgrading the operator tool alone does not change those controls. Preserve
+their journals, promotion roots and existing bindings, and verify the effective
+process environment and namespace access after the switch. Keep
+this repair instruction while an installed successor uses the older rendering.
+
 Enabling this override reads an existing completed local verdict and copies its
 metadata into shared state before reuse; it does not repeat native verification
 or delete the local record. Retain that fallback reader while a supported owner
@@ -143,6 +155,43 @@ refuses new versions. Use `python tools/verification_manifest.py
 qualify compatibility before release. Compatible external versions retain the
 same native ABI and completed verdicts; accepted semantic changes require an ABI
 change. Validate the installed wheel and dependency inventory before cutover.
+
+## Reward-history checkpoints and repair
+
+The reward-history owner keeps successful per-block native facts in its original
+private journal. These facts bind the chain-configuration digest, control hotkey, initial block,
+original directory and database identity, source-record mutation identities and
+verifier semantics. Restart restores the compact verified prefix without rereading or
+rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
+require a fresh owned finalized-chain check. A raw archive frame or a progress
+log is not a successful-verification receipt.
+
+Supported journals containing only legacy `/1` raw history records receive a
+counted source-identity migration and then a first native checkpoint pass. This
+preserves all original record bytes. Retain that compatibility reader while an
+installed owner or recovery consumer still has uncheckpointed legacy records;
+remove it only after those consumers have completed and qualified migration.
+An older running owner has no supported export of its process-local successful
+prefix. Keep it running through its current handoff when preserving that work
+requires avoiding replay; replacing it needs a disclosed first native checkpoint
+pass over its retained legacy records. Source deployment alone cannot recover
+volatile verification facts.
+
+Migration and history review emit `reward_history_progress` with counts, elapsed
+time, an ETA and its basis, and retrying or stalled states. Restored blocks count
+toward completion but do not inflate measured native throughput. These estimates
+cover history review only, not overall reward finality.
+
+Changed source dependencies or damaged successful records stop with
+`repair_required`; they are not silent cache misses. After restoring the exact
+original source, the owning reader can run
+`repair_checkpoints(provider, reason=..., through_block=...)` for the affected scope. Keep
+the repair reason and counted progress, and preserve unaffected completed blocks.
+Missing source-identity tables or the owner marker require recovery of the
+original metadata before reuse; do not recreate an empty success index, move the
+journal to a replacement identity, or treat stored proofs as completed checks.
+Do not open a live service's journal from a separate repair process. Cooperative
+owner shutdown and supported recovery must preserve its existing state bindings.
 
 ## Recoverable cohort model awards
 

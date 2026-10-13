@@ -410,6 +410,8 @@ def _standing_logs():
         "umi.competition_reward_service",
         "umi.competition_reward_executor",
         "umi.competition_reward_coverage_service",
+        "umi.competition_reward_history_progress",
+        "umi.competition_reward_history_checkpoint",
     ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))

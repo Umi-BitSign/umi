@@ -22,7 +22,14 @@ def _logs():
     for name in (
         *(
             "umi.competition_reward_" + suffix
-            for suffix in ("coordinator", "exchange", "control_publisher", "coverage_service")
+            for suffix in (
+                "coordinator",
+                "exchange",
+                "control_publisher",
+                "coverage_service",
+                "history_progress",
+                "history_checkpoint",
+            )
         ),
         "umi.competition.progress",
     ):
