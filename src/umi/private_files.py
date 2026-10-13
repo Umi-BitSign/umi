@@ -174,7 +174,14 @@ def _publish_bounded_private_model(path: Path, value: BaseModel, *, maximum_byte
         finally:
             os.close(directory)
     finally:
-        os.close(lock)
+        # A concurrent proof-helper fork can temporarily inherit this open
+        # description, even with close_fds/CLOEXEC. Closing our descriptor alone
+        # then leaves flock held until that child closes its copy. Release our
+        # completed publication explicitly before handing off the directory.
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            os.close(lock)
 
 
 def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: int) -> None:
