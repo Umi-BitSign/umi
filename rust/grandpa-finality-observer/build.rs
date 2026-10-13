@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 const VENDOR_HASH_DOMAIN: &[u8] = b"umi-grandpa-finality-vendor-v1\0";
 const EXPECTED_VENDOR_TREE_SHA256: &str =
-    "6ebb7bb6f4c5bbf559fe09e27996382eb44ff81e0b68105cb7755a5ca56d37be";
+    "3313c4edc287be2365852f682aa6c4ad1a0e0e4b948cda3222f3d30b28515a19";
 const EXPECTED_FINNEY_CHECKPOINT_FIXTURE_SHA256: &str =
     "b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311";
 

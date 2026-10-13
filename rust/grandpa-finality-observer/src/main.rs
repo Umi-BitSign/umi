@@ -23,7 +23,7 @@ const SOURCE_REVISION: &str = concat!(
     "subtensor-chain-spec:da06f033663896ef2fdbbfc3ecc68ca908fba0f5;",
     "subxt-lightclient:0.50.3@49ea25dcf81a6c764ed6d341679211a396191cc8+umi-database-input-v1;",
     "smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+umi-database-bootstrap-v1+lru-0.18.4-rustsec-2026-0253;",
-    "smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+umi-header-consensus-disambiguation-v1"
+    "smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+umi-header-consensus-disambiguation-v1+ruzstd-0.9.1-rustsec-2026-0344"
 );
 const TRANSCRIPT_DOMAIN: &[u8] = b"umi-grandpa-finality-attestation-v1\0";
 const TIMESTAMP_NOW_KEY: &str =
@@ -1462,6 +1462,29 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_runtime_rejects_a_block_larger_than_its_window() {
+        use smoldot::executor::{DEFAULT_HEAP_PAGES, host, vm};
+
+        // Substrate prefix, zstd frame with a 1 KiB window, then an RLE block
+        // declaring 2 KiB output. The input is only 18 bytes and exercises the
+        // RUSTSEC-2026-0344 per-block bound without allocating a large payload.
+        let module = [
+            82, 188, 83, 118, 70, 219, 142, 5, 0x28, 0xb5, 0x2f, 0xfd, 0, 0, 3, 0x40, 0, 0,
+        ];
+        assert!(matches!(
+            host::HostVmPrototype::new(host::Config {
+                module,
+                heap_pages: DEFAULT_HEAP_PAGES,
+                exec_hint: vm::ExecHint::ValidateAndExecuteOnce,
+                allow_unresolved_imports: true,
+            }),
+            Err(host::NewErr::BadFormat(
+                host::ModuleFormatError::InvalidZstd
+            ))
+        ));
+    }
     use std::io::Write;
 
     #[tokio::test]

@@ -14,13 +14,20 @@ vendored files.
   `7998fa4206a99d310bd288df99300724da1d7800f06b64387e431d9cd0d870f1`
 - License: `GPL-3.0-or-later WITH Classpath-exception-2.0`; exact upstream
   `LICENSE` copied into `smoldot-2.2.0/`.
-- Changed file: `src/chain/chain_information/build.rs`.
+- Changed files: `src/chain/chain_information/build.rs`, `Cargo.toml`, and
+  `Cargo.toml.orig`.
 - Patch: when a proof-verified non-genesis finalized header is available and a
   runtime advertises both Aura and Babe APIs, select an engine only when the
   header contains exactly one corresponding pre-runtime digest. Ambiguous or
   unrecognized headers retain upstream's fail-closed behavior. This is required
   by Finney, whose current runtime advertises both APIs while finalized headers
   use Aura.
+- Dependency patch: pin `ruzstd` 0.9.1 in place of the upstream 0.8 line. This
+  removes RUSTSEC-2026-0344, which allowed a small compressed block to allocate
+  gigabytes before the outer runtime-size check. The patched decoder enforces
+  the RFC 8878 per-block output bound; the existing runtime-size limit remains
+  unchanged. Both the finality observer and runtime-metadata helper use this
+  vendored dependency and lock the fixed release.
 
 ## `smoldot-light` 1.3.2
 

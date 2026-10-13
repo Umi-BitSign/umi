@@ -333,7 +333,7 @@
     "external_miner_pilot.py": "b4a4e76e31f4da7466c14fd5ce9fc4224825d8edf7354fc6f7b992a78ae7fc33",
     "file_identity.py": "35007f428860ff84cb8e55238ed1371f37889187a417e2d3291d650c1e10ae00",
     "finalized_ancestry.py": "eb797cba3f1ccfcc8a31b3389fe74bde3a46214c745216dc5a5a679b788e98f0",
-    "grandpa_finality.py": "5b0310c31b8d603cc132d225772e6f620fab7cfbda955405110baa42e027479d",
+    "grandpa_finality.py": "3dce32aae15b90ad3b50fca3aa5dab889e5f5d273a833659a66b6d3e61e8e61f",
     "grandpa_finality_accounting.py": "48eeb65bc6bc432a58910e9f0b17249172f1905c806c1f35e82ae69c8302e859",
     "grandpa_finality_supervisor.py": "6605522e3caac19a165d04ff07de67ab945c47ec21d4e7d87c8e592e21e6512c",
     "historical_header_recovery.py": "0c7bd04c9cc97f56558b3afadcb0a881575cc2ccd68cd77320e9783feff6d842",

@@ -1,5 +1,13 @@
 # Maintenance
 
+- For C6 and later cohorts, retain the entire finalized block range and complete
+  native replay proofs throughout intake, work and certification. Verify
+  independent blocks in bounded spawned workers, persist each completed result,
+  and apply history effects in block order under one owner. Workers must use
+  immutable inputs without RPC, signing keys or live owner database handles.
+  Expose captured, verified, replicated and applied progress separately. Qualify
+  serial equivalence, gaps, out-of-order completion, restart, repair and upgrades.
+
 - Carry every permanent fix through C6 and subsequent cohorts, including the
   selected miner/client, coordinator, reviewer, writer and upgrade paths that
   consume it. Qualify older supported installations, retained artifacts, restart,

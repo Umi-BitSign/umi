@@ -5,7 +5,9 @@ adapter requires a verified `:code` membership proof at the requested snapshot,
 hash-checks and privately stages the helper, then checks its output before
 constructing a Bittensor codec. RPC metadata is not an input.
 
-The helper uses the existing vendored smoldot interpreter. It services no
+The helper uses the existing vendored smoldot interpreter, with `ruzstd` 0.9.1
+pinned in its lockfile to reject oversized decompressed blocks before they can
+exhaust memory (RUSTSEC-2026-0344). It services no
 storage, network, clock, offchain or signature host requests. Unresolved imports
 may exist but trap if called. Output must be one canonical SCALE byte vector
 with the metadata magic prefix. Runtime versions come from the Wasm.

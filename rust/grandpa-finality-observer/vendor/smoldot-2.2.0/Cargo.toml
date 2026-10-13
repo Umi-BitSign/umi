@@ -267,7 +267,7 @@ optional = true
 default-features = false
 
 [dependencies.ruzstd]
-version = "0.8.0"
+version = "=0.9.1"
 default-features = false
 
 [dependencies.schnorrkel]
