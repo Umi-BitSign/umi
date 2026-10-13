@@ -5,6 +5,7 @@ import os
 import sqlite3
 import stat
 from contextlib import AsyncExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 
 from .competition_cohort_direct_model_review import (
@@ -121,10 +122,14 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             return await run_owned_thread(sign_object, body, key)
 
         executions = tuple(CohortExecutionJournal(c, config.policy) for c in config.executions)
-        proofs = SettlementRegistrationFiles(
-            provider,
-            inbox=Path(config.proof_import_directory),
-            outbox=Path(config.proof_export_directory),
+        proofs = await run_owned_thread(
+            partial(
+                SettlementRegistrationFiles,
+                provider,
+                inbox=Path(config.proof_import_directory),
+                outbox=Path(config.proof_export_directory),
+                proof_stores=config.proof_stores,
+            )
         )
         promotion = CompetitionStore(Path(config.promotion_directory), config.policy)
         direct_artifacts = (
@@ -134,6 +139,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 config.direct_model_review,
                 config.policy,
                 config.proposer_hotkey,
+                verification_root=root / "direct-model-byte-verification",
             )
         )
         nodes = []

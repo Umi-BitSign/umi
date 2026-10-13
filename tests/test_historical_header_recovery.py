@@ -10,7 +10,8 @@ from dataclasses import replace
 import pytest
 
 from umi.chain_evidence import FinalizedSnapshotRef
-from umi.finalized_ancestry import encode_rpc_header
+from umi.finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
+from umi.grandpa_finality import GrandpaFinalityObserverError, _decode_header
 from umi.historical_header_recovery import HistoricalHeaderRecovery, HistoricalHeaderRecoveryPending
 
 from .test_competition_chain import chain_config as chain_config
@@ -348,3 +349,71 @@ async def test_successful_bounded_header_pass_reports_progress(walk):
     assert len(w.calls) == 4
     assert (await finish(service, w)).snapshot == w.target
     assert len(w.calls) == len(set(w.calls)) == w.anchor.height - w.target.block_number
+
+
+async def test_supplied_target_header_is_checked_retained_and_reused_after_restart(walk):
+    w = walk
+    encoded = encode_rpc_header(w.headers[w.target.block_hash])
+    service = HistoricalHeaderRecovery(w.connect)
+    result = await service.recover(w.anchor, w.target, w.request, target_header=encoded)
+    assert result.snapshot == w.target and result.encoded == encoded
+    assert w.target.block_hash not in w.calls
+    assert len(w.calls) == w.anchor.height - w.target.block_number - 1
+
+    async def offline(*_):
+        pytest.fail("restart must use the retained complete header interval")
+
+    restarted = HistoricalHeaderRecovery(w.connect)
+    assert (await restarted.recover(w.anchor, w.target, offline)) == result
+
+
+async def test_supplied_target_header_does_not_skip_unavailable_ancestor(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+
+    async def offline(*_):
+        raise FileNotFoundError("intermediate header unavailable")
+
+    with pytest.raises(FileNotFoundError, match="intermediate header"):
+        await service.recover(
+            w.anchor,
+            w.target,
+            offline,
+            target_header=encode_rpc_header(w.headers[w.target.block_hash]),
+        )
+    assert service._load(w.target.block_hash) is None
+    assert not service.progress and not service._verified
+
+
+@pytest.mark.parametrize("changed", ["snapshot", "malformed", "forged_branch"])
+async def test_supplied_target_header_cannot_create_ancestry(walk, changed):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    encoded = encode_rpc_header(w.headers[w.target.block_hash])
+    target = w.target
+    if changed == "snapshot":
+        target = replace(target, state_root="0x" + "ff" * 32)
+    elif changed == "malformed":
+        encoded = "0x1234"
+    else:
+        encoded = encode_rpc_header(
+            {**w.headers[w.target.block_hash], "stateRoot": "0x" + "ff" * 32}
+        )
+        header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+        target = FinalizedSnapshotRef(
+            header["number"], header["hash"], header["parent_hash"], header["state_root"]
+        )
+    with pytest.raises(GrandpaFinalityObserverError if changed == "malformed" else ValueError):
+        await service.recover(w.anchor, target, w.request, target_header=encoded)
+    assert service._load(target.block_hash) is None
+    assert target.block_hash not in w.calls
+
+
+async def test_supplied_target_header_cannot_mask_corrupt_durable_hint(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    encoded = encode_rpc_header(w.headers[w.target.block_hash])
+    service._save(w.target.block_hash, encode_rpc_header(w.headers[w.anchor.block_hash]))
+    with pytest.raises(ValueError, match="committed parent"):
+        await service.recover(w.anchor, w.target, w.request, target_header=encoded)
+    assert service._load(w.target.block_hash) != encoded

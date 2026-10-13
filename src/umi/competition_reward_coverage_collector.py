@@ -17,7 +17,7 @@ from typing import Protocol
 from .competition_chain import _uint
 from .competition_evidence_codec import checked_size
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint
-from .competition_reward_coverage_intervals import coverage_point
+from .competition_reward_coverage_intervals import CoverageEndpoint, coverage_point
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_source import CoverageHistoryPending
 from .competition_reward_decisions import RewardActivation, StandingRewardSeries
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class CoverageSource(Protocol):
     async def finalized_height(self) -> int: ...
     async def capture(self, validator_hotkey: str, height: int) -> OwnedRewardCoverageEndpoint: ...
-    async def replay(self, key: str) -> OwnedRewardCoverageEndpoint: ...
+    async def replay(self, key: str) -> CoverageEndpoint: ...
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ class RewardCoverageCollector:
         self._cursor = None
         self._replayed: set[str] = set()
         self._next: dict[str, int] = {}
-        self._left: dict[str, OwnedRewardCoverageEndpoint] = {}
+        self._left: dict[str, CoverageEndpoint] = {}
         self._certificate = None
         self._lock = asyncio.Lock()
 

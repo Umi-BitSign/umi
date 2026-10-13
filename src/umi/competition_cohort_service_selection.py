@@ -7,6 +7,7 @@ import bittensor as bt
 
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_review_config import PhaseReviewServiceConfig
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_export import ServiceWorkHTTPClient, ServiceWorkReader
 from .competition_cohort_service_quality import ServiceTerms
 from .competition_cohort_service_review import (
@@ -34,17 +35,23 @@ class SelectedServiceReviewer:
         if config.service_signing is None:
             raise ValueError("service review is not configured")
         self.config, self.provider, self.archive, self.sign = config, provider, archive, sign
-        limits = dict(token=token, timeout_seconds=config.service_signing.read_timeout_seconds)
+        self.budget = service_execution_budget(
+            config.phase_review_budget,
+            read_seconds=config.service_signing.read_timeout_seconds,
+            signing_seconds=config.service_signing.signing_timeout_seconds,
+            vote_seconds=config.review_timeout_seconds,
+        )
+        limits = dict(token=token, timeout_seconds=self.budget.read_seconds)
         self.history = CohortHistoryReader(
             config.owner_hotkey,
             CohortHistoryHTTPClient(client, config.owner_origin, **limits),
-            timeout_seconds=config.service_signing.read_timeout_seconds,
+            timeout_seconds=self.budget.read_seconds,
         )
         self.owner = ServiceWorkReader(
             config.policy,
             config.owner_hotkey,
             ServiceWorkHTTPClient(client, config.owner_origin, **limits),
-            timeout_seconds=config.service_signing.read_timeout_seconds,
+            timeout_seconds=self.budget.read_seconds,
         )
         self.root = Path(config.service_signing.directory)
         self.journal = RoundJournal(
@@ -125,6 +132,7 @@ class SelectedServiceReviewer:
                 self.archive,
                 self._round,
                 self.sign,
+                budget=self.config.phase_review_budget,
             )
         return self.reviewers[key]
 

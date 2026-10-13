@@ -10,9 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
-import signal
 import subprocess
 import threading
 from collections import OrderedDict
@@ -24,6 +22,7 @@ import bittensor_core
 
 from .chain_evidence import FinalizedSnapshotRef, StorageEvidence
 from .concurrency import run_owned_thread
+from .native_process_group import kill_native_process, native_start_new_session
 from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_artifacts
 from .protocol import canonical_json_bytes
 from .validator_chain import FinalizedRuntimePin, PinnedRuntimeContext
@@ -224,14 +223,14 @@ class RuntimeMetadataExecutor:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     close_fds=True,
-                    start_new_session=True,
+                    start_new_session=native_start_new_session(),
                     env={"LANG": "C", "LC_ALL": "C"},
                 )
                 try:
                     stdout, _ = process.communicate(code, timeout=self.timeout_seconds)
                 except subprocess.TimeoutExpired as error:
                     with suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                        kill_native_process(process)
                     process.communicate()
                     raise RuntimeMetadataError("runtime_execution_timeout") from error
                 if process.returncode:

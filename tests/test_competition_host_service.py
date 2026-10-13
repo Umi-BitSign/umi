@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_host_environment
 from umi import competition_host_service as service
 from umi.competition_host_anchor import MaterializedSuccessorAnchor
 from umi.competition_host_artifacts import VerifiedHostTree
@@ -297,3 +298,51 @@ def test_coordinator_plan_preserves_logical_paths_and_uses_physical_bind_sources
     assert plan.drop_in_path.parent.name == layout.unit_name + ".d"
     assert plan.drop_in_path.parent.name != "umi-validator@.service.d"
     assert "ExecStopPost=+/usr/sbin/runuser -u umi-validator -- " in main
+
+
+def test_shared_verification_setting_survives_clean_start_and_stop_environments(case, monkeypatch):
+    contract = Path(competition_host_environment.__file__).read_bytes()
+    case.signed.manifest.files.append(
+        SimpleNamespace(
+            path="src/umi/competition_host_environment.py",
+            sha256=hashlib.sha256(contract).hexdigest(),
+            mode=0o444,
+        )
+    )
+    monkeypatch.delenv("UMI_NATIVE_VERIFICATION_DIRECTORY", raising=False)
+    original = _plan(case)
+    monkeypatch.setenv("UMI_NATIVE_VERIFICATION_DIRECTORY", "/should/not/be/copied/from/upgrader")
+    repeated = _plan(case)
+    assert original == repeated
+    assignment = "UMI_NATIVE_VERIFICATION_DIRECTORY=${UMI_NATIVE_VERIFICATION_DIRECTORY}"
+    for prefix in ("ExecStart=", "ExecStopPost="):
+        commands = [
+            line
+            for line in original.drop_in_bytes.decode().splitlines()
+            if line.startswith(prefix) and line != prefix
+        ]
+        assert len(commands) == 1
+        assert "/usr/bin/env -i " in commands[0]
+        assert assignment in commands[0]
+    assert assignment in original.cleanup_unit_bytes.decode()
+
+
+def test_older_signed_host_preserves_original_rendering_for_recovery(case):
+    plan = _plan(case)
+    assert b"UMI_NATIVE_VERIFICATION_DIRECTORY" not in plan.drop_in_bytes
+    assert b"UMI_NATIVE_VERIFICATION_DIRECTORY" not in plan.cleanup_unit_bytes
+    assert plan == _plan(case)
+
+
+@pytest.mark.parametrize("mode,digest", [(0o555, None), (0o444, "00" * 32)])
+def test_unsupported_clean_environment_contract_refuses_before_service_changes(case, mode, digest):
+    contract = Path(competition_host_environment.__file__).read_bytes()
+    case.signed.manifest.files.append(
+        SimpleNamespace(
+            path="src/umi/competition_host_environment.py",
+            sha256=digest or hashlib.sha256(contract).hexdigest(),
+            mode=mode,
+        )
+    )
+    with pytest.raises(ValueError, match="clean-environment contract"):
+        _plan(case)

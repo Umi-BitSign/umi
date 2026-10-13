@@ -39,6 +39,11 @@ from .test_open_competition import wallet
 pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
 
 
+@pytest.fixture(autouse=True)
+def private_model_verification(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMI_MODEL_VERIFICATION_DIRECTORY", str(tmp_path / "verification"))
+
+
 class Multipart:
     def __init__(self):
         self.signer = R2SigV4(
@@ -121,6 +126,7 @@ async def test_part_upload_stops_at_response_byte_bound(delivery):
 @pytest.mark.asyncio
 async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(delivery, monkeypatch):
     h = delivery
+    events = []
     profile = ModelDeliveryProfile(
         schema="umi-model-delivery-profile/1",
         mechanism="direct_r2_multipart_v1",
@@ -224,6 +230,7 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
                 transport=httpx.ASGITransport(app),
                 object_transport=httpx.MockTransport(put_part),
                 retry_seconds=0.001,
+                report=events.append,
             ),
             20,
         )
@@ -238,6 +245,7 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
                 transport=httpx.ASGITransport(app),
                 object_transport=httpx.MockTransport(put_part),
                 retry_seconds=0.001,
+                report=events.append,
             ),
             20,
         )
@@ -259,3 +267,22 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
     assert not (h.source.parent / "direct-owner" / "files").exists()
     model = h.request.signed_submission.submission.model_revision
     assert (reviews / (model + ".json")).is_file()
+
+    progress = [event for event in events if event.get("schema") == "umi-transport-work-progress/1"]
+    stages = {event["stage"] for event in progress if event["status"] == "completed"}
+    assert {
+        "model_source_verification",
+        "model_payload_digest",
+        "direct_model_reservation",
+        "direct_model_upload",
+        "direct_model_object_completion",
+        "model_payload_preservation",
+        "model_participation_admission",
+    } <= stages
+    restored = [
+        event
+        for event in progress
+        if event["status"] == "completed" and event["stage"] == "model_payload_digest"
+    ]
+    assert restored[-1]["native_bytes"] == 0
+    assert restored[-1]["restored_bytes"] == restored[-1]["total_bytes"]

@@ -92,24 +92,27 @@ The version 0.1 build uses Rust 1.98.0 and these reviewed upstream revisions:
   `90e94869a7fbd617d28990da3005eaa906bc3862`.
 
 The vendored `smoldot-light` manifest pins `lru` 0.18.4 instead of its upstream
-0.16 line, removing RUSTSEC-2026-0253 from the locked graph.
+0.16 line, removing RUSTSEC-2026-0253 from the locked graph. The vendored
+`smoldot` manifest pins `ruzstd` 0.9.1 instead of the upstream 0.8 line, fixing
+the decompression memory-exhaustion issue RUSTSEC-2026-0344. The observer and
+runtime-metadata helper both lock this patched decoder.
 
 The narrow local patches, upstream archive checksums, and redistribution terms
 are recorded in `vendor/PATCHES.md`. The complete vendored tree, including
 license files and provenance, has build-time SHA-256
-`6ebb7bb6f4c5bbf559fe09e27996382eb44ff81e0b68105cb7755a5ca56d37be`.
+`3313c4edc287be2365852f682aa6c4ad1a0e0e4b948cda3222f3d30b28515a19`.
 The root Apache-2.0 license does not relicense the vendored smoldot code.
 
 Current artifact pins are:
 
 - `Cargo.lock` SHA-256:
-  `9d6ba175a232ddb051c0ce795dc500562b05b48f57bb29a33344aad1eef87f8c`;
+  `c7e0530a519f59c4ba389846081f1aca5ec5eb171e987b81ecdd071ee2ec14d3`;
 - `fixtures/finality-v1.json` SHA-256:
   `b5522352dc04cbd88eb7916ba95e65330c89915619e292f3512ed3acebd11655`;
 - `fixtures/finney-grandpa-checkpoint-v1.json` SHA-256:
   `b3f2191587a21b57fbe9f56e3a8245e852c06cdebb0a4dd0b878a5242d9a8311`;
 - source-tree SHA-256:
-  `4ebff3884dca50726e3a94abd1b5332063daf5e8600933142612755aa03de3fc`.
+  `dac8079bc2041bd2512cb599846ea822aa5b53d77d62437bf9b02774acb73488`.
 
 Release binary hashes are target- and release-specific. The primary Linux
 validator hash is fixed by its signed release. An Apple Silicon miner hash is

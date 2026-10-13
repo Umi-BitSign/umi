@@ -39,7 +39,7 @@ from umi.grandpa_finality_supervisor import (
 from umi.open_competition import digest
 from umi.policy import FinalityVerifierPin, LiveChainObservationPin
 from umi.protocol import canonical_json_bytes
-from umi.validator_chain import FinalizedProofCollector, ValidatorChainError
+from umi.validator_chain import _RPC_RESPONSE_LIMITS, FinalizedProofCollector, ValidatorChainError
 from umi.validator_plans import VerifiedFinalizedBlock
 
 from .test_open_competition import (
@@ -1089,7 +1089,13 @@ def pooled_sockets(monkeypatch):
             self.socket.state = State.CLOSED
 
     def connect(endpoint, **kwargs):
-        assert kwargs["max_size"] in (2048, 17 * 1024**2, 33 * 1024**2, 1024**2)
+        assert kwargs["max_size"] in (
+            2048,
+            17 * 1024**2,
+            33 * 1024**2,
+            1024**2,
+            _RPC_RESPONSE_LIMITS["chain_getBlock"],
+        )
         assert kwargs["proxy"] is None
         connection = Connection()
         connection.max_size = kwargs["max_size"]
@@ -1180,7 +1186,7 @@ async def test_persistent_block_reads_reuse_socket_and_discard_invalid_response(
         assert results == ["0x00"] * 3
         assert state.requests == 3
         assert len(state.connections) == 1
-        assert state.connections[0].max_size == 1024**2
+        assert state.connections[0].max_size == _RPC_RESPONSE_LIMITS["chain_getBlock"]
         state.invalid_next = True
         with pytest.raises(RuntimeError, match="proof_rpc_response_invalid"):
             await transport.request("chain_getBlock", (_hash(4),))
@@ -1190,6 +1196,92 @@ async def test_persistent_block_reads_reuse_socket_and_discard_invalid_response(
     finally:
         await transport.aclose()
     assert all(connection.closed for connection in state.connections)
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_block_reader_accepts_large_body_over_loopback(chain_config, monkeypatch, persistent):
+    from websockets.asyncio.client import connect
+    from websockets.asyncio.server import serve
+
+    # A valid block body can exceed the small registration response ceiling.
+    # Exercise actual decompressed websocket framing, not a fake recv result.
+    result = {"block": {"header": {}, "extrinsics": ["0x" + "01" * (2 * 1024**2)]}}
+    requests, ceilings, connections = [], [], []
+
+    async def handler(socket):
+        connections.append(socket)
+        async for raw in socket:
+            request = json.loads(raw)
+            requests.append(request)
+            await socket.send(json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}))
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        address = server.sockets[0].getsockname()
+
+        def routed_connect(endpoint, **kwargs):
+            assert endpoint == chain_config.rpc_url
+            ceilings.append(kwargs["max_size"])
+            return connect(f"ws://127.0.0.1:{address[1]}", **kwargs)
+
+        monkeypatch.setattr("umi.competition_chain.websocket_connect", routed_connect)
+        transport = _RegistrationRpc(chain_config, persistent=persistent)
+        try:
+            for block in (1, 2):
+                assert await transport.request("chain_getBlock", (_hash(block),)) == result
+        finally:
+            await transport.aclose()
+
+    assert [request["params"] for request in requests] == [[_hash(1)], [_hash(2)]]
+    assert all(request["method"] == "chain_getBlock" for request in requests)
+    assert ceilings == [_RPC_RESPONSE_LIMITS["chain_getBlock"]] * (1 if persistent else 2)
+    assert len(connections) == (1 if persistent else 2)
+    assert all(socket.state is State.CLOSED for socket in connections)
+
+
+async def test_block_reader_receive_limit_closes_socket_and_retry_is_fresh(
+    chain_config, monkeypatch
+):
+    from websockets.asyncio.client import connect
+    from websockets.asyncio.server import serve
+
+    # Lower the authoritative method bound to exercise an actual parser failure
+    # without allocating its full production allowance in a unit test.
+    monkeypatch.setitem(_RPC_RESPONSE_LIMITS, "chain_getBlock", 2048)
+    requests, connections = [], []
+
+    async def handler(socket):
+        connections.append(socket)
+        request = json.loads(await socket.recv())
+        requests.append(request)
+        result = "x" * 4096 if len(requests) == 1 else {"block": {"extrinsics": []}}
+        await socket.send(json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}))
+        await socket.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        address = server.sockets[0].getsockname()
+
+        def routed_connect(endpoint, **kwargs):
+            assert endpoint == chain_config.rpc_url
+            assert kwargs["max_size"] == 2048
+            return connect(f"ws://127.0.0.1:{address[1]}", **kwargs)
+
+        monkeypatch.setattr("umi.competition_chain.websocket_connect", routed_connect)
+        transport = _RegistrationRpc(chain_config, persistent=True)
+        try:
+            with pytest.raises(ValidatorChainError) as caught:
+                await transport.request("chain_getBlock", (_hash(1),))
+            assert caught.value.reason_code == "proof_rpc_response_limit"
+            assert caught.value.rpc_method == "chain_getBlock"
+            assert caught.value.rpc_block_hash == _hash(1)
+            assert await transport.request("chain_getBlock", (_hash(1),)) == {
+                "block": {"extrinsics": []}
+            }
+        finally:
+            await transport.aclose()
+
+    assert len(connections) == len(requests) == 2
+    assert requests[0] == requests[1]
+    assert all(socket.state is State.CLOSED for socket in connections)
 
 
 async def test_persistent_block_read_cancellation_drains_socket(chain_config, pooled_sockets):
@@ -1217,12 +1309,17 @@ async def test_persistent_block_read_cancellation_drains_socket(chain_config, po
 async def test_persistent_rpc_keeps_method_receive_limits_separate(chain_config, pooled_sockets):
     state, _ = pooled_sockets
     transport = _RegistrationRpc(chain_config, persistent=True)
-    methods = ("state_getStorageAt", "state_getReadProof", "state_getMetadata")
+    methods = ("state_getStorageAt", "state_getReadProof", "state_getMetadata", "chain_getBlock")
     for _ in range(3):
         for method in methods:
             assert await transport.request(method, ()) == "0x00"
-    assert len(state.connections) == 3
-    assert [c.max_size for c in state.connections] == [2048, 17 * 1024**2, 33 * 1024**2]
+    assert len(state.connections) == 4
+    assert [c.max_size for c in state.connections] == [
+        2048,
+        17 * 1024**2,
+        33 * 1024**2,
+        _RPC_RESPONSE_LIMITS["chain_getBlock"],
+    ]
     await transport.aclose()
     assert all(connection.closed for connection in state.connections)
 

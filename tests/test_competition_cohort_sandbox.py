@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -128,6 +129,12 @@ async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
 
+        async def resumable(self, request, archive):
+            return False
+
+        def cache_identity(self, request):
+            return digest(bundle)
+
         def verify_materialization_filesystem(self, root):
             filesystems.append(root)
 
@@ -137,6 +144,7 @@ async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
 
         async def materialize(self, request, archive):
             calls.append((request, archive))
+            archive.mkdir(mode=0o700)
             (archive / digest(bundle) / "model").mkdir(parents=True)
 
     request = SimpleNamespace(
@@ -205,6 +213,12 @@ async def test_direct_candidate_cache_allows_same_model_cases_to_run_concurrentl
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
 
+        async def resumable(self, request, archive):
+            return False
+
+        def cache_identity(self, request):
+            return digest(bundle)
+
         def verify_materialization_filesystem(self, root):
             return None
 
@@ -213,6 +227,7 @@ async def test_direct_candidate_cache_allows_same_model_cases_to_run_concurrentl
 
         async def materialize(self, request, archive):
             materializations.append(archive)
+            archive.mkdir(mode=0o700)
             (archive / digest(bundle) / "model").mkdir(parents=True)
 
     request = SimpleNamespace(
@@ -275,6 +290,12 @@ async def test_direct_candidate_cancellation_releases_cache_ownership(cpu, tmp_p
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
 
+        async def resumable(self, request, archive):
+            return False
+
+        def cache_identity(self, request):
+            return digest(bundle)
+
         def verify_materialization_filesystem(self, root):
             return None
 
@@ -282,6 +303,7 @@ async def test_direct_candidate_cancellation_releases_cache_ownership(cpu, tmp_p
             return False
 
         async def materialize(self, request, archive):
+            archive.mkdir(mode=0o700)
             (archive / digest(bundle) / "model").mkdir(parents=True)
 
     request = SimpleNamespace(
@@ -326,6 +348,12 @@ async def test_direct_sandbox_routes_legacy_candidate_to_retained_archive(
 
     class Artifacts:
         config = SimpleNamespace(materialization_concurrency=1)
+
+        async def resumable(self, request, archive):
+            return False
+
+        def cache_identity(self, request):
+            return digest(bundle)
 
         def verify_materialization_filesystem(self, root):
             return None
@@ -470,3 +498,65 @@ async def test_real_retained_cpu_invocation_and_orphan_cleanup(cpu, tmp_path, in
     assert not (port.workspace / digest(attempt)).exists()
     assert (await runner._small_command(("/usr/bin/podman", "container", "exists", name)))[0] == 1
     assert (port.videos / (video_sha + ".mp4")).read_bytes() == video
+
+
+async def test_direct_cache_waits_for_all_leases_before_changing_same_bundle_source(
+    cpu, tmp_path, caplog
+):
+    job, _, original = cpu
+    bundle = job.submission.submission.model_bundle
+    if bundle is None:
+        pytest.skip("endpoint jobs have no direct candidate")
+    writes = []
+    caplog.set_level("INFO", logger="umi.competition.progress")
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_concurrency=1)
+
+        def verify_materialization_filesystem(self, root):
+            pass
+
+        async def resumable(self, request, archive):
+            return False
+
+        def cache_identity(self, request):
+            return request.source
+
+        async def materialized(self, request, archive):
+            return (archive / "source").read_text() == request.source
+
+        async def materialize(self, request, archive):
+            writes.append(request.source)
+            archive.mkdir(mode=0o700)
+            (archive / digest(bundle) / "model").mkdir(parents=True)
+            (archive / "source").write_text(request.source)
+
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "source-cache",
+        artifacts=Artifacts(),
+        request=lambda _: None,
+    )
+    first, second = SimpleNamespace(source="first"), SimpleNamespace(source="second")
+    archive = await port._candidate_archive(first, bundle)
+    await port._candidate_archive(first, bundle)
+    waiting = asyncio.create_task(port._candidate_archive(second, bundle))
+    await asyncio.sleep(0)
+    assert not waiting.done() and (archive / "source").read_text() == "first"
+    await port._release_candidate_archive()
+    await asyncio.sleep(0)
+    assert not waiting.done() and port.active_candidate_invocations == 1
+    await port._release_candidate_archive()
+    assert await asyncio.wait_for(waiting, 2) == archive
+    assert writes == ["first", "second"] and (archive / "source").read_text() == "second"
+    await port._release_candidate_archive()
+    events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    ]
+    waits = [event for event in events if event["stage"] == "model_cache_lease_wait"]
+    assert any(event["status"] == "waiting" and event["planning_eta_seconds"] for event in waits)
+    assert waits[-1]["status"] == "completed" and waits[-1]["eta_seconds"] == 0

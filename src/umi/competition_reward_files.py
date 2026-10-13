@@ -14,6 +14,7 @@ from .competition_evidence_codec import checked_digest
 from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardControlDecision
 from .competition_reward_opportunity import RewardOpportunityCertificate, RewardOpportunityWitness
 from .competition_reward_opportunity_review import MAX_CERTIFICATE_BYTES
+from .competition_verification_snapshot import VerificationPackageStore
 from .open_competition import digest
 from .private_files import (
     ensure_private_directory,
@@ -44,6 +45,16 @@ class StandingRewardFiles:
 
     def package(self, sha: str) -> CohortRewardPackage:
         return self._read("packages", sha, CohortRewardPackage, self.maximum_package_bytes)
+
+    def verified_package(self, sha: str):
+        checked_digest(sha)
+        store = VerificationPackageStore(self.root / "verification" / "packages")
+        return store.load(
+            self.root / "packages" / (sha + ".json"),
+            CohortRewardPackage,
+            maximum_bytes=self.maximum_package_bytes,
+            expected_sha256=sha,
+        )
 
     def retain_package(self, package: CohortRewardPackage) -> None:
         """Retain immutable package bytes; presence does not replace native replay."""

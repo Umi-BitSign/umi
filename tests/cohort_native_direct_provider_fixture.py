@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from datetime import datetime
+from types import SimpleNamespace
 from urllib.parse import unquote
 
 import httpx
@@ -314,11 +315,14 @@ class NativeMultipart:
 
 
 class NativeMultipartReader:
-    """Role-scoped read-only interface; no signer or mutation methods exposed."""
+    """Read-only interface with public namespace metadata and no signing methods."""
 
     def __init__(self, provider: NativeMultipart, role: str):
         _require(isinstance(role, str) and bool(role), "synthetic reader role is required")
         self._provider = provider
+        self.signer = SimpleNamespace(
+            endpoint=provider.signer.endpoint, bucket=provider.signer.bucket
+        )
         self.role = role
         self.read_calls = 0
         self.head_calls = 0

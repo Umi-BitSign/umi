@@ -23,6 +23,16 @@ from .competition_reward_control import (
     _control_evidence,
     _control_value,
 )
+from .competition_reward_control_evidence import (
+    MAX_CONTROL_ARCHIVE_BYTES as MAX_CONTROL_ARCHIVE_BYTES,
+)
+from .competition_reward_control_evidence import (
+    MAX_CONTROL_METADATA_BYTES as MAX_CONTROL_METADATA_BYTES,
+)
+from .competition_reward_control_evidence import (
+    _Archive as _Archive,
+)
+from .competition_reward_history_verifier import HistoryProofTools, verify_slot_archive
 from .competition_worker import (
     CompetitionReplayWorker,
     _canonical_absolute_path,
@@ -38,14 +48,10 @@ from .finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
 from .grandpa_finality import _decode_header
 from .historical_header_recovery import HistoricalHeaderRecovery, HistoricalHeaderRecoveryPending
 from .open_competition import digest
-from .protocol import canonical_json_bytes
-from .runtime_metadata import collect_executed_runtime
 from .sqlite_contention import is_sqlite_full
-from .validator_chain import StorageReadSpec, VerifiedStorageBatch
+from .validator_chain import StorageReadSpec
 from .validator_plans import VerifiedFinalizedBlock
 
-MAX_CONTROL_ARCHIVE_BYTES = 32 * 1024**2
-MAX_CONTROL_METADATA_BYTES = 16 * 1024**2
 _ISSUER = object()
 
 
@@ -101,153 +107,6 @@ def validate_historical_reward_control(
         or observation.chain_config_sha256 != expected_chain_config_sha256
     ):
         raise ValueError("historical reward control lacks the selected owned proof")
-
-
-class _Archive:
-    """Exact bounded answers for proof replay, with no network fallback."""
-
-    def __init__(self, raw: bytes, metadata: bytes):
-        if type(raw) is not bytes or not 0 < len(raw) <= MAX_CONTROL_ARCHIVE_BYTES:
-            raise ValueError("reward control archive exceeds its byte bound")
-        if type(metadata) is not bytes or not 0 < len(metadata) <= MAX_CONTROL_METADATA_BYTES:
-            raise ValueError("reward control metadata exceeds its byte bound")
-        body = json.loads(raw)
-        required = {
-            "schema",
-            "config_sha256",
-            "block",
-            "block_hash",
-            "state_root",
-            "control_hotkey",
-            "control_sha256",
-            "committed_at_block",
-            "finality",
-            "runtime_metadata_sha256",
-            "runtime_version",
-            "storage_codec_mode",
-            "runtime_execution",
-            "claims",
-            "proof",
-            "chain_submission_authorized",
-        }
-        if (
-            not isinstance(body, dict)
-            or set(body) != required
-            or type(body["schema"]) is not str
-            or body["schema"]
-            not in {
-                "umi-reward-control-observation/1",
-                "umi-historical-reward-control-observation/1",
-            }
-            or body["chain_submission_authorized"] is not False
-            or canonical_json_bytes(body) != raw
-            or hashlib.sha256(metadata).hexdigest() != body["runtime_metadata_sha256"]
-        ):
-            raise ValueError("reward control archive is not exact native evidence")
-        finality = body["finality"]
-        if (
-            not isinstance(finality, dict)
-            or finality.get("evidence_class")
-            != (
-                "verifier_attested_finality"
-                if body["schema"] == "umi-reward-control-observation/1"
-                else "owned_finalized_ancestry"
-            )
-            or finality.get("offline_finality_proof") is not False
-            or not isinstance(finality.get("block"), dict)
-        ):
-            raise ValueError("reward control archive has no original finalized header")
-        encoded = finality["block"].get("scale_header")
-        header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-        _uint(body["block"], 2**53 - 1)
-        if body["committed_at_block"] is not None:
-            _uint(body["committed_at_block"], body["block"])
-        self.snapshot = FinalizedSnapshotRef(
-            header["number"], header["hash"], header["parent_hash"], header["state_root"]
-        )
-        if (body["block"], body["block_hash"], body["state_root"]) != (
-            self.snapshot.block_number,
-            self.snapshot.block_hash,
-            self.snapshot.state_root,
-        ):
-            raise ValueError("reward control archive differs from its header")
-        self.body, self.metadata, self.encoded = body, metadata, encoded
-        self.evidence_sha256 = hashlib.sha256(raw).hexdigest()
-        self.hotkey = _hotkey(body["control_hotkey"])
-        claims = body["claims"]
-        if not isinstance(claims, list) or len(claims) != 3:
-            raise ValueError("reward control archive must contain exactly three claims")
-        self.values = {}
-        for claim in claims:
-            if not isinstance(claim, dict) or set(claim) != {"key", "value"}:
-                raise ValueError("reward control archive claim is malformed")
-            key = claim["key"]
-            if type(key) is not str or not 2 < len(key) <= 8194 or key in self.values:
-                raise ValueError("reward control archive repeats or misnames a claim")
-            self.values[key] = claim["value"]
-        if list(self.values) != sorted(self.values):
-            raise ValueError("reward control archive claims are not ordered")
-        self.proofs = {tuple(self.values): body["proof"]}
-        execution = body["runtime_execution"]
-        if execution is not None:
-            if (
-                not isinstance(execution, dict)
-                or set(execution)
-                != {
-                    "executor_sha256",
-                    "block",
-                    "block_hash",
-                    "parent_hash",
-                    "state_root",
-                    "key",
-                    "value",
-                    "proof",
-                }
-                or (
-                    execution["block"],
-                    execution["block_hash"],
-                    execution["parent_hash"],
-                    execution["state_root"],
-                    execution["key"],
-                )
-                != (
-                    self.snapshot.block_number,
-                    self.snapshot.block_hash,
-                    self.snapshot.parent_hash,
-                    self.snapshot.state_root,
-                    "0x3a636f6465",
-                )
-                or execution["key"] in self.values
-            ):
-                raise ValueError("archived runtime execution binds a different block or key")
-            self.values[execution["key"]] = execution["value"]
-            self.proofs[(execution["key"],)] = execution["proof"]
-        self.used_keys, self.used_batches = set(), set()
-
-    async def request(self, method, params):
-        if not params or params[-1] != self.snapshot.block_hash:
-            raise ValueError("reward control replay requested another block")
-        if method == "state_getRuntimeVersion" and len(params) == 1:
-            return self.body["runtime_version"]
-        if method == "state_getMetadata" and len(params) == 1:
-            return "0x" + self.metadata.hex()
-        if method == "state_getStorageAt" and len(params) == 2:
-            key = params[0]
-            if key not in self.values:
-                raise ValueError("reward control archive omits a requested claim")
-            self.used_keys.add(key)
-            return self.values[key]
-        if method == "state_getReadProof" and len(params) == 2:
-            keys = tuple(params[0])
-            if keys not in self.proofs:
-                raise ValueError("reward control archive omits the requested proof batch")
-            self.used_batches.add(keys)
-            return {"at": self.snapshot.block_hash, "proof": self.proofs[keys]}
-        raise ValueError("reward control archive cannot make this RPC request")
-
-    def consumed(self) -> None:
-        if self.used_keys != set(self.values) or self.used_batches != set(self.proofs):
-            raise ValueError("reward control archive contains unused proof evidence")
 
 
 class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
@@ -374,59 +233,21 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         ):
             raise ValueError("reward control archive names another chain")
         timestamp, ceiling = await self._resolve_control_header(ref, archive.encoded)
-        collector = self._proofs.with_evidence_rpc(archive)
-        if self._runtime_executor is not None:
-            execution = archive.body["runtime_execution"]
-            if not isinstance(execution, dict) or execution["executor_sha256"] != (
-                self.config.runtime_metadata_binary_sha256
-            ):
-                raise ValueError("reward archive runtime executor differs from selection")
-            runtime = await collect_executed_runtime(
-                self._runtime_proofs.with_evidence_rpc(archive), self._runtime_executor, ref
-            )
-        else:
-            runtime = (
-                await collector.storage_codec_runtime(ref, self._runtime_pin, metadata)
-                if self._storage_codec is not None
-                else await collector.pinned_runtime(ref, self._runtime_pin)
-            )
-        self._validate_runtime_context(runtime, ref)
-        if (
-            runtime.storage_codec_mode != archive.body["storage_codec_mode"]
-            or runtime.metadata_sha256 != archive.body["runtime_metadata_sha256"]
-            or json.loads(runtime.runtime_version_bytes) != archive.body["runtime_version"]
-        ):
-            raise ValueError("replayed runtime differs from archived control evidence")
-        specs = (
-            StorageReadSpec("Timestamp", "Now"),
-            StorageReadSpec("SubtensorModule", "NetworksAdded", (78,)),
-            StorageReadSpec("Commitments", "CommitmentOf", (78, archive.hotkey)),
+        runtime, _, control, committed = await verify_slot_archive(
+            archive, self._history_proof_tools(), timestamp=timestamp, ceiling=ceiling
         )
-        batch = await collector.storage_reads(runtime, specs)
-        if (
-            not isinstance(batch, VerifiedStorageBatch)
-            or batch.runtime != runtime
-            or len(batch.reads) != len(specs)
-            or {read.spec for read in batch.reads} != set(specs)
-        ):
-            raise ValueError("historical control proof binding or coverage differs")
-        values = {r.spec: r.decoded_value for r in batch.reads}
-        actual_time = _uint(values[specs[0]], 2**53 - 1)
-        if (
-            not 0 < actual_time <= ceiling
-            or (timestamp is not None and actual_time != timestamp)
-            or values[specs[1]] is not True
-        ):
-            raise ValueError("historical control timestamp or subnet differs")
-        control, committed = _control_value(values[specs[2]], ref.block_number)
-        if (control, committed) != (
-            archive.body["control_sha256"],
-            archive.body["committed_at_block"],
-        ):
-            raise ValueError("historical control digest differs from proved storage")
-        archive.consumed()
         _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
         return self._issue_control(archive, runtime, raw, metadata, control, committed), runtime
+
+    def _history_proof_tools(self):
+        return HistoryProofTools(
+            self._proofs,
+            self._runtime_proofs,
+            self._runtime_executor,
+            self._runtime_pin,
+            self._storage_codec is not None,
+            self.config.runtime_metadata_binary_sha256,
+        )
 
     def _issue_control(self, archive, runtime, raw, metadata, control, committed):
         """Issue only after capture or external replay has proved these inputs."""
@@ -472,7 +293,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 raise ValueError("reward admission anchor exceeds owned head")
             try:
                 recovered = await self._historical_headers.recover(
-                    anchor, ref, self._registration_rpc.request
+                    anchor, ref, self._registration_rpc.request, target_header=encoded
                 )
             except sqlite3.Error as error:
                 if not is_sqlite_full(error):
@@ -503,22 +324,35 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             if self._closed or not self._owned or self._registration_rpc is None:
                 raise ValueError("historical capture requires the owned chain provider")
             _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
-            request = self._registration_rpc.request
-            block_hash = await request("chain_getBlockHash", (height,))
-            if (
-                type(block_hash) is not str
-                or len(block_hash) != 66
-                or not block_hash.startswith("0x")
-                or any(c not in "0123456789abcdef" for c in block_hash[2:])
-            ):
-                raise ValueError("historical control header hint is invalid")
-            encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+            original = await self._finality.verified_block_at(height)
+            if original is not None:
+                if not isinstance(original, VerifiedFinalizedBlock):
+                    raise ValueError("owned finality evidence is unavailable")
+                self._check_finality_context(original)
+                block_hash = original.block_hash
+                try:
+                    encoded = json.loads(original.finality_evidence)["block"]["scale_header"]
+                except (KeyError, TypeError) as error:
+                    raise ValueError("owned finality header is unavailable") from error
+            else:
+                request = self._registration_rpc.request
+                block_hash = await request("chain_getBlockHash", (height,))
+                if (
+                    type(block_hash) is not str
+                    or len(block_hash) != 66
+                    or not block_hash.startswith("0x")
+                    or any(c not in "0123456789abcdef" for c in block_hash[2:])
+                ):
+                    raise ValueError("historical control header hint is invalid")
+                encoded = encode_rpc_header(await request("chain_getHeader", (block_hash,)))
             header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
             if (header["number"], header["hash"]) != (height, block_hash):
                 raise ValueError("historical control header differs from the requested identity")
             ref = FinalizedSnapshotRef(
                 height, block_hash, header["parent_hash"], header["state_root"]
             )
+            if original is not None:
+                self._check_finality(ref, original)
             timestamp, ceiling = await self._resolve_control_header(ref, encoded)
             runtime = await self._runtime_context(ref)
             self._validate_runtime_context(runtime, ref)

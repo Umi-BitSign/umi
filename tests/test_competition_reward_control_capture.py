@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -118,6 +120,8 @@ async def test_capture_without_retained_archive_and_replay_without_historical_rp
             expected_chain_config_sha256=digest(h.item.config),
         )
     assert any(m == "state_getReadProof" for m, _ in source.calls)
+    assert source.calls.count(("chain_getBlockHash", (h.old.height,))) == 1
+    assert source.calls.count(("chain_getHeader", (source.w.original.block_hash,))) == 1
     assert not any(m.startswith("author_") for m, _ in source.calls)
     await h.item.provider.aclose()
     h.item.provider = source.own(h.reopen())
@@ -134,6 +138,76 @@ async def test_capture_without_retained_archive_and_replay_without_historical_rp
     assert replayed == result
     # Durable hints must not manufacture entries in the owned observer history.
     assert h.blocks.get(h.old.height) is None
+
+
+async def test_retained_owned_header_capture_avoids_target_rpc_across_restart(
+    historical, monkeypatch
+):
+    h = historical
+    source = await capture_source(h, monkeypatch)
+    h.blocks[h.old.height] = source.w.original
+    original_request = source.request
+
+    async def forbid_redundant_header(method, params):
+        assert (method, tuple(params)) not in {
+            ("chain_getBlockHash", (h.old.height,)),
+            ("chain_getHeader", (source.w.original.block_hash,)),
+        }
+        return await original_request(method, params)
+
+    results = []
+    for _ in range(2):
+        h.item.provider._registration_rpc.request = forbid_redundant_header
+        result = await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+        check(h, result)
+        results.append(result)
+        await h.item.provider.aclose()
+        h.item.provider = source.own(h.reopen())
+    assert results[0] == results[1]
+    assert any(m == "state_getReadProof" for m, _ in source.calls)
+    assert not any(
+        m in {"chain_getHeader", "chain_getBlockHash"}
+        and p in {(h.old.height,), (source.w.original.block_hash,)}
+        for m, p in source.calls
+    )
+
+
+@pytest.mark.parametrize(
+    "changed", ["header", "missing_header", "height", "root", "hash", "policy", "verifier", "head"]
+)
+async def test_corrupt_owned_header_never_falls_back_or_reaches_state_capture(
+    historical, monkeypatch, changed
+):
+    h = historical
+    source = await capture_source(h, monkeypatch)
+    original = source.w.original
+    changes = {
+        "header": {"finality_evidence": b'{"evidence_class":"corrupt"}'},
+        "missing_header": {
+            "finality_evidence": json.dumps(
+                {**json.loads(original.finality_evidence), "block": {}}
+            ).encode()
+        },
+        "height": {"height": original.height + 1},
+        "root": {"state_root": "0x" + "ff" * 32},
+        "hash": {"block_hash": "0x" + "ff" * 32},
+        "policy": {"scoring_policy_hash": "ff" * 32},
+        "verifier": {"finality_verifier_sha256": "ff" * 32},
+        "head": {},
+    }
+    selected = changes[changed]
+    if "finality_evidence" in selected:
+        selected["finality_evidence_sha256"] = hashlib.sha256(
+            selected["finality_evidence"]
+        ).hexdigest()
+    h.blocks[h.old.height] = replace(original, **selected)
+    if changed == "head":
+        h.blocks[source.w.head.height] = replace(source.w.head, scoring_policy_hash="ff" * 32)
+    with pytest.raises(ValueError):
+        await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    assert not any(m.startswith("state_") for m, _ in source.calls)
+    assert ("chain_getBlockHash", (h.old.height,)) not in source.calls
+    assert ("chain_getHeader", (original.block_hash,)) not in source.calls
 
 
 async def test_capture_resumes_after_long_outage_and_provider_restart(historical, monkeypatch):
@@ -217,12 +291,15 @@ async def test_proven_historical_absence_does_not_become_admission(historical, m
     assert not json.loads(result.evidence)["chain_submission_authorized"]
 
 
-async def test_cancellation_drains_capture_proof_before_unlock(historical, monkeypatch):
+@pytest.mark.parametrize("retained", [False, True])
+async def test_cancellation_drains_capture_proof_before_unlock(historical, monkeypatch, retained):
     import asyncio
     import threading
 
     h = historical
-    await capture_source(h, monkeypatch)
+    source = await capture_source(h, monkeypatch)
+    if retained:
+        h.blocks[h.old.height] = source.w.original
     entered, release = threading.Event(), threading.Event()
     read = h.item.verifier.read_many
 
@@ -249,11 +326,11 @@ async def test_cancellation_drains_capture_proof_before_unlock(historical, monke
 
 @pytest.mark.parametrize("bound", ["MAX_CONTROL_ARCHIVE_BYTES", "MAX_CONTROL_METADATA_BYTES"])
 async def test_capture_keeps_archive_size_bounds(historical, monkeypatch, bound):
-    from umi import competition_reward_control_archive as archive_module
+    from umi import competition_reward_control_evidence as evidence_module
 
     h = historical
     await capture_source(h, monkeypatch)
-    monkeypatch.setattr(archive_module, bound, 1)
+    monkeypatch.setattr(evidence_module, bound, 1)
     with pytest.raises(ValueError, match="exceeds its byte bound"):
         await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
 

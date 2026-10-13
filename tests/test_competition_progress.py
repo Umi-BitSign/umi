@@ -232,3 +232,121 @@ def test_admission_diagnostics_never_log_request_or_exception_text(progress_even
     assert progress_events[-1]["operation"] == "unknown"
     assert progress_events[-1]["stage"] == "unknown"
     assert secret not in json.dumps(progress_events)
+
+
+def test_settlement_retry_reports_bounded_causes_without_inputs(progress_events):
+    secret = "https://private.example/capability/secret"
+    try:
+        try:
+            raise PermissionError(secret)
+        except PermissionError as cause:
+            raise ValueError(secret) from cause
+    except ValueError as error:
+        progress.report_settlement_retry(
+            cohort="a" * 64, role="coordinator", stage="maintenance", error=error
+        )
+    event = progress_events[-1]
+    assert event["event"] == "settlement_retry"
+    assert event["cohort_sha256"] == "a" * 64
+    assert event["role"] == "coordinator" and event["stage"] == "maintenance"
+    assert [cause["reason_code"] for cause in event["causes"]] == [
+        "validation_failed",
+        "permission_denied",
+    ]
+    assert event["state"] == "retrying" and event["eta_seconds"] is None
+    assert secret not in json.dumps(event)
+    progress.report_settlement_retry(
+        cohort=secret, role=secret, stage=secret, error=OSError(secret)
+    )
+    assert progress_events[-1]["cohort_sha256"] is None
+    assert progress_events[-1]["role"] == progress_events[-1]["stage"] == "unknown"
+    assert secret not in json.dumps(progress_events)
+
+
+async def test_settlement_retry_keeps_scheduler_status_and_releases_error_frames(
+    progress_events, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from umi import competition_cohort_settlement_service as settlement
+
+    failure = ValueError("private rejected payload")
+    node = SimpleNamespace(cohort="b" * 64, config=SimpleNamespace(role="reviewer"))
+    observations = []
+    original = settlement.discard_error_frames
+
+    def discard(error):
+        observations.append((error is failure, len(progress_events)))
+        original(error)
+
+    monkeypatch.setattr(settlement, "discard_error_frames", discard)
+
+    async def operation():
+        raise failure
+
+    assert await settlement.SettlementSeriesScheduler._attempt(node, operation, stage="tick") == (
+        False,
+        "retry:ValueError",
+    )
+    assert observations == [(True, 1)]
+    assert failure.__traceback__ is None
+    assert progress_events[-1]["cohort_sha256"] == node.cohort
+    assert progress_events[-1]["stage"] == "tick"
+
+
+async def test_settlement_failed_diagnostics_preserve_retry_and_cancellation(monkeypatch):
+    from types import SimpleNamespace
+
+    from umi.competition_cohort_settlement_service import SettlementSeriesScheduler
+
+    class FailedSink:
+        def log(self, *args, **kwargs):
+            raise RuntimeError("sink unavailable")
+
+    monkeypatch.setattr(progress, "_LOG", FailedSink())
+    node = SimpleNamespace(cohort="c" * 64, config=SimpleNamespace(role="coordinator"))
+
+    async def failed():
+        raise OSError("private input")
+
+    assert await SettlementSeriesScheduler._attempt(node, failed, stage="maintenance") == (
+        False,
+        "retry:OSError",
+    )
+    cancelled = asyncio.CancelledError()
+
+    async def cancel():
+        raise cancelled
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await SettlementSeriesScheduler._attempt(node, cancel, stage="tick")
+    assert caught.value is cancelled
+
+
+async def test_standalone_settlement_emits_retry_before_clean_drain(progress_events):
+    from types import SimpleNamespace
+
+    from umi.competition_cohort_settlement_service import CohortSettlementService
+
+    stopped = asyncio.Event()
+    released = []
+    node = object.__new__(CohortSettlementService)
+    node.cohort = "d" * 64
+    node.config = SimpleNamespace(role="coordinator", poll_seconds=0.001)
+    node.last_report = None
+    node.provider = SimpleNamespace(ensure_observer_running=lambda: None)
+    node._release_active_inputs = lambda: released.append("inputs")
+    node._release_memory = lambda: released.append("memory")
+
+    async def tick():
+        stopped.set()
+        raise PermissionError("private journal path")
+
+    node.tick = tick
+    await node.run(stopped)
+    assert node.last_report == "retry:PermissionError"
+    assert released == ["inputs", "memory"]
+    assert progress_events[-1]["event"] == "settlement_retry"
+    assert progress_events[-1]["cohort_sha256"] == node.cohort
+    assert progress_events[-1]["reason_code"] == "permission_denied"
+    assert "private journal path" not in json.dumps(progress_events)

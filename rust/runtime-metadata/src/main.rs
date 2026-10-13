@@ -149,6 +149,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compressed_runtime_rejects_a_block_larger_than_its_window() {
+        // A 2 KiB RLE block in a frame declaring a 1 KiB window must fail in
+        // decompression, before Wasm initialization. This bounded regression
+        // covers the shared decoder's RUSTSEC-2026-0344 fix.
+        let module = [
+            82, 188, 83, 118, 70, 219, 142, 5, 0x28, 0xb5, 0x2f, 0xfd, 0, 0, 3, 0x40, 0, 0,
+        ];
+        assert!(matches!(
+            host::HostVmPrototype::new(host::Config {
+                module,
+                heap_pages: DEFAULT_HEAP_PAGES,
+                exec_hint: vm::ExecHint::ValidateAndExecuteOnce,
+                allow_unresolved_imports: true,
+            }),
+            Err(host::NewErr::BadFormat(
+                host::ModuleFormatError::InvalidZstd
+            ))
+        ));
+        assert_eq!(inspect(&module), Err("runtime_initialization_failed"));
+    }
+
+    #[test]
     fn exact_canonical_vector_only() {
         assert_eq!(metadata_bytes(b"\x14meta\x0e").unwrap(), b"meta\x0e");
         for value in [

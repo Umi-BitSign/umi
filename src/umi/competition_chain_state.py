@@ -33,6 +33,7 @@ from .competition_chain import (
     model_burn_storage_reads,
     verified_model_burn_destination,
 )
+from .competition_reward_runtime import validate_weight_runtime
 from .competition_weight_rpc import WeightProofRpc
 from .competition_worker import (
     CompetitionReplayWorker,
@@ -408,19 +409,12 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
         return await collect_executed_runtime(self._runtime_proofs, self._runtime_executor, ref)
 
     def _validate_runtime_context(self, runtime, ref):
-        if not isinstance(runtime, PinnedRuntimeContext) or runtime.snapshot != ref:
-            raise ValueError("weight runtime binding mismatch")
-        if self._runtime_executor is None:
-            if isinstance(runtime, ExecutedRuntimeContext) or runtime.pin != self._runtime_pin:
-                raise ValueError("weight runtime binding mismatch")
-        elif (
-            type(runtime) is not ExecutedRuntimeContext
-            or runtime.executor_sha256 != self.config.runtime_metadata_binary_sha256
-            or runtime.code_evidence.snapshot != ref
-            or runtime.code_evidence.verified_state_root != ref.state_root
-            or runtime.code_evidence.storage_key != b":code"
-        ):
-            raise ValueError("weight executed runtime binding mismatch")
+        validate_weight_runtime(
+            runtime,
+            ref,
+            self._runtime_pin,
+            None if self._runtime_executor is None else self.config.runtime_metadata_binary_sha256,
+        )
 
     def _release_cache_lease(self):
         if self._cache_lease is not None:

@@ -47,6 +47,34 @@ idempotent parts. If the object store has expired an old unfinished multipart
 generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
 not change.
+Local verification records live in `~/.local/state/umi/model-verification` by
+default, or the absolute private `UMI_MODEL_VERIFICATION_DIRECTORY` you select.
+Keep this directory across client upgrades and restarts. On qualified Linux
+filesystems, each successfully checked source file is checkpointed immediately;
+unchanged files resume from metadata checks without rereading model bytes.
+The records bind file and directory identities, the signed bundle and policy,
+owner and qualified verifier semantics. Direct delivery also retains its
+separate concatenated payload digest. Source timestamps must predate the native
+check before its result can be reused; an unqualified platform or timestamp
+clock explicitly reports that reuse is disabled and keeps native verification.
+No receipt is treated as admission or certification authority.
+
+Missing or damaged completed records report `repair_required`, recheck only the
+affected file and persist `repair_completed`; other completed files stay reused.
+A missing or damaged completion marker with a valid receipt is restored from
+that receipt without reading payloads. Unsafe links, file permissions or changing
+metadata stop the command. If both a receipt and its marker are deleted, their
+previous completion cannot be distinguished from a first verification; preserve
+this state instead of clearing it to force a retry.
+
+Progress reports identify the current substage, counted work, elapsed time,
+measured ETA or a labeled planning range, and waiting, stalled or retrying state.
+Restored work is excluded from measured throughput. Source verification counts
+bytes processed and reports completion only after its successful checkpoints;
+upload counts acknowledged offsets or parts. Preservation and admission are
+separate owner stages whose planning ranges exclude external queue time. These
+estimates do not predict overall certification completion.
+
 Keep the source unchanged while uploading. Permanent rejection or a changed
 source stops the command; it does not silently replace your submission.
 

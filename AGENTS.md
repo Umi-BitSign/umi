@@ -1,5 +1,21 @@
 # Maintenance
 
+- For C6 and later cohorts, retain the entire finalized block range and complete
+  native replay proofs throughout intake, work and certification. Verify
+  independent blocks in bounded spawned workers, persist each completed result,
+  and apply history effects in block order under one owner. Workers must use
+  immutable inputs without RPC, signing keys or live owner database handles.
+  Expose captured, verified, replicated and applied progress separately. Qualify
+  serial equivalence, gaps, out-of-order completion, restart, repair and upgrades.
+
+- Carry every permanent fix through C6 and subsequent cohorts, including the
+  selected miner/client, coordinator, reviewer, writer and upgrade paths that
+  consume it. Qualify older supported installations, retained artifacts, restart,
+  repair and reward replay before claiming successor readiness. Preserve each
+  already signed plan and its clocks; transport or policy changes need their
+  supported authenticated adoption or a separately signed successor. A C5-only
+  recovery helper or source test is not proof of a future cohort deployment.
+
 - Prefer one consolidated PR for a coherent body of work. Include related fixes,
   integration, tests and documentation, and batch validation before pushing to
   avoid running slow CI for each small change. Split only when an independent
@@ -34,6 +50,15 @@
   Before enough samples exist, report a labeled planning range with assumptions.
   Keep substage estimates separate from overall completion, revise stale ranges,
   and qualify telemetry without adding execution watchdogs.
+- Successful expensive verification is durable owner state. Reuse it across
+  stages and restart for unchanged evidence and validation context. Bind reuse to
+  actual immutable local/R2 identities, policy, lineage, owner and signed clocks;
+  never accept a caller-supplied digest as proof. Preserve exact collector coverage
+  and resource accounting without rereading/rehashing trusted unchanged payloads.
+  Initial semantic verification remains required. Version native/shape rules when
+  accepted validation semantics change; unrelated releases preserve verdicts.
+  Ship atomic checkpointing, interruption recovery, invalidation/repair telemetry
+  and actual consuming-stage tests with every reuse or retained-format change.
 - Existing validators and miners must not be stopped or replaced for a cleanup.
   Test changes in an isolated workspace before any separately qualified deployment.
 - Clean up task-created remote build/test/rehearsal directories after use. Check

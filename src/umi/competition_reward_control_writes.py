@@ -13,16 +13,27 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from .chain_evidence import FinalizedBlockRecord, FinalizedSnapshotRef
+from .chain_evidence import FinalizedBlockRecord
 from .competition_chain_state import _runtime_execution_evidence
 from .competition_reward_control_archive import (
     HistoricalRewardControlProvider,
     OwnedHistoricalRewardControl,
     validate_historical_reward_control,
 )
-from .encoding import account_id32
-from .finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
-from .grandpa_finality import _decode_header
+from .competition_reward_history_effects import (
+    MAX_WRITE_EVIDENCE_BYTES as MAX_WRITE_EVIDENCE_BYTES,
+)
+from .competition_reward_history_effects import (
+    ControlWrite as ControlWrite,
+)
+from .competition_reward_history_effects import (
+    _select_writes as _select_writes,
+)
+from .competition_reward_history_effects import (
+    checked_control_effects,
+    control_block_identity,
+)
+from .finalized_ancestry import encode_rpc_header
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import ExecutedRuntimeContext
@@ -36,13 +47,6 @@ from .validator_chain_scan import (
 from .validator_chain_scan_port import LiveFinalizedBlockScanPort
 
 _ISSUER = object()
-MAX_WRITE_EVIDENCE_BYTES = 256 * 1024**2
-
-
-@dataclass(frozen=True, slots=True)
-class ControlWrite:
-    extrinsic_index: int
-    decision_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,38 +88,6 @@ def validate_control_writes(
         expected_control_hotkey=expected_control_hotkey,
         expected_chain_config_sha256=expected_chain_config_sha256,
     )
-
-
-def _select_writes(
-    block: FinalizedBlockRecord,
-    bindings: tuple[FinalizedCommitmentCallBinding, ...],
-    hotkey: str,
-) -> tuple[tuple[ControlWrite, ...], tuple[int, ...]]:
-    """Outer success never proves which child of a wrapper actually ran."""
-    account = account_id32(hotkey)
-    arguments = {b.extrinsic_index: b for b in bindings}
-    writes, unresolved = [], set()
-    for outer in block.calls:
-        pending = [outer]
-        while pending:
-            call = pending.pop()
-            pending.extend(call.children)
-            if call.module != "Commitments" or call.effective_origin_account_id32 not in (
-                None,
-                account,
-            ):
-                continue
-            if call.call_path or call.effective_origin_account_id32 is None:
-                unresolved.add(outer.extrinsic_index)
-                continue
-            if not outer.successful:
-                continue
-            binding = arguments.get(outer.extrinsic_index)
-            if binding is None or binding.call_hash != outer.call_hash:
-                unresolved.add(outer.extrinsic_index)
-            elif binding.netuid == 78:
-                writes.append(ControlWrite(outer.extrinsic_index, binding.field_sha256))
-    return tuple(writes), tuple(sorted(unresolved))
 
 
 class _BlockPort(LiveFinalizedBlockScanPort):
@@ -173,24 +145,15 @@ def _control_block_identity(
         expected_control_hotkey=slot.control_hotkey,
         expected_chain_config_sha256=digest(provider.config),
     )
-    if encoded != json.loads(slot.evidence)["finality"]["block"]["scale_header"]:
-        raise ValueError("control block differs from its independently proved slot")
-    header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-    parent = _decode_header(parent_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-    if (parent["number"], parent["hash"]) != (
-        slot.snapshot.block_number - 1,
-        slot.snapshot.parent_hash,
-    ):
-        raise ValueError("control block parent differs from authenticated child")
-    parent_ref = FinalizedSnapshotRef(
-        parent["number"], parent["hash"], parent["parent_hash"], parent["state_root"]
-    )
-    return VerifiedFinalizedBlockIdentity(
+    return control_block_identity(
         slot.snapshot,
-        parent_ref,
-        header["extrinsics_root"],
-        provider.config.finality_pin.release_sha256_by_target[provider.config.target_triple],
-        slot.evidence_sha256,
+        encoded,
+        parent_encoded,
+        slot_header=json.loads(slot.evidence)["finality"]["block"]["scale_header"],
+        finality_sha256=provider.config.finality_pin.release_sha256_by_target[
+            provider.config.target_triple
+        ],
+        evidence_sha256=slot.evidence_sha256,
     )
 
 
@@ -200,19 +163,18 @@ def _proved_writes(
     bindings: tuple[FinalizedCommitmentCallBinding, ...],
     evidence: bytes,
 ) -> OwnedRewardControlWrites:
-    if block.snapshot != slot.snapshot:
-        raise ValueError("control block differs from proved slot")
-    writes, unresolved = _select_writes(block, bindings, slot.control_hotkey)
-    height = slot.snapshot.block_number
-    if not unresolved and (
-        (
-            writes
-            and (slot.committed_at_block, slot.control_sha256)
-            != (height, writes[-1].decision_sha256)
-        )
-        or (not writes and slot.committed_at_block == height)
-    ):
-        raise ValueError("control block writes differ from proved post-state")
+    writes, unresolved = checked_control_effects(
+        slot.snapshot,
+        slot.control_hotkey,
+        slot.control_sha256,
+        slot.committed_at_block,
+        block,
+        bindings,
+    )
+    return _issue_writes(slot, writes, unresolved, evidence)
+
+
+def _issue_writes(slot, writes, unresolved, evidence):
     if type(evidence) is not bytes or not 0 < len(evidence) <= MAX_WRITE_EVIDENCE_BYTES:
         raise ValueError("control block evidence exceeds its byte bound")
     result = OwnedRewardControlWrites(slot, writes, unresolved, evidence, _issuer=_ISSUER)

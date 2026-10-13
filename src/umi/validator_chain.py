@@ -253,7 +253,27 @@ class BittensorRawJsonRpc:
         except ValidatorChainError:
             raise
         except PayloadTooBig as error:
-            raise ValidatorChainError("proof_rpc_response_limit") from error
+            raise ValidatorChainError(
+                "proof_rpc_response_limit",
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+            ) from error
+        except ConnectionClosed as error:
+            # websockets recv() reports a receive-size failure as a closed
+            # connection. Use its typed cause or locally initiated 1009 close;
+            # a remote 1009 (including our echo) says nothing about receive size.
+            # Never inspect close reason text, which may contain private data.
+            local_response_limit = isinstance(error.__cause__, PayloadTooBig) or (
+                error.sent is not None
+                and error.sent.code == 1009
+                and error.rcvd_then_sent is not True
+            )
+            raise ValidatorChainError(
+                "proof_rpc_response_limit" if local_response_limit else "proof_rpc_failed",
+                rpc_method=method,
+                rpc_block_hash=params[-1] if params else None,
+                rpc_transport_error="connection_closed",
+            ) from error
         except InvalidStatus as error:
             # Preserve a useful, fixed diagnostic without exposing response
             # headers, provider error bodies or credential-bearing endpoints.
@@ -273,8 +293,6 @@ class BittensorRawJsonRpc:
             transport_error = "unknown"
             if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
                 transport_error = "timeout"
-            elif isinstance(error, ConnectionClosed):
-                transport_error = "connection_closed"
             elif isinstance(error, OSError):
                 transport_error = "os_error"
             raise ValidatorChainError(

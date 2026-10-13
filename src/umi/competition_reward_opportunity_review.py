@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from .competition_evidence_codec import checked_size
-from .competition_reward_coverage import OwnedRewardCoverageEndpoint
-from .competition_reward_coverage_intervals import coverage_interval, coverage_point
+from .competition_reward_coverage_intervals import (
+    CoverageEndpoint,
+    coverage_interval,
+    coverage_point,
+)
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_decisions import DecisionSource, RewardActivation, StandingRewardSeries
 from .competition_reward_manifest import RewardManifest
@@ -26,7 +29,7 @@ from .protocol import canonical_json_bytes
 
 MAX_CERTIFICATE_BYTES = 128 * 1024
 DEFAULT_WITNESS_BYTES = 16 * 1024**2
-EndpointReview = Callable[[str], Awaitable[OwnedRewardCoverageEndpoint]]
+EndpointReview = Callable[[str], Awaitable[CoverageEndpoint]]
 
 
 async def prepare_opportunity_certificate(

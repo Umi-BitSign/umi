@@ -16,6 +16,7 @@ from tests.test_competition_host_switch import (
 from umi import competition_host_start as start
 from umi import competition_host_switch as switch
 from umi import competition_host_upgrade as host
+from umi.competition_host_environment import NATIVE_VERIFICATION_ASSIGNMENT
 
 __all__ = ["inputs", "installed", "switching"]
 
@@ -93,6 +94,68 @@ def test_start_uses_only_exact_committed_unit_after_lock_release(ready):
     assert result.host_manifest_sha256 == ready.plan.host_manifest_sha256
     assert not result.chain_submission_authorized
     assert ready.unit["ExecStart"] != dict(ready.result._unit)["ExecStart"]
+
+
+@pytest.mark.parametrize("assignment", ["", NATIVE_VERIFICATION_ASSIGNMENT + " "])
+def test_exec_start_report_preserves_old_and_selected_environment_commands(assignment):
+    command = (
+        "/usr/bin/env -i HOME=/var/lib/umi-validator-supervisor/home "
+        + assignment
+        + "/opt/umi/bin/umi-competition-supervisor --config /etc/umi/validator-supervisor.json ;"
+    )
+    before = start._exec_start_command(_execution_report(command))
+    after = start._exec_start_command(_execution_report(command, started=True))
+    assert before == after
+    assert before == "{ path=/usr/bin/env ; argv[]=" + command + " ignore_errors=no"
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "OTHER=${OTHER}",
+        "OTHER=${UMI_NATIVE_VERIFICATION_DIRECTORY}",
+        "prefix" + NATIVE_VERIFICATION_ASSIGNMENT,
+        NATIVE_VERIFICATION_ASSIGNMENT + "suffix",
+        "UMI_NATIVE_VERIFICATION_DIRECTORY=${OTHER}",
+        "UMI_NATIVE_VERIFICATION_DIRECTORY=${UMI_NATIVE_VERIFICATION_DIRECTORY:-/tmp}",
+        "{ /tmp/extra }",
+    ],
+)
+def test_exec_start_report_rejects_unselected_brace_syntax(assignment):
+    report = _execution_report("/usr/bin/env -i " + assignment + " /opt/umi/bin/worker ;")
+    with pytest.raises(host.HostUpgradeError, match="unexpected successor ExecStart"):
+        start._exec_start_command(report)
+
+
+def test_exec_start_report_rejects_extra_command_with_selected_environment():
+    report = _execution_report(
+        "/usr/bin/env -i " + NATIVE_VERIFICATION_ASSIGNMENT + " /opt/umi/bin/worker ;"
+    )
+    with pytest.raises(host.HostUpgradeError, match="unexpected successor ExecStart"):
+        start._exec_start_command(report + " " + report)
+
+
+def test_exec_start_retained_rooted_migration_report():
+    # Verbatim ExecStart from the amd64 rooted migration diagnostic. systemd
+    # preserves the selected variable token even after the process has exited.
+    report = (
+        "{ path=/usr/bin/env ; argv[]=/usr/bin/env -i "
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+        "LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 "
+        "PYTHONUTF8=1 HOME=/var/lib/umi-validator-supervisor/home USER=umi-validator "
+        "LOGNAME=umi-validator XDG_RUNTIME_DIR=/run/user/999 "
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus "
+        "UMI_NATIVE_VERIFICATION_DIRECTORY=${UMI_NATIVE_VERIFICATION_DIRECTORY} "
+        "/opt/umi-validator-supervisor-hosts/10e186aaa91a19228184b50a0e1708296cf17f0c/"
+        ".venv/bin/umi-competition-supervisor --config /etc/umi/validator-supervisor.json "
+        "; ignore_errors=no ; start_time=[Tue 2026-10-13 06:21:14 UTC] "
+        "; stop_time=[Tue 2026-10-13 06:21:14 UTC] ; pid=3458 ; code=killed ; status=15/TERM }"
+    )
+    original = start._exec_start_command(report)
+    assert original == report.split(" ; start_time=", 1)[0]
+    assert NATIVE_VERIFICATION_ASSIGNMENT in original
+    changed = report.replace(NATIVE_VERIFICATION_ASSIGNMENT, "UMI_NATIVE_VERIFICATION_DIRECTORY=")
+    assert start._exec_start_command(changed) != original
 
 
 def test_start_cannot_use_a_copied_capability(ready):

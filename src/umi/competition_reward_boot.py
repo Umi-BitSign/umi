@@ -25,6 +25,8 @@ from .competition_cohort_direct_model_review import (
 from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
+from .competition_proof_archive_selection import selected_proof_archives
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import StandingRewardCoverageService
@@ -44,13 +46,12 @@ from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
-from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
 from .competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
 from .competition_supervisor_runtime import SuccessorSupervisorRuntime
-from .concurrency import await_owned_task
+from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, Directory
@@ -99,6 +100,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     delivery_directory: Directory
     promotion_directory: Directory
     proof_import_directory: Directory
+    proof_stores: ProofArchiveStores | None = None
     proof_export_directory: Directory
     service: StandingRewardServiceLimits
     maximum_history_bytes: HistoryCapacity
@@ -121,6 +123,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def omit_successor_inputs(self, handler):
         value = handler(self)
+        if self.proof_stores is None:
+            value.pop("proof_stores", None)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
         for name in (
@@ -204,6 +208,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.delivery_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
                 *(
@@ -312,7 +317,12 @@ async def run_installed_standing_rewards(
         None
         if config.direct_model_review is None
         else DirectModelSettlementVerifier(
-            DirectModelArtifactReviewer(config.direct_model_review, config.policy, None),
+            DirectModelArtifactReviewer(
+                config.direct_model_review,
+                config.policy,
+                None,
+                verification_root=root / "direct-model-byte-verification",
+            ),
             store.directory / "model-reward-artifacts",
             root / "direct-model-reward-receipts",
         )
@@ -325,14 +335,19 @@ async def run_installed_standing_rewards(
         maximum_package_bytes=config.maximum_package_bytes,
         model_artifacts=model_artifacts,
     )
-    imported = RewardProofArchive(Path(config.proof_import_directory))
-    exported = RewardProofArchive(Path(config.proof_export_directory))
+    imported, exported = await run_owned_thread(
+        selected_proof_archives,
+        Path(config.proof_import_directory),
+        Path(config.proof_export_directory),
+        config.proof_stores,
+    )
     history = RewardControlHistoryReader(
         root / "history",
         control_hotkey=config.series.control_hotkey,
         chain_config_sha256=digest(config.chain),
         first_block=config.series.recovery.authority.issued_at_block,
         maximum_bytes=config.maximum_history_bytes,
+        verification_profile=config.service.history_verification,
         archive=imported,
         export_archive=exported,
     )
@@ -405,6 +420,7 @@ async def run_installed_standing_rewards(
                 chain_config_sha256=digest(config.chain),
                 first_block=old.recovery.authority.issued_at_block,
                 maximum_bytes=config.maximum_history_bytes,
+                verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
             )
@@ -460,7 +476,7 @@ async def run_installed_standing_rewards(
                 digest(c.chain): providers[digest(c.chain)] for c in config.legacy_chains
             },
             history=history,
-            packages=files.package,
+            packages=files.verified_package,
             decisions=files.decision,
             opportunity=collection.opportunity,
             coverage=collection,

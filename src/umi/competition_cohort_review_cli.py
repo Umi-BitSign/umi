@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_review_boot import run_phase_review_service
 from .competition_cohort_review_config import load_phase_review_config
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_progress import _failure_details
 from .open_competition import digest
 
@@ -47,6 +48,17 @@ def main(argv=None):
                             else config.phase_review_budget.effective()
                         ),
                         "managed_phase_path_qualified": False,
+                        "service_execution_budget": (
+                            None
+                            if config.service_signing is None
+                            else service_execution_budget(
+                                config.phase_review_budget,
+                                read_seconds=config.service_signing.read_timeout_seconds,
+                                signing_seconds=config.service_signing.signing_timeout_seconds,
+                                vote_seconds=config.review_timeout_seconds,
+                            ).effective()
+                        ),
+                        "managed_service_path_qualified": False,
                     }
                 )
             )

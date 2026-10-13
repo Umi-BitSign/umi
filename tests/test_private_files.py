@@ -1,6 +1,9 @@
 import errno
+import fcntl
 import os
+import select
 import stat
+from contextlib import ExitStack, contextmanager
 
 import pytest
 from pydantic import field_validator
@@ -144,6 +147,135 @@ def test_lock_contention_prevents_publication_and_release_allows_retry(tmp_path)
         os.close(lock)
     files.publish_private_model(path, value)
     assert files.read_private_model(path, StoredRecord) == value
+
+
+@contextmanager
+def _child_holding_inherited_descriptors():
+    ready_read, ready_write = os.pipe()
+    release_read, release_write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        # Model the pre-exec interval of a concurrent proof-helper fork. Never
+        # use inherited Python locks or run pytest cleanup inside this child.
+        os.close(ready_read)
+        os.close(release_write)
+        os.write(ready_write, b"1")
+        ready, _, _ = select.select([release_read], [], [], 10)
+        if ready:
+            os.read(release_read, 1)
+        os._exit(0 if ready else 124)
+    os.close(ready_write)
+    os.close(release_read)
+    try:
+        assert select.select([ready_read], [], [], 5)[0]
+        assert os.read(ready_read, 1) == b"1"
+        yield child
+    finally:
+        os.close(release_write)  # EOF also releases the child after a failed assertion.
+        os.close(ready_read)
+        assert os.waitpid(child, 0) == (child, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX inherited flock description")
+@pytest.mark.parametrize("stage", ["new", "retry", "conflict", "directory_sync_failure"])
+def test_publication_releases_lock_while_fork_child_still_has_descriptor(
+    tmp_path, monkeypatch, stage
+):
+    path = tmp_path / "outbox" / "first.json"
+    value = StoredRecord(value="original")
+    if stage in ("retry", "conflict"):
+        files.publish_private_model(path, value)
+    inode = path.stat().st_ino if path.exists() else None
+    lock, sync = files.lock_private_file, os.fsync
+    children, directory_syncs = [], []
+    with ExitStack() as cleanup:
+
+        def inherited(candidate):
+            descriptor = lock(candidate)
+            children.append(cleanup.enter_context(_child_holding_inherited_descriptors()))
+            return descriptor
+
+        def sync_while_locked(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                # Durability must finish before explicit unlock, including
+                # exact retries. The new owner must still be excluded here.
+                with pytest.raises(files.PrivateStateBusyError):
+                    lock(path.parent / ".publish.lock")
+                directory_syncs.append(descriptor)
+                if stage == "directory_sync_failure":
+                    raise OSError("injected directory sync failure")
+            sync(descriptor)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(files, "lock_private_file", inherited)
+            patch.setattr(files.os, "fsync", sync_while_locked)
+            if stage == "conflict":
+                with pytest.raises(ValueError, match="different bytes"):
+                    files.publish_private_model(path, StoredRecord(value="conflict"))
+            elif stage == "directory_sync_failure":
+                with pytest.raises(OSError, match="injected directory sync failure"):
+                    files.publish_private_model(path, value)
+            else:
+                files.publish_private_model(path, value)
+        assert len(children) == 1 and os.waitpid(children[0], os.WNOHANG) == (0, 0)
+        # The child deliberately still owns its inherited descriptor. Closing
+        # only the parent's fd leaves the lock held and makes this call fail.
+        second = path.with_name("second.json")
+        files.publish_private_model(second, StoredRecord(value="next"))
+        assert files.read_private_model(path, StoredRecord) == value
+        assert files.read_private_model(second, StoredRecord).value == "next"
+        assert bool(directory_syncs) == (stage != "conflict")
+        if inode is not None:
+            assert path.stat().st_ino == inode
+
+
+@pytest.mark.parametrize("failure", ["busy", "unsafe"])
+def test_failed_lock_acquisition_never_runs_publication_unlock(tmp_path, monkeypatch, failure):
+    root = tmp_path / "private"
+    files.ensure_private_directory(root)
+    lock_path = root / ".publish.lock"
+    owner = files.lock_private_file(lock_path)
+    flock, unlocks = fcntl.flock, []
+
+    def tracked(descriptor, operation):
+        if operation == fcntl.LOCK_UN:
+            unlocks.append(descriptor)
+        return flock(descriptor, operation)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(files.fcntl, "flock", tracked)
+            if failure == "unsafe":
+                lock_path.chmod(0o644)
+            with pytest.raises(files.PrivateStateBusyError if failure == "busy" else ValueError):
+                files.publish_private_model(root / "record.json", StoredRecord(value="busy"))
+            assert unlocks == []
+            lock_path.chmod(0o600)
+            with pytest.raises(files.PrivateStateBusyError):
+                files.lock_private_file(lock_path)
+    finally:
+        os.close(owner)
+
+
+def test_publication_unlock_failure_still_closes_owned_descriptor(tmp_path, monkeypatch):
+    path = tmp_path / "outbox" / "record.json"
+    flock, descriptors = fcntl.flock, []
+
+    def fail_unlock(descriptor, operation):
+        if operation == fcntl.LOCK_UN:
+            descriptors.append(descriptor)
+            raise OSError("injected unlock failure")
+        return flock(descriptor, operation)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(files.fcntl, "flock", fail_unlock)
+        with pytest.raises(OSError, match="injected unlock failure"):
+            files.publish_private_model(path, StoredRecord(value="retained"))
+    assert len(descriptors) == 1
+    with pytest.raises(OSError) as caught:
+        os.fstat(descriptors[0])
+    assert caught.value.errno == errno.EBADF
+    files.publish_private_model(path, StoredRecord(value="retained"))
 
 
 def test_output_bound_is_inclusive_and_rejection_precedes_directory_creation(tmp_path, monkeypatch):

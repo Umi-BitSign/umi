@@ -19,6 +19,7 @@ from .competition_runner import (
     execute_offline_case,
     stop_retained_cpu_invocation,
 )
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import CompetitionPolicy, digest
 from .private_files import ensure_private_directory, private_path
@@ -107,7 +108,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         self.artifacts, self.request = artifacts, request
         self.materializations = asyncio.Condition()
         self.cache = workspace / "direct-model-cache"
-        self.cached_model_sha256: str | None = None
+        self.cached_request_sha256: str | None = None
         self.active_candidate_invocations = 0
         ensure_private_directory(self.cache)
         self.artifacts.verify_materialization_filesystem(self.cache)
@@ -115,21 +116,33 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     async def _candidate_archive(self, request: ModelReviewRequest, bundle) -> Path:
         archive = self.cache / "archive"
         selected = archive / digest(bundle)
-        model_sha256 = digest(bundle)
+        request_sha256 = self.artifacts.cache_identity(request)
         async with self.materializations:
-            while self.active_candidate_invocations and self.cached_model_sha256 != model_sha256:
-                await self.materializations.wait()
+            if self.active_candidate_invocations and self.cached_request_sha256 != request_sha256:
+                with TransferProgress("model_cache_lease_wait", 1, unit="objects") as progress:
+                    progress.emit("waiting", reason="active_candidate_invocations")
+                    while (
+                        self.active_candidate_invocations
+                        and self.cached_request_sha256 != request_sha256
+                    ):
+                        await self.materializations.wait()
+                    progress.advance(1)
             reusable = selected.is_dir() and (
-                self.cached_model_sha256 == model_sha256
+                self.cached_request_sha256 == request_sha256
                 or await self.artifacts.materialized(request, archive)
             )
             if not reusable:
                 if self.active_candidate_invocations:
                     raise OSError("active direct model cache became unavailable")
-                if archive.exists():
-                    await run_owned_thread(shutil.rmtree, archive)
+                if archive.exists() and not await self.artifacts.resumable(request, archive):
+                    # Only the disposable cache is released. Durable remote
+                    # byte results are in the service state outside this tree.
+                    with TransferProgress("model_cache_eviction", 1, unit="objects") as progress:
+                        ensure_private_directory(archive)
+                        await run_owned_thread(shutil.rmtree, archive)
+                        progress.advance(1)
                 await self.artifacts.materialize(request, archive)
-            self.cached_model_sha256 = model_sha256
+            self.cached_request_sha256 = request_sha256
             self.active_candidate_invocations += 1
             return archive
 

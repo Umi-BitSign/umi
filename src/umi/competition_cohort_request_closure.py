@@ -35,6 +35,7 @@ from .competition_cohort_roster import (
     verify_recoverable_roster_membership,
 )
 from .competition_execution import ExecutionBoundary
+from .competition_verification_reuse import verified_replay
 from .competition_work_progress import progress_items
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -127,6 +128,140 @@ def unfinished_request_miners(closure: CohortRequestClosure, roster) -> tuple[st
         raise ValueError("request tail skipped an unselected participant") from None
 
 
+@verified_replay("request_participant", SignedRecoverableEvaluationOrder)
+def _review_request_participant(
+    participant,
+    retained,
+    round_,
+    objects,
+    policy,
+    history,
+    *,
+    expected_tip_sha256,
+    current_block,
+    opened_at_block,
+    closed_at_block,
+    tail,
+):
+    """Checkpoint one complete semantic review; global coverage remains with closure."""
+    incomplete = isinstance(participant, SkippedRequestParticipant)
+    if incomplete and participant.order_sha256 is None:
+        raise PendingRequestClosure(((participant.submission_sha256, "order_inventory"),))
+    order = SignedRecoverableEvaluationOrder.model_validate_json(
+        read_endpoint_object(objects, participant.order_sha256)
+    )
+    verify_recoverable_order(
+        order,
+        policy,
+        retained.record.request.consent,
+        retained.admission,
+        retained.record.snapshot,
+        history,
+        expected_tip_sha256=expected_tip_sha256,
+        current_block=current_block,
+    )
+    if (
+        order.order.round != round_
+        or order.order.submission != retained.record.request.signed_submission
+    ):
+        raise ValueError("request closure substituted a selected order or submission")
+    expected = tuple(identity(k) for k in order.order.evaluators)
+    actual = tuple(identity(r.evaluator_hotkey) for r in participant.evaluators)
+    if incomplete:
+        if actual != tuple(who for who in expected if who in actual) or actual == expected:
+            raise ValueError("skipped participant must preserve a strict original evaluator subset")
+    elif actual != expected:
+        raise ValueError("request closure must cover every assigned evaluator exactly once")
+    if incomplete:
+        partial_evaluators = set()
+        inventories = {}
+        for inventory_key in participant.inventory_sha256s:
+            assignment, manifest, signed = review_request_inventory(
+                inventory_key,
+                objects,
+                policy,
+                order,
+                opened_at_block=opened_at_block,
+                selected_at_block=(tail.selected_observation or tail.observation).block,
+                completed_by_block=closed_at_block,
+            )
+            key = signed.inventory.manifest_sha256
+            if key in inventories:
+                raise ValueError("partial request repeats an authenticated inventory")
+            inventories[key] = assignment
+        if set(inventories) != set(participant.retained_objects):
+            raise PendingRequestClosure(
+                ((participant.submission_sha256, "authenticated_inventory"),)
+            )
+        for key in participant.retained_objects:
+            assignment = inventories[key]
+            who = identity(assignment.delivery.receipt.evaluator_hotkey)
+            if (
+                who not in expected
+                or who in actual
+                or who in partial_evaluators
+                or assignment.participant.consent != retained.record.request.consent
+                or assignment.participant.admission != retained.admission
+                or assignment.participant.admission_snapshot != retained.record.snapshot
+            ):
+                raise ValueError(
+                    "partial request repeats an evaluator or changes its original participant"
+                )
+            partial_evaluators.add(who)
+            manifest = PartialRequestManifest.model_validate_json(
+                read_endpoint_object(objects, key)
+            )
+            certified_cases = {case.case_id for case in manifest.cases}
+            pending_cases = tuple(
+                (
+                    participant.submission_sha256,
+                    f"case_certification:{who}:{response.case_id}",
+                )
+                for response in manifest.responses
+                if response.retirement_sha256 is not None
+                and response.case_id not in certified_cases
+            )
+            if pending_cases:
+                raise PendingRequestCertification(pending_cases)
+            job = recoverable_order_job(order.order, assignment.delivery.receipt.evaluator_hotkey)
+            if len(manifest.steps) == step_count(job) and (
+                job.mode == "paired_model" or len(manifest.cases) == len(job.cases)
+            ):
+                raise PendingRequestCertification(
+                    ((participant.submission_sha256, f"terminal_certification:{who}"),)
+                )
+        missing = set(expected) - set(actual) - partial_evaluators
+        if missing:
+            raise PendingRequestClosure(
+                tuple(
+                    (participant.submission_sha256, f"partial_inventory:{who}")
+                    for who in sorted(missing)
+                )
+            )
+    for ref in participant.evaluators:
+        signed = SignedRequestTerminal.model_validate_json(
+            read_endpoint_object(objects, ref.terminal_sha256)
+        )
+        assignment = read_request_terminal(
+            signed,
+            objects,
+            policy,
+            opened_at_block=opened_at_block,
+            completed_by_block=closed_at_block,
+        )
+        if (
+            assignment.certificate != order
+            or identity(assignment.delivery.receipt.evaluator_hotkey)
+            != identity(ref.evaluator_hotkey)
+            or assignment.participant.consent != retained.record.request.consent
+            or assignment.participant.admission != retained.admission
+            or assignment.participant.admission_snapshot != retained.record.snapshot
+        ):
+            raise ValueError("request terminal differs from the exact assigned participant")
+    return order
+
+
+@verified_replay("request_closure", CohortRequestClosure)
 def review_request_closure(
     closure: CohortRequestClosure,
     roster: RecoverableRosterEvidence,
@@ -191,130 +326,22 @@ def review_request_closure(
         unit="selected_entries",
         cohort=roster.round.cohort_sha256,
     ):
-        retained = members[participant.submission_sha256]
-        incomplete = isinstance(participant, SkippedRequestParticipant)
-        if incomplete and participant.order_sha256 is None:
-            raise PendingRequestClosure(((participant.submission_sha256, "order_inventory"),))
-        order = SignedRecoverableEvaluationOrder.model_validate_json(
-            read_endpoint_object(objects, participant.order_sha256)
-        )
-        verify_recoverable_order(
-            order,
+        order = _review_request_participant(
+            participant,
+            members[participant.submission_sha256],
+            roster.round,
+            objects,
             policy,
-            retained.record.request.consent,
-            retained.admission,
-            retained.record.snapshot,
             history,
             expected_tip_sha256=expected_tip_sha256,
             current_block=current_block,
+            opened_at_block=view.closure("preparation").observed_at_block,
+            closed_at_block=closure.observation.block,
+            tail=closure.tail,
         )
-        if (
-            order.order.round != roster.round
-            or order.order.submission != retained.record.request.signed_submission
-        ):
-            raise ValueError("request closure substituted a selected order or submission")
         if catalog is not None and order.order.cases != catalog:
             raise ValueError("request closure has inconsistent assigned case catalogs")
         catalog = order.order.cases
-        expected = tuple(identity(k) for k in order.order.evaluators)
-        actual = tuple(identity(r.evaluator_hotkey) for r in participant.evaluators)
-        if incomplete:
-            if actual != tuple(who for who in expected if who in actual) or actual == expected:
-                raise ValueError(
-                    "skipped participant must preserve a strict original evaluator subset"
-                )
-        elif actual != expected:
-            raise ValueError("request closure must cover every assigned evaluator exactly once")
-        if incomplete:
-            partial_evaluators = set()
-            inventories = {}
-            for inventory_key in participant.inventory_sha256s:
-                assignment, manifest, signed = review_request_inventory(
-                    inventory_key,
-                    objects,
-                    policy,
-                    order,
-                    opened_at_block=view.closure("preparation").observed_at_block,
-                    selected_at_block=(
-                        closure.tail.selected_observation or closure.tail.observation
-                    ).block,
-                    completed_by_block=closure.observation.block,
-                )
-                key = signed.inventory.manifest_sha256
-                if key in inventories:
-                    raise ValueError("partial request repeats an authenticated inventory")
-                inventories[key] = assignment
-            if set(inventories) != set(participant.retained_objects):
-                raise PendingRequestClosure(
-                    ((participant.submission_sha256, "authenticated_inventory"),)
-                )
-            for key in participant.retained_objects:
-                assignment = inventories[key]
-                who = identity(assignment.delivery.receipt.evaluator_hotkey)
-                if (
-                    who not in expected
-                    or who in actual
-                    or who in partial_evaluators
-                    or assignment.participant.consent != retained.record.request.consent
-                    or assignment.participant.admission != retained.admission
-                    or assignment.participant.admission_snapshot != retained.record.snapshot
-                ):
-                    raise ValueError(
-                        "partial request repeats an evaluator or changes its original participant"
-                    )
-                partial_evaluators.add(who)
-                manifest = PartialRequestManifest.model_validate_json(
-                    read_endpoint_object(objects, key)
-                )
-                certified_cases = {case.case_id for case in manifest.cases}
-                pending_cases = tuple(
-                    (
-                        participant.submission_sha256,
-                        f"case_certification:{who}:{response.case_id}",
-                    )
-                    for response in manifest.responses
-                    if response.retirement_sha256 is not None
-                    and response.case_id not in certified_cases
-                )
-                if pending_cases:
-                    raise PendingRequestCertification(pending_cases)
-                job = recoverable_order_job(
-                    order.order, assignment.delivery.receipt.evaluator_hotkey
-                )
-                if len(manifest.steps) == step_count(job) and (
-                    job.mode == "paired_model" or len(manifest.cases) == len(job.cases)
-                ):
-                    raise PendingRequestCertification(
-                        ((participant.submission_sha256, f"terminal_certification:{who}"),)
-                    )
-            missing = set(expected) - set(actual) - partial_evaluators
-            if missing:
-                raise PendingRequestClosure(
-                    tuple(
-                        (participant.submission_sha256, f"partial_inventory:{who}")
-                        for who in sorted(missing)
-                    )
-                )
-        for ref in participant.evaluators:
-            signed = SignedRequestTerminal.model_validate_json(
-                read_endpoint_object(objects, ref.terminal_sha256)
-            )
-            assignment = read_request_terminal(
-                signed,
-                objects,
-                policy,
-                opened_at_block=view.closure("preparation").observed_at_block,
-                completed_by_block=closure.observation.block,
-            )
-            if (
-                assignment.certificate != order
-                or identity(assignment.delivery.receipt.evaluator_hotkey)
-                != identity(ref.evaluator_hotkey)
-                or assignment.participant.consent != retained.record.request.consent
-                or assignment.participant.admission != retained.admission
-                or assignment.participant.admission_snapshot != retained.record.snapshot
-            ):
-                raise ValueError("request terminal differs from the exact assigned participant")
     return closure
 
 

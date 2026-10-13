@@ -120,7 +120,8 @@ async def test_physical_exhaustion_preserves_hints_and_current_control_then_resu
     assert h.blocks.get(walk.original.height) is None
     assert len(_hints(h.item.provider)) == 80
     assert all(walk.calls.count(block_hash) == 1 for block_hash in retained)
-    assert len(set(walk.calls)) == 80
+    assert len(set(walk.calls)) == 79
+    assert walk.original.block_hash not in walk.calls
     assert _files(h.item.provider._cache_root) == before
 
 

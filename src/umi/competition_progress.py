@@ -195,6 +195,31 @@ def report_admission_failure(operation, stage, error):
     )
 
 
+def report_settlement_retry(*, cohort, role, stage, error):
+    """Record bounded causes before memory cleanup, without retaining inputs."""
+    # Failed diagnostics cannot replace the retry or alter work ownership.
+    with suppress(Exception):
+        _emit(
+            {
+                "event": "settlement_retry",
+                "cohort_sha256": (
+                    cohort
+                    if type(cohort) is str and re.fullmatch(r"[0-9a-f]{64}", cohort)
+                    else None
+                ),
+                "role": role if role in {"coordinator", "reviewer"} else "unknown",
+                "stage": stage if stage in {"tick", "maintenance"} else "unknown",
+                "reason_code": _reason(error),
+                "causes": _failure_details(error),
+                "state": "retrying",
+                "eta_seconds": None,
+                "eta_basis": "retry_requires_new_progress_sample",
+                "certification_authority": False,
+            },
+            failed=True,
+        )
+
+
 def report_container_command_failure(command, returncode, stderr):
     """Keep runtime errors useful without logging arguments or bearer URLs."""
     if command not in {"info", "ps", "image", "container", "load", "create", "start", "stop", "rm"}:

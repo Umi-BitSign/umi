@@ -26,9 +26,13 @@ canonical serialization bytes with a 64 MiB retained key/output budget and
 65,536 entries. Nested preparation shares the assembly budget; the cache clears
 on success or failure before later waits. This is not a process RSS limit: Python
 bookkeeping, transient snapshots and input models consume additional memory.
-Schema, signature, authority and source checks still execute on every replay;
+The serialization cache is separate from durable native verification below;
 aggregate streaming remains uncached. Oversize values use ordinary serialization
 and are not rejected by this optimization.
+Plain single-field `{"hex":"..."}` objects with ASCII alphanumeric contents use
+direct encoding of the same RFC 8785 bytes. This avoids generic string escaping
+for retained binary evidence without changing its format, signatures or replay
+checks; no migration is needed.
 
 Finite substages report `completed`, `total`, `unit`, `percent`,
 `elapsed_seconds`, `eta_seconds` and `eta_samples`. Counts advance only after an
@@ -60,12 +64,381 @@ estimates for complete local replay and cooperative child cleanup. Progress
 output must use a diagnostic channel separate from an exact RPC response or a
 success contract that requires empty stderr.
 
+Settlement retry events retain the cohort, role, `tick` or `maintenance` boundary
+and bounded causal error types, reason codes and native source locations. They
+omit exception messages, inputs and URLs. The event is emitted before rejected
+input frames are released, including through the series scheduler. A retry
+withdraws the current ETA until progress supplies a new sample; diagnostic sink
+failures cannot change the retry or cancellation result.
+
 Report the stage name with every percentage and ETA. Separate nested substages
 and repeated replays; do not add their percentages or describe a completed
 object inventory as completed certification. Use the native certified phase
 history, verified reward package and finalized chain observation to establish
 those milestones. These log records explicitly carry
 `certification_authority: false`.
+
+## Durable native verification
+
+Settlement and reward owners retain completed closure, participant, terminal,
+endpoint ancestry/content, execution and paid-work verification under private
+state. A restart or later phase reuses a result
+only for the same original evidence, policy and lineage, owner, signed interval
+and native verification rules. Each independent owner establishes its own result.
+Current history, finality, authority, signature creation and chain selection keep
+their native checks. A stored object alone does not establish valid miner work.
+
+The first package read imports its exact native envelope and original object bytes
+into a private immutable snapshot. Subsequent reads compare the actual package and
+object file identities and metadata; unchanged payloads need no repeated hashing
+or evidence replay. Dependency coverage and resource budgets are still counted
+when a verdict is reused. Payloads are read when a new consumer actually needs them.
+A completed participant's verdict survives interruption before full closure.
+
+The default verdict location is
+`promotion_directory/verification/<series-sha256>/native`. A reviewer and its
+predecessor preparation share that location and verification context. Separate
+role promotion directories do not share state automatically. To reuse native
+facts across roles of the **same validator authority**, explicitly set
+`UMI_NATIVE_VERIFICATION_DIRECTORY` to one private directory visible to all of
+those services. Each series/policy/chain-reader context gets a separate child
+directory. Preserve each service's promotion roots, journals and configured
+bindings; for a service with `RootDirectory`, expose the same host directory
+with an explicit service-manager bind. Independent validator authorities must
+have separate private directories. Qualify ownership, access, restart and
+role-to-role reuse before enabling the override.
+
+For generated systemd successor services, configure this variable through the
+unit's `Environment=` or `EnvironmentFile=` setting. The generated start and stop
+commands explicitly preserve it through their clean environment. An unset or
+empty setting retains the default location; nonempty paths must be absolute.
+Existing generated drop-ins that lack the explicit assignment need a supported
+host upgrade to the new signed environment contract before enabling shared
+reuse. Recovery and drain of older signed hosts retain their original command
+bytes; upgrading the operator tool alone does not change those controls. Preserve
+their journals, promotion roots and existing bindings, and verify the effective
+process environment and namespace access after the switch. Keep
+this repair instruction while an installed successor uses the older rendering.
+
+Enabling this override reads an existing completed local verdict and copies its
+metadata into shared state before reuse; it does not repeat native verification
+or delete the local record. Retain that fallback reader while a supported owner
+still has completed verdicts only in its former default directory. A private
+nonblocking owner lock prevents simultaneous workers from repeating the same
+first verification; contention reports `waiting_for_owner` and remains pending.
+
+Existing installations need no reset or signed format conversion. Their first
+successful native review records the missing private verdicts; original packages,
+journals, account paths, clocks and signatures remain unchanged. Interrupted import
+resumes completed object checkpoints. Invalid private metadata is reported as
+`repair_required` and rebuilt from originals; changed or missing immutable objects
+require restoration from the unchanged selected package. Unsupported signed inputs
+remain errors. Retain this compatibility path while installed owners have original
+packages without snapshots; it may be removed only after those owners have imported
+and qualified their retained inputs.
+
+`umi-native-verification-reuse/1` events report misses, retained results, hits,
+invalidation and required repair. Completion markers distinguish a lost completed
+record from a first read. Snapshot preparation emits a labeled capacity planning
+range before measured object import/identity and dependency accounting
+also emit ordinary counted progress, elapsed time and substage ETA. Receipt writes
+are atomic and publication failures remain visible; completed verdicts are not
+silently evicted or dropped. These records do not certify a cohort or authorize
+weights. There is no independent receipt or snapshot metadata size ceiling;
+native selected evidence capacities and per-operation accounting still apply.
+Native verification and JSON shape rule identifiers change only when accepted
+validation semantics change, so unrelated releases preserve completed work.
+
+`competition_verification_rules.json` binds the verifier's source dependency
+closure to its explicit semantic ABI. The runtime refuses an unqualified source
+change before reading verdicts. For a compatible implementation change, regenerate
+the candidate manifest with `python tools/verification_manifest.py`, retain the ABI,
+and qualify native historical/restart/reward parity before release. Change the ABI
+when accepted semantics change. A manifest refresh alone is not qualification.
+Storage identity is separate from the native ABI, so a verifier rule change does
+not force unchanged immutable package objects to be extracted again.
+
+The same manifest lists qualified external distribution versions, including their
+installed dependency closure. Missing or unqualified versions stop the owner
+before receipt access. A normal manifest refresh preserves those allowlists and
+refuses new versions. Use `python tools/verification_manifest.py
+--candidate-external-versions` to add candidate installed versions, then separately
+qualify compatibility before release. Compatible external versions retain the
+same native ABI and completed verdicts; accepted semantic changes require an ABI
+change. Validate the installed wheel and dependency inventory before cutover.
+
+## Reward-history checkpoints and repair
+
+The reward-history owner keeps successful per-block native facts in its original
+private journal. These facts bind the chain-configuration digest, control hotkey, initial block,
+original directory and database identity, source-record mutation identities and
+verifier semantics. Restart restores the compact verified prefix without rereading or
+rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
+require a fresh owned finalized-chain check. A raw archive frame or a progress
+log is not a successful-verification receipt.
+
+Historical capture reuses the original owned finalized header when it is retained,
+avoiding another target hash/header RPC. An archived target header can also supply
+the final link of a historical ancestry walk; it remains an untrusted hint until
+every link reaches the owned finalized descendant. Missing intermediate headers
+still use normal recovery. Malformed owned records and corrupt durable hints stop
+the operation instead of falling back to replacement data. These optimizations
+preserve the original evidence format, state bindings and current-finality checks.
+
+Retained block verification supports an explicit local
+`service.history_verification` selection in both standing-writer and
+coordinator/reviewer configurations:
+
+```json
+{
+  "schema": "umi-history-verification-profile/1",
+  "workers": 2,
+  "maximum_in_flight": 2,
+  "maximum_in_flight_bytes": 637534208
+}
+```
+
+Omitting this field preserves existing serial behavior and canonical configuration
+bytes. Selecting it does not alter a signed cohort, a clock, the history root or
+its receipts. Current and configured predecessor histories, coverage collection
+and both owner repair commands use the same selection. For each new cohort,
+start the coverage/history owner at launch, retain the complete finalized interval
+from its original authority block, and monitor catch-up during intake, paid work
+and certification. Selecting workers alone does not start a missing capture owner.
+
+The parent authenticates each child header against its owned finalized chain;
+spawned workers receive only immutable evidence and the selected native verifier
+context. They share the serial archive parser, runtime/slot proof checks and
+complete body/event scanner, including parent-runtime changes. Each successful
+result is committed independently, even when an earlier block fails. Only one
+owner applies consecutive results in block order. Gaps and unresolved effects
+cannot become a complete history. Worker shutdown drains started operations;
+an abnormal worker exit cleans its owned native process group while healthy
+peers finish and checkpoint their results. No signing key, RPC connection or
+owner database handle enters a worker.
+
+This parallel path accelerates retained or imported proof verification. Missing
+frames still use the existing serial online native capture path. Do not derive an
+online catch-up ETA or a production throughput promise from offline worker count.
+Each window reserves room for maximum supported frames; the byte budget bounds
+concurrency without reducing the evidence allowance. The default profile requires
+10.5 GiB of conservative aggregate headroom for raw/IPC copies, decoded graphs,
+worker interpreters and native tools. Qualify the selected host's full peak before
+cutover. When host memory admission is configured, its enclosing transient slot
+must cover the entire window; workers never acquire a nested lease. Unsupported
+memory selections fail before loading a window. An absent host memory policy
+leaves provisioning with the operator and does not claim that capacity is present.
+
+Progress inventories read compact durable checkpoint metadata once, in bounded
+batches, and then advance counts as work commits. `captured_blocks`,
+`verified_blocks`, `exported_blocks` and `applied_blocks` are distinct.
+`exported_blocks` describes the selected proof archive. With an R2 exporter,
+`replicated_blocks` counts durable acknowledgements for complete block frames and
+their dependencies. A filesystem exporter has no remote acknowledgement, so its
+replication count remains null with an explicit unavailable-receipt basis. A past
+replication receipt does not assert current R2 availability. Ordered pipeline and
+ahead-of-prefix verification rates are separate; history ETAs use the ordered
+rate. `local_release` separately reports original SQL records moved to R2 and
+logical bytes released. It does not report a smaller SQLite file on disk.
+
+### Optional R2 proof archives
+
+The standing reward writer, reward coordinator/reviewer and settlement service
+accept optional `proof_stores` alongside their existing import/export directory
+paths. The admission owner's `lifecycle.proof_stores` selects the same transport
+for original registration-proof publication. The phase reviewer accepts only
+`proof_stores.imported`. Omission preserves legacy canonical configuration bytes
+and local archive behavior. This transport
+selection does not alter signed plans, clocks, acceptance rules or native proof
+authority. Select it through each service's existing authenticated configuration
+and upgrade boundary; source tests alone do not qualify a deployed successor.
+
+An example selection is:
+
+```json
+{
+  "schema": "umi-proof-archive-stores/1",
+  "imported": {
+    "schema": "umi-r2-proof-archive/1",
+    "credentials_file": "/etc/umi/proof-reader.env",
+    "bucket": "umi-proof-artifacts",
+    "prefix": "cohort-proofs",
+    "read_only": true,
+    "maximum_cache_bytes": 1073741824,
+    "maximum_index_bytes": 4294967296,
+    "timeout_seconds": 60
+  },
+  "exported": {
+    "schema": "umi-r2-proof-archive/1",
+    "credentials_file": "/etc/umi/proof-writer.env",
+    "bucket": "umi-proof-artifacts",
+    "prefix": "cohort-proofs",
+    "read_only": false,
+    "maximum_cache_bytes": 1073741824,
+    "maximum_index_bytes": 4294967296,
+    "timeout_seconds": 60
+  }
+}
+```
+
+Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
+`ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable
+or replicated stores and separate from direct-model credentials. Provision
+read-only bucket credentials for importers and publication permission only for
+exporters. Cache and index limits are explicit host capacities; size them for the
+cohort's retained range and full supported object size. An exhausted capacity
+holds visibly without silently evicting durable verification state. The payload
+cache is bounded, disposable and separate from private acknowledged receipts
+under the original archive's `.remote-state` directory. Each store serializes
+bounded transfers; active payload leases prevent eviction.
+
+The private receipt index uses capability generation 4 and a separate immutable
+completion ledger. Startup upgrades older indexes transactionally using only
+their retained metadata, with counted progress and an ETA. Original receipt
+bytes, owner binding and journal inode stay intact. Old runtimes and reservation
+layout changes refuse this capability; keep its completed ledger with the index.
+A missing receipt is damaged completed state, not permission to import it again.
+
+Objects use content-addressed keys. Complete original `/1` frames publish after
+their dependencies using conditional single PUT, SHA metadata and exact single-PUT
+MD5 ETags. Reads pin the acknowledged generation and check bounded bytes. Transport
+receipts establish replication, never native proof validity: a new independent
+owner still performs its first native verification.
+
+On writable selection, startup migrates retained local `/1` archives before
+consumers run. It preserves exact frames, signed proof bytes and local originals,
+and checkpoints each completed copy. Restart skips unchanged completed payloads
+using private source-identity receipts. Progress includes counts, elapsed time,
+planning or measured ETA, and retry/stall state. A changed completed local identity
+requires explicit exact-byte repair. Retain this compatibility migration while
+any installed or recovery consumer still has local `/1` archives.
+
+Offline `migrate_proof_archive(original, selected, evict=True)` can remove local
+archive payload files only after the complete graph is acknowledged. The caller
+must hold the original service's exclusive upgrade boundary. This library repair
+surface is not an installed cleanup command. Keep permanent `.remote-state`,
+original journal directories and journals; never move their identity to reclaim
+space. SQL externalization replaces raw records with charged immutable aliases
+bound to their original revisions and remote receipts. Existing successful `/1`
+history facts remain unchanged. Deleted raw records free logical capacity and
+reusable SQLite pages, not physical database file size. The remote generation
+fence refuses old runtimes and transitions to reservation-only layouts.
+
+An observed missing, replaced or corrupt remote object creates a persistent
+repair hold. Restore its exact original generation and invoke the original
+owner's `RemoteProofStore.repair_reference` under an explicit repair operation;
+normal retry never adopts another generation. An intact original completion
+ledger can restore its exact missing or damaged receipt only through this
+explicit repair, after checking the original remote generation. Lost or damaged
+completion ledgers, private aliases or source-identity metadata require
+restoration in place from the original owner backup. Remote transport alone
+cannot reconstruct native verification facts.
+Qualify backup/restore, startup migration, interruption, bounded capacity and all
+selected consuming roles before adopting this transport in a cohort.
+
+Supported journals containing only legacy `/1` raw history records receive a
+counted source-identity migration and then a first native checkpoint pass. This
+preserves all original record bytes. Retain that compatibility reader while an
+installed owner or recovery consumer still has uncheckpointed legacy records;
+remove it only after those consumers have completed and qualified migration.
+An older running owner has no supported export of its process-local successful
+prefix. Keep it running through its current handoff when preserving that work
+requires avoiding replay; replacing it needs a disclosed first native checkpoint
+pass over its retained legacy records. Source deployment alone cannot recover
+volatile verification facts.
+
+Migration and history review emit `reward_history_progress` with counts, elapsed
+time, an ETA and its basis, and retrying or stalled states. Restored blocks count
+toward completion but do not inflate measured native throughput. These estimates
+cover history review only, not overall reward finality.
+
+Unreserved history journals keep transactional record counts and byte totals, so
+adding a block does not recount the entire retained history. Older unreserved
+journals receive a metadata-only migration in place. Reserved journals retain
+their original accounting and allowances. Migration emits
+`round_journal_progress` with counts, elapsed time, ETA and retry state.
+
+Capacity history is traversed in bounded batches without the former 32-transition
+ceiling. Its schema and retained bytes are unchanged. An older runtime cannot
+reopen a journal after more than 32 transitions; never discard retained capacity
+history to downgrade. The separate 20 GiB registration domain and two-transition
+RPC semantic restriction are unchanged.
+
+Changed source dependencies or damaged successful records stop with
+`repair_required`; they are not silent cache misses. Restore the exact original
+source and run the bounded owner repair command using the installed interpreter,
+original service account and original configuration. Cooperatively stop the
+applicable owner through its supported service lifecycle first. The repair
+command refuses overlapping ownership; it does not stop services for you.
+
+For a coordinator or reviewer:
+
+```sh
+"$INSTALLED_PYTHON" -m umi.competition_reward_coordinator_cli repair-history --config "$ORIGINAL_CONFIG" --through-block "$LAST_BLOCK" --reason "original source restored"
+```
+
+For the sole reward writer, use its authentic supervisor configuration and
+standing boot configuration, in the same namespace as the installed service:
+
+```sh
+"$INSTALLED_PYTHON" -m umi.competition_supervisor_cli --config "$ORIGINAL_SUPERVISOR_CONFIG" --standing-config "$ORIGINAL_BOOT_CONFIG" --repair-history --through-block "$LAST_BLOCK" --reason "original source restored"
+```
+
+Add `--history predecessor` only to select an explicitly configured predecessor.
+The coordinator holds both current and predecessor service locks and, for its
+publishing role, the original control-writer lock before opening journals. The
+writer uses its native supervisor startup lease and root-approved original boot
+configuration. A coordinator configuration cannot substitute for a writer's
+namespace. Neither route constructs a signer, writer adapter or chain executor.
+
+Repeat the same finite scope to resume after interruption. Completed native facts
+remain in the original journal; unaffected blocks are restored without payload
+reverification. Repair reports its counted scope, elapsed time, ETA basis and
+retry/stall state. The startup planning range covers local open/provider startup
+only; it is not an estimate for the selected history or final reward activation.
+
+These same repair commands also repair damaged record-capacity counters before
+opening the selected history. They rebuild only record lengths and counts under
+the original owner's exclusive locks; signed records and verification results
+are preserved. Healthy counters are reused on repeated commands. Missing native
+verification identities still require their separate restoration in place;
+repairing capacity metadata does not authorize evidence or reset history.
+
+An existing original journal is required. Missing source-identity tables or the
+owner marker require restoration of original metadata before reuse. Do not create
+an empty success index, move the journal to a replacement identity, or treat stored
+proofs as completed checks. This command cannot recover an older running reader's
+volatile verified prefix. Keep that owner running through its handoff when
+preserving those completed checks requires it.
+
+## Paid service review budgets and retained capacity
+
+For a cohort whose signed tracks permit endpoint paid work, the selected phase
+review profile also determines paid-history reads, owner export, native review,
+authority refresh, peer exchange, signing and queue/transport allowances. An older
+`service_signing.read_timeout_seconds` value cannot shorten that full selected
+path. Signed assignment response clocks remain unchanged; a larger transport
+allowance cannot extend the remaining signed response interval.
+
+The reviewer configuration check exposes `service_execution_budget`. Treat
+`managed_service_path_qualified: false` as an outstanding deployment check: compare
+actual owner, reviewer, peer, proxy and unit overrides through
+`validate_service_execution_path` before cutover. Printed source-derived budgets
+are operating allowances, not completion estimates or proof of a managed route.
+
+Provision reviewer transport for every admitted catalog sharing that journal,
+including retained predecessors. Each provisioned claim attempt can require both
+a request and a retry intent. `service_review_capacity_requirement` and
+`validate_service_review_capacity` expose the selected claim/attempt assumptions;
+an attempt assumption does not impose a protocol retry cutoff. Exact retries
+reuse the existing intent. Inspect native remaining request/retry/byte capacity
+and increase the existing configured envelope before it is exhausted.
+
+`maximum_votes` can increase beyond the former 65,536 ceiling while retaining
+original journal identity and bytes; the original explicit value remains in force
+until it is provisioned. Byte accounting still applies. This is neither an
+automatic capacity increase nor a model-only cohort eligibility change. Preserve
+all original signed work and already-earned credit through closure and replay.
 
 ## Recoverable cohort model awards
 
@@ -222,7 +595,14 @@ verifies the complete preserved object once before signing. Standing reward
 coordinators, reviewers and validators repeat that check from their own
 read-only credentials before activation review or package replay. Each retains
 a small private receipt under its own state and checks the current object length
-and ETag on replay. Candidate archives are not copied into a
+and ETag on replay. The completed byte result also binds the authenticated R2
+endpoint and bucket, exact object key, signed bundle and payload, policy, cohort,
+owner and qualified verifier semantics. Reuse reads only object metadata and the
+bounded private result, including the original rights documents. It does not
+download or hash the weights again, and one owner's receipt never substitutes
+for another owner's independent verification. Missing or damaged owned results
+trigger explicit native repair with progress and an ETA; unsafe links, ownership
+or permissions are refused. Candidate archives are not copied into a
 `promotion_directory`; the frozen baseline remains in the native local archive.
 A missing or changed preserved R2 object keeps settlement or activation pending
 or held. No consumer falls back to another object, URL or local candidate.
@@ -1297,11 +1677,19 @@ If every model-enabled plan in the installed series is direct, omit
 
 Each independent `umi-cohort-phase-review-service/7` receives a read-only R2
 credential and the same standing review policy. It authenticates the owner's
-signed object reservation, then reads the complete object itself and checks the
-stream digest, every manifest file and the declared rights documents. It does
+signed object reservation, then reads the complete object itself once and checks
+the stream digest, every manifest file and the declared rights documents. It does
 not trust the owner's byte-verification result and does not retain another model
 archive. The R2 reader credential must not allow writes, multipart creation,
 completion, listing outside its selected bucket, or deletion.
+The upload owner retains byte results under its private `byte-verification`
+directory. Phase reviewers, settlement signers, standing reward coordinators
+and reward writers keep theirs under `direct-model-byte-verification` in their
+existing private service state. Keep these directories through upgrades and
+restarts, independently of the disposable benchmark cache. Existing version-two
+materialization and settlement receipts remain readable; installations without
+the new private result build it during their next necessary native check, without
+rewriting signed evidence or resetting retained journals.
 When the signed host selects only the model track, version seven omits the
 endpoint host entirely. A mixed-track selection still configures the endpoint
 host and preserves its ordinary independent request and decision paths.
@@ -1310,9 +1698,23 @@ Benchmark execution necessarily needs the candidate bytes while its offline
 runtime runs. A version-seven reviewer therefore keeps one bounded candidate
 cache under the benchmark workspace. It streams and verifies the selected
 object into that cache, reuses it across that candidate's cases, and removes the
-old candidate before materializing another one. Materialization is serialized
-and capped by `maximum_materialized_bytes`. It also requires the complete payload
-plus `materialization_free_space_reserve_bytes` to be free before writing; the
+old candidate before materializing another one. All active case leases finish
+before a different selection can replace the cache, including a different request
+for the same bundle. Materialization is serialized and capped by
+`maximum_materialized_bytes`. It checks each file and the full payload while
+writing, then publishes the local immutable receipt without rereading the newly
+written weights. A retry retains completed files and their checks. A changed R2
+namespace or object generation invalidates the pending transfer before reuse.
+Completed aggregate verification survives failures during final publication;
+only an unfinished concatenated SHA256 must reread retained local files, without
+redownloading or repeating their completed per-file checks. Missing local results
+receive visible scoped repair. Preparation, transfer, cache validation, lease
+waiting and eviction report counts, elapsed time, ETA basis and retry/stall status.
+
+Before writing, the remaining new allocation plus
+`materialization_free_space_reserve_bytes` must be free. Verified retained files
+and complete files requiring local receipt repair need no second allocation;
+owned partial files are reclaimed before capacity is measured again. The
 baseline remains in the pinned local archive. Put the benchmark workspace on a
 dedicated quota-controlled scratch filesystem. Source schema 2 binds
 `materialization_filesystem_maximum_bytes` and at least one
@@ -1366,15 +1768,43 @@ artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward
 certification.
 
-Installed reward coverage collectors retain an owner-bound native preparation
-result after successful historical replay, and release the full package graph.
-Every uncached endpoint still verifies eligibility and complete native control
-history. An earlier block reloads and replays the original package, and direct
-model artifact checks keep their existing refresh behavior. The current and
-predecessor collectors share one process-local guard across loading and replay;
-cancellation drains owned work before releasing it. Other reward consumers and
-other processes require separate memory admission. This does not establish the
-whole-host memory envelope by itself.
+Installed reward coverage collectors persist successful native endpoint facts
+bound to their original journal, source generations, package, policy, authority,
+requirement and verifier semantics. Restart can restore unchanged facts from
+compact metadata without loading the package or endpoint payload. Restoration
+still requires the selected owner's complete native history at the exact block;
+a portable point or another owner's receipt cannot establish coverage. R2 cache
+eviction and acknowledged SQL externalization preserve these facts. New endpoints
+and changed dependencies still require their affected native checks.
+
+For direct models, compact dependency receipts bind the selected native verifier,
+standing review policy, original receipt owner and authenticated R2 object
+generation. Restore checks those small receipts and object HEADs without loading
+model weights or the reward package. Older receipts lacking these bindings receive
+an explicitly reported first native qualification; existing durable byte checks
+remain reusable. Older directory-based model acceptances retain their original
+native path. Observed receipt or generation damage stays held even if the original
+later reappears, until explicit scoped repair succeeds.
+
+Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
+under the original model receipt directory. The immutable completion ledger
+detects lost per-item qualification files before new capture can repeat native
+work. An explicit original-owner repair can restore an exact missing qualifier
+from that ledger after receipt and object-generation checks. Lost owner or ledger
+metadata requires restoration in place. Intact older qualifiers receive a counted
+metadata-only migration without rewriting their bytes or loading model payloads.
+Retain this migration while supported owners still have qualifiers without the
+completion ledger; its private capability refuses reservation-layout changes.
+
+Missing or damaged completed results require explicit scoped repair. After exact
+original inputs are restored, `NativeRewardCoverageSource.repair(key, reason=...)`
+requalifies the selected endpoint with progress and ETA and preserves earlier
+successful result bytes. There is no installed coverage-repair CLI in this
+surface. Recovery integration and original-owner metadata restoration must be
+qualified before deployment. The current and predecessor collectors share one
+process-local guard across package loading and replay; cancellation drains owned
+work before releasing it. Other reward consumers and processes require separate
+memory admission. This does not establish the whole-host memory envelope.
 
 
 ### Host memory admission

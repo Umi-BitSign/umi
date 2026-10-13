@@ -15,6 +15,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
+from .competition_host_environment import NATIVE_VERIFICATION_ASSIGNMENT
 from .competition_host_switch import (
     CommittedSuccessorServiceSwitch,
     _read_drop_in,
@@ -59,12 +60,24 @@ def _exec_start_command(value: str) -> str:
     # the configured path, argv and ignore-errors flag. Permit only that known
     # suffix to change. Extra commands, fields or malformed reports must fail.
     match = re.fullmatch(
-        r"(?P<command>\{ path=[^;\n{}]+ ; argv\[\]=[^;\n{}]+ ; ignore_errors=(?:yes|no))"
+        r"(?P<command>\{ path=[^;\r\n{}]+ ; argv\[\]=(?P<argv>[^;\r\n]+)"
+        r" ; ignore_errors=(?:yes|no))"
         r" ; start_time=\[[^\[\]\n]*\] ; stop_time=\[[^\[\]\n]*\]"
         r" ; pid=[0-9]+ ; code=(?:\(null\)|[A-Za-z0-9_-]+) ; status=[0-9]+/[A-Za-z0-9_+-]+ \}",
         value,
     )
     if match is None:
+        raise HostUpgradeError("unexpected successor ExecStart observation")
+    # systemctl retains the literal expansion from the manifest-selected clean
+    # environment contract. Permit that complete argv token, never arbitrary
+    # braces/expansions. Return the original bytes so _running still compares
+    # the complete configured command against the sealed pre-start observation.
+    remainder = re.sub(
+        r"(?<!\S)" + re.escape(NATIVE_VERIFICATION_ASSIGNMENT) + r"(?!\S)",
+        "",
+        match["argv"],
+    )
+    if "{" in remainder or "}" in remainder:
         raise HostUpgradeError("unexpected successor ExecStart observation")
     return match["command"]
 

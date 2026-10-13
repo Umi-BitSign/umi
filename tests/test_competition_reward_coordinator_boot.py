@@ -19,6 +19,7 @@ from umi import competition_reward_coordinator_boot as boot
 from umi import competition_reward_coordinator_cli as cli
 from umi.competition_reward_decisions import StandingRewardSeries
 from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.open_competition import digest, verify_signature
 from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
@@ -75,8 +76,17 @@ def test_root_selection_and_cli_check_report_no_credentials(config_case, capsys)
         boot.load_reward_coordinator_config(h.path)
 
 
-def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys):
-    logger = logging.getLogger("umi.competition.progress")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "umi.competition.progress",
+        "umi.competition_reward_history_progress",
+        "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_history_repair",
+    ],
+)
+def test_reward_cli_emits_work_progress_once_and_restores_logging(capsys, name):
+    logger = logging.getLogger(name)
     before = (logger.level, logger.propagate, tuple(logger.handlers))
     with cli._logs():
         logger.info("work_progress completed=1 total=2")
@@ -218,6 +228,16 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             else h.config.maximum_history_bytes,
         }
     )
+    history_profile = (
+        HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+        if proof_reads
+        else None
+    )
+    config = config.model_copy(
+        update={
+            "service": config.service.model_copy(update={"history_verification": history_profile})
+        }
+    )
     if role == "reviewer":
         config = boot.RewardCoordinatorConfig.model_validate(
             config.model_dump(by_alias=True)
@@ -290,6 +310,11 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         collector_lifecycle.append("started")
         try:
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
+            assert self.history.verification_profile == history_profile
+            if config.proof_stores is not None:
+                assert self.history.archive.remote.config == config.proof_stores.imported
+                assert self.history.export_archive.remote.config == config.proof_stores.exported
+                assert self.journal.remote_store is self.history.remote_store
             if failure == "coverage":
                 raise OSError("coverage failure")
             if failure == "coverage_exit":
@@ -376,4 +401,23 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
         text=True,
         timeout=20,
     )
-    assert result.returncode == 0 and "{check,run}" in result.stdout and "--config" in result.stdout
+    assert (
+        result.returncode == 0
+        and "{check,run,repair-history}" in result.stdout
+        and "--config" in result.stdout
+        and "--through-block" in result.stdout
+    )
+
+
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+async def test_r2_reward_owner_boot_retains_selection_on_restart(
+    config_case, tmp_path, monkeypatch, role
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    config_case.config, opened, _ = select_remote_proofs(config_case.config, tmp_path, monkeypatch)
+    for _ in range(2):
+        await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
+            config_case, monkeypatch, role, None, True
+        )
+    assert len(opened) == 4

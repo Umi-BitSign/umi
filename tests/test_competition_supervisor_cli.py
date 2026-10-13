@@ -20,6 +20,24 @@ from .test_competition_host_artifacts import sign as sign_host_artifact
 from .test_competition_host_artifacts import staged as _staged_host_fixture
 
 
+@pytest.fixture(autouse=True)
+def restore_process_progress_logger():
+    # run_cli configures process-lifetime stderr logging. Tests invoke several
+    # synthetic CLIs in one interpreter, with a new captured stderr each time;
+    # do not leave that handler pointing at a closed capture in later tests.
+    logger = logging.getLogger("umi.competition.progress")
+    level, propagate, handlers = logger.level, logger.propagate, tuple(logger.handlers)
+    try:
+        yield
+    finally:
+        for handler in tuple(logger.handlers):
+            if handler not in handlers:
+                logger.removeHandler(handler)
+                handler.close()
+        logger.setLevel(level)
+        logger.propagate = propagate
+
+
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     events = []
@@ -210,7 +228,17 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
         assert host.events[-3:] == ["stop-and-unlock", "close-observer", "leave-lock-scope"]
 
 
-@pytest.mark.parametrize("name", ["service", "executor", "coverage_service"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "service",
+        "executor",
+        "coverage_service",
+        "history_progress",
+        "history_checkpoint",
+        "history_repair",
+    ],
+)
 def test_standing_cli_emits_progress_without_enabling_transport_logs(capsys, name):
     logger = logging.getLogger("umi.competition_reward_" + name)
     http = logging.getLogger("httpx")
@@ -715,3 +743,112 @@ def test_root_control_reads_bounded_exact_bytes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli.os, "fstat", observed)
     assert cli._root_control(path, 100) == path.read_bytes()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_history_repair_uses_authenticated_writer_route_without_starting_services(
+    host, monkeypatch, explicit
+):
+    from umi import competition_reward_boot as boot
+    from umi import competition_reward_history_repair as repair
+
+    selection = object()
+
+    def select(path, anchor, *, explicit_path):
+        host.events.append("standing-approval")
+        return selection
+
+    async def run(anchor, path, stop, **kwargs):
+        assert anchor.config is host.inputs.config and stop is host.stop
+        assert path == (
+            Path("/etc/umi/exact-standing.json")
+            if explicit
+            else Path("/etc/umi/standing-reward-boot.json")
+        )
+        assert kwargs == dict(through_block=200, reason="original restored", history="predecessor")
+        host.events.append("owned-history-repair")
+        return dict(status="history_repaired", percent=100)
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
+    monkeypatch.setattr(repair, "run_installed_history_repair", run)
+    result = await cli.run_supervisor(
+        Path("/etc/umi/supervisor.json"),
+        stop_event=host.stop,
+        standing_config=Path("/etc/umi/exact-standing.json") if explicit else None,
+        history_repair=dict(through_block=200, reason="original restored", history="predecessor"),
+    )
+    assert result == dict(status="history_repaired", percent=100)
+    assert host.events == [
+        "read-config",
+        "load-anchor",
+        "verify-anchor-host",
+        "standing-approval",
+        "owned-history-repair",
+    ]
+
+
+async def test_history_repair_refuses_missing_standing_selection(host, monkeypatch):
+    from umi import competition_reward_boot as boot
+
+    monkeypatch.setattr(boot, "select_standing_boot", lambda *args, **kwargs: None)
+    with pytest.raises(ValueError, match="approved standing"):
+        await cli.run_supervisor(
+            Path("/etc/umi/supervisor.json"),
+            stop_event=host.stop,
+            history_repair=dict(through_block=200, reason="original restored"),
+        )
+    assert host.events == ["read-config", "load-anchor", "verify-anchor-host"]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--repair-history"],
+        ["--repair-history", "--through-block", "200"],
+        ["--reason", "original restored"],
+    ],
+)
+def test_writer_repair_cli_requires_explicit_action_scope_and_reason(options):
+    with pytest.raises(SystemExit) as error:
+        cli.run_cli(["--config", "/etc/umi/supervisor.json", *options])
+    assert error.value.code == 2
+
+
+def test_writer_repair_cli_passes_finite_scope_and_reports_completion(monkeypatch, capsys):
+    captured = []
+
+    async def run(path, **kwargs):
+        captured.append((path, kwargs))
+        return dict(status="history_repaired", percent=100)
+
+    monkeypatch.setattr(cli, "run_supervisor", run)
+    assert (
+        cli.run_cli(
+            [
+                "--config",
+                "/etc/umi/supervisor.json",
+                "--standing-config",
+                "/etc/umi/exact.json",
+                "--repair-history",
+                "--through-block",
+                "200",
+                "--reason",
+                "original restored",
+            ]
+        )
+        == 0
+    )
+    assert captured == [
+        (
+            Path("/etc/umi/supervisor.json"),
+            dict(
+                standing_config=Path("/etc/umi/exact.json"),
+                history_repair=dict(
+                    through_block=200,
+                    reason="original restored",
+                    history="current",
+                ),
+            ),
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == dict(status="history_repaired", percent=100)

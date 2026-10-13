@@ -53,6 +53,11 @@ from .test_open_competition import wallet
 pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
 
 
+@pytest.fixture(autouse=True)
+def private_model_verification(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMI_MODEL_VERIFICATION_DIRECTORY", str(tmp_path / "verification"))
+
+
 def options(h, transport=None):
     return dict(
         origin="https://intake.example",
@@ -122,6 +127,7 @@ async def test_signed_history_selects_legacy_delivery(delivery, monkeypatch):
 
 async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(delivery, monkeypatch):
     h = delivery
+    events = []
     first_size = h.request.signed_submission.submission.model_bundle.files[0].size_bytes
     monkeypatch.setattr(client, "CHUNK_BYTES", min(32, first_size // 2))
     native = httpx.ASGITransport(h.app)
@@ -180,7 +186,10 @@ async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(deliv
 
     async with preservation(h):
         receipt = await asyncio.wait_for(
-            client.submit_cohort_model(**options(h, httpx.MockTransport(resume))), 20
+            client.submit_cohort_model(
+                **options(h, httpx.MockTransport(resume)), report=events.append
+            ),
+            20,
         )
     assert writes[0] == (f"/v1/competition/model-uploads/{key}/files/0", offset)
     assert reserved and set(reserved) == {canonical_json_bytes(h.request)}
@@ -195,6 +204,14 @@ async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(deliv
     restart(h)
     again = await asyncio.wait_for(client.submit_cohort_model(**options(h)), 5)
     assert again == receipt
+
+    progress = [event for event in events if event.get("schema") == "umi-transport-work-progress/1"]
+    finished = {event["stage"]: event for event in progress if event["status"] == "completed"}
+    assert finished["model_source_verification"]["native_bytes"] == 0
+    assert finished["model_upload"]["restored_bytes"] >= offset
+    assert finished["model_payload_preservation"]["percent"] == 100
+    assert finished["model_participation_admission"]["eta_seconds"] == 0
+    assert any(event["status"] == "retrying" and event["eta_seconds"] is None for event in progress)
 
 
 @pytest.mark.parametrize("failure", ["wrong-wallet", "bytes", "hardlink", "symlink"])

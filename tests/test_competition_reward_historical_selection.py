@@ -27,7 +27,7 @@ pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=T
 
 async def captured(h, height):
     history = (await h.reader.advance(h.item.provider, through_block=height)).history
-    return history, h.reader._tip.slot
+    return history, await h.reader.review_control(h.item.provider, height)
 
 
 def highwater(reader):
@@ -58,7 +58,7 @@ async def test_past_selection_after_newer_checkpoint_and_offline_restart(handoff
         assert result.effective_selection.decision_sha256 == digest(effective.decision)
     assert not result.chain_submission_authorized
 
-    # A process restart replays retained native block evidence, with no old
+    # A process restart restores retained native block results, with no old
     # block/state RPC or coordinator decision source. No freshness clock is reset.
     c.reader, h.reader = c.reopen(), await h.restart()
     h.offline_through = h.end

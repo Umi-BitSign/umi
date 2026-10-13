@@ -12,6 +12,7 @@ from .competition_cohort_execution_journal import CohortExecutionConfig
 from .competition_cohort_intake import CohortIntakeConfig
 from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import ObjectCapacity, _disjoint
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import (
@@ -70,6 +71,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     promotion_directory: Directory
     settlement_directory: Directory
     proof_import_directory: Directory
+    proof_stores: ProofArchiveStores | None = None
     proof_export_directory: Directory
     exchange_inbox: Directory
     exchange_outbox: Directory
@@ -87,6 +89,8 @@ class SettlementServiceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.proof_stores is None:
+            value.pop("proof_stores", None)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
         if self.original_sources is None:
@@ -108,6 +112,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                 self.promotion_directory,
                 self.settlement_directory,
                 self.proof_import_directory,
+                *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,

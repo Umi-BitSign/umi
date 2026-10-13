@@ -349,6 +349,7 @@ class NativeDirect:
             self.policy,
             wallet("Charlie").hotkey.ss58_address,
             multipart=reader,
+            verification_root=self.root / (role + "-byte-verification"),
         )
 
     def configure_model_reviews(self, o, client, signatures):

@@ -2133,7 +2133,15 @@ request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
 transport category such as `timeout` or `connection_closed`. Inspect every
 provider entry: a rate-limit refusal from the last fallback does not establish
 why the authenticated primary failed. Reports omit remote text, headers and
-credentials. These diagnostics do not change fallback or proof-validation rules.
+credentials. Native proof-validation rules remain unchanged.
+
+Historical `chain_getBlock` reads use the raw block reader's 130 MiB response
+allowance, including through the shared registration transport. Its separate
+storage and proof methods retain their smaller registration bounds. Local
+receive-size failures, including a locally initiated WebSocket close code `1009`,
+report `proof_rpc_response_limit` with the method and block hash. They require
+repair rather than another provider attempt under the same bound; an ordinary
+remote close remains `proof_rpc_failed`. Remote close reason text is omitted.
 
 Persistent proof connections are reused only while their WebSocket state is
 open. A socket closed during an idle period is discarded before the next read,

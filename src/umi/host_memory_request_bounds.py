@@ -91,6 +91,61 @@ def stage_evidence_budget():
         _evidence_values.reset(token)
 
 
+def stage_shape_identity():
+    """Bind retained shape counts to every selected bound and these check rules."""
+    bounds = stage_bounds()
+    value = None if bounds is None else bounds.model_dump(mode="json", by_alias=True)
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(b"umi-verified-json-shape-v1\0" + raw).hexdigest()
+
+
+def replay_stage_json_shape(
+    *, byte_sha256, size, values, bounds_sha256, maximum_bytes, kind="object"
+):
+    """Account for an owner-authenticated shape descriptor without its payload.
+
+    The caller must establish unchanged immutable bytes and a successful native
+    shape check before retaining these fields. A digest supplied by an untrusted
+    source is not that authority. Changed bounds return a miss without charging;
+    matching bounds still enforce the current byte and aggregate value budgets.
+    Ordinary reads and retained descriptors share the raw-byte SHA256 identity.
+    This does not charge declaration bytes or replace semantic verification.
+    """
+    if bounds_sha256 != stage_shape_identity():
+        return False
+    if (
+        type(byte_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", byte_sha256) is None
+        or type(size) is not int
+        or size <= 0
+        or type(maximum_bytes) is not int
+        or maximum_bytes <= 0
+        or kind not in ("input", "object", "declaration")
+    ):
+        raise ValueError("invalid retained JSON shape descriptor")
+    if size > stage_limit("maximum_" + kind + "_bytes", maximum_bytes):
+        raise ValueError("requests-stage JSON exceeds its qualified byte bound")
+    bounds = stage_bounds()
+    if bounds is None:
+        if values is not None:
+            raise ValueError("unbounded retained JSON shape has an unexpected value count")
+        return True
+    if type(values) is not int or not 1 <= values <= bounds.maximum_json_values:
+        raise ValueError("invalid retained JSON shape value count")
+    aggregate = _evidence_values.get()
+    if aggregate is not None:
+        fingerprint = bytes.fromhex(byte_sha256)
+        if fingerprint in aggregate["seen"]:
+            if aggregate["seen"][fingerprint] != values:
+                raise ValueError("retained JSON shape changed its verified value count")
+        else:
+            if values > aggregate["remaining"]:
+                raise ValueError("requests-stage JSON exceeds its qualified value count")
+            aggregate["seen"][fingerprint] = values
+            aggregate["remaining"] -= values
+    return True
+
+
 def _tokens(raw):
     """Linear scan with bounded auxiliary memory, including malformed strings."""
     index = 0

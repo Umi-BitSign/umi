@@ -97,6 +97,46 @@ async def test_legacy_service_configuration_keeps_canonical_bytes(host):
     assert retained.request_window_miner_hotkeys == ()
 
 
+async def test_profile_reaches_native_paid_export_authority_transport_and_peer(host, monkeypatch):
+    from .test_competition_cohort_review_budget import profile
+
+    h, s = host.open(), host.s
+    owner = h.service.config.admission_owner
+    owner.phase_review_budget = profile(h.service.intake.policy, export_seconds=43200)
+    owner.reviewers = tuple(
+        peer.model_copy(update={"phase_review_budget": owner.phase_review_budget})
+        for peer in owner.reviewers
+    )
+    h = host.open()
+    assert h.timeout_seconds == 43200
+    original = dispatch.ServiceWorkExporter
+    selected = []
+
+    def exporter(*args, **kwargs):
+        value = original(*args, **kwargs)
+        selected.append(value.timeout_seconds)
+        return value
+
+    monkeypatch.setattr(dispatch, "ServiceWorkExporter", exporter)
+    raw = await h.respond(
+        ServiceWorkLookup(
+            schema="umi-service-work-lookup/1",
+            claim=s.c.claim,
+            challenge="cd" * 32,
+        )
+    )
+    assert SignedServiceWorkResponse.model_validate_json(raw).response.assignment == s.c.assignment
+    assert selected == [43200]
+    worker = await h.worker(host.catalog)
+    assert worker.transport.authority_timeout == h.budget.dispatch_seconds
+    assert worker.transport.timeout == max(
+        h.config.operation_timeout_seconds, worker.transport.limits.inference_timeout_seconds
+    )
+    assert worker.transport.origin.__self__.timeout == h.operation_timeout_seconds
+    peers = [port.args[0] for port in worker.reviewers.values()]
+    assert all(p.requests.timeout_seconds == h.budget.exchange_seconds for p in peers)
+
+
 @pytest.fixture
 async def host(networked, tmp_path, monkeypatch):
     s, c, p = networked, networked.c, networked.p
@@ -134,7 +174,9 @@ async def host(networked, tmp_path, monkeypatch):
         config=SimpleNamespace(
             dispatch=cfg,
             admission_owner=SimpleNamespace(
-                reviewers=peers, owner_hotkey=p.validator.hotkey.ss58_address
+                reviewers=peers,
+                owner_hotkey=p.validator.hotkey.ss58_address,
+                phase_review_budget=None,
             ),
         ),
         intake=SimpleNamespace(policy=p.c.policy, config=SimpleNamespace(cohorts=p.e.cfg.cohorts)),

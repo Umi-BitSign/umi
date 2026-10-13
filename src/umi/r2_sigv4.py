@@ -243,7 +243,15 @@ class R2SigV4:
             canonical_name = name.lower()
             canonical_value = " ".join(value.strip().split())
             if (
-                canonical_name not in {"x-amz-copy-source", "x-amz-copy-source-range"}
+                canonical_name
+                not in {
+                    "x-amz-copy-source",
+                    "x-amz-copy-source-range",
+                    "if-match",
+                    "if-none-match",
+                    "content-md5",
+                    "x-amz-meta-sha256",
+                }
                 or canonical_name in headers
                 or not canonical_value
                 or len(canonical_value) > 4096
@@ -281,7 +289,11 @@ class R2SigV4:
             "Host": host,
             "X-Amz-Content-SHA256": payload_sha256,
             "X-Amz-Date": timestamp,
-        } | {name: value for name, value in headers.items() if name.startswith("x-amz-copy-")}
+        } | {
+            name: value
+            for name, value in headers.items()
+            if name not in {"host", "x-amz-content-sha256", "x-amz-date"}
+        }
 
     def copy_source_header(self, key: str) -> str:
         """Return the encoded bucket/key value required by UploadPartCopy."""

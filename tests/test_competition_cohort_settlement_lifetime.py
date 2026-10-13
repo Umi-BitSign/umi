@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import weakref
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,9 @@ def graph(node):
 
 def blank():
     node = object.__new__(CohortSettlementService)
+    # These lifecycle fixtures replace native verification with tiny graph ports.
+    # Supply its owner scope explicitly, just as the real constructor does.
+    node.verification_reuse = SimpleNamespace(selected=nullcontext)
     node.data = node.votes = node.controller = node.phases = node.exchange = None
     node.batch_votes = ((), ())
     node.retained_result_votes = ()

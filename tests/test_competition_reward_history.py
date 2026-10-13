@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import traceback
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -666,7 +667,8 @@ async def test_one_frame_capture_overlaps_publication_without_advancing_prefix(
         assert h.body_requests == [first, first + 1]
         assert h.reader._next == first
         assert h.reader._tip is None and h.reader._prefixes == {}
-        assert h.reader.journal.get("control_history_block", str(first + 1)) is None
+        # Prefetched proof success now owns its persistence independently of
+        # this blocked predecessor. Neither result advances the ordered prefix.
         assert (h.reader.journal.get("control_history_block", str(first)) is not None) == (
             stage == "export"
         )
@@ -788,8 +790,38 @@ async def test_publication_failure_discards_lookahead_and_preserves_original_err
     with pytest.raises(OSError) as raised:
         await task
     assert raised.value is failure
+    frames = {frame.name for frame in traceback.extract_tb(raised.value.__traceback__)}
+    assert "failed" in frames
+    assert "prepared" not in frames
     assert finished.is_set() and not h.reader._lock.locked()
     assert h.reader._next == first
+
+
+async def test_native_preparation_failure_preserves_original_traceback_and_prefix(
+    history_case, monkeypatch
+):
+    from umi import competition_reward_control_writes as module
+
+    h = history_case
+    first = h.old.height
+    await h.reader.advance(h.item.provider, through_block=first)
+    prefix = await h.reader.verified_prefix(first)
+    # Reach the real native proof path and reject its completed evidence at a
+    # validation boundary. A stubbed _prepare would not qualify these frames.
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "MAX_WRITE_EVIDENCE_BYTES", 1)
+        with pytest.raises(ValueError, match="evidence exceeds its byte bound") as raised:
+            await h.reader.advance(h.item.provider, through_block=h.end)
+    frames = {frame.name for frame in traceback.extract_tb(raised.value.__traceback__)}
+    assert {"_prepare_durable", "_prepare", "capture_control_writes", "_proved_writes"} <= frames
+    assert h.reader._next == first + 1
+    assert await h.reader.verified_prefix(first) == prefix
+    assert h.reader.checkpoints.load(first + 1) is None
+    assert h.reader.progress.latest["state"] == "retrying"
+    assert not h.reader._lock.locked() and not h.item.provider._lock.locked()
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    assert h.body_requests.count(first) == 1
+    assert h.body_requests.count(first + 1) == 2
 
 
 async def test_failed_native_lookahead_preserves_committed_prefix(history_case):
@@ -817,6 +849,9 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
     await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
     h.offline_through = first + 1
     h.reader = await h.restart()
+    # Exercise native preparation, rather than the independently tested durable
+    # result restore path, so the injected wrong native height is actually used.
+    monkeypatch.setattr(h.reader.checkpoints, "load", lambda height: None)
     prepare = h.reader._prepare
     requested = []
 
@@ -838,8 +873,9 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
 
 
 @pytest.mark.parametrize("publication", ["save", "export"])
+@pytest.mark.parametrize("native_failure", [False, True])
 async def test_repeated_cancellation_drains_publication_and_native_lookahead_before_release(
-    history_case, monkeypatch, tmp_path, publication
+    history_case, monkeypatch, tmp_path, publication, native_failure
 ):
     from umi.competition_reward_proof_archive import RewardProofArchive
 
@@ -869,6 +905,8 @@ async def test_repeated_cancellation_drains_publication_and_native_lookahead_bef
         if calls == 2:
             loop.call_soon_threadsafe(native_started.set)
             assert release_native.wait(10), "prefetched native proof thread was abandoned"
+            if native_failure:
+                return False
         return verify(**kwargs)
 
     monkeypatch.setattr(h.reader, method, blocked_publication)
@@ -897,7 +935,12 @@ async def test_repeated_cancellation_drains_publication_and_native_lookahead_bef
         await task
     assert not h.reader._lock.locked() and not h.item.provider._lock.locked()
     assert h.reader._next == first
-    assert h.reader._load(first) is not None and h.reader._load(first + 1) is None
-    h.offline_through = first
+    assert h.reader._load(first) is not None
+    assert (h.reader._load(first + 1) is None) == native_failure
+    assert h.reader.checkpoints.load(first) is not None
+    assert (h.reader.checkpoints.load(first + 1) is None) == native_failure
+    h.offline_through = first if native_failure else first + 1
     h.reader = await h.restart()
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    assert h.body_requests.count(first) == 1
+    assert h.body_requests.count(first + 1) == (2 if native_failure else 1)

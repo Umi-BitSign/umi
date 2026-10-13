@@ -11,7 +11,6 @@ verification remains required before model admission.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -56,6 +55,7 @@ from .competition_cohort_model_static_review import (
 )
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_remote_model_verification import verify_remote_model
 from .competition_round_journal import RoundJournal
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
@@ -65,7 +65,7 @@ from .private_files import (
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
-from .r2_multipart import MAXIMUM_RANGE_BYTES, R2MultipartClient, R2ObjectHead
+from .r2_multipart import R2MultipartClient, R2ObjectHead
 
 
 class DirectModelUploadPending(OSError):
@@ -992,36 +992,20 @@ class DirectModelUploadOwner:
         *,
         expected_head: R2ObjectHead | None = None,
     ) -> R2ObjectHead:
-        observed = await self.multipart.head(object_key)
-        if observed is None:
-            raise DirectModelUploadPending("direct upload object is unavailable")
-        head = R2ObjectHead(size_bytes=observed.size_bytes, etag=observed.etag)
-        if head.size_bytes != payload.total_bytes or (
-            expected_head is not None
-            and (head.size_bytes, head.etag) != (expected_head.size_bytes, expected_head.etag)
-        ):
-            raise ValueError("direct upload object metadata changed")
-        stream_hash = hashlib.sha256()
-        offset = 0
-        for record in bundle.files:
-            file_hash = hashlib.sha256()
-            remaining = record.size_bytes
-            while remaining:
-                size = min(remaining, MAXIMUM_RANGE_BYTES)
-                data = await self.multipart.read_range(object_key, offset=offset, size_bytes=size)
-                if len(data) != size:
-                    raise ValueError("direct upload verification range differs")
-                stream_hash.update(data)
-                file_hash.update(data)
-                offset += size
-                remaining -= size
-            if file_hash.hexdigest() != record.sha256:
-                raise ValueError("direct upload file differs from its manifest")
-        if offset != payload.total_bytes or stream_hash.hexdigest() != payload.payload_sha256:
-            raise ValueError("direct upload payload digest differs")
-        final = await self.multipart.head(object_key)
-        if final is None or (final.size_bytes, final.etag) != (head.size_bytes, head.etag):
-            raise ValueError("direct upload object changed while verifying")
+        _, head = await verify_remote_model(
+            self.multipart,
+            object_key,
+            bundle,
+            payload,
+            root=Path(self.config.directory) / "byte-verification",
+            context={
+                "cohort_sha256": self.config.cohort_sha256,
+                "owner_hotkey": identity(self.config.owner_hotkey),
+                "delivery": digest(self.config.delivery),
+                "policy_sha256": None if self.policy is None else digest(self.policy),
+            },
+            expected_head=expected_head,
+        )
         return head
 
     async def verify(

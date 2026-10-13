@@ -29,6 +29,7 @@ from umi.competition_reward_handoff_models import (
     LegacyRewardHandoffPlan,
     StandingRewardHandoffPlan,
 )
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.competition_reward_host import StandingRewardHostApproval
 from umi.competition_reward_manifest import (
     RewardOpportunityTerms,
@@ -468,6 +469,16 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
             else i.value.maximum_history_bytes,
         }
     )
+    history_profile = (
+        HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+        if proof_reads
+        else None
+    )
+    selected = selected.model_copy(
+        update={
+            "service": selected.service.model_copy(update={"history_verification": history_profile})
+        }
+    )
     events, providers = [], []
 
     class Provider:
@@ -489,6 +500,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         old = i.value.legacy_chains[0]
         assert kwargs["legacy_providers"] == {digest(old.chain): providers[1]}
         assert providers[1].kwargs["resources"] == old.resources
+        assert kwargs["history"].verification_profile == history_profile
         assert kwargs["history"].config_sha256 == digest(i.value.chain)
         assert kwargs["history"].journal.maximum_bytes == selected.maximum_history_bytes
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
@@ -500,6 +512,10 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert collection.history.export_archive.root == Path(i.value.proof_export_directory)
         assert collection.journal.archive is collection.history.archive
         assert collection.journal.export_archive is collection.history.export_archive
+        if selected.proof_stores is not None:
+            assert collection.history.archive.remote.config == selected.proof_stores.imported
+            assert collection.history.remote_store is collection.history.export_archive.remote
+            assert collection.journal.remote_store is collection.history.remote_store
         assert kwargs["opportunity"] == collection.opportunity
         if failure == "service":
             raise RuntimeError("fixture service failure")
@@ -527,6 +543,14 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
     candidate, approval = successor_boot(i)
     candidate = candidate.model_copy(update={"maximum_history_bytes": 64 * 1024**3})
     i.save(Path(candidate.approval_path), canonical_json_bytes(approval))
+    history_profile = HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+    candidate = candidate.model_copy(
+        update={
+            "service": candidate.service.model_copy(
+                update={"history_verification": history_profile}
+            )
+        }
+    )
     events, providers = [], []
 
     class Provider:
@@ -554,6 +578,8 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert coverage.preparation.reader.series == i.value.series
         assert coverage.preparation.manifest == i.value.manifest
         assert coverage.profile == i.value.eligibility
+        assert coverage.history.verification_profile == history_profile
+        assert kwargs["history"].verification_profile == history_profile
         assert coverage.history.archive is kwargs["history"].archive
         assert coverage.history.export_archive is kwargs["history"].export_archive
         assert coverage.history.journal.maximum_bytes == 64 * 1024**3
@@ -606,3 +632,17 @@ def test_content_reader_does_not_confuse_signed_envelope_with_decision_identity(
     path.write_bytes(path.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="canonical"):
         files.decision(digest(decision.decision))
+
+
+async def test_r2_writer_boot_retains_archive_selection_across_restart(
+    inputs, tmp_path, monkeypatch
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    inputs.value, opened, _ = select_remote_proofs(inputs.value, tmp_path, monkeypatch)
+    for _ in range(2):
+        await test_native_assembly_preserves_configuration_and_closes_owned_providers(
+            inputs, monkeypatch, None, True
+        )
+    assert len(opened) == 4
+    assert [s.config.read_only for s in opened] == [True, False, True, False]

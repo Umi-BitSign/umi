@@ -652,3 +652,26 @@ async def test_request_readiness_requires_exact_fresh_dispatch_observation(lifec
     ) as client:
         live = LiveRequestPhaseObserver(source, "https://public.example", client=client)
         assert await live._ready(state, capture) is (fault is None)
+
+
+async def test_r2_lifecycle_publishes_original_registration_proofs_across_restart(
+    host, tmp_path, monkeypatch
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    selected, opened, server = select_remote_proofs(host.config.lifecycle, tmp_path, monkeypatch)
+    host.service.config = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(host.config.model_copy(update={"lifecycle": selected}))
+    )
+    await test_configured_phase_owner_recovers_quorum_and_holds_request_start(host)
+    async with host.open() as app:
+        observation = execution_boundary(await host.h.provider.collect())
+        await app.state.lifecycle.proofs.publish(observation)
+        expected = await host.h.provider.retained_archive(observation)
+    async with host.open() as app:
+        assert await app.state.lifecycle.proofs.read(observation) == expected
+        await app.state.lifecycle.proofs.publish(observation)
+    assert opened and len(opened) % 2 == 0
+    assert [store.config.read_only for store in opened] == [True, False] * (len(opened) // 2)
+    assert any("/frames/registration/" in key for key in server.objects)
+    assert not list(Path(selected.proof_export_directory).glob("registration/*.json"))

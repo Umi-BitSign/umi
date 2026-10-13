@@ -14,7 +14,6 @@ import math
 import os
 import re
 import selectors
-import signal
 import subprocess
 import threading
 import time
@@ -23,6 +22,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 
+from .native_process_group import kill_native_process, native_start_new_session
 from .pinned_artifact import PinnedArtifact, PinnedArtifactError, staged_pinned_artifacts
 
 REQUEST_SCHEMA = "umi-substrate-proof/1"
@@ -133,10 +133,7 @@ def _communicate_bounded(
             process.wait(timeout=max(0, deadline - time.monotonic()))
         return bytes(output)
     except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (AttributeError, OSError):
-            process.kill()
+        kill_native_process(process)
         process.wait()
         raise
     finally:
@@ -370,7 +367,7 @@ class SubprocessStorageProofVerifier:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     close_fds=True,
-                    start_new_session=True,
+                    start_new_session=native_start_new_session(),
                     env={"LANG": "C", "LC_ALL": "C"},
                 )
                 break

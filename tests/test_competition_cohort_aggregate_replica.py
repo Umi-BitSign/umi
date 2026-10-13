@@ -111,8 +111,13 @@ def test_publication_failure_and_exact_retry_keep_verified_bytes(files, monkeypa
     original_fsync, original_rename = replica.os.fsync, replica.os.rename
 
     def fsync(descriptor):
-        directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
-        if (directory and failure == "directory_fsync") or (
+        info = os.fstat(descriptor)
+        directory = stat.S_ISDIR(info.st_mode)
+        publication_directory = directory and (info.st_dev, info.st_ino) == (
+            destination.parent.stat().st_dev,
+            destination.parent.stat().st_ino,
+        )
+        if (publication_directory and failure == "directory_fsync") or (
             not directory and failure == "file_fsync"
         ):
             raise OSError("injected durability refusal")
@@ -135,3 +140,77 @@ def test_publication_failure_and_exact_retry_keep_verified_bytes(files, monkeypa
     assert destination.read_bytes() == raw
     if inode is not None:
         assert destination.stat().st_ino == inode
+
+
+def test_stable_retry_uses_no_payload_reads(files, monkeypatch):
+    copy(files)
+    # Newly materialized outputs need their first stable-identity native check.
+    copy(files)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unchanged verified aggregate was reread")
+
+    monkeypatch.setattr(replica, "_transfer", forbidden)
+    copy(files)
+
+
+def test_only_missing_destination_receipt_is_repaired(files, monkeypatch, caplog):
+    import hashlib
+    import json
+
+    _source, destination, _, _ = files
+    copy(files)
+    copy(files)
+    root = (
+        destination.parent
+        / ".aggregate-verification"
+        / hashlib.sha256(destination.name.encode()).hexdigest()
+    )
+    slot = hashlib.sha256(json.dumps(str(destination), separators=(",", ":")).encode()).hexdigest()
+    (root / (slot + ".json")).unlink()
+    native = replica._transfer
+    reads = []
+
+    def observed(path, *args, **kwargs):
+        reads.append(path)
+        return native(path, *args, **kwargs)
+
+    monkeypatch.setattr(replica, "_transfer", observed)
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        copy(files)
+    assert reads == [destination]
+    assert "completed_byte_receipt_missing" in caplog.text
+    assert "byte_receipt_native_repair_persisted" in caplog.text
+
+
+def test_replacement_during_rename_cannot_acquire_copy_verdict(files, monkeypatch):
+    source, destination, _, raw = files
+    native = replica.os.rename
+
+    def replace(old, new):
+        native(old, new)
+        destination.unlink()
+        destination.write_bytes(b"x" * len(raw))
+        destination.chmod(0o600)
+
+    monkeypatch.setattr(replica.os, "rename", replace)
+    with pytest.raises(ValueError, match="output changed"):
+        copy(files)
+    assert source.read_bytes() == raw
+
+
+def test_existing_destination_mutation_after_checkpoint_lookup_refuses(files, monkeypatch):
+    _source, destination, _, raw = files
+    copy(files)
+    copy(files)
+    native = replica.ByteCheckpoints.load
+
+    def changed(saved, slot, identity):
+        value = native(saved, slot, identity)
+        if slot == str(destination):
+            destination.write_bytes(b"x" * len(raw))
+        return value
+
+    monkeypatch.setattr(replica.ByteCheckpoints, "load", changed)
+    with pytest.raises(ValueError, match="destination changed"):
+        copy(files)

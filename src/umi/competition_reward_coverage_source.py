@@ -11,7 +11,7 @@ from .competition_evidence_codec import checked_digest, checked_size
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, review_reward_coverage
 from .competition_reward_coverage_capture import capture_reward_eligibility
-from .competition_reward_coverage_intervals import coverage_point
+from .competition_reward_coverage_intervals import CoverageEndpoint, coverage_point
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_prepared import (
     CoveragePackageReplayRequired,
@@ -22,6 +22,7 @@ from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryPending
 from .host_memory_runtime import memory_operation, selected_memory
@@ -78,7 +79,7 @@ class NativeRewardCoverageSource:
         self.profile = profile
         self.maximum_history_blocks = maximum_history_blocks
         self.maximum_cached_endpoints = maximum_cached_endpoints
-        self._cache: OrderedDict[str, OwnedRewardCoverageEndpoint] = OrderedDict()
+        self._cache: OrderedDict[str, CoverageEndpoint] = OrderedDict()
 
     async def finalized_height(self) -> int:
         control = await self.provider.collect_control(self.history.hotkey)
@@ -146,20 +147,56 @@ class NativeRewardCoverageSource:
             except CoveragePackageReplayRequired:
                 pass
         package = await run_owned_thread(self._package_loader)
-        if await run_owned_thread(digest, package) != self._package_sha256:
+        if await run_owned_thread(verified_package_digest, package) != self._package_sha256:
             raise ValueError("coverage package loader changed the selected original")
         endpoint = await review(package)
-        self._retained_package = RetainedCoveragePackage(endpoint.prepared)
+        if type(endpoint) is OwnedRewardCoverageEndpoint:
+            self._retained_package = RetainedCoveragePackage(endpoint.prepared)
         return endpoint
 
-    async def replay(self, key: str) -> OwnedRewardCoverageEndpoint:
+    async def replay(self, key: str) -> CoverageEndpoint:
         async with self._package_guard:
             return await self._replay(key)
 
+    async def repair(self, key: str, *, reason: str):
+        """Explicitly requalify one restored original after dependency damage."""
+        async with self._package_guard:
+            self._cache.pop(key, None)
+
+            async def review(package):
+                return await self.journal.review_endpoint(
+                    key,
+                    provider=self.provider,
+                    preparation=self.preparation,
+                    package=package,
+                    history=None,
+                    history_source=self._history,
+                    source=self.decisions,
+                    profile=self.profile,
+                    repair_reason=reason,
+                )
+
+            return self._remember(await self._with_package(review))
+
     async def _replay(self, key):
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
+        # A process-local endpoint cannot outlive damaged durable sources or a
+        # changed authority. Compact restoration rechecks those dependencies
+        # without reading payloads or repeating successful native verification.
+        expected = self._package_sha256
+        if expected is None:
+            expected = await run_owned_thread(verified_package_digest, self.package)
+        restored = await self.journal.restore_endpoint(
+            key,
+            provider=self.provider,
+            preparation=self.preparation,
+            expected_package_sha256=expected,
+            history=None,
+            history_source=self._history,
+            profile=self.profile,
+        )
+        if restored is not None:
+            cached = self._cache.get(key)
+            return self._remember(cached if cached == restored else restored)
 
         async def review(package):
             return await self.journal.review_endpoint(

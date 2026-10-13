@@ -241,7 +241,7 @@ async def eventually(predicate):
     await asyncio.wait_for(wait(), timeout=5)
 
 
-async def test_original_input_digest_runs_off_loop(monkeypatch):
+async def test_original_input_snapshot_load_runs_off_loop():
     from umi import competition_cohort_settlement_service as service
 
     node = blank()
@@ -249,15 +249,17 @@ async def test_original_input_digest_runs_off_loop(monkeypatch):
     node.config.inputs_directory = "/unused-original"
     node.journal = SimpleNamespace(get=lambda *args: None)
     loop_thread = threading.get_ident()
-    package = Marker()
-    monkeypatch.setattr(service, "read_aggregate_model", lambda *args, **kwargs: package)
 
-    def digest(value):
-        assert value is package and threading.get_ident() != loop_thread
-        raise OSError("stop after original digest boundary")
+    def load(path, model, *, maximum_bytes):
+        assert path.name == node.cohort + ".json"
+        assert str(path.parent) == node.config.inputs_directory
+        assert model is service.SettlementInputPackage
+        assert maximum_bytes == node.config.maximum_package_bytes
+        assert threading.get_ident() != loop_thread
+        raise OSError("stop after original snapshot load boundary")
 
-    monkeypatch.setattr(service, "digest", digest)
-    with pytest.raises(OSError, match="original digest boundary"):
+    node.verified_packages = SimpleNamespace(load=load)
+    with pytest.raises(OSError, match="original snapshot load boundary"):
         await node._load_active_inputs(history)
 
 

@@ -1,0 +1,224 @@
+"""Single-owner ordered application of independently proved history blocks."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import suppress
+from dataclasses import asdict
+from functools import partial
+
+from .competition_chain_state import _cache_usage
+from .competition_reward_control_evidence import archive_header_hint
+from .competition_reward_history_checkpoint import ABI, HistoryCheckpointRepairRequired
+from .competition_reward_history_workers import (
+    MAX_FRAME_BYTES,
+    HistoryWorkers,
+    HistoryWorkerSelection,
+)
+from .competition_reward_proof_archive import history_archive_key
+from .concurrency import await_owned_task, run_owned_thread
+from .host_memory_runtime import compact_memory_error, history_memory_window
+
+
+async def _load_input(reader, height):
+    try:
+        completed = await run_owned_thread(reader.checkpoints.load, height)
+    except HistoryCheckpointRepairRequired:
+        reader.progress.invalidate(height)
+        if not reader._repair_reason:
+            raise
+        completed = None
+    if completed is not None:
+        return completed, None, True
+    fields = await run_owned_thread(reader._load, height)
+    retained = fields is not None
+    if fields is None and reader.archive is not None:
+        try:
+            context, fields = await run_owned_thread(
+                partial(
+                    reader.archive.read,
+                    "history",
+                    history_archive_key(reader.config_sha256, reader.hotkey, height),
+                    bounds=reader._field_bounds,
+                )
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if context != reader._archive_context(height):
+                raise ValueError("imported history changes its requested domain")
+    return None, fields, retained
+
+
+async def _persist(reader, pool, future, fields, retained):
+    # This owned task is never cancelled by a caller. It spans the independent
+    # native check and durable result, including successful later heights when
+    # a predecessor fails, export fails or shutdown is requested.
+    await asyncio.wait((future,))
+    result = pool.result(future)
+    height = result.snapshot.block_number
+    save_error = None
+    if not retained:
+        try:
+            await run_owned_thread(reader._save_fields, height, fields)
+        except Exception as error:
+            if height not in reader._source_tokens:
+                raise
+            save_error = error
+    value = {
+        "schema": ABI,
+        "owner": reader.checkpoints.owner,
+        "semantics": reader.checkpoints.semantics,
+        "snapshot": asdict(result.snapshot),
+        "header": result.header,
+        "control_sha256": result.control_sha256,
+        "committed_at_block": result.committed_at_block,
+        "slot_evidence_sha256": result.slot_evidence_sha256,
+        "slot_metadata_sha256": result.slot_metadata_sha256,
+        "write_evidence_sha256": result.write_evidence_sha256,
+        "writes": [list(item) for item in result.writes],
+        "unresolved_extrinsics": list(result.unresolved_extrinsics),
+        "sources": reader._source_tokens[height],
+        "exports": [],
+        "repair": (
+            {"reason": reader._repair_reason, "operation": reader._repair_id}
+            if reader._repair_reason
+            else None
+        ),
+    }
+    try:
+        await run_owned_thread(
+            partial(reader.checkpoints.remember, value, repair_reason=reader._repair_reason)
+        )
+    except Exception:
+        if save_error is not None:
+            raise save_error from None
+        raise
+    reader.progress.native_finished(height)
+    reader.progress.report(reader, "running")
+    if save_error is not None:
+        raise save_error
+    return value
+
+
+async def _window(reader, provider, pool, entries, stop):
+    tasks = []
+    error = None
+    async with provider._lock:
+        if provider._closed or not provider._owned:
+            raise ValueError("parallel history requires a running owned provider")
+        _cache_usage(provider._cache_root, provider.config.maximum_cache_bytes)
+        try:
+            for height, fields, retained in entries:
+                if stop.is_set():
+                    break
+                snapshot, header = await run_owned_thread(
+                    archive_header_hint, fields["slot_evidence"]
+                )
+                if snapshot.block_number != height:
+                    raise ValueError("history frame differs from selected owner context")
+                timestamp, ceiling = await provider._resolve_control_header(snapshot, header)
+                if stop.is_set():
+                    break
+                reader.progress.native_start(retained=retained, repair=bool(reader._repair_reason))
+                future = pool.submit(
+                    snapshot=snapshot,
+                    header=header,
+                    timestamp=timestamp,
+                    ceiling=ceiling,
+                    fields=fields,
+                )
+                tasks.append(
+                    (future, asyncio.create_task(_persist(reader, pool, future, fields, retained)))
+                )
+            # Checkpoint coroutines run as each worker finishes; gathering here
+            # never imposes block order on durable completion.
+            results = await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+            error = next((result for result in results if isinstance(result, BaseException)), None)
+            _cache_usage(provider._cache_root, provider.config.maximum_cache_bytes)
+        finally:
+            for future, task in tasks:
+                with suppress(Exception, asyncio.CancelledError):
+                    await await_owned_task(task)
+                pool.release(future)
+        if error is not None:
+            raise error
+    return [result for result in results if isinstance(result, dict)]
+
+
+async def _run(reader, provider, last, stop):
+    profile = reader.verification_profile
+    # Conservative raw-frame slots include a maximum permitted block; large
+    # evidence lowers throughput rather than failing an accepted input.
+    count = min(profile.maximum_in_flight, profile.maximum_in_flight_bytes // MAX_FRAME_BYTES)
+    async with history_memory_window(profile.required_memory_bytes):
+        pool = prepared = fields = values = None
+        entries = []
+        failure = None
+        try:
+            while reader._next <= last and not stop.is_set():
+                await reader._restore_prefix(provider, last)
+                if reader._next > last:
+                    break
+                entries = []
+                for height in range(reader._next, min(last + 1, reader._next + count)):
+                    completed, fields, retained = await _load_input(reader, height)
+                    if completed is not None or fields is None:
+                        break
+                    entries.append((height, fields, retained))
+                if not entries:
+                    # No retained frame: use the existing online capture owner,
+                    # outside its lock. The shared journal remains owned here.
+                    prepared = reader._start_preparation(provider, reader._next)
+                    value = await await_owned_task(prepared.task)
+                    value = await reader._ensure_checkpoint_export(value)
+                    reader._apply_checkpoint(value)
+                    continue
+                if pool is None:
+                    pool = HistoryWorkers(
+                        profile, HistoryWorkerSelection.from_provider(provider, reader.hotkey)
+                    )
+                values = await _window(reader, provider, pool, entries, stop)
+                # Recheck cheap source revisions before publication/application;
+                # no repeated hashing or native verification of unchanged bytes.
+                for value, (height, fields, _) in zip(values, entries, strict=False):
+                    if await run_owned_thread(reader.checkpoints.load, height) != value:
+                        raise HistoryCheckpointRepairRequired(
+                            "checkpoint changed during parallel verification"
+                        )
+                    if reader.export_archive is not None:
+                        await run_owned_thread(
+                            reader._export_fields, height, fields, reader.export_archive
+                        )
+                        value = {**value, "exports": [reader._export_identity()]}
+                        await run_owned_thread(
+                            partial(
+                                reader.checkpoints.remember,
+                                value,
+                                repair_reason="new_export_destination",
+                            )
+                        )
+                        reader.progress.record("exported", height)
+                    reader._apply_checkpoint(value)
+        except BaseException as error:
+            failure = compact_memory_error(error)
+        finally:
+            try:
+                if pool is not None:
+                    await pool.close()
+            except BaseException as error:
+                if failure is None:
+                    failure = compact_memory_error(error)
+            entries.clear()
+            pool = prepared = fields = values = None
+            reader._prepared_encodings.clear()
+            reader._source_tokens.clear()
+        if failure is not None:
+            raise failure from None
+
+
+async def advance_parallel_locked(reader, provider, last):
+    """Caller retains reader and journal locks until all native children drain."""
+    stop = asyncio.Event()
+    task = asyncio.create_task(_run(reader, provider, last, stop))
+    await await_owned_task(task, on_cancel=stop.set)

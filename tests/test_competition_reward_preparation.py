@@ -1514,7 +1514,7 @@ async def test_native_pending_activation_signs_recovers_and_delivers_after_resta
         pytest.fail("native signing history did not converge")
 
     retained = await history()
-    control = h.reader._tip.slot
+    control = await h.reader.review_control(h.item.provider, retained.tip.block_number)
     inputs = dict(
         control=control,
         history=retained,
@@ -1633,7 +1633,7 @@ async def test_native_admission_signs_only_an_empty_reserved_control_history(
             break
     else:
         pytest.fail("native empty control history did not converge")
-    control = h.reader._tip.slot
+    control = await h.reader.review_control(h.item.provider, part.history.tip.block_number)
     assert control.control_sha256 is None and not part.history.writes
     reviewed = review_reward_decision(
         c.reader,
@@ -1662,22 +1662,32 @@ async def test_native_admission_signs_only_an_empty_reserved_control_history(
 
 
 @pytest.mark.parametrize(
-    "complete_preparation_case",
+    "complete_preparation_case,parallel_history",
     [
-        "matching",
-        "sparse_zeros",
-        "raw_row",
-        "missing_recipient",
-        "extra_recipient",
-        "permit_missing",
+        ("matching", False),
+        ("sparse_zeros", False),
+        ("raw_row", False),
+        ("missing_recipient", False),
+        ("extra_recipient", False),
+        ("permit_missing", False),
+        ("matching", True),
     ],
-    indirect=True,
+    indirect=["complete_preparation_case"],
 )
 async def test_complete_native_history_package_and_projection_restart_without_coordinator(
     complete_preparation_case,
+    parallel_history,
+    tmp_path,
+    monkeypatch,
 ):
     h = complete_preparation_case
     p, c = h.package_case, h.c
+    if parallel_history:
+        from .test_competition_reward_history_parallel import retained_parallel_case
+
+        await retained_parallel_case(h, tmp_path, monkeypatch)
+        h.new_reader = h.open_parallel
+        h.offline_through = h.end - 1
 
     async def history():
         for _ in range(100):
@@ -1714,7 +1724,9 @@ async def test_complete_native_history_package_and_projection_restart_without_co
 
     StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
     captured = await history()
-    archived_control = h.reader._tip.slot
+    if parallel_history:
+        assert h.reader.progress.native_completed == h.end - h.old.height + 1
+    archived_control = await h.reader.review_control(h.item.provider, captured.tip.block_number)
     ready, result = await prepare(owner(), captured)
     eligibility_control, captured_eligibility = await current_state(
         h, captured.tip, validator_hotkey=h.validator_hotkey, eligibility_profile=h.item.profile
@@ -1735,6 +1747,8 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     c.objects.clear()
     h.offline_through = h.end - 1
     replayed = await history()
+    if parallel_history:
+        assert h.reader.progress.native_completed == 0
     # Recover the exact historical allocation natively before any fresh state
     # collection. No coordinator, historical body/state RPC or renewed control
     # publication participates in this review.
@@ -1903,7 +1917,10 @@ async def test_native_coverage_retention_retries_and_offline_restart(
 
     def counts(journal):
         with journal.journal.transaction() as db:
-            return db.execute("SELECT COUNT(*),SUM(LENGTH(body)) FROM records").fetchone()
+            return db.execute(
+                "SELECT COUNT(*),SUM(LENGTH(body)) FROM records WHERE kind NOT IN "
+                "('coverage_verified','coverage_verified_done','coverage_checkpoint_owner')"
+            ).fetchone()
 
     # Capacity errors and interrupted transactions preserve atomicity. No
     # endpoint, interval or verified total is acknowledged before commit.
@@ -1919,9 +1936,11 @@ async def test_native_coverage_retention_retries_and_offline_restart(
     journal = RewardCoverageJournal(tmp_path / "coverage", rule, **selected)
     original_put = journal.journal.put_many
 
-    def interrupt_before_commit(records):
+    def interrupt_before_commit(records, *, index=None):
         def fail(db):
             assert db.execute("SELECT COUNT(*) FROM records").fetchone()[0] > 0
+            if index is not None:
+                index(db)
             raise OSError("simulated interrupted commit")
 
         original_put(records, index=fail)
@@ -1933,8 +1952,8 @@ async def test_native_coverage_retention_retries_and_offline_restart(
     assert counts(journal) == (0, None)
     assert await journal.verified_ms(**query) == 0
 
-    def lost_acknowledgement(records):
-        original_put(records)
+    def lost_acknowledgement(records, **kwargs):
+        original_put(records, **kwargs)
         raise OSError("simulated lost acknowledgement")
 
     with monkeypatch.context() as m:
@@ -2000,14 +2019,14 @@ async def test_native_coverage_retention_retries_and_offline_restart(
     entered, release = threading.Event(), threading.Event()
     original_put = cancelled.journal.put_many
 
-    def slow_commit(records):
+    def slow_commit(records, **kwargs):
         entered.set()
         assert release.wait(20)
-        original_put(records)
+        original_put(records, **kwargs)
 
     with monkeypatch.context() as m:
         m.setattr(cancelled.journal, "put_many", slow_commit)
-        pending = asyncio.create_task(cancelled.credit(*restored))
+        pending = asyncio.create_task(cancelled.credit(*endpoints))
         try:
             assert await asyncio.to_thread(entered.wait, 20)
             pending.cancel()
@@ -2020,7 +2039,7 @@ async def test_native_coverage_retention_retries_and_offline_restart(
             with pytest.raises(asyncio.CancelledError):
                 await pending
     assert await cancelled.verified_ms(**query) == 12000
-    assert await cancelled.credit(*restored) == result
+    assert await cancelled.credit(*endpoints) == result
     assert await cancelled.verified_ms(**query) == 12000
 
     # Corruption is a hold, not permission to replace evidence or reset the
@@ -2031,12 +2050,29 @@ async def test_native_coverage_retention_retries_and_offline_restart(
         ).fetchone()
         db.execute("DELETE FROM records WHERE kind='coverage_object' AND id=?", (sha,))
     damaged = counts(restarted)
-    with pytest.raises(ValueError, match="evidence object is missing"):
+    with pytest.raises(ValueError, match="explicit scoped repair"):
         await restarted.credit(*restored)
     assert counts(restarted) == damaged
     with restarted.journal.transaction() as db:
         db.execute("INSERT INTO records VALUES ('coverage_object',?,?)", (sha, raw))
     assert counts(restarted) == committed
+    with pytest.raises(ValueError, match="explicit scoped repair"):
+        await restarted.credit(*restored)
+    # Restoring the same payload does not undo its mutation generation. Repair
+    # only the two affected native endpoints, retaining their old success facts.
+    restored = [
+        await restarted.review_endpoint(
+            key,
+            provider=h.item.provider,
+            preparation=owner(),
+            package=p.package,
+            history=retained,
+            source=c.source,
+            profile=h.item.profile,
+            repair_reason="original evidence restored",
+        )
+        for key, retained in zip((hint.left, hint.right), histories, strict=True)
+    ]
     assert await restarted.credit(*restored) == result
 
     if h.variant == "opportunity":
@@ -2055,8 +2091,8 @@ async def test_native_coverage_retention_retries_and_offline_restart(
         certificate_bytes = canonical_json_bytes(certificate)
         assert certificate.contributions[0].credited_ms == 12000
         assert certificate.contributions[0].through_block == h.end
-        # A retained claim is not enough after a crash, even when its digest
-        # is right. The original proofs must be reviewed again.
+        # A portable claim is never authority. Private completed results restore
+        # only through selected owner, sources, policy and native history.
         fresh = RewardCoverageJournal(tmp_path / "coverage", rule, **selected)
         with pytest.raises(ValueError, match="no natively verified coverage"):
             await prepare_opportunity_certificate(fresh, **terms)
@@ -3213,7 +3249,22 @@ def original_settlement_inputs(service_quality_inputs):
 
 
 @pytest.fixture
-async def recurring_settlement_case(original_settlement_inputs, registered_case, tmp_path, request):
+def settlement_service_umask():
+    # Both deployed settlement and replication units use UMask=0077. These
+    # integration fixtures run their services and copy loop in this process;
+    # pathlib's parents=True otherwise creates intermediate directories with
+    # the pytest runner's umask, unlike either supported service entry point.
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.fixture
+async def recurring_settlement_case(
+    original_settlement_inputs, registered_case, tmp_path, request, settlement_service_umask
+):
     """Real owner journals, signatures, file exchange and native settlement.
 
     Only finality/proof verification and the original fixture model are synthetic.
@@ -5633,6 +5684,142 @@ async def test_lazy_native_coverage_releases_package_and_reloads_earlier_history
     assert len(references) == 2
 
 
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_repair(
+    complete_preparation_case, tmp_path, monkeypatch
+):
+    from umi import competition_reward_coverage_journal as coverage_module
+    from umi.competition_reward_coverage_checkpoint import CoverageCheckpointRepairRequired
+    from umi.competition_reward_coverage_intervals import coverage_point
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    from .test_competition_remote_proof_store import EvidenceServer, store
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    server = EvidenceServer()
+    state, remote_state, archive_root = (
+        tmp_path / "coverage",
+        tmp_path / "r2-state",
+        tmp_path / "outbox",
+    )
+
+    def open_owner():
+        remote = store(remote_state, server)
+        journal = RewardCoverageJournal(
+            state,
+            rule,
+            expected_rule_sha256=digest(rule),
+            export_archive=RewardProofArchive(archive_root, remote=remote),
+        )
+        preparation = StandingRewardPreparation(
+            c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+        )
+        return journal, remote, preparation
+
+    journal, remote, owner = open_owner()
+    source = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=journal,
+        history=h.reader,
+        preparation=owner,
+        package=p.package,
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+    endpoints = []
+    for height in (h.end - 1, h.end):
+        for _ in range(100):
+            try:
+                endpoint = await source.capture(h.validator_hotkey, height)
+                break
+            except CoverageHistoryPending:
+                continue
+        else:
+            pytest.fail("native coverage fixture did not converge")
+        await journal.retain_endpoint(endpoint)
+        endpoints.append(endpoint)
+    interval = await journal.credit(*endpoints)
+    assert interval.credited_ms == 12000
+    keys = [coverage_point(e, rule).key() for e in endpoints]
+    with journal.journal.read_transaction() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM records WHERE kind IN "
+                "('coverage_object','coverage_endpoint','coverage_blob_proof','coverage_blob_metadata')"
+            ).fetchone()[0]
+            == 0
+        )
+    with pytest.raises(ValueError, match="unsupported round journal"):
+        RoundJournal(state, rule, maximum_rounds=65536, maximum_bytes=4 * 1024**3)
+
+    fresh, remote, owner = open_owner()
+    loads = []
+
+    def unavailable_package():
+        loads.append(True)
+        raise AssertionError("completed coverage reread its package")
+
+    restarted = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=fresh,
+        history=h.reader,
+        preparation=owner,
+        package_loader=unavailable_package,
+        package_sha256=digest(p.package),
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+
+    def prohibit(*_args, **_kwargs):
+        raise AssertionError("completed coverage repeated native proof work")
+
+    server.calls.clear()
+    with monkeypatch.context() as m:
+        m.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        m.setattr(coverage_module, "review_reward_coverage", prohibit)
+        m.setattr(fresh, "_load", prohibit)
+        restored = [await restarted.replay(key) for key in keys]
+        assert await fresh.credit(*restored) == interval
+        assert all(endpoint.covered for endpoint in restored)
+    assert not loads and not server.calls
+    foreign = RewardCoverageJournal(tmp_path / "foreign", rule, expected_rule_sha256=digest(rule))
+    with pytest.raises(ValueError, match="lost its native result"):
+        await foreign.credit(*restored)
+
+    # An observed missing remote source remains a hold across restart. Restoring
+    # its exact generation requires one explicit transport repair, no proof replay.
+    alias = fresh.journal.get("coverage_remote_source", digest(["coverage_endpoint", keys[0]]))
+    reference = alias["remote"]
+    raw = server.objects.pop(reference["key"])
+    remote.evict_cache()
+    with pytest.raises(ValueError, match="explicit repair"):
+        fresh._load(keys[0])
+    with pytest.raises(CoverageCheckpointRepairRequired):
+        fresh.checkpoints.load(keys[0])
+    with pytest.raises(CoverageCheckpointRepairRequired):
+        await restarted.replay(keys[0])  # Even a process-local cache must hold.
+    server.objects[reference["key"]] = raw
+    remote.repair_reference(reference)
+    assert fresh.checkpoints.load(keys[0]) is not None
+    server.calls.clear()
+    with monkeypatch.context() as m:
+        m.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        m.setattr(coverage_module, "review_reward_coverage", prohibit)
+        assert (await restarted.replay(keys[0])).covered
+    assert not server.calls and not loads
+
+
 async def test_settlement_releases_parsed_package_after_native_replay(
     recurring_settlement_case, monkeypatch
 ):
@@ -5734,3 +5921,58 @@ def test_settlement_serialization_scope_preserves_native_checks_and_package_byte
     names = {event.get("operation_name") for event in events}
     assert {"settlement_prepare", "settlement_replay"} <= names
     assert all(event["certification_authority"] is False for event in events)
+
+
+async def test_durable_snapshot_preparation_reuses_native_work_across_all_consumers(
+    historical_preparation_case, tmp_path, monkeypatch
+):
+    """Installed file loader, fresh/restarted writer, predecessor and initial replay."""
+    from umi import competition_cohort_endpoint_archive as archive_module
+    from umi import competition_cohort_endpoint_quality as endpoint_module
+    from umi import competition_cohort_request_terminal as terminal_module
+    from umi import competition_cohort_service_quality as service_module
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p, _, chosen, historical_args = historical_preparation_case
+    files = StandingRewardFiles(
+        tmp_path / "durable-inputs",
+        maximum_package_bytes=64 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    package_sha = digest(p.package)
+    before = (files.root / "packages" / (package_sha + ".json")).read_bytes()
+    counts = {"cases": 0, "endpoint_content": 0, "paid_content": 0, "execution": 0}
+    for module, name, key in (
+        (archive_module, "verify_case_decision", "cases"),
+        (endpoint_module, "decrypt_endpoint_content", "endpoint_content"),
+        (service_module, "decrypt_endpoint_content", "paid_content"),
+        (terminal_module, "replay_execution_steps", "execution"),
+    ):
+        native = getattr(module, name)
+
+        def counted(*args, _native=native, _key=key, **kwargs):
+            counts[_key] += 1
+            return _native(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+    snapshot = files.verified_package(package_sha)
+    ready = await p.preparation.prepare(snapshot, **replay_args(await p.observations()))
+    assert ready.allocation == p.allocation
+    cold = counts.copy()
+    assert all(value > 0 for value in cold.values())
+    restored = p.reopen()
+    snapshot = files.verified_package(package_sha)
+    again = await restored.prepare(snapshot, **replay_args(await p.observations()))
+    assert again.allocation == p.allocation
+    assert counts == cold
+    predecessor = await p.reopen().prepare_historical(snapshot, **historical_args)
+    chosen.current = replace(chosen.current, initial_selection=chosen.current.selection)
+    initial = await p.reopen().prepare_initial(snapshot, **historical_args)
+    assert predecessor.allocation == initial.allocation == ready.allocation
+    assert counts == cold
+    fresh = await p.observations()
+    projected = await restored.project(again, **fresh)
+    assert sum(projected.projection.weights) == 65535
+    assert not projected.chain_submission_authorized
+    assert (files.root / "packages" / (package_sha + ".json")).read_bytes() == before

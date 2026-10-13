@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import bisect
-import hashlib
 import math
 import os
 from collections.abc import AsyncIterator, Callable
@@ -15,7 +14,6 @@ import httpx
 
 from .competition_artifacts import _artifact, _directory
 from .competition_client import MAX_SUBMISSION_BYTES, CompetitionSubmissionError
-from .competition_cohort_client import submit_cohort_participation
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadCompletion,
@@ -33,46 +31,31 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadRestartRequest,
 )
 from .competition_cohort_model_client import (
+    _admit_model,
     _Fingerprint,
     _fingerprint,
     _retry,
     _snapshot,
-    _verify_source,
+    _verify_source_owned,
 )
 from .competition_cohort_participation import (
     CohortParticipationReceipt,
     CohortParticipationRequest,
 )
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_source_verification import model_payload_digest
+from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, ModelBundle, digest, identity, sign_object
+from .private_files import PrivateStateBusyError
 from .protocol import canonical_json_bytes
 
 _READ_BYTES = 8 * 1024**2
 _Report = Callable[[dict], None]
 
 
-def _payload_digest(
-    source: Path,
-    bundle: ModelBundle,
-    fingerprints: tuple[_Fingerprint, ...],
-) -> str:
-    value = hashlib.sha256()
-    with _directory(source) as root:
-        for record, expected in zip(bundle.files, fingerprints, strict=True):
-            with _artifact(root, record) as (stream, info):
-                if _fingerprint(info) != expected:
-                    raise ValueError("model source changed; rerun with the original bundle")
-                remaining = record.size_bytes
-                while remaining:
-                    data = stream.read(min(_READ_BYTES, remaining))
-                    if not data:
-                        raise ValueError("model source ended before its signed manifest")
-                    value.update(data)
-                    remaining -= len(data)
-                if _fingerprint(os.fstat(stream.fileno())) != expected:
-                    raise ValueError("model source changed during payload hashing")
-    return value.hexdigest()
+def _payload_digest(source, bundle, fingerprints, policy, report=None):
+    return model_payload_digest(source, bundle, fingerprints, _fingerprint, policy, report)
 
 
 def _offsets(bundle: ModelBundle) -> tuple[int, ...]:
@@ -260,10 +243,26 @@ async def submit_direct_cohort_model(
     bundle = submission.model_bundle
     source = Path(os.path.abspath(source))
     if fingerprints is None:
-        fingerprints = await run_owned_thread(_verify_source, source, bundle, policy)
+        fingerprints = await _verify_source_owned(source, bundle, policy, report, retry_seconds)
     elif fingerprints != await run_owned_thread(_snapshot, source, bundle):
         raise ValueError("model source changed after verification")
-    payload_sha256 = await run_owned_thread(_payload_digest, source, bundle, fingerprints)
+    with TransferProgress(
+        "model_payload_preparation",
+        1,
+        report,
+        unit="passes",
+        planning_work_bytes=sum(record.size_bytes for record in bundle.files),
+    ) as progress:
+        while True:
+            try:
+                payload_sha256 = await run_owned_thread(
+                    _payload_digest, source, bundle, fingerprints, policy, report
+                )
+                progress.advance(1)
+                break
+            except PrivateStateBusyError:
+                progress.emit("waiting", reason="verification_owner_busy")
+                await asyncio.sleep(retry_seconds)
     total_bytes = sum(record.size_bytes for record in bundle.files)
     payload = DirectModelPayload(
         schema="umi-direct-model-payload/1",
@@ -303,30 +302,35 @@ async def submit_direct_cohort_model(
             trust_env=False,
         ) as objects,
     ):
-        raw = await _retry(
-            lambda: _json_exchange(
-                intake,
-                "POST",
-                f"/v1/competition/cohorts/{cohort}/direct-model-uploads",
-                body=canonical_json_bytes(reservation_request),
-            ),
-            retry_seconds,
-            report,
-        )
-        try:
-            reservation = SignedDirectModelUploadReservation.model_validate_json(raw)
-            body = reservation.reservation
-            if (
-                body.cohort_sha256 != cohort
-                or body.payload != payload
-                or identity(body.hotkey) != identity(submission.hotkey)
-                or identity(reservation.signature.hotkey)
-                not in {identity(e.hotkey) for e in policy.evaluators}
-            ):
-                raise ValueError("direct upload reservation differs")
-        except ValueError as error:
-            raise CompetitionSubmissionError("invalid_model_upload_status") from error
-        reservation_sha256 = digest(body)
+        with TransferProgress(
+            "direct_model_reservation", 1, report, unit="reservations"
+        ) as progress:
+            raw = await _retry(
+                lambda: _json_exchange(
+                    intake,
+                    "POST",
+                    f"/v1/competition/cohorts/{cohort}/direct-model-uploads",
+                    body=canonical_json_bytes(reservation_request),
+                ),
+                retry_seconds,
+                report,
+            )
+            try:
+                reservation = SignedDirectModelUploadReservation.model_validate_json(raw)
+                body = reservation.reservation
+                if (
+                    body.cohort_sha256 != cohort
+                    or body.payload != payload
+                    or identity(body.hotkey) != identity(submission.hotkey)
+                    or identity(reservation.signature.hotkey)
+                    not in {identity(e.hotkey) for e in policy.evaluators}
+                ):
+                    raise ValueError("direct upload reservation differs")
+            except ValueError as error:
+                raise CompetitionSubmissionError("invalid_model_upload_status") from error
+            reservation_sha256 = digest(body)
+
+            progress.advance(1)
 
         async def current_status() -> DirectModelUploadStatus:
             raw_status = await _retry(
@@ -400,15 +404,20 @@ async def submit_direct_cohort_model(
 
         status = await current_status()
         if status.object_complete:
-            while not status.payload_verified:
-                report(
-                    {
-                        "status": "model_preservation_pending",
-                        "upload_sha256": payload.upload_sha256,
-                    }
-                )
-                await asyncio.sleep(max(15, retry_seconds))
-                status = await current_status()
+            with TransferProgress(
+                "model_payload_preservation", 1, report, unit="payloads"
+            ) as progress:
+                while not status.payload_verified:
+                    progress.emit("waiting", reason="model_preservation_pending")
+                    report(
+                        {
+                            "status": "model_preservation_pending",
+                            "upload_sha256": payload.upload_sha256,
+                        }
+                    )
+                    await asyncio.sleep(max(15, retry_seconds))
+                    status = await current_status()
+                progress.advance(1)
             report(
                 {
                     "status": "model_payload_preserved",
@@ -416,122 +425,130 @@ async def submit_direct_cohort_model(
                     "model_sha256": payload.model_sha256,
                 }
             )
-            return await _retry(
-                lambda: submit_cohort_participation(
-                    origin=origin, policy=policy, request=request, transport=transport
-                ),
-                retry_seconds,
-                report,
+            return await _admit_model(
+                origin=origin,
+                policy=policy,
+                request=request,
+                transport=transport,
+                retry_seconds=retry_seconds,
+                report=report,
             )
 
-        completed: dict[int, DirectModelUploadPart] = {}
-        pending = list(range(1, payload.total_parts + 1))
-        wait = retry_seconds
-        while pending:
-            batch = tuple(pending[: delivery.maximum_concurrent_parts])
-            part_request = DirectModelUploadPartRequest(
-                schema="umi-direct-model-upload-part-request/1",
-                reservation_sha256=reservation_sha256,
-                generation=body.generation,
-                part_numbers=batch,
-            )
-            signed_part_request = SignedDirectModelUploadPartRequest(
-                schema="umi-signed-direct-model-upload-part-request/1",
-                request=part_request,
-                signature=sign_object(part_request, wallet),
-            )
-            request_bytes = canonical_json_bytes(signed_part_request)
-            raw = await _retry(
-                lambda request_bytes=request_bytes: _json_exchange(
-                    intake,
-                    "POST",
-                    f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
-                    f"{reservation_sha256}/parts",
-                    body=request_bytes,
-                ),
-                retry_seconds,
-                report,
-            )
-            try:
-                capabilities = DirectModelUploadPartCapabilities.model_validate_json(raw)
-                if (
-                    capabilities.reservation_sha256 != reservation_sha256
-                    or capabilities.generation != body.generation
-                    or tuple(value.part_number for value in capabilities.capabilities) != batch
-                    or any(
-                        value.reservation_sha256 != reservation_sha256
-                        or value.generation != body.generation
-                        or value.size_bytes
-                        != min(
-                            payload.part_size_bytes,
-                            payload.total_bytes - (value.part_number - 1) * payload.part_size_bytes,
+        with TransferProgress("direct_model_upload", payload.total_bytes, report) as progress:
+            completed: dict[int, DirectModelUploadPart] = {}
+            pending = list(range(1, payload.total_parts + 1))
+            wait = retry_seconds
+            while pending:
+                batch = tuple(pending[: delivery.maximum_concurrent_parts])
+                part_request = DirectModelUploadPartRequest(
+                    schema="umi-direct-model-upload-part-request/1",
+                    reservation_sha256=reservation_sha256,
+                    generation=body.generation,
+                    part_numbers=batch,
+                )
+                signed_part_request = SignedDirectModelUploadPartRequest(
+                    schema="umi-signed-direct-model-upload-part-request/1",
+                    request=part_request,
+                    signature=sign_object(part_request, wallet),
+                )
+                request_bytes = canonical_json_bytes(signed_part_request)
+                raw = await _retry(
+                    lambda request_bytes=request_bytes: _json_exchange(
+                        intake,
+                        "POST",
+                        f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
+                        f"{reservation_sha256}/parts",
+                        body=request_bytes,
+                    ),
+                    retry_seconds,
+                    report,
+                )
+                try:
+                    capabilities = DirectModelUploadPartCapabilities.model_validate_json(raw)
+                    if (
+                        capabilities.reservation_sha256 != reservation_sha256
+                        or capabilities.generation != body.generation
+                        or tuple(value.part_number for value in capabilities.capabilities) != batch
+                        or any(
+                            value.reservation_sha256 != reservation_sha256
+                            or value.generation != body.generation
+                            or value.size_bytes
+                            != min(
+                                payload.part_size_bytes,
+                                payload.total_bytes
+                                - (value.part_number - 1) * payload.part_size_bytes,
+                            )
+                            for value in capabilities.capabilities
                         )
-                        for value in capabilities.capabilities
-                    )
-                ):
-                    raise CompetitionSubmissionError("invalid_model_upload_status")
-            except ValueError:
-                # Validation errors may embed the bearer capability URL.
-                raise CompetitionSubmissionError("invalid_model_upload_status") from None
-            results = await asyncio.gather(
-                *(
-                    _upload_part(
-                        objects,
-                        capability,
-                        source,
-                        bundle,
-                        fingerprints,
-                        offsets,
-                        payload,
-                    )
-                    for capability in capabilities.capabilities
-                ),
-                return_exceptions=True,
-            )
-            retry = False
-            restart = False
-            for result in results:
-                if isinstance(result, DirectModelUploadPart):
-                    completed[result.part_number] = result
-                elif isinstance(result, CompetitionSubmissionError) and result.status_code == 404:
-                    restart = True
-                elif isinstance(result, CompetitionSubmissionError) and (
-                    result.reason_code == "model_upload_transport_unavailable"
-                    or result.status_code in {403, 408, 429, 500, 502, 503, 504}
-                ):
-                    retry = True
-                elif isinstance(result, BaseException):
-                    raise result
-                else:
-                    raise RuntimeError("direct upload part returned an invalid result")
-            if restart:
-                await restart_expired_generation()
-                completed.clear()
-                pending = list(range(1, payload.total_parts + 1))
-                wait = retry_seconds
-                continue
-            pending = [number for number in pending if number not in completed]
-            report(
-                {
-                    "status": "model_upload_progress",
-                    "upload_sha256": payload.upload_sha256,
-                    "uploaded_bytes": sum(part.size_bytes for part in completed.values()),
-                    "total_bytes": payload.total_bytes,
-                }
-            )
-            if retry:
+                    ):
+                        raise CompetitionSubmissionError("invalid_model_upload_status")
+                except ValueError:
+                    # Validation errors may embed the bearer capability URL.
+                    raise CompetitionSubmissionError("invalid_model_upload_status") from None
+                results = await asyncio.gather(
+                    *(
+                        _upload_part(
+                            objects,
+                            capability,
+                            source,
+                            bundle,
+                            fingerprints,
+                            offsets,
+                            payload,
+                        )
+                        for capability in capabilities.capabilities
+                    ),
+                    return_exceptions=True,
+                )
+                retry = False
+                restart = False
+                for result in results:
+                    if isinstance(result, DirectModelUploadPart):
+                        completed[result.part_number] = result
+                    elif (
+                        isinstance(result, CompetitionSubmissionError) and result.status_code == 404
+                    ):
+                        restart = True
+                    elif isinstance(result, CompetitionSubmissionError) and (
+                        result.reason_code == "model_upload_transport_unavailable"
+                        or result.status_code in {403, 408, 429, 500, 502, 503, 504}
+                    ):
+                        retry = True
+                    elif isinstance(result, BaseException):
+                        raise result
+                    else:
+                        raise RuntimeError("direct upload part returned an invalid result")
+                if restart:
+                    await restart_expired_generation()
+                    completed.clear()
+                    progress.set_completed(0)
+                    pending = list(range(1, payload.total_parts + 1))
+                    wait = retry_seconds
+                    continue
+                pending = [number for number in pending if number not in completed]
+                progress.set_completed(sum(part.size_bytes for part in completed.values()))
                 report(
                     {
-                        "status": "model_delivery_retry",
-                        "reason_code": "model_upload_transport_unavailable",
-                        "http_status": None,
-                        "retry_seconds": wait,
+                        "status": "model_upload_progress",
+                        "upload_sha256": payload.upload_sha256,
+                        "uploaded_bytes": sum(part.size_bytes for part in completed.values()),
+                        "total_bytes": payload.total_bytes,
                     }
                 )
-                await asyncio.sleep(wait)
-                wait = min(60, wait * 2)
-            else:
-                wait = retry_seconds
+                if retry:
+                    progress.emit("retrying", reason="model_upload_transport_unavailable")
+                    report(
+                        {
+                            "status": "model_delivery_retry",
+                            "reason_code": "model_upload_transport_unavailable",
+                            "http_status": None,
+                            "retry_seconds": wait,
+                        }
+                    )
+                    await asyncio.sleep(wait)
+                    wait = min(60, wait * 2)
+                else:
+                    wait = retry_seconds
 
         if fingerprints != await run_owned_thread(_snapshot, source, bundle):
             raise ValueError("model source changed during direct upload")
@@ -546,31 +563,38 @@ async def submit_direct_cohort_model(
             completion=completion,
             signature=sign_object(completion, wallet),
         )
-        raw = await _retry(
-            lambda: _json_exchange(
-                intake,
-                "POST",
-                f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
-                f"{reservation_sha256}/complete",
-                body=canonical_json_bytes(signed_completion),
-            ),
-            retry_seconds,
-            report,
-        )
-        completed_object = DirectModelUploadObject.model_validate_json(raw)
-        if completed_object.reservation_sha256 != reservation_sha256:
-            raise CompetitionSubmissionError("invalid_model_upload_status")
-        while True:
-            status = await current_status()
-            if status.payload_verified:
-                break
-            report(
-                {
-                    "status": "model_preservation_pending",
-                    "upload_sha256": payload.upload_sha256,
-                }
+        with TransferProgress(
+            "direct_model_object_completion", 1, report, unit="objects"
+        ) as progress:
+            raw = await _retry(
+                lambda: _json_exchange(
+                    intake,
+                    "POST",
+                    f"/v1/competition/cohorts/{cohort}/direct-model-uploads/"
+                    f"{reservation_sha256}/complete",
+                    body=canonical_json_bytes(signed_completion),
+                ),
+                retry_seconds,
+                report,
             )
-            await asyncio.sleep(max(15, retry_seconds))
+            completed_object = DirectModelUploadObject.model_validate_json(raw)
+            if completed_object.reservation_sha256 != reservation_sha256:
+                raise CompetitionSubmissionError("invalid_model_upload_status")
+            progress.advance(1)
+        with TransferProgress("model_payload_preservation", 1, report, unit="payloads") as progress:
+            while True:
+                status = await current_status()
+                if status.payload_verified:
+                    break
+                progress.emit("waiting", reason="model_preservation_pending")
+                report(
+                    {
+                        "status": "model_preservation_pending",
+                        "upload_sha256": payload.upload_sha256,
+                    }
+                )
+                await asyncio.sleep(max(15, retry_seconds))
+            progress.advance(1)
 
     report(
         {
@@ -579,10 +603,11 @@ async def submit_direct_cohort_model(
             "model_sha256": payload.model_sha256,
         }
     )
-    return await _retry(
-        lambda: submit_cohort_participation(
-            origin=origin, policy=policy, request=request, transport=transport
-        ),
-        retry_seconds,
-        report,
+    return await _admit_model(
+        origin=origin,
+        policy=policy,
+        request=request,
+        transport=transport,
+        retry_seconds=retry_seconds,
+        report=report,
     )

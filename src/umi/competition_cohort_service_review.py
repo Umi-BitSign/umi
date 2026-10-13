@@ -30,6 +30,8 @@ from .competition_cohort_request_window import (
     capture_cohort_attempt_window,
     capture_request_window,
 )
+from .competition_cohort_review_budget import PhaseReviewBudget, ReviewSeconds
+from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_export import ServiceWorkReader, SignedServiceWorkResponse
 from .competition_cohort_service_grant import (
     MAX_SERVICE_GRANT_BYTES,
@@ -82,7 +84,19 @@ class ServiceRetryReview(StrictProtocolModel):
 class ServiceReviewConfig(CohortAdmissionSignerConfig):
     schema_: Literal["umi-service-review-config/1"] = Field(alias="schema")
     owner: Hotkey
-    read_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+    read_timeout_seconds: ReviewSeconds = 2400
+    # Service requests and retry fences share this operational count. Unlike
+    # admission identities it can span many catalogs and execution attempts.
+    maximum_votes: Annotated[int, Field(strict=True, ge=1, le=2**53 - 1)] = 4096
+
+
+class _ServiceReviewJournal(RoundJournal):
+    @property
+    def maximum_records(self):
+        # Every retained record consumes logical bytes. Service vote count is
+        # enforced on native intent kinds below; the ordinary round-index cap
+        # must not become an earlier, unrelated paid-work record limit.
+        return self.maximum_bytes
 
 
 class ServiceReviewIntent(StrictProtocolModel):
@@ -177,8 +191,17 @@ class ServiceWorkReviewer:
         archive: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]],
         current_round: Callable[[], Awaitable[int]],
         sign: Callable[[ServiceRequestBody | CohortEndpointCaseDecision], Awaitable[Signature]],
+        *,
+        budget: PhaseReviewBudget | None = None,
     ):
         self.config = ServiceReviewConfig.model_validate_json(canonical_json_bytes(config))
+        if budget is not None:
+            budget.verify(policy, budget.maximum_aggregate_evidence_bytes)
+        self.budget = service_execution_budget(
+            budget,
+            read_seconds=self.config.read_timeout_seconds,
+            signing_seconds=self.config.signing_timeout_seconds,
+        )
         self.policy, self.transport = (
             policy,
             ScoringPolicy.model_validate_json(canonical_json_bytes(transport)),
@@ -200,7 +223,7 @@ class ServiceWorkReviewer:
         )
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in config.cohorts}
         self.serial = asyncio.Lock()
-        self.journal = RoundJournal(
+        self.journal = _ServiceReviewJournal(
             Path(config.directory),
             {
                 "config": config.model_dump(
@@ -215,7 +238,7 @@ class ServiceWorkReviewer:
                 ),
                 "transport": digest(self.transport),
             },
-            maximum_rounds=config.maximum_votes,
+            maximum_rounds=min(config.maximum_votes, 65536),
             maximum_bytes=config.maximum_bytes,
             maximum_record_bytes=3 * MAX_SERVICE_GRANT_BYTES
             + 2 * (MAX_ARCHIVE_BYTES + MAX_METADATA_BYTES),
@@ -296,7 +319,7 @@ class ServiceWorkReviewer:
             raise ValueError("service retry precedes request expiry")
 
     async def _call(self, awaitable):
-        return await wait_for_owned(awaitable, timeout=self.config.read_timeout_seconds)
+        return await wait_for_owned(awaitable, timeout=self.budget.call_seconds)
 
     async def _current(self, review, body):
         source = await self._call(self.history(body.assignment.round.cohort_sha256))
@@ -445,6 +468,30 @@ class ServiceWorkReviewer:
             ),
             index=bounded,
         )
+
+    def capacity(self):
+        """Advisory counted headroom; native reservation remains atomic."""
+        with self.journal.read_transaction() as db:
+            counts = dict(
+                db.execute(
+                    "SELECT kind, COUNT(*) FROM records "
+                    "WHERE kind IN ('service_request_intent', 'service_retry_intent') GROUP BY kind"
+                )
+            )
+            used = sum(counts.values())
+            _, used_bytes, _ = self.journal._capacity(db)
+        return {
+            "request_intents": counts.get("service_request_intent", 0),
+            "retry_intents": counts.get("service_retry_intent", 0),
+            "maximum_intents": self.config.maximum_votes,
+            "remaining_intents": max(0, self.config.maximum_votes - used),
+            "maximum_bytes": self.config.maximum_bytes,
+            "remaining_bytes": max(0, self.config.maximum_bytes - used_bytes),
+            "status": "capacity_exhausted"
+            if used >= self.config.maximum_votes or used_bytes >= self.config.maximum_bytes
+            else "capacity_available",
+            "capacity_reserved": False,
+        }
 
     def _vote(self, value, signature):
         signature = Signature.model_validate(signature)

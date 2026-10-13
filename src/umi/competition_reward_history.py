@@ -1,8 +1,8 @@
-"""Resumable complete control-block history, with native replay after restart.
+"""Resumable complete control-block history with durable native block results.
 
 The selected start block is part of the owner's binding. Every intervening block
 is proved, including unchanged or empty slots; there is no last-update shortcut.
-Storage records are only hints until replayed. Shared metadata/code bytes are
+Raw records are only hints until natively verified. Shared metadata/code bytes are
 deduplicated by the existing lossless recipe format. Capacity exhaustion retains
 the verified prefix for retry after provisioning; it never completes a cohort.
 
@@ -14,7 +14,7 @@ effects. Execution still requires fresh current control and recipient proofs.
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import secrets
 import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -27,7 +27,13 @@ from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
     checked_digest,
     decode_evidence,
+    decode_evidence_for_reuse,
     encode_evidence,
+    encode_evidence_for_reuse,
+)
+from .competition_history_source_externalization import (
+    JournalSourceExternalizer,
+    source_journal_version,
 )
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
@@ -42,6 +48,14 @@ from .competition_reward_control_writes import (
     capture_control_writes,
     validate_control_writes,
 )
+from .competition_reward_history_checkpoint import (
+    SOURCE_KINDS,
+    HistoryCheckpointRepairRequired,
+    HistoryCheckpoints,
+)
+from .competition_reward_history_parallel import advance_parallel_locked
+from .competition_reward_history_progress import HistoryProgress
+from .competition_reward_history_workers import HistoryVerificationProfile
 from .competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
@@ -69,6 +83,26 @@ class _HistoryJournal(RoundJournal):
     """
 
     MAXIMUM_BYTES = MAX_HISTORY_BYTES
+
+    def __init__(self, *args, remote_store=None, **kwargs):
+        self.remote_store = remote_store
+        super().__init__(*args, **kwargs)
+
+    def _version(self, db):
+        try:
+            return source_journal_version(
+                db,
+                remote_namespace=None
+                if self.remote_store is None
+                else self.remote_store.namespace_sha256,
+            )
+        except ValueError as error:
+            raise HistoryCheckpointRepairRequired(str(error)) from error
+
+    def _enable_reservations(self, db):
+        if db.execute("PRAGMA user_version").fetchone()[0] == 3:
+            raise ValueError("remote history cannot transition to reservation generation")
+        return super()._enable_reservations(db)
 
     @property
     def maximum_records(self) -> int:
@@ -141,12 +175,27 @@ class ControlHistoryProgress:
     history: OwnedRewardControlHistory | None
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryTip:
+    snapshot: FinalizedSnapshotRef
+    control_sha256: str | None
+    committed_at_block: int | None
+
+
+@dataclass(slots=True)
+class _HistoryPreparation:
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    observation: OwnedRewardControlWrites | dict | None = None
+    task: asyncio.Task | None = None
+
+
 class RewardControlHistoryReader:
     """One private owner captures or replays a bounded amount of work per call.
 
     Per-call work limits do not expire the retained interval. On restart the
-    reader replays retained proofs before fetching missing blocks. No cursor or
-    stored summary is accepted as proof that a block has been checked.
+    reader restores owned successful block results and fresh tip finality before
+    fetching missing blocks. Legacy raw records receive one native verification
+    pass. Missing or changed completed results require explicit scoped repair.
     """
 
     def __init__(
@@ -159,6 +208,9 @@ class RewardControlHistoryReader:
         maximum_bytes: int = 4 * 1024**3,
         archive: RewardProofArchive | None = None,
         export_archive: RewardProofArchive | None = None,
+        repair_record_capacity: bool = False,
+        verification_profile: HistoryVerificationProfile | None = None,
+        remote_store=None,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -166,8 +218,13 @@ class RewardControlHistoryReader:
         self.hotkey = _hotkey(control_hotkey)
         self.config_sha256 = checked_digest(chain_config_sha256)
         self.first_block = first_block
+        self.verification_profile = verification_profile
+        self._field_bounds = _FIELDS
         self.archive = archive
         self.export_archive = export_archive
+        self.remote_store = (
+            remote_store if remote_store is not None else getattr(export_archive, "remote", None)
+        )
         binding = {
             "schema": "umi-reward-control-history/1",
             "control_hotkey": self.hotkey,
@@ -180,14 +237,33 @@ class RewardControlHistoryReader:
             maximum_rounds=65536,
             maximum_bytes=maximum_bytes,
             maximum_record_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+            repair_record_capacity=repair_record_capacity,
+            remote_store=self.remote_store,
         )
+        self.checkpoints = HistoryCheckpoints(self.journal, binding)
+        self.remote_sources = JournalSourceExternalizer(
+            self.journal,
+            self.checkpoints,
+            self.remote_store,
+            source_kinds=SOURCE_KINDS,
+            repair_error=HistoryCheckpointRepairRequired,
+        )
+        self.checkpoints.remote_sources = self.remote_sources
+        self._source_tokens = {}
+        self._prepared_encodings = {}
+        self.progress = HistoryProgress(first_block)
+        self.progress.remote_export_selected = getattr(export_archive, "remote", None) is not None
+        self._repair_reason = None
+        self._repair_id = None
+        self._advance_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._next = first_block
-        self._tip: OwnedRewardControlWrites | None = None
+        self._tip: _HistoryTip | None = None
         self._writes: list[HistoricalControlWrite] = []
         self._unresolved: list[int] = []
-        self._evidence_sha256 = digest(binding)
-        # Only entries verified in this process enter this index. Keep a tip,
+        self._initial_evidence_sha256 = digest(binding)
+        self._evidence_sha256 = self._initial_evidence_sha256
+        # Only entries verified or restored by this owner enter this index. Keep a tip,
         # proof digest and list lengths, not a copy of the growing write list.
         self._prefixes: dict[int, tuple[FinalizedSnapshotRef, str, int, int]] = {}
 
@@ -212,8 +288,8 @@ class RewardControlHistoryReader:
     async def verified_prefix(self, height: int) -> OwnedRewardControlHistory:
         """Reuse an already replayed prefix for an older coverage endpoint.
 
-        Reopening clears this index. Retained records do not issue history until
-        advance() has natively replayed every intervening block again.
+        Reopening clears this index. advance() restores bound successful results
+        with current owned tip finality before issuing history.
         """
         _uint(height, 2**53 - 1)
         async with self._lock:
@@ -235,7 +311,11 @@ class RewardControlHistoryReader:
         async with self._lock:
             prefix = self._prefix(height)
             with self.journal.locked():
-                saved = await run_owned_thread(self._load, height)
+                try:
+                    saved = await run_owned_thread(self._load, height)
+                finally:
+                    self._prepared_encodings.pop(height, None)
+                    self._source_tokens.pop(height, None)
                 if saved is None:
                     raise ValueError("verified control history lost its retained frame")
                 control = await provider.review_control(
@@ -251,16 +331,30 @@ class RewardControlHistoryReader:
                 return control
 
     def _save(self, observation: OwnedRewardControlWrites) -> None:
+        self._save_fields(
+            observation.slot.snapshot.block_number,
+            {
+                "slot_evidence": observation.slot.evidence,
+                "slot_metadata": observation.slot.metadata,
+                "evidence": observation.evidence,
+            },
+        )
+
+    def _save_fields(self, height: int, fields: dict[str, bytes]) -> None:
         records = []
         refs = {}
-        for name, raw in (
-            ("slot_evidence", observation.slot.evidence),
-            ("slot_metadata", observation.slot.metadata),
-            ("evidence", observation.evidence),
-        ):
+        prepared = {}
+        for name, raw in fields.items():
             refs[name] = []
+            prepared[name] = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
-                encoded = encode_evidence(raw[offset : offset + MAX_EVIDENCE_BYTES], kind="proof")
+                part = raw[offset : offset + MAX_EVIDENCE_BYTES]
+                if self.export_archive is None:
+                    encoded = encode_evidence(part, kind="proof")
+                else:
+                    encoding = encode_evidence_for_reuse(part, kind="proof")
+                    encoded = encoding.for_bytes(part, kind="proof")
+                    prepared[name].append(encoding)
                 records.extend(
                     ("control_history_object", sha, {"hex": value.hex()})
                     for sha, value in encoded.objects.items()
@@ -276,13 +370,24 @@ class RewardControlHistoryReader:
                     )
                 )
                 refs[name].append(encoded.sha256)
-        records.append(("control_history_block", str(observation.slot.snapshot.block_number), refs))
+        records.append(("control_history_block", str(height), refs))
         # The complete frame and all of its objects commit together. A lost
         # acknowledgement is an exact immutable retry, never another decision.
-        self.journal.put_many(records)
+        source_tokens = []
+
+        def index(db):
+            source_tokens.extend(
+                self.checkpoints.sources(((kind, key) for kind, key, _ in records), db)
+            )
+            self._source_tokens[height] = source_tokens
+
+        self.journal.put_many(self.remote_sources.filter_records(records), index=index)
+        self.progress.record("captured", height)
+        if self.export_archive is not None:
+            self._prepared_encodings[height] = prepared
 
     def _object(self, sha: str, size: int, *, db: sqlite3.Connection) -> bytes:
-        value = self.journal.get("control_history_object", sha, db=db)
+        value = self.remote_sources.get("control_history_object", sha, db=db)
         if (
             type(value) is not dict
             or set(value) != {"hex"}
@@ -302,7 +407,8 @@ class RewardControlHistoryReader:
             return self._load_frame(height, db=db)
 
     def _load_frame(self, height: int, *, db: sqlite3.Connection) -> dict[str, bytes] | None:
-        frame = self.journal.get("control_history_block", str(height), db=db)
+        source_keys = [("control_history_block", str(height))]
+        frame = self.remote_sources.get("control_history_block", str(height), db=db)
         if frame is None:
             return None
         if type(frame) is not dict or set(frame) != set(_FIELDS):
@@ -314,6 +420,7 @@ class RewardControlHistoryReader:
             nonlocal object_bytes
             key = sha, size
             if key not in objects:
+                source_keys.append(("control_history_object", sha))
                 raw = self._object(sha, size, db=db)
                 if (
                     len(objects) < _MAX_FRAME_OBJECTS
@@ -325,6 +432,7 @@ class RewardControlHistoryReader:
             return objects[key]
 
         result = {}
+        prepared = {}
         for name, maximum in _FIELDS.items():
             refs = frame[name]
             if (
@@ -333,10 +441,12 @@ class RewardControlHistoryReader:
             ):
                 raise ValueError("control history frame exceeds its chunk bound")
             parts = []
+            prepared[name] = []
             total = 0
             for sha in refs:
                 checked_digest(sha)
-                chunk = self.journal.get("control_history_chunk", sha, db=db)
+                source_keys.append(("control_history_chunk", sha))
+                chunk = self.remote_sources.get("control_history_chunk", sha, db=db)
                 if type(chunk) is not dict or set(chunk) != {"length", "recipe_hex"}:
                     raise ValueError("control history chunk is missing or malformed")
                 if (
@@ -353,22 +463,41 @@ class RewardControlHistoryReader:
                 raw_recipe = bytes.fromhex(recipe)
                 if raw_recipe.hex() != recipe:
                     raise ValueError("control history recipe is not canonical")
-                parts.append(
-                    decode_evidence(
-                        raw_recipe,
-                        sha256=sha,
-                        expanded_bytes=chunk["length"],
-                        kind="proof",
-                        resolve=resolve,
-                    )
+                decode = (
+                    decode_evidence if self.export_archive is None else decode_evidence_for_reuse
                 )
+                decoded = decode(
+                    raw_recipe,
+                    sha256=sha,
+                    expanded_bytes=chunk["length"],
+                    kind="proof",
+                    resolve=resolve,
+                )
+                if self.export_archive is None:
+                    parts.append(decoded)
+                else:
+                    parts.append(decoded.raw)
+                    prepared[name].append(decoded)
             result[name] = b"".join(parts)
+        self._source_tokens[height] = self.checkpoints.sources(source_keys, db)
+        if self.export_archive is not None:
+            self._prepared_encodings[height] = prepared
         return result
 
     async def _prepare(self, provider: HistoricalRewardControlProvider, height: int):
         """Prepare one exact frame without publishing it or changing the prefix."""
+        try:
+            completed = await run_owned_thread(self.checkpoints.load, height)
+        except HistoryCheckpointRepairRequired:
+            self.progress.invalidate(height)
+            if not self._repair_reason:
+                raise
+            completed = None
+        if completed is not None:
+            return completed, True
         saved = await run_owned_thread(self._load, height)
         retained = saved is not None
+        self.progress.native_start(retained=retained, repair=bool(self._repair_reason))
         if not retained and self.archive is not None:
             try:
                 context, saved = await run_owned_thread(
@@ -391,13 +520,62 @@ class RewardControlHistoryReader:
         )
         return observation, retained
 
-    async def advance(
-        self,
-        provider: HistoricalRewardControlProvider,
-        *,
-        through_block: int,
-        maximum_blocks: int = 64,
-    ) -> ControlHistoryProgress:
+    def _start_preparation(self, provider, height):
+        prepared = _HistoryPreparation()
+        prepared.task = asyncio.create_task(self._prepare_durable(provider, height, prepared))
+        return prepared
+
+    async def _prepare_durable(self, provider, height, prepared):
+        # One owned task spans native verification through durable success. The
+        # caller may cancel or fail publication, but must drain this task before
+        # releasing ownership. A successful prefetched check is never discarded.
+        try:
+            observation, retained = await self._prepare(provider, height)
+            if isinstance(observation, dict):
+                prepared.observation = observation
+                prepared.ready.set()
+                return observation
+            validate_control_writes(
+                observation,
+                expected_control_hotkey=self.hotkey,
+                expected_chain_config_sha256=self.config_sha256,
+            )
+            if observation.slot.snapshot.block_number != height:
+                raise ValueError("control history has a gap or a different parent")
+            prepared.observation = observation
+            prepared.ready.set()
+            save_error = None
+            if not retained:
+                try:
+                    await run_owned_thread(self._save, observation)
+                except Exception as error:
+                    # A publication can commit and lose its acknowledgement.
+                    # The transaction's captured identities let us persist the
+                    # already successful native result before propagating that
+                    # original error. remember() rechecks committed identities.
+                    if height not in self._source_tokens:
+                        raise
+                    save_error = error
+            value = self.checkpoints.capture(observation, self._source_tokens[height])
+            if self._repair_reason:
+                value["repair"] = {"reason": self._repair_reason, "operation": self._repair_id}
+            try:
+                await run_owned_thread(
+                    partial(self.checkpoints.remember, value, repair_reason=self._repair_reason)
+                )
+            except Exception:
+                if save_error is not None:
+                    raise save_error from None
+                raise
+            self.progress.native_finished(height)
+            if save_error is not None:
+                raise save_error
+            return value
+        finally:
+            # Also wake the owner on failure before native observation exists.
+            prepared.ready.set()
+
+    def _validate_advance(self, provider, through_block, maximum_blocks):
         _uint(through_block, 2**53 - 1)
         if type(maximum_blocks) is not int or not 1 <= maximum_blocks <= 4096:
             raise ValueError("control history work count exceeds its bound")
@@ -406,85 +584,346 @@ class RewardControlHistoryReader:
             or digest(provider.config) != self.config_sha256
         ):
             raise ValueError("control history provider differs from selected chain")
+        if through_block < self.first_block or through_block < self._next - 1:
+            raise ValueError("control history target regressed")
+
+    async def _advance(
+        self,
+        provider: HistoricalRewardControlProvider,
+        *,
+        through_block: int,
+        maximum_blocks: int = 64,
+    ) -> ControlHistoryProgress:
+        self._validate_advance(provider, through_block, maximum_blocks)
         async with self._lock:
             if through_block < self.first_block or through_block < self._next - 1:
                 raise ValueError("control history target regressed")
             with self.journal.locked():
                 last = min(through_block, self._next + maximum_blocks - 1)
-                pending = None
+                pending = following = None
                 try:
-                    if self._next <= last:
-                        pending = asyncio.create_task(self._prepare(provider, self._next))
-                    while self._next <= last:
-                        observation, retained = await await_owned_task(pending)
-                        pending = None
-                        validate_control_writes(
-                            observation,
-                            expected_control_hotkey=self.hotkey,
-                            expected_chain_config_sha256=self.config_sha256,
+                    await self.progress.inventory(self)
+                    if self.verification_profile is not None:
+                        await advance_parallel_locked(self, provider, last)
+                        history = (
+                            self._prefix(through_block) if self._next == through_block + 1 else None
                         )
-                        slot = observation.slot
-                        if slot.snapshot.block_number != self._next or (
+                        return ControlHistoryProgress(self._next, through_block, history)
+                    await self._restore_prefix(provider, last)
+                    if self._next <= last:
+                        pending = self._start_preparation(provider, self._next)
+                    while self._next <= last:
+                        await pending.ready.wait()
+                        observation = pending.observation
+                        if observation is None:
+                            # Propagate the original preparation failure. No
+                            # subsequent block may start before this validation.
+                            await await_owned_task(pending.task)
+                            raise RuntimeError("history preparation produced no result")
+                        if isinstance(observation, dict):
+                            snapshot = FinalizedSnapshotRef(**observation["snapshot"])
+                        else:
+                            snapshot = observation.slot.snapshot
+                        if snapshot.block_number != self._next or (
                             self._tip is not None
-                            and slot.snapshot.parent_hash != self._tip.slot.snapshot.block_hash
+                            and snapshot.parent_hash != self._tip.snapshot.block_hash
                         ):
                             raise ValueError("control history has a gap or a different parent")
                         if self._next < last:
-                            # Only one following frame may overlap this frame's
-                            # persistence/export. The provider keeps its own
-                            # collection lock; native checks are not parallelized.
-                            pending = asyncio.create_task(self._prepare(provider, self._next + 1))
-                        if not retained:
-                            await run_owned_thread(self._save, observation)
-                        unresolved = bool(observation.unresolved_extrinsics)
-                        if self._tip is not None and not observation.writes:
-                            prior = self._tip.slot
-                            if (slot.control_sha256, slot.committed_at_block) != (
-                                prior.control_sha256,
-                                prior.committed_at_block,
-                            ):
-                                # A cleared slot or an unattributed effect must be
-                                # resolved by a future native decoder, never skipped.
-                                unresolved = True
-                        if self.export_archive is not None:
-                            # Retain original bytes before advancing the replay cursor.
-                            # A failed export leaves this block retryable after restart.
+                            # Native proof work may overlap persistence/export.
+                            # Each child owns its own success checkpoint, even
+                            # if its predecessor fails or this caller cancels.
+                            following = self._start_preparation(provider, self._next + 1)
+                        value = await await_owned_task(pending.task)
+                        if isinstance(observation, dict):
+                            # A following native worker may already be active.
+                            # Keep its timer running across this cheap restore;
+                            # restored blocks never enter the rate numerator.
+                            await self._validate_checkpoint_tip(provider, value)
+                            if await run_owned_thread(self.checkpoints.load, self._next) != value:
+                                raise HistoryCheckpointRepairRequired(
+                                    "checkpoint changed during finality"
+                                )
+                            value = await self._ensure_checkpoint_export(value)
+                            self.progress.restored_completed += 1
+                        elif self.export_archive is not None:
                             await run_owned_thread(self._export, observation, self.export_archive)
-                        if unresolved:
-                            self._unresolved.append(self._next)
-                        self._writes.extend(
-                            HistoricalControlWrite(self._next, w.extrinsic_index, w.decision_sha256)
-                            for w in observation.writes
-                        )
-                        self._evidence_sha256 = digest(
-                            {
-                                "prior": self._evidence_sha256,
-                                "block": self._next,
-                                "slot": slot.evidence_sha256,
-                                "writes": hashlib.sha256(observation.evidence).hexdigest(),
-                            }
-                        )
-                        self._tip = observation
-                        self._prefixes[self._next] = (
-                            slot.snapshot,
-                            self._evidence_sha256,
-                            len(self._writes),
-                            len(self._unresolved),
-                        )
-                        self._next += 1
+                            value = {**value, "exports": [self._export_identity()]}
+                            await run_owned_thread(
+                                partial(
+                                    self.checkpoints.remember,
+                                    value,
+                                    repair_reason="new_export_destination",
+                                )
+                            )
+                        if self.export_archive is not None:
+                            self.progress.record("exported", self._next)
+                        self._apply_checkpoint(value)
+                        pending, following = following, None
                 finally:
-                    if pending is not None:
-                        # Do not cancel a frame's finality/RPC/proof work. Drain
-                        # it before releasing journal ownership, also through
-                        # repeated cancellation. A discarded frame changes no
-                        # history state, and its error cannot replace the
-                        # publication/cancellation error already being raised.
-                        with suppress(asyncio.CancelledError, Exception):
-                            await await_owned_task(pending)
+                    for prepared in (pending, following):
+                        if prepared is not None:
+                            # Drain complete native+checkpoint ownership. A
+                            # secondary failure cannot replace the caller's
+                            # publication error or cancellation. Retrieving a
+                            # completed failure with result() again would
+                            # replace its original traceback with this cleanup.
+                            with suppress(asyncio.CancelledError, Exception):
+                                if not prepared.task.done():
+                                    await await_owned_task(prepared.task)
+                                elif not prepared.task.cancelled():
+                                    prepared.task.exception()
+                    self._source_tokens.clear()
+                    self._prepared_encodings.clear()
                 history = None
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)
                 return ControlHistoryProgress(self._next, through_block, history)
+
+    def _apply_checkpoint(self, value):
+        self.progress.record("verified", value["snapshot"]["block_number"])
+        self.progress.applied(value["snapshot"]["block_number"])
+        slot = _HistoryTip(
+            FinalizedSnapshotRef(**value["snapshot"]),
+            value["control_sha256"],
+            value["committed_at_block"],
+        )
+        if slot.snapshot.block_number != self._next or (
+            self._tip is not None and slot.snapshot.parent_hash != self._tip.snapshot.block_hash
+        ):
+            raise ValueError("control history has a gap or a different parent")
+        unresolved = bool(value["unresolved_extrinsics"])
+        if (
+            self._tip is not None
+            and not value["writes"]
+            and (slot.control_sha256, slot.committed_at_block)
+            != (self._tip.control_sha256, self._tip.committed_at_block)
+        ):
+            unresolved = True
+        if unresolved:
+            self._unresolved.append(self._next)
+        self._writes.extend(
+            HistoricalControlWrite(self._next, i, key) for i, key in value["writes"]
+        )
+        self._evidence_sha256 = digest(
+            {
+                "prior": self._evidence_sha256,
+                "block": self._next,
+                "slot": value["slot_evidence_sha256"],
+                "writes": value["write_evidence_sha256"],
+            }
+        )
+        self._tip = slot
+        self._prefixes[self._next] = (
+            slot.snapshot,
+            self._evidence_sha256,
+            len(self._writes),
+            len(self._unresolved),
+        )
+        self._source_tokens.pop(self._next, None)
+        self._next += 1
+        self.progress.report(self, "running")
+
+    async def _validate_checkpoint_tip(self, provider, value):
+        async with provider._lock:
+            if provider._closed or not provider._owned:
+                raise ValueError("checkpoint restore requires the running owned provider")
+            await provider._resolve_control_header(
+                FinalizedSnapshotRef(**value["snapshot"]), value["header"]
+            )
+
+    async def _restore_prefix(self, provider, last):
+        self.progress.native_stop()
+        values = []
+        for height in range(self._next, last + 1):
+            try:
+                value = await run_owned_thread(self.checkpoints.load, height)
+            except HistoryCheckpointRepairRequired:
+                self.progress.invalidate(height)
+                if not self._repair_reason:
+                    raise
+                break
+            if value is None:
+                break
+            values.append(value)
+        if not values:
+            return
+        self.progress.report(self, "restoring_checkpoint")
+        await self._validate_checkpoint_tip(provider, values[-1])
+        # Recheck source identities after asynchronous finality, before issuing
+        # any prefix. Unchanged proof payloads are never read or hashed here.
+        for value in values:
+            current = await run_owned_thread(
+                self.checkpoints.load, value["snapshot"]["block_number"]
+            )
+            if current != value:
+                raise HistoryCheckpointRepairRequired("checkpoint changed during owned restore")
+        for value in values:
+            value = await self._ensure_checkpoint_export(value)
+            self.progress.restored_completed += 1
+            self._apply_checkpoint(value)
+
+    def _export_identity(self):
+        root = self.export_archive.root
+        try:
+            stat = root.stat()
+        except FileNotFoundError:
+            return None
+        value = {"path": str(root.resolve()), "identity": [stat.st_dev, stat.st_ino, stat.st_uid]}
+        remote = getattr(self.export_archive, "remote", None)
+        if remote is not None:
+            value["remote_namespace_sha256"] = remote.namespace_sha256
+        return digest(value)
+
+    async def _ensure_checkpoint_export(self, value):
+        if self.export_archive is None:
+            return value
+        identity = self._export_identity()
+        if identity in value["exports"]:
+            self.progress.record("exported", value["snapshot"]["block_number"])
+            return value
+        # A new destination needs its first copy, but no new native proof check.
+        # Retain the old successful result and bind the new delivery fact to the
+        # same original source identities in the atomic checkpoint transaction.
+        height = value["snapshot"]["block_number"]
+        self.progress.stage = "checkpoint_export"
+        self.progress.report(self, "running", force=True)
+        fields = await run_owned_thread(self._load, height)
+        if fields is None:
+            raise HistoryCheckpointRepairRequired("verified history lost export source")
+        await run_owned_thread(self._export_fields, height, fields, self.export_archive)
+        identity = self._export_identity()
+        updated = {**value, "exports": [*value["exports"], identity]}
+        await run_owned_thread(
+            partial(self.checkpoints.remember, updated, repair_reason="new_export_destination")
+        )
+        self.progress.record("exported", height)
+        return updated
+
+    async def advance(self, provider, *, through_block, maximum_blocks=64):
+        async with self._advance_lock:
+            result = await self._observed_advance(
+                provider, through_block=through_block, maximum_blocks=maximum_blocks
+            )
+            if result.history is not None:
+                self._repair_reason = self._repair_id = None
+            return result
+
+    def _externalize_sources(self, maximum_records):
+        if type(maximum_records) is not int or not 1 <= maximum_records <= 4096:
+            raise ValueError("history source replication requires a bounded record batch")
+        with self.journal.locked():
+            return self._externalize_sources_locked(maximum_records)
+
+    def _externalize_sources_locked(self, maximum_records):
+        keys = []
+        with self.journal.read_transaction() as db:
+            # Bound index traversal as well as payload work. A mixed-direction
+            # ORDER BY across all kinds requires a temporary sort of the whole
+            # first kind even when the requested batch is small.
+            for kind in reversed(SOURCE_KINDS):
+                keys.extend(
+                    db.execute(
+                        "SELECT kind,id FROM records WHERE kind=? ORDER BY id LIMIT ?",
+                        (kind, maximum_records - len(keys)),
+                    ).fetchall()
+                )
+                if len(keys) == maximum_records:
+                    break
+        result = self.remote_sources.externalize_many(keys)
+        with self.journal.read_transaction() as db:
+            result["remaining_local_records"] = db.execute(
+                "SELECT COALESCE(SUM(number),0) FROM round_record_capacity_kinds "
+                "WHERE kind IN (?,?,?)",
+                SOURCE_KINDS,
+            ).fetchone()[0]
+        self.progress.local_release = result
+        return result
+
+    async def externalize_history_sources(self, *, maximum_records=256):
+        """Explicit bounded upgrade/repair entrypoint under this reader's ownership."""
+        async with self._advance_lock, self._lock:
+            return await run_owned_thread(self._externalize_sources, maximum_records)
+
+    async def _observed_advance(self, provider, *, through_block, maximum_blocks):
+        stop = asyncio.Event()
+        # Preserve native argument rejection before starting diagnostics.
+        self._validate_advance(provider, through_block, maximum_blocks)
+        self.progress.start(through_block, self._next, repair=bool(self._repair_reason))
+        self.progress.report(self, "running", force=True)
+        monitor = asyncio.create_task(self.progress.monitor(self, stop))
+        failed = False
+        try:
+            if self.remote_store is not None:
+                self.progress.stage = "history_source_replication"
+                self.progress.report(self, "running", force=True)
+                async with self._lock:
+                    await run_owned_thread(self._externalize_sources, 256)
+            result = await self._advance(
+                provider, through_block=through_block, maximum_blocks=maximum_blocks
+            )
+            if self.remote_store is not None:
+                self.progress.stage = "history_source_replication"
+                self.progress.report(self, "running", force=True)
+                async with self._lock:
+                    await run_owned_thread(self._externalize_sources, 256)
+            self.progress.report(self, "completed" if result.history is not None else "pending")
+            return result
+        except BaseException as error:
+            failed = True
+            self.progress.report(
+                self,
+                "repair_required"
+                if isinstance(error, HistoryCheckpointRepairRequired)
+                else "retrying",
+                error_type=type(error).__name__,
+            )
+            raise
+        finally:
+            stop.set()
+            self.progress.finish()
+            # Diagnostic failures never mask native errors or abandon native
+            # cancellation cleanup; the monitor owns no protocol work.
+            if failed:
+                with suppress(Exception, asyncio.CancelledError):
+                    await await_owned_task(monitor)
+            else:
+                # A new caller cancellation remains a cancellation, including
+                # when it arrives after the native result but during cleanup.
+                with suppress(Exception):
+                    await await_owned_task(monitor)
+
+    async def repair_checkpoints(self, provider, *, through_block, reason, maximum_blocks=64):
+        """Explicitly recheck affected native blocks; preserve unaffected receipts.
+
+        Existing raw /1 journals need no reset. Blocks with no successful receipt
+        follow the ordinary native first pass, checkpointed one block at a time.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("history checkpoint repair requires an explicit reason")
+        async with self._advance_lock:
+            if self._repair_reason is None:
+                # Rebuild the cheap ordered reducer from the beginning. Good
+                # independent block results survive; only affected blocks replay
+                # their native proofs. Continued bounded repair calls retain this
+                # cursor and reason until the selected interval is complete.
+                async with self._lock:
+                    self._next = self.first_block
+                    self._tip = None
+                    self._writes.clear()
+                    self._unresolved.clear()
+                    self._prefixes.clear()
+                    self._evidence_sha256 = self._initial_evidence_sha256
+                self._repair_reason = reason
+                self._repair_id = secrets.token_hex(16)
+            elif self._repair_reason != reason:
+                raise ValueError("history checkpoint repair already has a different reason")
+            result = await self._observed_advance(
+                provider, through_block=through_block, maximum_blocks=maximum_blocks
+            )
+            if result.history is not None:
+                self._repair_reason = self._repair_id = None
+            return result
 
     def _archive_context(self, height):
         return {
@@ -497,13 +936,21 @@ class RewardControlHistoryReader:
         # advance() has verified and durably retained these exact bytes. Reloading
         # the frame here only decodes the same large proof objects a second time.
         height = observation.slot.snapshot.block_number
-        archive.write(
-            "history",
-            history_archive_key(self.config_sha256, self.hotkey, height),
-            context=self._archive_context(height),
-            fields={
+        self._export_fields(
+            height,
+            {
                 "slot_evidence": observation.slot.evidence,
                 "slot_metadata": observation.slot.metadata,
                 "evidence": observation.evidence,
             },
+            archive,
+        )
+
+    def _export_fields(self, height, fields, archive):
+        archive.write(
+            "history",
+            history_archive_key(self.config_sha256, self.hotkey, height),
+            context=self._archive_context(height),
+            fields=fields,
+            prepared_encodings=self._prepared_encodings.pop(height, None),
         )

@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .protocol import canonical_json_bytes
 
@@ -22,6 +22,7 @@ MAX_SEGMENTS = 32768
 _HEX_DIGITS = b"0123456789abcdef"
 _SHA = re.compile(r"[0-9a-f]{64}")
 _SCHEMA = "umi-weight-evidence-recipe/1"
+_PREPARED_ISSUER = object()
 
 
 def checked_digest(value: str) -> str:
@@ -48,6 +49,70 @@ class EncodedEvidence:
     expanded_bytes: int
     recipe: bytes
     objects: dict[str, bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEvidenceEncoding:
+    """An immutable encoding emitted only after complete ordinary decoding.
+
+    Retaining this operation-local representation avoids scanning/re-encoding
+    those same bytes for export. It is not a proof verification receipt. Every
+    object and the expanded bytes have passed the unchanged codec checks.
+    """
+
+    raw: bytes = field(repr=False)
+    kind: str
+    sha256: str
+    recipe: bytes = field(repr=False)
+    objects: tuple[tuple[str, bytes], ...] = field(repr=False)
+    canonical_encoder: bool = False
+    _issuer: object = field(default=None, repr=False, compare=False)
+    _binding: tuple = field(default=(), repr=False, compare=False)
+
+    def for_bytes(self, raw: bytes, *, kind: str) -> EncodedEvidence:
+        if (
+            type(self) is not PreparedEvidenceEncoding
+            or self._issuer is not _PREPARED_ISSUER
+            or self._binding
+            != (
+                id(self.raw),
+                self.kind,
+                self.sha256,
+                id(self.recipe),
+                id(self.objects),
+                self.canonical_encoder,
+            )
+            or type(raw) is not bytes
+            or kind != self.kind
+            or raw != self.raw
+        ):
+            raise ValueError("prepared encoding differs from its decoded original bytes")
+        return EncodedEvidence(self.sha256, len(raw), self.recipe, dict(self.objects))
+
+
+def _prepare_encoding(raw, kind, sha256, recipe, objects, *, canonical_encoder=False):
+    value = PreparedEvidenceEncoding(
+        bytes(raw),
+        kind,
+        sha256,
+        bytes(recipe),
+        tuple(objects.items()),
+        canonical_encoder=canonical_encoder,
+        _issuer=_PREPARED_ISSUER,
+    )
+    object.__setattr__(
+        value,
+        "_binding",
+        (
+            id(value.raw),
+            value.kind,
+            value.sha256,
+            id(value.recipe),
+            id(value.objects),
+            value.canonical_encoder,
+        ),
+    )
+    return value
 
 
 def _hex_spans(raw: bytes):
@@ -112,6 +177,19 @@ def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
     return EncodedEvidence(identity, len(raw), encoded, objects)
 
 
+def encode_evidence_for_reuse(raw: bytes, *, kind: str) -> PreparedEvidenceEncoding:
+    """Retain this encoder's exact output for a second owned publication."""
+    encoded = encode_evidence(raw, kind=kind)
+    return _prepare_encoding(
+        raw,
+        kind,
+        encoded.sha256,
+        encoded.recipe,
+        encoded.objects,
+        canonical_encoder=True,
+    )
+
+
 def inspect_recipe(raw: bytes, *, expanded_bytes: int, kind: str) -> tuple[tuple, ...]:
     """Validate all expansion bounds before consulting any object resolver."""
     checked_size(expanded_bytes, evidence_bound(kind))
@@ -154,9 +232,48 @@ def decode_evidence(
     kind: str,
     resolve: Callable[[str, int], bytes],
 ) -> bytes:
+    return _decode_evidence(
+        recipe,
+        sha256=sha256,
+        expanded_bytes=expanded_bytes,
+        kind=kind,
+        resolve=resolve,
+        prepare_encoding=False,
+    )
+
+
+def decode_evidence_for_reuse(
+    recipe: bytes,
+    *,
+    sha256: str,
+    expanded_bytes: int,
+    kind: str,
+    resolve: Callable[[str, int], bytes],
+) -> PreparedEvidenceEncoding:
+    """Run every decoder check once and retain its exact encoding for export."""
+    return _decode_evidence(
+        recipe,
+        sha256=sha256,
+        expanded_bytes=expanded_bytes,
+        kind=kind,
+        resolve=resolve,
+        prepare_encoding=True,
+    )
+
+
+def _decode_evidence(
+    recipe: bytes,
+    *,
+    sha256: str,
+    expanded_bytes: int,
+    kind: str,
+    resolve: Callable[[str, int], bytes],
+    prepare_encoding: bool,
+) -> bytes | PreparedEvidenceEncoding:
     checked_digest(sha256)
     parts = inspect_recipe(recipe, expanded_bytes=expanded_bytes, kind=kind)
     result = bytearray()
+    objects = {} if prepare_encoding else None
     # No nested recipes, recursive object references, decompressor, or unbounded cache.
     for mode, key, size in parts:
         value = resolve(key, size)
@@ -164,8 +281,14 @@ def decode_evidence(
             raise ValueError("evidence object missing or wrong size")
         if hashlib.sha256(value).hexdigest() != key:
             raise ValueError("evidence object digest changed")
+        if objects is not None:
+            # Own immutable bytes even when a legacy resolver uses a bytes
+            # subclass. A repeated object still receives its ordinary check.
+            objects[key] = bytes(value)
         result.extend(value.hex().encode("ascii") if mode == "x" else value)
     raw = bytes(result)
     if hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError("reconstructed evidence digest changed")
+    if objects is not None:
+        return _prepare_encoding(raw, kind, sha256, recipe, objects)
     return raw
