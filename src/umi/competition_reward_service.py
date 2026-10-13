@@ -17,7 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_control_archive import HistoricalRewardControlProvider
@@ -31,6 +31,7 @@ from .competition_reward_handoff_models import (
     StandingRewardHandoffPlan,
 )
 from .competition_reward_history import RewardControlHistoryReader
+from .competition_reward_history_workers import HistoryVerificationProfile
 from .competition_reward_host import (
     bind_standing_reward_host,
     check_standing_reward_host_selection,
@@ -59,8 +60,16 @@ class StandingRewardServiceLimits(StrictProtocolModel):
     maximum_journal_bytes: Annotated[int, Field(ge=1024, le=512 * 1024**3)]
     mortality_period: Annotated[int, Field(ge=4, le=4096)]
     maximum_history_blocks: Annotated[int, Field(ge=1, le=4096)] = 64
+    history_verification: HistoryVerificationProfile | None = None
     submission_timeout_seconds: Annotated[float, Field(gt=0, le=3600)] = 120
     poll_seconds: Annotated[float, Field(gt=0, le=3600)] = 12
+
+    @model_serializer(mode="wrap")
+    def omit_unselected_history_profile(self, handler):
+        value = handler(self)
+        if self.history_verification is None:
+            value.pop("history_verification", None)
+        return value
 
     @model_validator(mode="after")
     def mortal_period(self):

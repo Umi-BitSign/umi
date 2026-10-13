@@ -48,7 +48,9 @@ from .competition_reward_history_checkpoint import (
     HistoryCheckpointRepairRequired,
     HistoryCheckpoints,
 )
+from .competition_reward_history_parallel import advance_parallel_locked
 from .competition_reward_history_progress import HistoryProgress
+from .competition_reward_history_workers import HistoryVerificationProfile
 from .competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
@@ -182,6 +184,7 @@ class RewardControlHistoryReader:
         archive: RewardProofArchive | None = None,
         export_archive: RewardProofArchive | None = None,
         repair_record_capacity: bool = False,
+        verification_profile: HistoryVerificationProfile | None = None,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -189,6 +192,8 @@ class RewardControlHistoryReader:
         self.hotkey = _hotkey(control_hotkey)
         self.config_sha256 = checked_digest(chain_config_sha256)
         self.first_block = first_block
+        self.verification_profile = verification_profile
+        self._field_bounds = _FIELDS
         self.archive = archive
         self.export_archive = export_archive
         binding = {
@@ -287,14 +292,20 @@ class RewardControlHistoryReader:
                 return control
 
     def _save(self, observation: OwnedRewardControlWrites) -> None:
+        self._save_fields(
+            observation.slot.snapshot.block_number,
+            {
+                "slot_evidence": observation.slot.evidence,
+                "slot_metadata": observation.slot.metadata,
+                "evidence": observation.evidence,
+            },
+        )
+
+    def _save_fields(self, height: int, fields: dict[str, bytes]) -> None:
         records = []
         refs = {}
         prepared = {}
-        for name, raw in (
-            ("slot_evidence", observation.slot.evidence),
-            ("slot_metadata", observation.slot.metadata),
-            ("evidence", observation.evidence),
-        ):
+        for name, raw in fields.items():
             refs[name] = []
             prepared[name] = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
@@ -320,11 +331,10 @@ class RewardControlHistoryReader:
                     )
                 )
                 refs[name].append(encoded.sha256)
-        records.append(("control_history_block", str(observation.slot.snapshot.block_number), refs))
+        records.append(("control_history_block", str(height), refs))
         # The complete frame and all of its objects commit together. A lost
         # acknowledgement is an exact immutable retry, never another decision.
         source_tokens = []
-        height = observation.slot.snapshot.block_number
 
         def index(db):
             source_tokens.extend(
@@ -333,6 +343,7 @@ class RewardControlHistoryReader:
             self._source_tokens[height] = source_tokens
 
         self.journal.put_many(records, index=index)
+        self.progress.record("captured", height)
         if self.export_archive is not None:
             self._prepared_encodings[height] = prepared
 
@@ -439,6 +450,7 @@ class RewardControlHistoryReader:
         try:
             completed = await run_owned_thread(self.checkpoints.load, height)
         except HistoryCheckpointRepairRequired:
+            self.progress.invalidate(height)
             if not self._repair_reason:
                 raise
             completed = None
@@ -516,7 +528,7 @@ class RewardControlHistoryReader:
                 if save_error is not None:
                     raise save_error from None
                 raise
-            self.progress.native_completed += 1
+            self.progress.native_finished(height)
             if save_error is not None:
                 raise save_error
             return value
@@ -546,6 +558,13 @@ class RewardControlHistoryReader:
                 last = min(through_block, self._next + maximum_blocks - 1)
                 pending = following = None
                 try:
+                    await self.progress.inventory(self)
+                    if self.verification_profile is not None:
+                        await advance_parallel_locked(self, provider, last)
+                        history = (
+                            self._prefix(through_block) if self._next == through_block + 1 else None
+                        )
+                        return ControlHistoryProgress(self._next, through_block, history)
                     await self._restore_prefix(provider, last)
                     if self._next <= last:
                         pending = self._start_preparation(provider, self._next)
@@ -593,6 +612,8 @@ class RewardControlHistoryReader:
                                     repair_reason="new_export_destination",
                                 )
                             )
+                        if self.export_archive is not None:
+                            self.progress.record("exported", self._next)
                         self._apply_checkpoint(value)
                         pending, following = following, None
                 finally:
@@ -616,6 +637,8 @@ class RewardControlHistoryReader:
                 return ControlHistoryProgress(self._next, through_block, history)
 
     def _apply_checkpoint(self, value):
+        self.progress.record("verified", value["snapshot"]["block_number"])
+        self.progress.applied(value["snapshot"]["block_number"])
         slot = _HistoryTip(
             FinalizedSnapshotRef(**value["snapshot"]),
             value["control_sha256"],
@@ -672,6 +695,7 @@ class RewardControlHistoryReader:
             try:
                 value = await run_owned_thread(self.checkpoints.load, height)
             except HistoryCheckpointRepairRequired:
+                self.progress.invalidate(height)
                 if not self._repair_reason:
                     raise
                 break
@@ -710,6 +734,7 @@ class RewardControlHistoryReader:
             return value
         identity = self._export_identity()
         if identity in value["exports"]:
+            self.progress.record("exported", value["snapshot"]["block_number"])
             return value
         # A new destination needs its first copy, but no new native proof check.
         # Retain the old successful result and bind the new delivery fact to the
@@ -726,6 +751,7 @@ class RewardControlHistoryReader:
         await run_owned_thread(
             partial(self.checkpoints.remember, updated, repair_reason="new_export_destination")
         )
+        self.progress.record("exported", height)
         return updated
 
     async def advance(self, provider, *, through_block, maximum_blocks=64):

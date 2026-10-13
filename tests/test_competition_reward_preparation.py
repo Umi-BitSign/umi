@@ -1662,22 +1662,32 @@ async def test_native_admission_signs_only_an_empty_reserved_control_history(
 
 
 @pytest.mark.parametrize(
-    "complete_preparation_case",
+    "complete_preparation_case,parallel_history",
     [
-        "matching",
-        "sparse_zeros",
-        "raw_row",
-        "missing_recipient",
-        "extra_recipient",
-        "permit_missing",
+        ("matching", False),
+        ("sparse_zeros", False),
+        ("raw_row", False),
+        ("missing_recipient", False),
+        ("extra_recipient", False),
+        ("permit_missing", False),
+        ("matching", True),
     ],
-    indirect=True,
+    indirect=["complete_preparation_case"],
 )
 async def test_complete_native_history_package_and_projection_restart_without_coordinator(
     complete_preparation_case,
+    parallel_history,
+    tmp_path,
+    monkeypatch,
 ):
     h = complete_preparation_case
     p, c = h.package_case, h.c
+    if parallel_history:
+        from .test_competition_reward_history_parallel import retained_parallel_case
+
+        await retained_parallel_case(h, tmp_path, monkeypatch)
+        h.new_reader = h.open_parallel
+        h.offline_through = h.end - 1
 
     async def history():
         for _ in range(100):
@@ -1714,6 +1724,8 @@ async def test_complete_native_history_package_and_projection_restart_without_co
 
     StandingRewardPreparation(c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000)
     captured = await history()
+    if parallel_history:
+        assert h.reader.progress.native_completed == h.end - h.old.height + 1
     archived_control = await h.reader.review_control(h.item.provider, captured.tip.block_number)
     ready, result = await prepare(owner(), captured)
     eligibility_control, captured_eligibility = await current_state(
@@ -1735,6 +1747,8 @@ async def test_complete_native_history_package_and_projection_restart_without_co
     c.objects.clear()
     h.offline_through = h.end - 1
     replayed = await history()
+    if parallel_history:
+        assert h.reader.progress.native_completed == 0
     # Recover the exact historical allocation natively before any fresh state
     # collection. No coordinator, historical body/state RPC or renewed control
     # publication participates in this review.

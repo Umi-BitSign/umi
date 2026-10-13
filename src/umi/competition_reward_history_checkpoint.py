@@ -387,6 +387,50 @@ class HistoryCheckpoints:
         ]:
             raise ValueError("history checkpoint frame identity missing")
 
+    def progress_rows(self, first, last, export_identity):
+        """Bounded compact inventory; no retained proof payloads are loaded.
+
+        Diagnostic counts describe durable facts, not an authority decision.
+        Normal load()/repair still validates every selected source revision.
+        """
+        if not 0 <= last - first < 512:
+            raise ValueError("history progress inventory exceeds its work window")
+        heights = tuple(str(height) for height in range(first, last + 1))
+        with self.journal.read_transaction() as db:
+            captured = {
+                int(row[0])
+                for row in db.execute(
+                    "SELECT id FROM records WHERE kind='control_history_block' AND id IN ("
+                    + ",".join("?" for _ in heights)
+                    + ")",
+                    heights,
+                )
+            }
+            verified, exported = set(), set()
+            for height, body in db.execute(
+                "SELECT i.height,r.body FROM history_checkpoint_index i LEFT JOIN records r "
+                "ON r.kind='control_history_verified' AND r.id=i.key "
+                "WHERE i.height>=? AND i.height<=?",
+                (first, last),
+            ):
+                try:
+                    value = json.loads(body)
+                    if (
+                        value["schema"] != ABI
+                        or value["owner"] != self.owner
+                        or value["semantics"] != self.semantics
+                        or value["snapshot"]["block_number"] != height
+                    ):
+                        continue
+                    verified.add(height)
+                    if export_identity is not None and export_identity in value["exports"]:
+                        exported.add(height)
+                except (KeyError, TypeError, ValueError):
+                    # A damaged receipt is never counted as successful. Its
+                    # authoritative load exposes the scoped repair requirement.
+                    continue
+        return captured, verified, exported
+
     def capture(self, observation, sources):
         slot = observation.slot
         return {

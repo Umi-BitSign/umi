@@ -185,6 +185,60 @@ still use normal recovery. Malformed owned records and corrupt durable hints sto
 the operation instead of falling back to replacement data. These optimizations
 preserve the original evidence format, state bindings and current-finality checks.
 
+Retained block verification supports an explicit local
+`service.history_verification` selection in both standing-writer and
+coordinator/reviewer configurations:
+
+```json
+{
+  "schema": "umi-history-verification-profile/1",
+  "workers": 2,
+  "maximum_in_flight": 2,
+  "maximum_in_flight_bytes": 637534208
+}
+```
+
+Omitting this field preserves existing serial behavior and canonical configuration
+bytes. Selecting it does not alter a signed cohort, a clock, the history root or
+its receipts. Current and configured predecessor histories, coverage collection
+and both owner repair commands use the same selection. For C6 and later cohorts,
+start the coverage/history owner at launch, retain the complete finalized interval
+from its original authority block, and monitor catch-up during intake, paid work
+and certification. Selecting workers alone does not start a missing capture owner.
+
+The parent authenticates each child header against its owned finalized chain;
+spawned workers receive only immutable evidence and the selected native verifier
+context. They share the serial archive parser, runtime/slot proof checks and
+complete body/event scanner, including parent-runtime changes. Each successful
+result is committed independently, even when an earlier block fails. Only one
+owner applies consecutive results in block order. Gaps and unresolved effects
+cannot become a complete history. Worker shutdown drains started operations;
+an abnormal worker exit cleans its owned native process group while healthy
+peers finish and checkpoint their results. No signing key, RPC connection or
+owner database handle enters a worker.
+
+This parallel path accelerates retained or imported proof verification. Missing
+frames still use the existing serial online native capture path. Do not derive an
+online catch-up ETA or a production throughput promise from offline worker count.
+Each window reserves room for maximum supported frames; the byte budget bounds
+concurrency without reducing the evidence allowance. The default profile requires
+10.5 GiB of conservative aggregate headroom for raw/IPC copies, decoded graphs,
+worker interpreters and native tools. Qualify the selected host's full peak before
+cutover. When host memory admission is configured, its enclosing transient slot
+must cover the entire window; workers never acquire a nested lease. Unsupported
+memory selections fail before loading a window. An absent host memory policy
+leaves provisioning with the operator and does not claim that capacity is present.
+
+Progress inventories read compact durable checkpoint metadata once, in bounded
+batches, and then advance counts as work commits. `captured_blocks`,
+`verified_blocks`, `exported_blocks` and `applied_blocks` are distinct.
+`exported_blocks` describes the selected local proof archive. The history owner
+has no remote delivery receipts, so `replicated_blocks` remains null with an
+explicit unavailable-receipt basis; local verification or export is never reported
+as remote replication. Ordered pipeline and ahead-of-prefix verification rates
+are separate, and parallel history ETAs use the ordered rate. Remote replication
+needs its transport's acknowledged-receipt telemetry before successor cutover.
+
 Supported journals containing only legacy `/1` raw history records receive a
 counted source-identity migration and then a first native checkpoint pass. This
 preserves all original record bytes. Retain that compatibility reader while an

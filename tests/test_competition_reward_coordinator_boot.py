@@ -19,6 +19,7 @@ from umi import competition_reward_coordinator_boot as boot
 from umi import competition_reward_coordinator_cli as cli
 from umi.competition_reward_decisions import StandingRewardSeries
 from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.open_competition import digest, verify_signature
 from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.protocol import canonical_json_bytes
@@ -227,6 +228,16 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             else h.config.maximum_history_bytes,
         }
     )
+    history_profile = (
+        HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+        if proof_reads
+        else None
+    )
+    config = config.model_copy(
+        update={
+            "service": config.service.model_copy(update={"history_verification": history_profile})
+        }
+    )
     if role == "reviewer":
         config = boot.RewardCoordinatorConfig.model_validate(
             config.model_dump(by_alias=True)
@@ -299,6 +310,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         collector_lifecycle.append("started")
         try:
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
+            assert self.history.verification_profile == history_profile
             if failure == "coverage":
                 raise OSError("coverage failure")
             if failure == "coverage_exit":

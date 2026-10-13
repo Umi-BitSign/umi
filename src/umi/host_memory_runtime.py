@@ -139,7 +139,11 @@ def compact_memory_error(error: BaseException) -> BaseException:
         setattr(result, name, value)
     if isinstance(error, OSError):
         for name in ("errno", "strerror", "filename", "filename2"):
-            setattr(result, name, _bounded_error_value(getattr(error, name), budget))
+            value = getattr(error, name)
+            # Setting an absent filename changes OSError's formatting flags;
+            # a plain-message failure would lose its original useful reason.
+            if value is not None:
+                setattr(result, name, _bounded_error_value(value, budget))
     return result
 
 
@@ -224,6 +228,25 @@ async def memory_operation_context(*, operation, cohort=None, phase=None):
     finally:
         lease.close()
         _active.reset(token)
+
+
+@asynccontextmanager
+async def history_memory_window(required_bytes):
+    """Use the parent's full reservation; never acquire a nested worker lease."""
+    controller = selected_memory()
+    if controller is None:
+        yield
+        return
+    inherited = _active.get()
+    if inherited is not None and not inherited.closed:
+        if inherited.slot.reservation_bytes < required_bytes:
+            raise ValueError("parallel history exceeds the selected host memory reservation")
+        yield
+        return
+    async with memory_operation_context(operation=None):
+        if _active.get().slot.reservation_bytes < required_bytes:
+            raise ValueError("parallel history exceeds the selected host memory reservation")
+        yield
 
 
 async def run_memory_thread(function, *args, operation=None, cohort=None, phase=None):

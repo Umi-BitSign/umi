@@ -249,6 +249,7 @@ async def _run_owned_history_repair(
                     chain_config_sha256=digest(config.chain),
                     first_block=first,
                     maximum_bytes=config.maximum_history_bytes,
+                    verification_profile=config.service.history_verification,
                     archive=imported,
                     export_archive=exported,
                     # The explicit owner repair command may reconstruct damaged

@@ -262,6 +262,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             chain_config_sha256=digest(config.chain),
             first_block=config.series.recovery.authority.issued_at_block,
             maximum_bytes=config.maximum_history_bytes,
+            verification_profile=config.service.history_verification,
             archive=imported,
             export_archive=exported,
         )
@@ -330,6 +331,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 chain_config_sha256=digest(config.chain),
                 first_block=old.recovery.authority.issued_at_block,
                 maximum_bytes=config.maximum_history_bytes,
+                verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
             )

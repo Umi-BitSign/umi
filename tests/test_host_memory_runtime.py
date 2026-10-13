@@ -432,6 +432,18 @@ async def test_operation_error_payloads_and_chains_die_before_release(
     assert all(ref() is None for ref in references)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [OSError("archive unavailable"), OSError(5, "input/output", "/archive")],
+)
+def test_compacted_os_error_preserves_bounded_diagnostics(error):
+    compact = runtime.compact_memory_error(error)
+    assert type(compact) is type(error)
+    assert compact.args == error.args
+    assert str(compact) == str(error)
+    assert compact.filename == error.filename
+
+
 def test_qualified_conservative_headroom_allows_downstream_owner(provisioned, monkeypatch):
     controller = selected(provisioned)
     reservation = controller.policy.slots[0].reservation_bytes
@@ -542,3 +554,28 @@ def test_namespace_identity_path_preserves_normal_identity_and_refuses_alias(tmp
     alias.symlink_to("/etc", target_is_directory=True)
     with pytest.raises((OSError, ValueError)):
         admission._host_identity(alias / "machine-id")
+
+
+async def test_history_window_reuses_parent_capacity_and_independent_scope_releases(provisioned):
+    with bind(provisioned):
+        async with runtime.history_memory_window(1024):
+            lease = runtime._active.get()
+            assert lease is not None and not lease.closed
+            async with runtime.history_memory_window(1024):
+                assert runtime._active.get() is lease
+            with pytest.raises(ValueError, match="history exceeds"):
+                async with runtime.history_memory_window(1025):
+                    raise AssertionError("unreserved workers were admitted")
+            assert not lease.closed
+        assert lease.closed
+        async with runtime.history_memory_window(1024):
+            assert not runtime._active.get().closed
+
+
+async def test_history_window_refuses_unreserved_parallel_memory_without_holding_slot(provisioned):
+    with bind(provisioned):
+        with pytest.raises(ValueError, match="history exceeds"):
+            async with runtime.history_memory_window(1025):
+                raise AssertionError("unreserved workers were admitted")
+        async with runtime.history_memory_window(1024):
+            assert not runtime._active.get().closed

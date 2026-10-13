@@ -14,6 +14,7 @@ from umi import competition_reward_history_repair as repair
 from umi.competition_reward_coordinator_ownership import owned_reward_state
 from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.open_competition import digest
 from umi.private_files import PrivateStateBusyError, ensure_private_directory, lock_private_file
 
@@ -114,6 +115,12 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
     config_case, monkeypatch, caplog, failure, selection
 ):
     config = config_case.config if selection == "current" else with_predecessor(config_case.config)
+    history_profile = HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+    config = config.model_copy(
+        update={
+            "service": config.service.model_copy(update={"history_verification": history_profile})
+        }
+    )
     selected_series = config.series if selection == "current" else config.predecessor_series
     root = Path(config.state_directory) / digest(selected_series)
     owner_root = Path(config.state_directory) / digest(config.series)
@@ -139,6 +146,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
             assert kwargs["first_block"] == selected_series.recovery.authority.issued_at_block
             assert kwargs["maximum_bytes"] == config.maximum_history_bytes
             assert kwargs["repair_record_capacity"] is True
+            assert kwargs["verification_profile"] == history_profile
             with pytest.raises(PrivateStateBusyError):
                 lock_private_file(root / "service.lock")
             if failure == "metadata":
