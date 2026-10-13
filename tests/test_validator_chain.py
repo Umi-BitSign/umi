@@ -8,6 +8,8 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
+from websockets.exceptions import ConnectionClosedError, PayloadTooBig
+from websockets.frames import Close
 
 from umi.chain_evidence import FinalizedSnapshotRef
 from umi.validator_chain import (
@@ -901,6 +903,67 @@ async def test_bittensor_adapter_rejects_oversized_response_before_json_parse() 
     with pytest.raises(ValidatorChainError) as oversized:
         await rpc.request("chain_getBlockHash", (42,))
     assert oversized.value.reason_code == "proof_rpc_response_limit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("received_code", "sent_code", "received_first", "expected_reason"),
+    [
+        (None, 1009, None, "proof_rpc_response_limit"),
+        (1009, 1009, False, "proof_rpc_response_limit"),
+        (1009, None, None, "proof_rpc_failed"),
+        (1009, 1009, True, "proof_rpc_failed"),
+        (None, None, None, "proof_rpc_failed"),
+        (1011, 1011, False, "proof_rpc_failed"),
+    ],
+)
+async def test_bittensor_adapter_distinguishes_local_and_remote_size_closes(
+    received_code: int | None,
+    sent_code: int | None,
+    received_first: bool | None,
+    expected_reason: str,
+) -> None:
+    private_reason = "private provider response, credential=secret"
+    failure = ConnectionClosedError(
+        Close(received_code, private_reason) if received_code is not None else None,
+        Close(sent_code, private_reason) if sent_code is not None else None,
+        received_first,
+    )
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(failure))
+
+    with pytest.raises(ValidatorChainError) as caught:
+        await rpc.request("state_queryStorageAt", (("0x61",), _hash(1)))
+
+    assert caught.value.reason_code == expected_reason
+    assert str(caught.value) == expected_reason
+    assert vars(caught.value) == {
+        "reason_code": expected_reason,
+        "rpc_method": "state_queryStorageAt",
+        "rpc_error_code": None,
+        "rpc_block_hash": _hash(1),
+        "rpc_http_status": None,
+        "rpc_transport_error": "connection_closed",
+        "rpc_failures": (),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_bittensor_adapter_identifies_typed_receive_size_failure(wrapped: bool) -> None:
+    too_big = PayloadTooBig(1024 * 1024 + 1, 1024 * 1024)
+    failure: Exception = too_big
+    if wrapped:
+        failure = ConnectionClosedError(None, None)
+        failure.__cause__ = too_big
+    rpc = BittensorRawJsonRpc(_RpcClient(), connect_factory=_FakeConnect(failure))
+
+    with pytest.raises(ValidatorChainError) as caught:
+        await rpc.request("state_queryStorageAt", (("0x61",), _hash(1)))
+
+    assert caught.value.reason_code == "proof_rpc_response_limit"
+    assert caught.value.rpc_method == "state_queryStorageAt"
+    assert caught.value.rpc_block_hash == _hash(1)
+    assert caught.value.rpc_transport_error == ("connection_closed" if wrapped else None)
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ from .protocol import canonical_json_bytes
 from .rpc_transport import websocket_connect
 from .substrate_proof import SubprocessStorageProofVerifier
 from .validator_chain import (
+    _RPC_RESPONSE_LIMITS,
     BittensorRawJsonRpc,
     FinalizedProofCollector,
     FinalizedRuntimePin,
@@ -400,6 +401,10 @@ class _RegistrationRpc:
             "state_getStorageAt": 2048,
             "state_getReadProof": 17 * 1024**2,
             "state_getMetadata": 33 * 1024**2,
+            # Historical control scanning uses the full block reader, whose
+            # allowance already covers the native scanner's hex-encoded body.
+            # Registration's small default cannot truncate that shared path.
+            "chain_getBlock": _RPC_RESPONSE_LIMITS["chain_getBlock"],
         }.get(method, 1024**2)
 
         async with AsyncExitStack() as stack:
