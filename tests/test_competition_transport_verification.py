@@ -19,7 +19,7 @@ def test_checkpoint_repair_is_visible_and_does_not_touch_unchanged_slot(tmp_path
         saved.path("a").unlink()
         assert saved.load("a", [1]) is None
         assert events[-1]["status"] == "repair_required"
-        assert events[-1]["planning_eta_seconds"] is not None
+        assert events[-1]["planning_eta_seconds"] is None
         assert saved.load("b", [2]) == "b" * 64
         progress.advance(10)
         saved.remember("a", [1], "a" * 64)
@@ -205,3 +205,16 @@ def test_generation_reset_keeps_total_elapsed_and_restarts_rate(monkeypatch):
         progress.advance(20)
         assert events[-1]["eta_seconds"] == 8
         assert events[-1]["elapsed_seconds"] == 12
+
+
+def test_counted_migration_planning_scales_with_remaining_work(monkeypatch):
+    monkeypatch.setattr(transport.time, "monotonic", lambda: 100.0)
+    events = []
+    with transport.TransferProgress("migration", 20, events.append, unit="files") as progress:
+        assert events[-1]["planning_eta_seconds"] == [20, 6000]
+        assert events[-1]["planning_seconds_per_unit"] == [1, 300]
+        progress.advance(5, restored=True)
+        assert events[-1]["planning_eta_seconds"] == [15, 4500]
+        progress.emit("repair_required", reason="original_missing")
+        assert events[-1]["eta_seconds"] is None
+        assert events[-1]["planning_eta_seconds"] is None

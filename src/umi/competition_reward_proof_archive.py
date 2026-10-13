@@ -38,7 +38,7 @@ from .private_files import (
     publish_private_model,
     read_private_model,
 )
-from .protocol import Hex32, StrictProtocolModel
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
@@ -90,14 +90,29 @@ class RewardProofArchive:
     Transport/replication of these files is independent of proof verification.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, remote=None):
         self.root = Path(private_path(str(root)))
+        self.remote = remote
+        if remote is not None:
+            self._ensure_root()
         self._published = OrderedDict()
         self._publication_lock = Lock()
         self._read_objects = OrderedDict()
         self._read_bytes = 0
         self._read_lock = Lock()
         self._pid = os.getpid()
+
+    def _ensure_root(self):
+        # Legacy publication created private children beneath an owned root
+        # using the process umask. Secure that supported layout in place before
+        # creating transport receipts, preserving all payload bytes and inodes.
+        private_path(str(self.root))
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = self.root.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("proof archive root must be owned by its transport owner")
+        if info.st_mode & 0o077:
+            os.chmod(self.root, stat.S_IMODE(info.st_mode) & ~0o077)
 
     @staticmethod
     def _object_stamp(path):
@@ -137,6 +152,11 @@ class RewardProofArchive:
     def _retain_bytes(self, raw: bytes) -> str:
         checked_size(len(raw), MAX_EVIDENCE_BYTES)
         sha = hashlib.sha256(raw).hexdigest()
+        if self.remote is not None:
+            receipt = self.remote.put_bytes(raw)
+            if receipt["content_sha256"] != sha:
+                raise ValueError("remote proof publication changed its content identity")
+            return sha
         path = self.root / "objects" / (sha + ".json")
         if os.getpid() != self._pid:
             # Do not acquire a possibly inherited thread lock after fork.
@@ -177,6 +197,8 @@ class RewardProofArchive:
             )
 
     def _bytes(self, sha: str, maximum: int) -> bytes:
+        if self.remote is not None:
+            return self.remote.read_object(checked_digest(sha), maximum=maximum)
         path = self.root / "objects" / (checked_digest(sha) + ".json")
         checked_size(maximum, MAX_EVIDENCE_BYTES)
         if os.getpid() != self._pid:
@@ -247,7 +269,7 @@ class RewardProofArchive:
             # frame names exactly that recipe; otherwise retain the old encoder
             # path, including its immutable-frame conflict behavior.
             with suppress(FileNotFoundError):
-                existing = read_private_model(path, _Frame, maximum_bytes=MAX_FRAME_BYTES)
+                existing = self._frame(kind, key)
             if existing is not None and (
                 existing.kind != kind
                 or existing.key != key
@@ -298,18 +320,32 @@ class RewardProofArchive:
                     )
                 )
             refs[name] = tuple(parts)
-        publish_private_model(
-            path,
-            _Frame(
-                schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
-            ),
-            maximum_bytes=MAX_FRAME_BYTES,
+        frame = _Frame(
+            schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
         )
+        if self.remote is None:
+            publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+        else:
+            raw = canonical_json_bytes(frame)
+            checked_size(len(raw), MAX_FRAME_BYTES)
+            # The original /1 frame and codec recipes form the immutable object
+            # index. Publish the frame only after every referenced byte object.
+            self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+
+    def _frame(self, kind: Kind, key: str) -> _Frame:
+        path = self._path(kind, key)
+        if self.remote is None:
+            return read_private_model(path, _Frame, maximum_bytes=MAX_FRAME_BYTES)
+        raw = self.remote.read_path("frames/" + kind + "/" + key, maximum=MAX_FRAME_BYTES)
+        frame = _Frame.model_validate_json(raw)
+        if canonical_json_bytes(frame) != raw:
+            raise ValueError("remote proof frame does not retain canonical original bytes")
+        return frame
 
     def read(
         self, kind: Kind, key: str, *, bounds: dict[str, int]
     ) -> tuple[dict, dict[str, bytes]]:
-        frame = read_private_model(self._path(kind, key), _Frame, maximum_bytes=MAX_FRAME_BYTES)
+        frame = self._frame(kind, key)
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
         result = {}

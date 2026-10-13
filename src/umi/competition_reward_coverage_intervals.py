@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -44,6 +45,39 @@ class CoveragePoint(StrictProtocolModel):
         )
 
 
+_RETAINED_ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedRetainedCoverageEndpoint:
+    """Compact owner-restored native facts; never a portable proof or weight lease."""
+
+    point: CoveragePoint
+    package_sha256: str
+    receipt_sha256: str
+    _issuer: object = field(default=None, repr=False, compare=False)
+    _binding: str = field(default="", repr=False, compare=False)
+
+    @property
+    def covered(self) -> bool:
+        return self.point.covered
+
+
+def _retained_binding(value):
+    return digest([digest(value.point), value.package_sha256, value.receipt_sha256])
+
+
+def _issue_retained_coverage(point, package_sha256, receipt_sha256):
+    value = OwnedRetainedCoverageEndpoint(
+        point, package_sha256, receipt_sha256, _issuer=_RETAINED_ISSUER
+    )
+    object.__setattr__(value, "_binding", _retained_binding(value))
+    return value
+
+
+CoverageEndpoint = OwnedRewardCoverageEndpoint | OwnedRetainedCoverageEndpoint
+
+
 class RewardCoverageInterval(StrictProtocolModel):
     """Retained arithmetic, not a native certificate or transaction permission."""
 
@@ -59,8 +93,17 @@ class RewardCoverageInterval(StrictProtocolModel):
         return digest({"rule": self.rule_sha256, "left": self.left, "right": self.right})
 
 
-def coverage_point(value: OwnedRewardCoverageEndpoint, rule: RewardCoverageRule) -> CoveragePoint:
+def coverage_point(value: CoverageEndpoint, rule: RewardCoverageRule) -> CoveragePoint:
     rule = RewardCoverageRule.model_validate_json(canonical_json_bytes(rule))
+    if type(value) is OwnedRetainedCoverageEndpoint:
+        if (
+            value._issuer is not _RETAINED_ISSUER
+            or value._binding != _retained_binding(value)
+            or value.point.series_sha256 != rule.series_sha256
+            or value.point.runtime_profile_sha256 != rule.runtime_profile_sha256
+        ):
+            raise ValueError("retained coverage lacks selected native provenance")
+        return value.point
     validate_reward_coverage(
         value,
         expected_series_sha256=rule.series_sha256,
@@ -123,7 +166,7 @@ def _interval(left: CoveragePoint, right: CoveragePoint, rule: RewardCoverageRul
 
 
 def coverage_interval(
-    left: OwnedRewardCoverageEndpoint, right: OwnedRewardCoverageEndpoint, rule: RewardCoverageRule
+    left: CoverageEndpoint, right: CoverageEndpoint, rule: RewardCoverageRule
 ) -> RewardCoverageInterval | None:
     """Both endpoints must independently pass the complete native coverage path."""
     return _interval(coverage_point(left, rule), coverage_point(right, rule), rule)

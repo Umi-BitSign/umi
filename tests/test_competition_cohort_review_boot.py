@@ -1244,3 +1244,29 @@ def test_request_aggregate_override_preserves_legacy_config_and_other_phase_limi
     restored = changed.model_dump(by_alias=True)
     restored.pop("maximum_aggregate_evidence_bytes")
     assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate(restored)) == original
+
+
+async def test_r2_phase_review_boot_selects_only_import_on_restart(
+    selected, providers, tmp_path, monkeypatch
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    selected.config, opened, _ = select_remote_proofs(
+        selected.config, tmp_path, monkeypatch, import_only=True
+    )
+    for _ in range(2):
+        async with boot.phase_review_app(selected.config):
+            assert opened[-1].config == selected.config.proof_stores.imported
+    assert len(opened) == 2
+    assert providers.events.count("started") == providers.events.count("closed") == 2
+    stores = selected.config.proof_stores.model_copy(
+        update={
+            "exported": selected.config.proof_stores.imported.model_copy(
+                update={"read_only": False}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="only an imported proof transport"):
+        PhaseReviewServiceConfig.model_validate_json(
+            canonical_json_bytes(selected.config.model_copy(update={"proof_stores": stores}))
+        )

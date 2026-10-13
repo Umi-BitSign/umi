@@ -81,10 +81,20 @@ class TransferProgress:
     stalled_seconds = 60.0
     emit_seconds = 10.0
 
-    def __init__(self, stage, total, report=None, *, unit="bytes", planning_work_bytes=None):
+    def __init__(
+        self,
+        stage,
+        total,
+        report=None,
+        *,
+        unit="bytes",
+        planning_work_bytes=None,
+        planning_unit_seconds=(1.0, 300.0),
+    ):
         self.stage, self.total, self.report = stage, total, report
         self.unit = unit
         self.planning_work_bytes = planning_work_bytes
+        self.planning_unit_seconds = planning_unit_seconds
         self.last_emit = 0.0
         self.token = None
         self.started = self.changed = self.rate_started = time.monotonic()
@@ -161,7 +171,7 @@ class TransferProgress:
             basis = "waiting_for_native_samples"
             if state == "completed":
                 eta, basis = 0, "completed_scope"
-            elif stalled or state in {"retrying", "refused"}:
+            elif stalled or state in {"retrying", "refused", "repair_required"}:
                 basis = "withdrawn_stalled_or_retrying"
             elif state == "waiting":
                 planning, basis = [5, 300], "planning_external_owner_starts_now_excludes_queue"
@@ -178,8 +188,8 @@ class TransferProgress:
                 basis = "planning_native_check_1_to_100_mib_per_second_excludes_owner_wait"
             elif remaining:
                 planning, basis = (
-                    [1, 300],
-                    "planning_one_network_operation_excludes_queue_and_retries",
+                    [remaining * seconds for seconds in self.planning_unit_seconds],
+                    "planning_seconds_per_work_unit_excludes_queue_and_retries",
                 )
             event = {
                 "schema": "umi-transport-work-progress/1",
@@ -201,6 +211,9 @@ class TransferProgress:
                 "planning_eta_seconds": planning,
                 "eta_basis": basis,
                 "eta_scope": "current_transfer_substage",
+                "planning_seconds_per_unit": list(self.planning_unit_seconds)
+                if planning is not None and basis.startswith("planning_seconds_per_work_unit")
+                else None,
                 "reason_code": self.reason,
                 "certification_authority": False,
             }

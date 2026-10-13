@@ -31,6 +31,10 @@ from .competition_evidence_codec import (
     encode_evidence,
     encode_evidence_for_reuse,
 )
+from .competition_history_source_externalization import (
+    JournalSourceExternalizer,
+    source_journal_version,
+)
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
@@ -45,6 +49,7 @@ from .competition_reward_control_writes import (
     validate_control_writes,
 )
 from .competition_reward_history_checkpoint import (
+    SOURCE_KINDS,
     HistoryCheckpointRepairRequired,
     HistoryCheckpoints,
 )
@@ -78,6 +83,26 @@ class _HistoryJournal(RoundJournal):
     """
 
     MAXIMUM_BYTES = MAX_HISTORY_BYTES
+
+    def __init__(self, *args, remote_store=None, **kwargs):
+        self.remote_store = remote_store
+        super().__init__(*args, **kwargs)
+
+    def _version(self, db):
+        try:
+            return source_journal_version(
+                db,
+                remote_namespace=None
+                if self.remote_store is None
+                else self.remote_store.namespace_sha256,
+            )
+        except ValueError as error:
+            raise HistoryCheckpointRepairRequired(str(error)) from error
+
+    def _enable_reservations(self, db):
+        if db.execute("PRAGMA user_version").fetchone()[0] == 3:
+            raise ValueError("remote history cannot transition to reservation generation")
+        return super()._enable_reservations(db)
 
     @property
     def maximum_records(self) -> int:
@@ -185,6 +210,7 @@ class RewardControlHistoryReader:
         export_archive: RewardProofArchive | None = None,
         repair_record_capacity: bool = False,
         verification_profile: HistoryVerificationProfile | None = None,
+        remote_store=None,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -196,6 +222,9 @@ class RewardControlHistoryReader:
         self._field_bounds = _FIELDS
         self.archive = archive
         self.export_archive = export_archive
+        self.remote_store = (
+            remote_store if remote_store is not None else getattr(export_archive, "remote", None)
+        )
         binding = {
             "schema": "umi-reward-control-history/1",
             "control_hotkey": self.hotkey,
@@ -209,11 +238,21 @@ class RewardControlHistoryReader:
             maximum_bytes=maximum_bytes,
             maximum_record_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
             repair_record_capacity=repair_record_capacity,
+            remote_store=self.remote_store,
         )
         self.checkpoints = HistoryCheckpoints(self.journal, binding)
+        self.remote_sources = JournalSourceExternalizer(
+            self.journal,
+            self.checkpoints,
+            self.remote_store,
+            source_kinds=SOURCE_KINDS,
+            repair_error=HistoryCheckpointRepairRequired,
+        )
+        self.checkpoints.remote_sources = self.remote_sources
         self._source_tokens = {}
         self._prepared_encodings = {}
         self.progress = HistoryProgress(first_block)
+        self.progress.remote_export_selected = getattr(export_archive, "remote", None) is not None
         self._repair_reason = None
         self._repair_id = None
         self._advance_lock = asyncio.Lock()
@@ -342,13 +381,13 @@ class RewardControlHistoryReader:
             )
             self._source_tokens[height] = source_tokens
 
-        self.journal.put_many(records, index=index)
+        self.journal.put_many(self.remote_sources.filter_records(records), index=index)
         self.progress.record("captured", height)
         if self.export_archive is not None:
             self._prepared_encodings[height] = prepared
 
     def _object(self, sha: str, size: int, *, db: sqlite3.Connection) -> bytes:
-        value = self.journal.get("control_history_object", sha, db=db)
+        value = self.remote_sources.get("control_history_object", sha, db=db)
         if (
             type(value) is not dict
             or set(value) != {"hex"}
@@ -369,7 +408,7 @@ class RewardControlHistoryReader:
 
     def _load_frame(self, height: int, *, db: sqlite3.Connection) -> dict[str, bytes] | None:
         source_keys = [("control_history_block", str(height))]
-        frame = self.journal.get("control_history_block", str(height), db=db)
+        frame = self.remote_sources.get("control_history_block", str(height), db=db)
         if frame is None:
             return None
         if type(frame) is not dict or set(frame) != set(_FIELDS):
@@ -407,7 +446,7 @@ class RewardControlHistoryReader:
             for sha in refs:
                 checked_digest(sha)
                 source_keys.append(("control_history_chunk", sha))
-                chunk = self.journal.get("control_history_chunk", sha, db=db)
+                chunk = self.remote_sources.get("control_history_chunk", sha, db=db)
                 if type(chunk) is not dict or set(chunk) != {"length", "recipe_hex"}:
                     raise ValueError("control history chunk is missing or malformed")
                 if (
@@ -536,13 +575,7 @@ class RewardControlHistoryReader:
             # Also wake the owner on failure before native observation exists.
             prepared.ready.set()
 
-    async def _advance(
-        self,
-        provider: HistoricalRewardControlProvider,
-        *,
-        through_block: int,
-        maximum_blocks: int = 64,
-    ) -> ControlHistoryProgress:
+    def _validate_advance(self, provider, through_block, maximum_blocks):
         _uint(through_block, 2**53 - 1)
         if type(maximum_blocks) is not int or not 1 <= maximum_blocks <= 4096:
             raise ValueError("control history work count exceeds its bound")
@@ -551,6 +584,17 @@ class RewardControlHistoryReader:
             or digest(provider.config) != self.config_sha256
         ):
             raise ValueError("control history provider differs from selected chain")
+        if through_block < self.first_block or through_block < self._next - 1:
+            raise ValueError("control history target regressed")
+
+    async def _advance(
+        self,
+        provider: HistoricalRewardControlProvider,
+        *,
+        through_block: int,
+        maximum_blocks: int = 64,
+    ) -> ControlHistoryProgress:
+        self._validate_advance(provider, through_block, maximum_blocks)
         async with self._lock:
             if through_block < self.first_block or through_block < self._next - 1:
                 raise ValueError("control history target regressed")
@@ -725,9 +769,11 @@ class RewardControlHistoryReader:
             stat = root.stat()
         except FileNotFoundError:
             return None
-        return digest(
-            {"path": str(root.resolve()), "identity": [stat.st_dev, stat.st_ino, stat.st_uid]}
-        )
+        value = {"path": str(root.resolve()), "identity": [stat.st_dev, stat.st_ino, stat.st_uid]}
+        remote = getattr(self.export_archive, "remote", None)
+        if remote is not None:
+            value["remote_namespace_sha256"] = remote.namespace_sha256
+        return digest(value)
 
     async def _ensure_checkpoint_export(self, value):
         if self.export_archive is None:
@@ -763,18 +809,64 @@ class RewardControlHistoryReader:
                 self._repair_reason = self._repair_id = None
             return result
 
+    def _externalize_sources(self, maximum_records):
+        if type(maximum_records) is not int or not 1 <= maximum_records <= 4096:
+            raise ValueError("history source replication requires a bounded record batch")
+        with self.journal.locked():
+            return self._externalize_sources_locked(maximum_records)
+
+    def _externalize_sources_locked(self, maximum_records):
+        keys = []
+        with self.journal.read_transaction() as db:
+            # Bound index traversal as well as payload work. A mixed-direction
+            # ORDER BY across all kinds requires a temporary sort of the whole
+            # first kind even when the requested batch is small.
+            for kind in reversed(SOURCE_KINDS):
+                keys.extend(
+                    db.execute(
+                        "SELECT kind,id FROM records WHERE kind=? ORDER BY id LIMIT ?",
+                        (kind, maximum_records - len(keys)),
+                    ).fetchall()
+                )
+                if len(keys) == maximum_records:
+                    break
+        result = self.remote_sources.externalize_many(keys)
+        with self.journal.read_transaction() as db:
+            result["remaining_local_records"] = db.execute(
+                "SELECT COALESCE(SUM(number),0) FROM round_record_capacity_kinds "
+                "WHERE kind IN (?,?,?)",
+                SOURCE_KINDS,
+            ).fetchone()[0]
+        self.progress.local_release = result
+        return result
+
+    async def externalize_history_sources(self, *, maximum_records=256):
+        """Explicit bounded upgrade/repair entrypoint under this reader's ownership."""
+        async with self._advance_lock, self._lock:
+            return await run_owned_thread(self._externalize_sources, maximum_records)
+
     async def _observed_advance(self, provider, *, through_block, maximum_blocks):
         stop = asyncio.Event()
         # Preserve native argument rejection before starting diagnostics.
-        _uint(through_block, 2**53 - 1)
+        self._validate_advance(provider, through_block, maximum_blocks)
         self.progress.start(through_block, self._next, repair=bool(self._repair_reason))
         self.progress.report(self, "running", force=True)
         monitor = asyncio.create_task(self.progress.monitor(self, stop))
         failed = False
         try:
+            if self.remote_store is not None:
+                self.progress.stage = "history_source_replication"
+                self.progress.report(self, "running", force=True)
+                async with self._lock:
+                    await run_owned_thread(self._externalize_sources, 256)
             result = await self._advance(
                 provider, through_block=through_block, maximum_blocks=maximum_blocks
             )
+            if self.remote_store is not None:
+                self.progress.stage = "history_source_replication"
+                self.progress.report(self, "running", force=True)
+                async with self._lock:
+                    await run_owned_thread(self._externalize_sources, 256)
             self.progress.report(self, "completed" if result.history is not None else "pending")
             return result
         except BaseException as error:

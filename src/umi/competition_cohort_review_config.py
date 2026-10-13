@@ -25,6 +25,7 @@ from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
@@ -57,6 +58,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     inputs_directory: Directory
     promotion_directory: Directory
     proof_import_directory: Directory
+    proof_stores: ProofArchiveStores | None = None
     eligible_tracks: Annotated[tuple[Track, ...], Field(min_length=1, max_length=2)]
     listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
     listen_port: Annotated[int, Field(ge=1024, le=65535)]
@@ -78,6 +80,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.proof_stores is None:
+            value.pop("proof_stores", None)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
         if self.phase_review_budget is None:
@@ -119,6 +123,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.inputs_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *((self.service_signing.directory,) if self.service_signing else ()),
                 *((self.admission_signing.directory,) if self.admission_signing else ()),
                 *(
@@ -159,6 +164,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selection(self):
+        if self.proof_stores is not None and self.proof_stores.exported is not None:
+            raise ValueError("phase reviewer accepts only an imported proof transport")
         checked_budget(
             self.phase_review_budget,
             self.policy,

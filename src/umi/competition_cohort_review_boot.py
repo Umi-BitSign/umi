@@ -38,7 +38,7 @@ from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_cohort_window_http import RemoteWindowClient
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_host_activation import _read_root_control_path
-from .competition_reward_proof_archive import RewardProofArchive
+from .competition_proof_archive_selection import selected_proof_archive
 from .competition_reward_service import _close_provider
 from .competition_store import CompetitionStore
 from .concurrency import await_owned_task, run_owned_thread
@@ -135,7 +135,11 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 limits=_http_limits(config),
             )
         )
-        proofs = RewardProofArchive(Path(config.proof_import_directory))
+        proofs = await run_owned_thread(
+            selected_proof_archive,
+            Path(config.proof_import_directory),
+            None if config.proof_stores is None else config.proof_stores.imported,
+        )
 
         async def archive(observation):
             return await run_owned_thread(SettlementRegistrationFiles._read, proofs, observation)

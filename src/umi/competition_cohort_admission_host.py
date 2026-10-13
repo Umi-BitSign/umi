@@ -230,7 +230,9 @@ async def admission_owner_app(
             for peer, credential in zip(c.reviewers, credentials, strict=True)
         )
         lifecycle = (
-            LifecycleHost(service_host, resources, client, credentials, sign)
+            await run_owned_thread(
+                LifecycleHost, service_host, resources, client, credentials, sign
+            )
             if service_host is not None and service_host.config.lifecycle is not None
             else None
         )

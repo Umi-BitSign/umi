@@ -12,7 +12,9 @@ from pathlib import Path
 
 from .competition_execution import ExecutionBoundary
 from .competition_historical_registration import HistoricalRegistrationProvider
+from .competition_proof_archive_selection import selected_proof_archives
 from .competition_registration_archive import MAX_ARCHIVE_BYTES, MAX_METADATA_BYTES
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_proof_archive import RewardProofArchive
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -20,11 +22,18 @@ from .protocol import canonical_json_bytes
 
 
 class SettlementRegistrationFiles:
-    def __init__(self, provider: HistoricalRegistrationProvider, *, inbox: Path, outbox: Path):
+    def __init__(
+        self,
+        provider: HistoricalRegistrationProvider,
+        *,
+        inbox: Path,
+        outbox: Path,
+        proof_stores: ProofArchiveStores | None = None,
+    ):
         self.provider = provider
-        self.inbox, self.outbox = RewardProofArchive(inbox), RewardProofArchive(outbox)
         if inbox.is_relative_to(outbox) or outbox.is_relative_to(inbox):
             raise ValueError("settlement proof inbox and outbox must be disjoint")
+        self.inbox, self.outbox = selected_proof_archives(inbox, outbox, proof_stores)
 
     @staticmethod
     def _read(archive: RewardProofArchive, observation: ExecutionBoundary) -> tuple[bytes, bytes]:

@@ -101,6 +101,7 @@ class HistoryCheckpoints:
 
     def _initialize(self, journal, binding):
         self.journal = journal
+        self.remote_sources = None
         directory = journal.root.stat()
         database = journal.path.stat()
         self.directory_identity = (directory.st_dev, directory.st_ino, directory.st_uid)
@@ -243,6 +244,9 @@ class HistoryCheckpoints:
         self.check_schema(db)
         out = []
         for kind, key in sorted(set(keys)):
+            if self.remote_sources is not None:
+                out.append(self.remote_sources.source_token(kind, key, db))
+                continue
             row = db.execute(
                 "SELECT revision,present FROM history_source_identity WHERE kind=? AND id=?",
                 (kind, key),
@@ -406,6 +410,14 @@ class HistoryCheckpoints:
                     heights,
                 )
             }
+            if self.remote_sources is not None:
+                for height in range(first, last + 1):
+                    if height in captured:
+                        continue
+                    alias = self.remote_sources._alias("control_history_block", str(height), db)
+                    if alias is not None:
+                        self.remote_sources.source_token("control_history_block", str(height), db)
+                        captured.add(height)
             verified, exported = set(), set()
             for height, body in db.execute(
                 "SELECT i.height,r.body FROM history_checkpoint_index i LEFT JOIN records r "

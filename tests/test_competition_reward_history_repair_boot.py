@@ -73,7 +73,7 @@ async def test_repair_refuses_live_owner_before_any_history_or_provider_read(
         pytest.fail("repair inspected state before obtaining exclusive ownership")
 
     monkeypatch.setattr(repair, "RewardControlHistoryReader", forbidden)
-    monkeypatch.setattr(repair, "RewardProofArchive", forbidden)
+    monkeypatch.setattr(repair, "selected_proof_archives", forbidden)
     monkeypatch.setattr(repair, "HistoricalRewardControlProvider", forbidden)
     monkeypatch.setattr(Path, "is_file", forbidden)
     try:

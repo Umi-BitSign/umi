@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
+from .competition_work_progress import WorkProgress
 from .protocol import canonical_json_bytes
 
 
@@ -39,32 +41,46 @@ def _binding(config, transport_policy_sha256):
     )
 
 
-def verify_cache_capacity_history(db, config, *, expected_binding):
+def _cache_history(db):
+    """Stream retained transitions; only the count and final tuple stay in memory."""
+    total = db.execute("SELECT COUNT(*) FROM cache_capacity_changes").fetchone()[0]
+    tail = None
+    count = 0
+    with (
+        closing(
+            db.execute(
+                "SELECT sequence,previous,current,transport_policy_sha256 "
+                "FROM cache_capacity_changes ORDER BY sequence"
+            )
+        ) as rows,
+        WorkProgress("registration_capacity_history", total, unit="changes") as progress,
+    ):
+        for count, row in enumerate(rows, 1):
+            sequence, prior, selected, context = row
+            before, after = capacity_increase(json.loads(prior), json.loads(selected))
+            if (
+                sequence != count
+                or (tail is not None and (prior != tail[2] or context != tail[3]))
+                or canonical_json_bytes(before) != prior
+                or canonical_json_bytes(after) != selected
+            ):
+                raise ValueError("registration capacity history changed")
+            tail = row
+            progress.advance()
+    return count, tail
 
+
+def verify_cache_capacity_history(db, config, *, expected_binding):
     exists = db.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache_capacity_changes'"
     ).fetchone()
     if exists is None:
         return
-    rows = db.execute(
-        "SELECT sequence,previous,current,transport_policy_sha256 "
-        "FROM cache_capacity_changes ORDER BY sequence LIMIT 33"
-    ).fetchall()
-    if not 1 <= len(rows) <= 32:
-        raise ValueError("registration capacity history exceeds scope")
-    tail = None
-    context = rows[0][3]
-    for number, (sequence, prior, selected, transport_policy_sha256) in enumerate(rows, 1):
-        before, after = capacity_increase(json.loads(prior), json.loads(selected))
-        if (
-            sequence != number
-            or (tail is not None and prior != tail)
-            or canonical_json_bytes(before) != prior
-            or canonical_json_bytes(after) != selected
-            or transport_policy_sha256 != context
-        ):
-            raise ValueError("registration capacity history changed")
-        tail = selected
+    _, tail = _cache_history(db)
+    if tail is None:
+        raise ValueError("registration capacity history is empty")
+    context = tail[3]
+    _, after = capacity_increase(json.loads(tail[1]), json.loads(tail[2]))
     expected = _binding(config, context)
     if _binding(after, context) != expected or expected != expected_binding:
         raise ValueError("registration capacity history differs from selected configuration")
@@ -92,38 +108,19 @@ def grow_registration_cache(path, previous, current, *, transport_policy_sha256=
         exists = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache_capacity_changes'"
         ).fetchone()
-        rows = (
-            []
-            if exists is None
-            else db.execute(
-                "SELECT sequence,previous,current,transport_policy_sha256 "
-                "FROM cache_capacity_changes ORDER BY sequence"
-            ).fetchall()
-        )
-        if len(rows) > 32:
-            raise ValueError("registration capacity history exceeds scope")
-        tail = None
-        for number, (sequence, prior, selected, context) in enumerate(rows, 1):
-            capacity_increase(json.loads(prior), json.loads(selected))
-            if (
-                sequence != number
-                or (tail is not None and prior != tail)
-                or context != transport_policy_sha256
-            ):
-                raise ValueError("registration capacity history changed")
-            tail = selected
+        count, tail = (0, None) if exists is None else _cache_history(db)
+        if tail is not None and tail[3] != transport_policy_sha256:
+            raise ValueError("registration capacity history changed")
         if (
             bound == [(new,)]
-            and rows
-            and rows[-1][1:] == (raw_before, raw_after, transport_policy_sha256)
+            and tail is not None
+            and tail[1:] == (raw_before, raw_after, transport_policy_sha256)
         ):
             verify_cache_capacity_history(db, after, expected_binding=new)
             db.commit()
             return
-        if bound != [(old,)] or (tail is not None and tail != raw_before):
+        if bound != [(old,)] or (tail is not None and tail[2] != raw_before):
             raise ValueError("registration capacity source binding changed")
-        if len(rows) == 32:
-            raise ValueError("registration capacity history exceeds scope")
         db.execute(
             "CREATE TABLE IF NOT EXISTS cache_capacity_changes "
             "(sequence INTEGER PRIMARY KEY, previous BLOB NOT NULL, current BLOB NOT NULL, "
@@ -132,7 +129,7 @@ def grow_registration_cache(path, previous, current, *, transport_policy_sha256=
         db.execute(
             "INSERT INTO cache_capacity_changes VALUES (?,?,?,?)",
             (
-                len(rows) + 1,
+                count + 1,
                 raw_before,
                 raw_after,
                 transport_policy_sha256,
@@ -166,25 +163,28 @@ def validate_evaluator_binding(db, original, current):
     exists = db.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluator_chain_capacity_changes'"
     ).fetchone()
-    rows = (
-        []
-        if exists is None
-        else db.execute(
-            "SELECT sequence,previous,current FROM evaluator_chain_capacity_changes "
-            "ORDER BY sequence LIMIT 33"
-        ).fetchall()
-    )
-    if len(rows) > 32:
-        raise ValueError("evaluator capacity history exceeds scope")
-    if rows:
-        effective = rows[0][1]
-        validate_rpc_binding(db, original, effective)
-        for number, (sequence, prior, selected) in enumerate(rows, 1):
-            if sequence != number or prior != effective:
-                raise ValueError("evaluator capacity history changed")
-            _evaluator_increase(prior, selected)
-            effective = selected
-    else:
+    count = 0
+    if exists is not None:
+        total = db.execute("SELECT COUNT(*) FROM evaluator_chain_capacity_changes").fetchone()[0]
+        with (
+            closing(
+                db.execute(
+                    "SELECT sequence,previous,current FROM evaluator_chain_capacity_changes "
+                    "ORDER BY sequence"
+                )
+            ) as rows,
+            WorkProgress("evaluator_capacity_history", total, unit="changes") as progress,
+        ):
+            for count, (sequence, prior, selected) in enumerate(rows, 1):
+                if count == 1:
+                    effective = prior
+                    validate_rpc_binding(db, original, effective)
+                if sequence != count or prior != effective:
+                    raise ValueError("evaluator capacity history changed")
+                _evaluator_increase(prior, selected)
+                effective = selected
+                progress.advance()
+    if not count:
         rpc = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='evaluator_rpc_transport_changes'"
@@ -206,8 +206,6 @@ def validate_evaluator_binding(db, original, current):
     if current == effective:
         return
     _evaluator_increase(effective, current)
-    if len(rows) == 32:
-        raise ValueError("evaluator capacity history exceeds scope")
     db.execute(
         "CREATE TABLE IF NOT EXISTS evaluator_chain_capacity_changes "
         "(sequence INTEGER PRIMARY KEY, previous BLOB NOT NULL, current BLOB NOT NULL)"
@@ -215,7 +213,7 @@ def validate_evaluator_binding(db, original, current):
     db.execute(
         "INSERT INTO evaluator_chain_capacity_changes VALUES (?,?,?)",
         (
-            len(rows) + 1,
+            count + 1,
             effective,
             current,
         ),

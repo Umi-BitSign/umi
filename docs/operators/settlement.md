@@ -232,12 +232,109 @@ leaves provisioning with the operator and does not claim that capacity is presen
 Progress inventories read compact durable checkpoint metadata once, in bounded
 batches, and then advance counts as work commits. `captured_blocks`,
 `verified_blocks`, `exported_blocks` and `applied_blocks` are distinct.
-`exported_blocks` describes the selected local proof archive. The history owner
-has no remote delivery receipts, so `replicated_blocks` remains null with an
-explicit unavailable-receipt basis; local verification or export is never reported
-as remote replication. Ordered pipeline and ahead-of-prefix verification rates
-are separate, and parallel history ETAs use the ordered rate. Remote replication
-needs its transport's acknowledged-receipt telemetry before successor cutover.
+`exported_blocks` describes the selected proof archive. With an R2 exporter,
+`replicated_blocks` counts durable acknowledgements for complete block frames and
+their dependencies. A filesystem exporter has no remote acknowledgement, so its
+replication count remains null with an explicit unavailable-receipt basis. A past
+replication receipt does not assert current R2 availability. Ordered pipeline and
+ahead-of-prefix verification rates are separate; history ETAs use the ordered
+rate. `local_release` separately reports original SQL records moved to R2 and
+logical bytes released. It does not report a smaller SQLite file on disk.
+
+### Optional R2 proof archives
+
+The standing reward writer, reward coordinator/reviewer and settlement service
+accept optional `proof_stores` alongside their existing import/export directory
+paths. The admission owner's `lifecycle.proof_stores` selects the same transport
+for original registration-proof publication. The phase reviewer accepts only
+`proof_stores.imported`. Omission preserves legacy canonical configuration bytes
+and local archive behavior. This transport
+selection does not alter signed plans, clocks, acceptance rules or native proof
+authority. Select it through each service's existing authenticated configuration
+and upgrade boundary; source tests alone do not qualify a deployed successor.
+
+An example selection is:
+
+```json
+{
+  "schema": "umi-proof-archive-stores/1",
+  "imported": {
+    "schema": "umi-r2-proof-archive/1",
+    "credentials_file": "/etc/umi/proof-reader.env",
+    "bucket": "umi-proof-artifacts",
+    "prefix": "cohort-proofs",
+    "read_only": true,
+    "maximum_cache_bytes": 1073741824,
+    "maximum_index_bytes": 4294967296,
+    "timeout_seconds": 60
+  },
+  "exported": {
+    "schema": "umi-r2-proof-archive/1",
+    "credentials_file": "/etc/umi/proof-writer.env",
+    "bucket": "umi-proof-artifacts",
+    "prefix": "cohort-proofs",
+    "read_only": false,
+    "maximum_cache_bytes": 1073741824,
+    "maximum_index_bytes": 4294967296,
+    "timeout_seconds": 60
+  }
+}
+```
+
+Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
+`ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable
+or replicated stores and separate from direct-model credentials. Provision
+read-only bucket credentials for importers and publication permission only for
+exporters. Cache and index limits are explicit host capacities; size them for the
+cohort's retained range and full supported object size. An exhausted capacity
+holds visibly without silently evicting durable verification state. The payload
+cache is bounded, disposable and separate from private acknowledged receipts
+under the original archive's `.remote-state` directory. Each store serializes
+bounded transfers; active payload leases prevent eviction.
+
+The private receipt index uses capability generation 4 and a separate immutable
+completion ledger. Startup upgrades older indexes transactionally using only
+their retained metadata, with counted progress and an ETA. Original receipt
+bytes, owner binding and journal inode stay intact. Old runtimes and reservation
+layout changes refuse this capability; keep its completed ledger with the index.
+A missing receipt is damaged completed state, not permission to import it again.
+
+Objects use content-addressed keys. Complete original `/1` frames publish after
+their dependencies using conditional single PUT, SHA metadata and exact single-PUT
+MD5 ETags. Reads pin the acknowledged generation and check bounded bytes. Transport
+receipts establish replication, never native proof validity: a new independent
+owner still performs its first native verification.
+
+On writable selection, startup migrates retained local `/1` archives before
+consumers run. It preserves exact frames, signed proof bytes and local originals,
+and checkpoints each completed copy. Restart skips unchanged completed payloads
+using private source-identity receipts. Progress includes counts, elapsed time,
+planning or measured ETA, and retry/stall state. A changed completed local identity
+requires explicit exact-byte repair. Retain this compatibility migration while
+any installed or recovery consumer still has local `/1` archives.
+
+Offline `migrate_proof_archive(original, selected, evict=True)` can remove local
+archive payload files only after the complete graph is acknowledged. The caller
+must hold the original service's exclusive upgrade boundary. This library repair
+surface is not an installed cleanup command. Keep permanent `.remote-state`,
+original journal directories and journals; never move their identity to reclaim
+space. SQL externalization replaces raw records with charged immutable aliases
+bound to their original revisions and remote receipts. Existing successful `/1`
+history facts remain unchanged. Deleted raw records free logical capacity and
+reusable SQLite pages, not physical database file size. The remote generation
+fence refuses old runtimes and transitions to reservation-only layouts.
+
+An observed missing, replaced or corrupt remote object creates a persistent
+repair hold. Restore its exact original generation and invoke the original
+owner's `RemoteProofStore.repair_reference` under an explicit repair operation;
+normal retry never adopts another generation. An intact original completion
+ledger can restore its exact missing or damaged receipt only through this
+explicit repair, after checking the original remote generation. Lost or damaged
+completion ledgers, private aliases or source-identity metadata require
+restoration in place from the original owner backup. Remote transport alone
+cannot reconstruct native verification facts.
+Qualify backup/restore, startup migration, interruption, bounded capacity and all
+selected consuming roles before adopting this transport in a cohort.
 
 Supported journals containing only legacy `/1` raw history records receive a
 counted source-identity migration and then a first native checkpoint pass. This
@@ -260,6 +357,12 @@ adding a block does not recount the entire retained history. Older unreserved
 journals receive a metadata-only migration in place. Reserved journals retain
 their original accounting and allowances. Migration emits
 `round_journal_progress` with counts, elapsed time, ETA and retry state.
+
+Capacity history is traversed in bounded batches without the former 32-transition
+ceiling. Its schema and retained bytes are unchanged. An older runtime cannot
+reopen a journal after more than 32 transitions; never discard retained capacity
+history to downgrade. The separate 20 GiB registration domain and two-transition
+RPC semantic restriction are unchanged.
 
 Changed source dependencies or damaged successful records stop with
 `repair_required`; they are not silent cache misses. Restore the exact original
@@ -1665,15 +1768,43 @@ artifacts and provenance before production launch. A local preservation receipt
 does not establish an R2 copy, independent backup, rights approval or reward
 certification.
 
-Installed reward coverage collectors retain an owner-bound native preparation
-result after successful historical replay, and release the full package graph.
-Every uncached endpoint still verifies eligibility and complete native control
-history. An earlier block reloads and replays the original package, and direct
-model artifact checks keep their existing refresh behavior. The current and
-predecessor collectors share one process-local guard across loading and replay;
-cancellation drains owned work before releasing it. Other reward consumers and
-other processes require separate memory admission. This does not establish the
-whole-host memory envelope by itself.
+Installed reward coverage collectors persist successful native endpoint facts
+bound to their original journal, source generations, package, policy, authority,
+requirement and verifier semantics. Restart can restore unchanged facts from
+compact metadata without loading the package or endpoint payload. Restoration
+still requires the selected owner's complete native history at the exact block;
+a portable point or another owner's receipt cannot establish coverage. R2 cache
+eviction and acknowledged SQL externalization preserve these facts. New endpoints
+and changed dependencies still require their affected native checks.
+
+For direct models, compact dependency receipts bind the selected native verifier,
+standing review policy, original receipt owner and authenticated R2 object
+generation. Restore checks those small receipts and object HEADs without loading
+model weights or the reward package. Older receipts lacking these bindings receive
+an explicitly reported first native qualification; existing durable byte checks
+remain reusable. Older directory-based model acceptances retain their original
+native path. Observed receipt or generation damage stays held even if the original
+later reappears, until explicit scoped repair succeeds.
+
+Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
+under the original model receipt directory. The immutable completion ledger
+detects lost per-item qualification files before new capture can repeat native
+work. An explicit original-owner repair can restore an exact missing qualifier
+from that ledger after receipt and object-generation checks. Lost owner or ledger
+metadata requires restoration in place. Intact older qualifiers receive a counted
+metadata-only migration without rewriting their bytes or loading model payloads.
+Retain this migration while supported owners still have qualifiers without the
+completion ledger; its private capability refuses reservation-layout changes.
+
+Missing or damaged completed results require explicit scoped repair. After exact
+original inputs are restored, `NativeRewardCoverageSource.repair(key, reason=...)`
+requalifies the selected endpoint with progress and ETA and preserves earlier
+successful result bytes. There is no installed coverage-repair CLI in this
+surface. Recovery integration and original-owner metadata restoration must be
+qualified before deployment. The current and predecessor collectors share one
+process-local guard across package loading and replay; cancellation drains owned
+work before releasing it. Other reward consumers and processes require separate
+memory admission. This does not establish the whole-host memory envelope.
 
 
 ### Host memory admission

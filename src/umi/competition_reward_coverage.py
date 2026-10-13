@@ -11,6 +11,7 @@ from typing import Literal
 
 from .competition_cohort_reward_allocation import CohortRewardProjection, project_reward_allocation
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_reward_coverage_models import capture_coverage_model_dependencies
 from .competition_reward_coverage_prepared import RetainedCoveragePackage, prepare_retained_coverage
 from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility_archive import (
@@ -34,6 +35,7 @@ class OwnedRewardCoverageEndpoint:
     chain_submission_authorized: Literal[False] = False
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    model_dependencies: dict | None = field(default=None, repr=False)
 
     @property
     def covered(self) -> bool:
@@ -52,6 +54,7 @@ def _binding(value: OwnedRewardCoverageEndpoint) -> str:
             "eligibility": value.eligibility._binding,
             "projection": digest(value.projection),
             "row_matches": value.row_matches,
+            "model_dependencies": value.model_dependencies,
         }
     )
 
@@ -91,6 +94,7 @@ async def review_reward_coverage(
     history: OwnedRewardControlHistory,
     source: DecisionSource,
     expected_runtime_profile_sha256: str,
+    model_dependency_repair_reason: str | None = None,
 ) -> OwnedRewardCoverageEndpoint:
     """Reconstruct one endpoint without a fresh lease or current-state substitution.
 
@@ -143,8 +147,16 @@ async def review_reward_coverage(
     # Missing zero entries are equivalent. Every nonzero recipient and amount
     # must match; matching a subset or the pre-conversion call is insufficient.
     matches = expected == tuple(stored.get(uid, 0) for uid in range(len(expected)))
+    dependencies = await capture_coverage_model_dependencies(
+        preparation, package, prepared, repair_reason=model_dependency_repair_reason
+    )
     result = OwnedRewardCoverageEndpoint(
-        prepared, eligibility, projection, matches, _issuer=_ISSUER
+        prepared,
+        eligibility,
+        projection,
+        matches,
+        _issuer=_ISSUER,
+        model_dependencies=dependencies,
     )
     object.__setattr__(result, "_binding", _binding(result))
     validate_reward_coverage(

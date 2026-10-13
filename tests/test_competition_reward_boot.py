@@ -512,6 +512,10 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert collection.history.export_archive.root == Path(i.value.proof_export_directory)
         assert collection.journal.archive is collection.history.archive
         assert collection.journal.export_archive is collection.history.export_archive
+        if selected.proof_stores is not None:
+            assert collection.history.archive.remote.config == selected.proof_stores.imported
+            assert collection.history.remote_store is collection.history.export_archive.remote
+            assert collection.journal.remote_store is collection.history.remote_store
         assert kwargs["opportunity"] == collection.opportunity
         if failure == "service":
             raise RuntimeError("fixture service failure")
@@ -628,3 +632,17 @@ def test_content_reader_does_not_confuse_signed_envelope_with_decision_identity(
     path.write_bytes(path.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="canonical"):
         files.decision(digest(decision.decision))
+
+
+async def test_r2_writer_boot_retains_archive_selection_across_restart(
+    inputs, tmp_path, monkeypatch
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    inputs.value, opened, _ = select_remote_proofs(inputs.value, tmp_path, monkeypatch)
+    for _ in range(2):
+        await test_native_assembly_preserves_configuration_and_closes_owned_providers(
+            inputs, monkeypatch, None, True
+        )
+    assert len(opened) == 4
+    assert [s.config.read_only for s in opened] == [True, False, True, False]

@@ -245,6 +245,9 @@ async def test_settlement_boot_owns_keys_locks_and_drains_children(selected, mon
         def __init__(self, conf, plan, *, sign, **ports):
             self.plan, self.sign = plan, sign
             assert conf == config and ports["provider"].policy == conf.policy
+            if config.proof_stores is not None:
+                assert ports["proofs"].inbox.remote.config == config.proof_stores.imported
+                assert ports["proofs"].outbox.remote.config == config.proof_stores.exported
 
         async def run(self, halted):
             events.append("node")
@@ -531,3 +534,14 @@ def test_package_aggregate_budget_does_not_raise_promotion_limit(selected):
     assert changed.maximum_promotion_bytes == selected.config.maximum_promotion_bytes
     with pytest.raises(ValueError):
         SettlementServiceConfig.model_validate(original | {"maximum_promotion_bytes": 1024**3})
+
+
+async def test_r2_settlement_boot_retains_selection_on_restart(selected, tmp_path, monkeypatch):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    selected.config, opened, _ = select_remote_proofs(selected.config, tmp_path, monkeypatch)
+    for _ in range(2):
+        await test_settlement_boot_owns_keys_locks_and_drains_children(
+            selected, monkeypatch, "stop"
+        )
+    assert len(opened) == 4

@@ -42,6 +42,7 @@ from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import bounded_stage_declarations, check_stage_json, stage_count
@@ -64,6 +65,7 @@ class LifecycleHostConfig(StrictProtocolModel):
     request_completion_directory: Directory
     settlement_history_directory: Directory
     proof_export_directory: Directory
+    proof_stores: ProofArchiveStores | None = None
     sources: SettlementOriginalSources
     public_origin: str
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
@@ -74,6 +76,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.proof_stores is None:
+            value.pop("proof_stores", None)
         if self.request_tail_operator_token_file is None:
             value.pop("request_tail_operator_token_file", None)
         return value
@@ -90,6 +94,7 @@ class LifecycleHostConfig(StrictProtocolModel):
                 self.request_completion_directory,
                 self.settlement_history_directory,
                 self.proof_export_directory,
+                *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.sources.round_directory,
                 self.sources.objects_directory,
                 self.sources.transport_directory,
@@ -125,7 +130,10 @@ class LifecycleHost:
             Path(c.request_completion_directory), maximum_bytes=owner.request_replay_bytes
         )
         self.proofs = SettlementRegistrationFiles(
-            self.provider, inbox=self.root / "proof-inbox", outbox=Path(c.proof_export_directory)
+            self.provider,
+            inbox=self.root / "proof-inbox",
+            outbox=Path(c.proof_export_directory),
+            proof_stores=c.proof_stores,
         )
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}

@@ -311,6 +311,10 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         try:
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             assert self.history.verification_profile == history_profile
+            if config.proof_stores is not None:
+                assert self.history.archive.remote.config == config.proof_stores.imported
+                assert self.history.export_archive.remote.config == config.proof_stores.exported
+                assert self.journal.remote_store is self.history.remote_store
             if failure == "coverage":
                 raise OSError("coverage failure")
             if failure == "coverage_exit":
@@ -403,3 +407,17 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
         and "--config" in result.stdout
         and "--through-block" in result.stdout
     )
+
+
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+async def test_r2_reward_owner_boot_retains_selection_on_restart(
+    config_case, tmp_path, monkeypatch, role
+):
+    from .test_competition_remote_proof_store import select_remote_proofs
+
+    config_case.config, opened, _ = select_remote_proofs(config_case.config, tmp_path, monkeypatch)
+    for _ in range(2):
+        await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
+            config_case, monkeypatch, role, None, True
+        )
+    assert len(opened) == 4

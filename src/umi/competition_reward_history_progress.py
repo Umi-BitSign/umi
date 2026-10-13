@@ -42,6 +42,8 @@ class HistoryProgress:
         self.last_next = first_block
         self.last_emitted = 0.0
         self.latest = {}
+        self.remote_export_selected = False
+        self.local_release = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -208,9 +210,16 @@ class HistoryProgress:
                 "verified_blocks": self.counts["verified"],
                 "verified_ahead_of_applied_blocks": max(0, self.counts["verified"] - done),
                 "exported_blocks": self.counts["exported"],
-                "export_scope": "selected_local_proof_archive",
-                "replicated_blocks": None,
-                "replication_basis": "remote_delivery_receipts_not_available_to_history_owner",
+                "export_scope": "selected_r2_proof_archive"
+                if self.remote_export_selected
+                else "selected_local_proof_archive",
+                "replicated_blocks": self.counts["exported"]
+                if self.remote_export_selected
+                else None,
+                "replication_basis": "completed_delivery_to_selected_immutable_r2_namespace"
+                if self.remote_export_selected
+                else "remote_delivery_receipts_not_available_to_history_owner",
+                "local_release": self.local_release,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
                 "elapsed_seconds": self.elapsed + (now - self.started if self.active else 0.0),

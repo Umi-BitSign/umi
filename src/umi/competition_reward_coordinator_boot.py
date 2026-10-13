@@ -23,6 +23,8 @@ from .competition_cohort_direct_model_review import (
 )
 from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
+from .competition_proof_archive_selection import selected_proof_archives
+from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
@@ -47,7 +49,6 @@ from .competition_reward_manifest import StandingRewardOpportunityManifest, veri
 from .competition_reward_offers import StandingRewardOffers
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
-from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, _close_provider, _stop_task
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
@@ -86,6 +87,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     settlement_directory: Directory | None = None
     promotion_directory: Directory
     proof_import_directory: Directory
+    proof_stores: ProofArchiveStores | None = None
     proof_export_directory: Directory
     exchange_inbox: Directory
     exchange_outbox: Directory
@@ -109,6 +111,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def omit_direct_model_review(self, handler):
         value = handler(self)
+        if self.proof_stores is None:
+            value.pop("proof_stores", None)
         if self.host_memory_admission is None:
             value.pop("host_memory_admission", None)
         for name in (
@@ -207,6 +211,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.settlement_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,
@@ -252,9 +257,11 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             expected_chain_config_sha256=digest(config.chain),
             maximum_bytes=config.maximum_reader_bytes,
         )
-        imported, exported = (
-            RewardProofArchive(Path(p))
-            for p in (config.proof_import_directory, config.proof_export_directory)
+        imported, exported = await run_owned_thread(
+            selected_proof_archives,
+            Path(config.proof_import_directory),
+            Path(config.proof_export_directory),
+            config.proof_stores,
         )
         history = RewardControlHistoryReader(
             root / "history",

@@ -17,6 +17,7 @@ from typing import Literal
 
 from .competition_chain_resources import CompetitionChainResources
 from .competition_host_anchor import MaterializedSuccessorAnchor
+from .competition_proof_archive_selection import selected_proof_archives
 from .competition_reward_boot import StandingRewardBootConfig, load_standing_boot
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coordinator_boot import RewardCoordinatorConfig
@@ -24,7 +25,6 @@ from .competition_reward_coordinator_ownership import owned_reward_state
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_history_repair_journal import HistoryRepairRequest
-from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import _close_provider
 from .competition_round_journal import RoundCapacityRepairRequired
 from .competition_supervisor_runtime import hold_successor_startup_lease
@@ -239,8 +239,12 @@ async def _run_owned_history_repair(
             root = state_directory / digest(selected)
             if not (root / "history" / "rounds.sqlite3").is_file():
                 raise FileNotFoundError("repair requires the existing original history journal")
-            imported = RewardProofArchive(Path(config.proof_import_directory))
-            exported = RewardProofArchive(Path(config.proof_export_directory))
+            imported, exported = await run_owned_thread(
+                selected_proof_archives,
+                Path(config.proof_import_directory),
+                Path(config.proof_export_directory),
+                config.proof_stores,
+            )
 
             def open_history():
                 return RewardControlHistoryReader(
