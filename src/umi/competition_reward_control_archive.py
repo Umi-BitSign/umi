@@ -6,11 +6,14 @@ control read, recipient proof or transaction preflight.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -267,44 +270,81 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         return result
 
     async def _resolve_control_header(self, ref, encoded):
+        # Single historical reads and checkpoint restoration always acquire a
+        # fresh owned head. Only an explicit bounded worker batch shares it.
+        async with self._control_header_window() as resolve:
+            return await resolve(ref, encoded)
+
+    @asynccontextmanager
+    async def _control_header_window(
+        self,
+    ) -> AsyncIterator[Callable[[FinalizedSnapshotRef, str], Awaitable[tuple[int | None, int]]]]:
+        """Resolve historical headers against one genuinely owned finalized head.
+
+        The caller holds the provider lock for its bounded batch. The resolver
+        stays in that task and scope; it cannot be serialized, supplied as a
+        proof, or reused by a later batch/current-control/transaction read.
+        Every target still checks its exact header and owned finality/ancestry.
+        """
+        owner = asyncio.current_task()
+        if self._closed or not self._lock.locked():
+            raise ValueError("historical header window requires the running locked provider")
         head = await self._proofs.finalized_snapshot()
         head_block = await self._finality.verified_block_at(head.block_number)
         self._check_finality(head, head_block)
-        if ref.block_number > head.block_number:
-            raise ValueError("historical reward control is ahead of owned finality")
-        original = await self._finality.verified_block_at(ref.block_number)
-        timestamp = None
-        if original is not None:
-            self._check_finality(ref, original)
-            if json.loads(original.finality_evidence)["block"]["scale_header"] != encoded:
-                raise ValueError("reward control header differs from owned history")
-            timestamp = original.timestamp_ms
-            ceiling = head_block.timestamp_ms
-        else:
-            if not self._owned or self._registration_rpc is None:
-                raise FileNotFoundError("owned reward admission header is unavailable")
-            anchor = await self._finality.verified_block_after(
-                ref.block_number, maximum_distance=None
-            )
-            if not isinstance(anchor, VerifiedFinalizedBlock):
-                raise FileNotFoundError("owned reward admission anchor is unavailable")
-            self._check_finality_context(anchor)
-            if anchor.height > head.block_number or anchor.timestamp_ms > head_block.timestamp_ms:
-                raise ValueError("reward admission anchor exceeds owned head")
-            try:
-                recovered = await self._historical_headers.recover(
-                    anchor, ref, self._registration_rpc.request, target_header=encoded
+        active = True
+
+        async def resolve(ref, encoded):
+            if (
+                not active
+                or self._closed
+                or not self._lock.locked()
+                or asyncio.current_task() is not owner
+            ):
+                raise ValueError("historical header resolver escaped its owned window")
+            if ref.block_number > head.block_number:
+                raise ValueError("historical reward control is ahead of owned finality")
+            original = await self._finality.verified_block_at(ref.block_number)
+            timestamp = None
+            if original is not None:
+                self._check_finality(ref, original)
+                if json.loads(original.finality_evidence)["block"]["scale_header"] != encoded:
+                    raise ValueError("reward control header differs from owned history")
+                timestamp = original.timestamp_ms
+                ceiling = head_block.timestamp_ms
+            else:
+                if not self._owned or self._registration_rpc is None:
+                    raise FileNotFoundError("owned reward admission header is unavailable")
+                anchor = await self._finality.verified_block_after(
+                    ref.block_number, maximum_distance=None
                 )
-            except sqlite3.Error as error:
-                if not is_sqlite_full(error):
-                    raise
-                raise HistoricalHeaderRecoveryPending(
-                    "historical header database needs capacity"
-                ) from error
-            if recovered.encoded != encoded:
-                raise ValueError("reward admission header differs from owned ancestry")
-            ceiling = anchor.timestamp_ms
-        return timestamp, ceiling
+                if not isinstance(anchor, VerifiedFinalizedBlock):
+                    raise FileNotFoundError("owned reward admission anchor is unavailable")
+                self._check_finality_context(anchor)
+                if (
+                    anchor.height > head.block_number
+                    or anchor.timestamp_ms > head_block.timestamp_ms
+                ):
+                    raise ValueError("reward admission anchor exceeds owned head")
+                try:
+                    recovered = await self._historical_headers.recover(
+                        anchor, ref, self._registration_rpc.request, target_header=encoded
+                    )
+                except sqlite3.Error as error:
+                    if not is_sqlite_full(error):
+                        raise
+                    raise HistoricalHeaderRecoveryPending(
+                        "historical header database needs capacity"
+                    ) from error
+                if recovered.encoded != encoded:
+                    raise ValueError("reward admission header differs from owned ancestry")
+                ceiling = anchor.timestamp_ms
+            return timestamp, ceiling
+
+        try:
+            yield resolve
+        finally:
+            active = False
 
     async def capture_control_at(
         self, control_hotkey: str, height: int

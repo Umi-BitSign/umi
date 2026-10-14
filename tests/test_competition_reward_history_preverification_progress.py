@@ -1,6 +1,7 @@
 """Telemetry exposes preparation waits without issuing or repeating proofs."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -137,13 +138,17 @@ async def test_owned_header_wait_is_visible_before_any_worker_submission(
     async def persist(*args):
         return {"unchanged_native_result": True}
 
+    @asynccontextmanager
+    async def window():
+        yield resolve
+
     provider = SimpleNamespace(
         _lock=asyncio.Lock(),
         _closed=False,
         _owned=True,
         _cache_root=None,
         config=SimpleNamespace(maximum_cache_bytes=100),
-        _resolve_control_header=resolve,
+        _control_header_window=window,
     )
     pool = SimpleNamespace(submit=submit, release=released.append)
     monkeypatch.setattr(parallel, "archive_header_hint", hint)
