@@ -61,6 +61,7 @@ from .competition_reward_proof_archive import RewardProofArchive, history_archiv
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task, run_owned_thread
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
 
 _ISSUER = object()
@@ -929,8 +930,11 @@ class RewardControlHistoryReader:
                 self,
                 "repair_required"
                 if isinstance(error, HistoryCheckpointRepairRequired)
+                else "running"
+                if isinstance(error, HistoricalHeaderRecoveryProgress)
                 else "retrying",
                 error_type=type(error).__name__,
+                ancestry_progress=getattr(error, "ancestry_progress", None),
             )
             raise
         finally:

@@ -27,7 +27,9 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def case(tmp_path, monkeypatch):
     assert os.geteuid() == 0
-    assert str(tmp_path).startswith("/var/lib/umi-successor-hostbundle-pytest-")
+    scratch = Path(os.environ.get("UMI_NAMESPACE_TEST_SCRATCH", "/var/lib"))
+    relative = tmp_path.relative_to(scratch)
+    assert relative.parts and relative.parts[0].startswith("umi-successor-hostbundle-pytest-")
     config = _config(target_platform=artifacts._current_platform())
     if os.environ.get("UMI_NAMESPACE_TEST_ROOTED_TARGETS") == "1":
         # Hosted CI's /opt ancestor need not be root-controlled. Keep every

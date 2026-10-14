@@ -50,6 +50,27 @@ FINNEY_GENESIS_HASH = "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5
 FINNEY_BOOTSTRAP_BLOCK_NUMBER = 8_867_448
 FINNEY_BOOTSTRAP_BLOCK_HASH = "511948e96e1d479d0a92d89bb976638780f2c65a93a5d5be710f22ee15c60200"
 
+# Retain the exact reviewed policy pin used by cohorts already admitted before
+# the ruzstd build update. The full canonical pin covers build, every target
+# release, chain spec and bootstrap; arbitrary old builds are not accepted.
+# This is docs/competition/C5_TRANSPORT_POLICY.json's finality_verifier pin.
+_RETAINED_POLICY_PIN_SHA256 = frozenset(
+    {"3e05f0f1c78526a0744811633645ed6eeac552eecaa72005b0a6a0200b9e3d8b"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FinalityObserverBuild:
+    source_revision: str
+    source_tree_sha256: str
+    cargo_lock_sha256: str
+    fixture_set_sha256: str
+
+
+CURRENT_OBSERVER_BUILD = FinalityObserverBuild(
+    SOURCE_REVISION, SOURCE_TREE_SHA256, CARGO_LOCK_SHA256, FIXTURE_SET_SHA256
+)
+
 _REQUEST_DOMAIN = b"umi-grandpa-finality-observer-request-v1\0"
 _TRANSCRIPT_DOMAIN = b"umi-grandpa-finality-attestation-v1\0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -285,6 +306,8 @@ class GrandpaFinalityObserver:
         staging_directory: str | os.PathLike[str] | None = None,
     ) -> None:
         self._limits = limits or GrandpaFinalityLimits()
+        self._build_identity = CURRENT_OBSERVER_BUILD
+        self._retained_policy_pin = False
         self._staging_directory = staging_directory
         self._binary_path = self._validate_absolute_path(binary_path, field="binary")
         self._chain_spec_path = self._validate_absolute_path(chain_spec_path, field="chain_spec")
@@ -342,6 +365,15 @@ class GrandpaFinalityObserver:
             executable=False,
             reason_prefix="chain_spec",
         )
+
+    @property
+    def build_identity(self) -> FinalityObserverBuild:
+        """Exact selected production policy build, also used during store audit."""
+        return self._build_identity
+
+    @property
+    def retained_policy_pin(self) -> bool:
+        return self._retained_policy_pin
 
     @property
     def expected_binary_sha256(self) -> str:
@@ -402,7 +434,13 @@ class GrandpaFinalityObserver:
             "cargo_lock_sha256": CARGO_LOCK_SHA256,
             "finality_fixture_set_sha256": FIXTURE_SET_SHA256,
         }
-        if any(getattr(pin, field) != value for field, value in expected_build.items()):
+        retained = (
+            hashlib.sha256(rfc8785.dumps(pin.model_dump(mode="json", by_alias=True))).hexdigest()
+            in _RETAINED_POLICY_PIN_SHA256
+        )
+        if not retained and any(
+            getattr(pin, field) != value for field, value in expected_build.items()
+        ):
             raise GrandpaFinalityObserverError("policy_build_pin_mismatch")
         expected_chain = {
             "chain_spec_source_revision": FINNEY_CHAIN_SPEC_SOURCE_REVISION,
@@ -418,7 +456,7 @@ class GrandpaFinalityObserver:
             binary_sha256 = pin.release_sha256_by_target[target_triple]
         except KeyError as error:
             raise GrandpaFinalityObserverError("policy_target_missing") from error
-        return cls(
+        observer = cls(
             binary_path=binary_path,
             expected_binary_sha256=binary_sha256,
             chain_spec_path=chain_spec_path,
@@ -430,6 +468,14 @@ class GrandpaFinalityObserver:
             first_record_timeout_seconds=first_record_timeout_seconds,
             limits=limits,
         )
+        observer._build_identity = FinalityObserverBuild(
+            pin.source_revision,
+            pin.source_tree_sha256,
+            pin.cargo_lock_sha256,
+            pin.finality_fixture_set_sha256,
+        )
+        observer._retained_policy_pin = retained
+        return observer
 
     @staticmethod
     def _validate_absolute_path(value: str | os.PathLike[str], *, field: str) -> Path:
@@ -788,7 +834,7 @@ class GrandpaFinalityObserver:
             "request_id": config["request_id"],
             "evidence_class": EVIDENCE_CLASS,
             "offline_finality_proof": False,
-            "source_revision": SOURCE_REVISION,
+            "source_revision": self.build_identity.source_revision,
             "chain_spec_sha256": self._expected_chain_spec_sha256,
             "genesis_hash": self._expected_genesis_hash,
             "bootstrap_block_number": self._bootstrap_block_number,

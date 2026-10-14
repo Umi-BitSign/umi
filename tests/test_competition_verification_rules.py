@@ -18,6 +18,15 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
     )
     for module in (
         "competition_verification_reuse.py",
+        "competition_reward_cutover.py",
+        "competition_reward_history_preparation.py",
+        "competition_reward_writer_broker.py",
+        "competition_reward_writer_broker_worker.py",
+        "competition_reward_writer_exchange.py",
+        "competition_reward_writer_prefix.py",
+        "competition_reward_writer_selection.py",
+        "competition_reward_writer_review.py",
+        "historical_header_hint_import.py",
         "competition_cohort_request_closure.py",
         "competition_cohort_endpoint_archive.py",
         "competition_cohort_service_closure.py",

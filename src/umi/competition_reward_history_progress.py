@@ -20,6 +20,7 @@ class HistoryProgress:
     heartbeat_seconds = 30.0
     stalled_seconds = 60.0
     planning_blocks_per_second = (0.1, 2.0)
+    preparation_planning_seconds = (1.0, 300.0)
 
     def __init__(self, first_block):
         self.first_block = first_block
@@ -45,6 +46,8 @@ class HistoryProgress:
         self.latest = {}
         self.remote_export_selected = False
         self.local_release = None
+        self.preparation = None
+        self.ancestry_progress = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -63,6 +66,8 @@ class HistoryProgress:
         self.state = "running"
         self.stage = "scoped_checkpoint_repair" if repair else "checkpoint_restore"
         self.native_started = None
+        self.preparation = None
+        self.ancestry_progress = None
 
     def record(self, stage, height):
         values = self.durable[stage]
@@ -129,7 +134,20 @@ class HistoryProgress:
                     },
                 )
 
+    def preparation_start(self, stage, height, reason):
+        """Describe owned preparation without counting it as native proof work."""
+        self.stage = stage
+        self.preparation = {
+            "stage": stage,
+            "height": height,
+            "reason": reason,
+            "started": time.monotonic(),
+            "finished": None,
+        }
+
     def native_start(self, *, retained=False, repair=False):
+        self.preparation = None
+        self.ancestry_progress = None
         self.stage = (
             "scoped_checkpoint_repair"
             if repair
@@ -147,14 +165,19 @@ class HistoryProgress:
 
     def finish(self):
         self.native_stop()
+        if self.preparation is not None and self.preparation["finished"] is None:
+            self.preparation["finished"] = time.monotonic()
         if self.active:
             self.elapsed += time.monotonic() - self.started
             self.active = False
 
-    def report(self, reader, state, *, error_type=None, force=False):
+    def report(self, reader, state, *, error_type=None, force=False, ancestry_progress=None):
         # A broken diagnostics sink must never change a native result or error.
         try:
             now = time.monotonic()
+            if ancestry_progress is not None:
+                self.ancestry_progress = dict(ancestry_progress)
+                self.stage = "owned_historical_ancestry"
             if reader._next != self.last_next:
                 self.changed, self.last_next = now, reader._next
             self.state = state
@@ -179,10 +202,38 @@ class HistoryProgress:
                 if getattr(reader, "verification_profile", None)
                 else self.native_completed
             )
+            preparation = self.preparation
+            if preparation is not None and preparation["stage"] != self.stage:
+                preparation = None
+            preparation_elapsed = (
+                (now if preparation["finished"] is None else preparation["finished"])
+                - preparation["started"]
+                if preparation is not None
+                else None
+            )
+            preparation_planning = None
+            preparation_basis = None
+            if preparation is not None:
+                if stalled or state in {"retrying", "repair_required"} or not self.active:
+                    preparation_basis = "withdrawn_stalled_retrying_or_stopped"
+                elif preparation_elapsed <= self.preparation_planning_seconds[1]:
+                    preparation_planning = [
+                        max(0.0, bound - preparation_elapsed)
+                        for bound in self.preparation_planning_seconds
+                    ]
+                    preparation_basis = "planning_local_retained_reads_or_responsive_archive_rpc"
+                else:
+                    preparation_basis = "withdrawn_preparation_exceeded_planning_range"
             if state == "completed":
                 eta, basis = 0.0, "complete_selected_history_interval"
             elif stalled or state in {"retrying", "repair_required"}:
                 basis = "withdrawn_stalled_or_retrying"
+            elif preparation is not None:
+                # Native throughput excludes the first ancestry resolution. A
+                # native-only extrapolation is not an ETA for this pending wait.
+                basis = "waiting_for_retained_history_preparation"
+            elif self.ancestry_progress is not None:
+                basis = "waiting_for_owned_historical_ancestry"
             elif sampled >= 3 and native_elapsed >= 1.0:
                 rate = sampled / native_elapsed
                 eta, basis = (
@@ -203,6 +254,16 @@ class HistoryProgress:
             verified = self.counts["verified"] + completed_admission
             self.latest = {
                 "stage": self.stage,
+                "ancestry_progress": self.ancestry_progress,
+                "stage_reason": None if preparation is None else preparation["reason"],
+                "active_block": None if preparation is None else preparation["height"],
+                "stage_elapsed_seconds": preparation_elapsed,
+                "stage_eta_seconds": None,
+                "stage_planning_eta_seconds": preparation_planning,
+                "stage_eta_basis": preparation_basis,
+                "stage_eta_scope": "current_retained_preparation_only"
+                if preparation is not None
+                else None,
                 "state": "stalled" if stalled else state,
                 "first_block": self.first_block,
                 "target_block": self.target,
@@ -239,6 +300,16 @@ class HistoryProgress:
                 "eta_scope": "history_only_assuming_remaining_blocks_need_native_verification",
                 "error_type": error_type,
             }
+            if self.ancestry_progress is not None:
+                ancestry = self.ancestry_progress
+                self.latest.update(
+                    active_block=ancestry.get("target_block"),
+                    stage_elapsed_seconds=ancestry.get("elapsed_seconds"),
+                    stage_eta_seconds=ancestry.get("eta_seconds"),
+                    stage_planning_eta_seconds=ancestry.get("planning_eta_seconds"),
+                    stage_eta_basis=ancestry.get("eta_basis"),
+                    stage_eta_scope=ancestry.get("eta_scope"),
+                )
             if force or state != "running" or now - self.last_emitted >= self.heartbeat_seconds:
                 self.last_emitted = now
                 logger.info("reward_history_progress %s", self.latest)

@@ -1,0 +1,80 @@
+{
+  "record": {
+    "ancestry": [
+      {
+        "hash": "0xe8b3681fa636f20984308ecbd1fd5263b5aede0c18feb63b9899f8965383c5b4",
+        "number": 9184789,
+        "parent_hash": "0x886413a9b0440c9c5fb6e61b53fd44d8ed48b71a9ffe4c822e8984da52361efb"
+      }
+    ],
+    "ancestry_complete_since_previous": false,
+    "block": {
+      "extrinsics_root": "0xe9515d56a8c96f22bbe4e35aa809f4d77570ce003c62d552f90c8a3c34c8c03b",
+      "hash": "0xe8b3681fa636f20984308ecbd1fd5263b5aede0c18feb63b9899f8965383c5b4",
+      "number": 9184789,
+      "parent_hash": "0x886413a9b0440c9c5fb6e61b53fd44d8ed48b71a9ffe4c822e8984da52361efb",
+      "scale_header": "0x886413a9b0440c9c5fb6e61b53fd44d8ed48b71a9ffe4c822e8984da52361efb56983002e729eff95eb66fe6e42a5d8d658dd5834e429c333322a0e41a2ebd18ffeb0bcfe9515d56a8c96f22bbe4e35aa809f4d77570ce003c62d552f90c8a3c34c8c03b0c0661757261203a25e508000000000466726f6e0901019a48e442549c6d5029949cc833a2c6e0c0e1d0776f635c2d700b4c8aa8d9c440044c94961efc276fb292ca2aad4bd51f757cfbc758393f2db681782097b97de1de05617572610101fab965e9a027f901ba7cec3cd9bb0ed53f568e0bb70eabf3ec600edfd91fc0466ab61cbd709617424c8276fc3331d439478235f2da3d758b95edb5c36ee3d58b",
+      "state_root": "0xe729eff95eb66fe6e42a5d8d658dd5834e429c333322a0e41a2ebd18ffeb0bcf",
+      "timestamp_ms": 1790820024001
+    },
+    "bootstrap_block_hash": "0x511948e96e1d479d0a92d89bb976638780f2c65a93a5d5be710f22ee15c60200",
+    "bootstrap_block_number": 8867448,
+    "bootstrap_selected": true,
+    "bootstrap_source": "grandpa_checkpoint",
+    "chain_spec_sha256": "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105",
+    "evidence_class": "verifier_attested_finality",
+    "genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+    "offline_finality_proof": false,
+    "previous_finalized_hash": null,
+    "previous_transcript_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "request_id": "d4986c83b0dbdf67c0c296bd48d4b72fe459ae8dbf2d11f09161365cf230c3ef",
+    "schema": "umi-grandpa-finality-attestation/1",
+    "sequence": 0,
+    "source_revision": "subtensor-chain-spec:da06f033663896ef2fdbbfc3ecc68ca908fba0f5;subxt-lightclient:0.50.3@49ea25dcf81a6c764ed6d341679211a396191cc8+umi-database-input-v1;smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+umi-database-bootstrap-v1+lru-0.18.4-rustsec-2026-0253;smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+umi-header-consensus-disambiguation-v1",
+    "startup_finalized_block_hash": "0xe8b3681fa636f20984308ecbd1fd5263b5aede0c18feb63b9899f8965383c5b4",
+    "startup_finalized_block_number": 9184789,
+    "transcript_digest": "2eed49be51aec65cf196009f0462ca0c00d8449a40cf5f4363bc66f8cc688195"
+  },
+  "binding": {
+    "minimum_finalized_block": 9178000,
+    "maximum_records": 100000,
+    "startup_timeout_seconds": 900
+  },
+  "store_config": {
+    "chain_observation": {
+      "genesis_block_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+      "live_chain_fixture_set_sha256": "0bd828e8663002a6f631d595748ba00fea9b5c022cb6881bb14b69252f36617b",
+      "metadata_sha256": "ccad189c41970e1d33fe665b697b4bc763bece0212e81e15a3035d4091c79b1d",
+      "network": "finney",
+      "runtime_spec_version": 470,
+      "state_version": 1,
+      "subtensor_revision": "runtime-code-sha256:e5abec692e3988352da818823d9729f139820e205ea17048f93816974106c005",
+      "transaction_version": 1
+    },
+    "finality_verifier_sha256": "67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925",
+    "initial_minimum_finalized_block": 9178000,
+    "limits": {
+      "maximum_database_bytes": 8589934592,
+      "maximum_evidence_bytes": 4194304,
+      "maximum_headers": 1000000,
+      "maximum_records_per_process": 100000,
+      "maximum_total_evidence_bytes": 4294967296
+    },
+    "observer": {
+      "binary_sha256": "67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925",
+      "bootstrap_block_hash": "0x511948e96e1d479d0a92d89bb976638780f2c65a93a5d5be710f22ee15c60200",
+      "bootstrap_block_number": 8867448,
+      "cargo_lock_sha256": "9d6ba175a232ddb051c0ce795dc500562b05b48f57bb29a33344aad1eef87f8c",
+      "chain_spec_sha256": "f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105",
+      "evidence_class": "verifier_attested_finality",
+      "fixture_set_sha256": "b5522352dc04cbd88eb7916ba95e65330c89915619e292f3512ed3acebd11655",
+      "genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+      "offline_finality_proof": false,
+      "source_revision": "subtensor-chain-spec:da06f033663896ef2fdbbfc3ecc68ca908fba0f5;subxt-lightclient:0.50.3@49ea25dcf81a6c764ed6d341679211a396191cc8+umi-database-input-v1;smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+umi-database-bootstrap-v1+lru-0.18.4-rustsec-2026-0253;smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+umi-header-consensus-disambiguation-v1",
+      "source_tree_sha256": "4ebff3884dca50726e3a94abd1b5332063daf5e8600933142612755aa03de3fc"
+    },
+    "schema": "umi-grandpa-finality-supervisor-store/1",
+    "scoring_policy_hash": "61f6c05143804c297aed524b6e067233567d30fe4eb50ab3289e7bfdad8e26fa",
+    "startup_timeout_seconds": 900
+  }
+}

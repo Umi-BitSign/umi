@@ -36,6 +36,7 @@ async def original(native_encoding, chain_config, policy, tmp_path, request):
     codec = native_encoding.context["runtime"]
     config = chain_config.model_copy(
         update={
+            "state_directory": str(tmp_path / "native-transaction-chain"),
             "chain_pin": chain_config.chain_pin.model_copy(
                 update={
                     "runtime_spec_version": codec.pin.spec_version,
@@ -50,6 +51,9 @@ async def original(native_encoding, chain_config, policy, tmp_path, request):
     count = getattr(request, "param", 3)
     names = ["Alice", "Bob", "Charlie"] + ["StandingFixture" + str(i) for i in range(3, count)]
     hotkeys = [bt.sp_core.Keypair.from_uri("//" + name).ss58_address for name in names]
+    # Permit native installed-owner integration fixtures to select their real
+    # development signer without replacing SCALE or signature verification.
+    hotkeys[0] = native_encoding.signer.ss58_address
     hotkey = hotkeys[0]
     values = {
         ("Timestamp", "Now", ()): finality.timestamp,

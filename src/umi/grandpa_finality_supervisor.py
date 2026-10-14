@@ -43,13 +43,10 @@ from typing import Any
 from .chain_evidence import FinalizedSnapshotRef
 from .concurrency import run_owned_thread
 from .grandpa_finality import (
-    CARGO_LOCK_SHA256,
     EVIDENCE_CLASS,
-    FIXTURE_SET_SHA256,
     RECOVERABLE_OBSERVER_FAILURES,
-    SOURCE_REVISION,
-    SOURCE_TREE_SHA256,
     FinalityAttestation,
+    FinalityObserverBuild,
     GrandpaFinalityLimits,
     GrandpaFinalityObserver,
     GrandpaFinalityObserverError,
@@ -76,6 +73,24 @@ _BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _LOGGER = logging.getLogger(__name__)
 _OBSERVER_RETRY_INITIAL_SECONDS = 1.0
 _OBSERVER_RETRY_MAXIMUM_SECONDS = 30.0
+
+# Freeze the exact build metadata emitted by the constructor-only compatibility
+# release. This supported repair must keep recognizing it after future native
+# builds advance their current constants; it is not a generic metadata rebind.
+_CONSTRUCTOR_ONLY_OBSERVER_BUILD = FinalityObserverBuild(
+    source_revision=(
+        "subtensor-chain-spec:da06f033663896ef2fdbbfc3ecc68ca908fba0f5;"
+        "subxt-lightclient:0.50.3@49ea25dcf81a6c764ed6d341679211a396191cc8+"
+        "umi-database-input-v1;"
+        "smoldot-light:1.3.2@5fe9121f81a58454542ac69a44c4d73f00f30283+"
+        "umi-database-bootstrap-v1+lru-0.18.4-rustsec-2026-0253;"
+        "smoldot:2.2.0@90e94869a7fbd617d28990da3005eaa906bc3862+"
+        "umi-header-consensus-disambiguation-v1+ruzstd-0.9.1-rustsec-2026-0344"
+    ),
+    source_tree_sha256="dac8079bc2041bd2512cb599846ea822aa5b53d77d62437bf9b02774acb73488",
+    cargo_lock_sha256="c7e0530a519f59c4ba389846081f1aca5ec5eb171e987b81ecdd071ee2ec14d3",
+    fixture_set_sha256="b5522352dc04cbd88eb7916ba95e65330c89915619e292f3512ed3acebd11655",
+)
 
 
 class GrandpaFinalitySupervisorError(RuntimeError):
@@ -885,6 +900,7 @@ class DurableGrandpaFinalityPort:
 
     def _initialize(self) -> None:
         audited = False
+        repair_started = None
         try:
             with self._connect(read_only=False) as connection, self._transaction(connection):
                 application_id = connection.execute("PRAGMA application_id").fetchone()[0]
@@ -915,6 +931,7 @@ class DurableGrandpaFinalityPort:
                 ):
                     raise GrandpaFinalityStoreConflict("store_schema_mismatch")
                 else:
+                    repair_started = self._repair_empty_retained_observer_binding(connection)
                     self._rebind_predecessor_policy(connection)
                 if user_version == 2:
                     # Audit and backfill under the same write lock. Old opened
@@ -931,6 +948,13 @@ class DurableGrandpaFinalityPort:
             self._assert_database_bound()
         else:
             self.audit()
+        if repair_started is not None:
+            _LOGGER.info(
+                "empty_finality_binding_repair state=completed completed=1 total=1 "
+                "percent=100 elapsed_seconds=%.3f eta_seconds=0 "
+                "eta_basis=committed_and_audited_store",
+                time.monotonic() - repair_started,
+            )
 
     def _commit(
         self, binding: ObserverRunBinding, attestation: FinalityAttestation
@@ -1290,6 +1314,80 @@ class DurableGrandpaFinalityPort:
                 )
                 return
 
+    def _repair_empty_retained_observer_binding(self, connection) -> float | None:
+        """Repair only the exact empty constructor-only compatibility layout.
+
+        A previous runtime accepted the retained binary pin but wrote current
+        build constants to its new store before rejecting that binary's first
+        transcript. No accepted attestation can be rebound by this repair.
+        Preserve the original metadata and database identity, then audit inside
+        the same transaction before committing the corrected selected build.
+        """
+        if not self._observer.retained_policy_pin:
+            return
+        stored = connection.execute("SELECT value FROM store_meta WHERE key='config'").fetchone()
+        if stored is None or stored[0] == self._config_bytes():
+            return
+        for policy in (None, *self._accepted_predecessor_policy_digests):
+            expected = self._config_bytes(policy)
+            previous = json.loads(expected)
+            previous["observer"].update(
+                source_revision=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_revision,
+                source_tree_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_tree_sha256,
+                cargo_lock_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.cargo_lock_sha256,
+                fixture_set_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.fixture_set_sha256,
+            )
+            previous_raw = canonical_json_bytes(previous)
+            if stored[0] != previous_raw:
+                continue
+            before = time.monotonic()
+            _LOGGER.info(
+                "empty_finality_binding_repair state=started completed=0 total=1 "
+                "percent=0 elapsed_seconds=0 planning_eta_seconds=0.01..5 "
+                "eta_basis=bounded_empty_store_metadata_transaction"
+            )
+            head = connection.execute(
+                "SELECT value FROM store_meta WHERE key='head_acceptance_digest'"
+            ).fetchone()
+            digest = connection.execute(
+                "SELECT value FROM store_meta WHERE key='config_sha256'"
+            ).fetchone()
+            if head is None or digest is None:
+                raise GrandpaFinalityStoreCorruption("store_meta_missing")
+            if (
+                connection.execute("SELECT 1 FROM finalized_headers LIMIT 1").fetchone()
+                or connection.execute("SELECT 1 FROM observer_segments LIMIT 1").fetchone()
+                or head[0] != _ZERO_DIGEST
+            ):
+                raise GrandpaFinalityStoreConflict(
+                    "retained_observer_build_repair_requires_empty_store"
+                )
+            if digest[0] != hashlib.sha256(previous_raw).digest():
+                raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
+            connection.execute(
+                "INSERT INTO store_meta(key,value) VALUES (?,?)",
+                ("observer_build_binding_repair_original", previous_raw),
+            )
+            # Retain an accepted predecessor policy until its own ordinary
+            # rebind below; the observer repair changes only build metadata.
+            connection.execute("UPDATE store_meta SET value=? WHERE key='config'", (expected,))
+            connection.execute(
+                "UPDATE store_meta SET value=? WHERE key='config_sha256'",
+                (hashlib.sha256(expected).digest(),),
+            )
+            self._rebind_predecessor_policy(connection)
+            self._audit_snapshot(
+                connection,
+                legacy_accounting=connection.execute("PRAGMA user_version").fetchone()[0] == 2,
+            )
+            _LOGGER.info(
+                "empty_finality_binding_repair state=verified_pending_commit completed=1 total=1 "
+                "percent=99.9 elapsed_seconds=%.3f eta_seconds=0 "
+                "eta_basis=empty_store_audit_completed",
+                time.monotonic() - before,
+            )
+            return before
+
     def _config_bytes(self, scoring_policy_digest: str | None = None) -> bytes:
         return canonical_json_bytes(
             {
@@ -1300,10 +1398,10 @@ class DurableGrandpaFinalityPort:
                 "observer": {
                     "evidence_class": EVIDENCE_CLASS,
                     "offline_finality_proof": False,
-                    "source_revision": SOURCE_REVISION,
-                    "source_tree_sha256": SOURCE_TREE_SHA256,
-                    "cargo_lock_sha256": CARGO_LOCK_SHA256,
-                    "fixture_set_sha256": FIXTURE_SET_SHA256,
+                    "source_revision": self._observer.build_identity.source_revision,
+                    "source_tree_sha256": self._observer.build_identity.source_tree_sha256,
+                    "cargo_lock_sha256": self._observer.build_identity.cargo_lock_sha256,
+                    "fixture_set_sha256": self._observer.build_identity.fixture_set_sha256,
                     "binary_sha256": self._observer.expected_binary_sha256,
                     "chain_spec_sha256": self._observer.expected_chain_spec_sha256,
                     "genesis_hash": self._observer.expected_genesis_hash,
