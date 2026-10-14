@@ -660,6 +660,11 @@ def main(argv: list[str] | None = None) -> int:
     initial.add_argument("--unit", required=True)
     initial.add_argument("--controls", type=Path, required=True)
     initial.add_argument("--host-bundle", type=Path, required=True)
+    initial.add_argument(
+        "--maximum-host-stage-slots",
+        type=int,
+        help="explicit local retained-host capacity (default: 32); never deletes old stages",
+    )
     initial.add_argument("--oci-bundle", type=Path, required=True)
     initial.add_argument("--recovery-root", type=Path, required=True)
     initial.add_argument("--recovery-limits", type=Path, required=True)
@@ -681,6 +686,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "upgrade":
             from .competition_initial_upgrade import upgrade_successor_service
 
+            staging = (
+                {}
+                if args.maximum_host_stage_slots is None
+                else {"maximum_host_stage_slots": args.maximum_host_stage_slots}
+            )
             result = upgrade_successor_service(
                 config_path=args.config,
                 unit_name=args.unit,
@@ -691,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
                 recovery_limits_path=args.recovery_limits,
                 historical_context_path=args.historical_context,
                 legacy_marker_consent_path=args.legacy_marker_consent,
+                **staging,
             )
         else:
             operation = (

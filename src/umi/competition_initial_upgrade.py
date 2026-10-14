@@ -37,7 +37,11 @@ from .competition_host_artifacts import (
     _ancestor_paths,
     _read_tree,
 )
-from .competition_host_bundle import stage_successor_host_bundle
+from .competition_host_bundle import (
+    MAX_HOST_STAGE_SLOTS,
+    stage_successor_host_bundle,
+    validate_host_stage_slots,
+)
 from .competition_host_observer import (
     StoppedBridgeObservation,
     StoppedUpgradeObserver,
@@ -609,11 +613,13 @@ def upgrade_successor_service(
     recovery_limits_path: Path,
     historical_context_path: Path | None = None,
     legacy_marker_consent_path: Path | None = None,
+    maximum_host_stage_slots: int = MAX_HOST_STAGE_SLOTS,
 ) -> dict:
     """Preflight, stop, archive, switch and start one exact legacy installation."""
     from .competition_coordinator_namespace import ensure_coordinator_host_view
 
     _require_root_linux()
+    validate_host_stage_slots(maximum_host_stage_slots)
     ensure_coordinator_host_view(unit_name=unit_name, config_path=config_path)
     with exclusive_upgrade_operation(unit_name):
         control = _controls(config_path, controls_path)
@@ -639,6 +645,7 @@ def upgrade_successor_service(
             signed=control.signed_host,
             config=control.config,
             expected_manifest_sha256=control.consent.approved_host_manifest_sha256,
+            maximum_host_stage_slots=maximum_host_stage_slots,
         )
         _prestop_host_requirements(control, tree)
         if marker_controls is not None:

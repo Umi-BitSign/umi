@@ -589,6 +589,10 @@ def test_cli_routes_initial_command_and_bounds_errors(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {"status": "fixture"}
     assert seen[0]["oci_bundle"] == Path("/oci")
     assert seen[0]["legacy_marker_consent_path"] is None
+    assert "maximum_host_stage_slots" not in seen[0]
+    assert recovery.main([*args, "--maximum-host-stage-slots", "64"]) == 0
+    capsys.readouterr()
+    assert seen[-1]["maximum_host_stage_slots"] == 64
     assert recovery.main([*args, "--legacy-marker-consent", "/marker-consent"]) == 0
     capsys.readouterr()
     assert seen[-1]["legacy_marker_consent_path"] == Path("/marker-consent")
@@ -730,3 +734,23 @@ def test_nonempty_historical_context_preserves_signed_objects(tmp_path, monkeypa
     assert source.payload == payload
     assert canonical_json_bytes(manifests[0]) == canonical_json_bytes(manifest)
     assert canonical_json_bytes(leases[0]) == canonical_json_bytes(lease)
+
+
+def test_upgrade_forwards_explicit_stage_capacity_before_stop(flow, monkeypatch):
+    original = upgrade.stage_successor_host_bundle
+    seen = []
+
+    def stage(*args, **kwargs):
+        assert "stop" not in flow.events
+        seen.append(kwargs["maximum_host_stage_slots"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(upgrade, "stage_successor_host_bundle", stage)
+    assert upgrade.upgrade_successor_service(**flow.args, maximum_host_stage_slots=64)
+    assert seen == [64]
+
+
+def test_invalid_upgrade_stage_capacity_refuses_before_layout_or_stop(flow):
+    with pytest.raises(ValueError, match="positive integer"):
+        upgrade.upgrade_successor_service(**flow.args, maximum_host_stage_slots=0)
+    assert not flow.events

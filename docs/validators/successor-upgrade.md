@@ -1768,6 +1768,18 @@ contexts can be supplied through `--historical-context`. All artifacts and
 authorization controls must already be reviewed and signed. The command does
 not fetch or create missing launch inputs.
 
+Host staging retains earlier signed releases and interrupted staging directories.
+The default capacity is 32 entries. If these remain recovery or service dependencies,
+review disk capacity and use `--maximum-host-stage-slots 64` (or another positive
+local capacity) on the upgrade command. The staging API accepts the same
+`maximum_host_stage_slots` option for maintenance tooling. The explicit value is
+checked before any service stop; it changes only local retention capacity. Signed
+host authentication, exact tree checks, parent locking and prior releases remain
+unchanged. Repeating an already installed exact host does not consume another slot.
+Do not delete an earlier host merely to satisfy this count: inspect services,
+configuration, virtual environments and recovery consumers before retiring it.
+
+
 An applied common-bootstrap journal requires its original signed manifest and
 lease in that historical context, even when later bridge writes supersede its
 weight row. The stopped observer requests the manifest commitment identified by
