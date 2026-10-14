@@ -686,6 +686,50 @@ proofs as completed checks. This command cannot recover an older running reader'
 volatile verified prefix. Keep that owner running through its handoff when
 preserving those completed checks requires it.
 
+### Original successful exports without completed admission
+
+The selected installed342 owner may finish native block verification but fail
+before recording its initial admission intent. Do not manufacture that intent or
+use the completed-admission migrator. The supported local export migration
+preserves individual successful native checks and reconstructs all writes and
+unresolved effects with the native decoder. The ordinary history reader still
+applies those effects in block order and checks fresh finalized ancestry before
+issuing history. Admission and reward authority remain separate.
+
+This migration requires an explicit administrator-selected origin contract for
+the original private export namespace. The deployment and transport history must
+establish its exclusive original publisher; generic archives, imported frames
+and a supplied checksum do not qualify. While that exact original owner is
+still running, capture the selection with
+`python -m umi.competition_reward_history_origin_cli capture --original-owner PATH --through-block HEIGHT --select-exclusive-original-namespace`.
+Seal its exact stdout as a root-owned mode0444 file under root-only writable
+ancestors. Capture checks the unchanged installed source, original owner seal,
+configuration, service invocation, namespace identities and a fresh original
+export. Its prefix evidence establishes completed native block checks, never an
+empty write list or aggregate admission completion.
+
+After qualifying the full cutover and provisioning metadata capacity, stop and
+fence the original owner cooperatively. Under the original service account run
+`python -m umi.competition_reward_history_origin_cli migrate --origin PATH --maximum-history-bytes BYTES`.
+The command takes the existing stopped-owner locks before initializing mutation
+tracking, writes normal atomic per-block checkpoints in the original journal,
+and preserves every raw proof and signed input. A bounded `--maximum-blocks`
+invocation or interruption resumes from completed checkpoints. It exposes count,
+elapsed time, planning/measured ETA and stalled/repair states; these estimates
+exclude fresh finality, admission, writer preparation and rewards activation.
+
+Projection reads the required metadata, extrinsics and event values while
+retaining dependencies on unchanged proof/code objects. It does not re-execute
+their verification. Split fields whose old format lacks a whole-field digest
+require bounded original expansion. Source revisions invalidate affected
+checkpoints; missing checkpoint markers, changed sources or origin seals require
+explicit repair. Retain both root seals, original journal identity and selected
+export namespace while migrated results depend on them. Removing or relocating
+these dependencies requires a qualified follow-up migration. This compatibility
+path is needed only by supported installed342 recovery consumers; successor
+owners already retain normal successful block checkpoints during verification.
+It does not by itself migrate a different writer's independent history state.
+
 ### Completed original admission migration
 
 `migrate_completed_admission` in
