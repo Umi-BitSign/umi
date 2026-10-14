@@ -18,6 +18,7 @@ from umi.competition_reward_decisions import StandingRewardControlReader
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_signing import RewardDecisionJournal
 from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes
 
 from .test_competition_reward_coordinator_boot import chain as chain
 from .test_competition_reward_coordinator_boot import chain_config as chain_config
@@ -131,10 +132,18 @@ def test_replaced_path_and_forged_lease_rejected(config_case):
 
 
 @pytest.mark.parametrize("mode", ["success", "error", "cancel", "progress"])
+@pytest.mark.parametrize("capacity", [False, True])
 async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
-    config_case, monkeypatch, mode
+    config_case, monkeypatch, mode, capacity, tmp_path
 ):
     config = config_case.config
+    selected_path = None
+    if capacity:
+        selected_path = tmp_path / "capacity.json"
+        config_case.save(
+            selected_path,
+            canonical_json_bytes(config.model_copy(update={"maximum_history_bytes": 64 * 1024**3})),
+        )
     root, *_ = components(config)
     events, started = [], asyncio.Event()
 
@@ -162,6 +171,9 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
         def __init__(self, **kwargs):
             kwargs["lease"].recheck(config)
             assert type(kwargs["history"]) is RewardControlHistoryReader
+            assert kwargs["history"].journal.maximum_bytes == (
+                64 * 1024**3 if capacity else config.maximum_history_bytes
+            )
             assert kwargs["provider"].__class__ is Provider
 
         async def step(self, cohort):
@@ -188,6 +200,7 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
             config_case.path,
             cohort=digest(config.series.cohorts[0]),
             operation="fixture-v1",
+            history_capacity_config=selected_path,
         )
     )
     if mode == "cancel":
@@ -203,6 +216,14 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
         assert not result["publication_authorized"]
         assert not result["publishing_roles_started"]
         assert not result["service_restart_performed"]
+        if capacity:
+            assert result["history_capacity_selection"]["original_config_sha256"] == digest(config)
+            assert (
+                result["history_capacity_selection"]["selected_maximum_history_bytes"]
+                == 64 * 1024**3
+            )
+        else:
+            assert result["history_capacity_selection"] is None
     assert events == [
         "construct",
         "start",
@@ -249,6 +270,69 @@ async def test_original_missing_migration_fails_before_provider(config_case, mon
         pytest.fail("changed configuration accepted")
 
 
+@pytest.mark.parametrize("change", ["equal", "decrease", "other_limit", "state", "noncanonical"])
+async def test_capacity_selection_refuses_changes_before_owner_or_provider(
+    config_case, monkeypatch, tmp_path, change
+):
+    config = config_case.config
+    updated = {"maximum_history_bytes": 64 * 1024**3}
+    if change == "equal":
+        updated["maximum_history_bytes"] = config.maximum_history_bytes
+    elif change == "decrease":
+        updated["maximum_history_bytes"] = config.maximum_history_bytes - 1
+    elif change == "other_limit":
+        updated["maximum_header_bytes"] = config.maximum_header_bytes + 1
+    elif change == "state":
+        updated["state_directory"] = str(tmp_path / "different-owner")
+    raw = canonical_json_bytes(config.model_copy(update=updated))
+    selected = tmp_path / "capacity.json"
+    config_case.save(selected, b" " + raw if change == "noncanonical" else raw)
+    monkeypatch.setattr(
+        runtime, "hold_reward_cutover_owner", lambda *a, **k: pytest.fail("owner opened")
+    )
+    with pytest.raises(ValueError, match=r"only increase history|not canonical"):
+        await runtime.reconcile_reward_cutover(
+            config_case.path,
+            cohort=digest(config.series.cohorts[0]),
+            operation="fixture-v1",
+            history_capacity_config=selected,
+        )
+
+
+async def test_capacity_selection_keeps_original_provenance_and_requires_migration(
+    config_case, monkeypatch, tmp_path
+):
+    config = config_case.config
+    root, *_ = components(config)
+    selected = tmp_path / "capacity.json"
+    config_case.save(
+        selected,
+        canonical_json_bytes(config.model_copy(update={"maximum_history_bytes": 64 * 1024**3})),
+    )
+    selection = {
+        "owner_uid": os.getuid(),
+        "paths": {"service_root": str(root)},
+        "series_sha256": digest(config.series),
+        "policy_sha256": digest(config.policy),
+        "chain_config_sha256": digest(config.chain),
+        "configuration": {"sha256": digest(config)},
+    }
+    monkeypatch.setattr(ownership, "load_provenance", lambda _: selection)
+    monkeypatch.setattr(ownership, "validate_provenance", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runtime, "HistoricalRewardControlProvider", lambda *a, **k: pytest.fail("provider opened")
+    )
+    with pytest.raises(ValueError, match="completed-admission migration"):
+        await runtime.reconcile_reward_cutover(
+            config_case.path,
+            cohort=digest(config.series.cohorts[0]),
+            operation="fixture-v1",
+            original_owner_selection=Path("fixture-only.json"),
+            history_capacity_config=selected,
+        )
+    assert runtime.load_reward_coordinator_config(config_case.path) == config
+
+
 def test_cli_only_reports_error_type(config_case, monkeypatch, capsys):
     async def fail(_):
         raise ValueError("wss://private.example/?credential=do-not-print")
@@ -275,6 +359,42 @@ def test_cli_interruption_is_not_reported_as_success(monkeypatch, capsys):
         cli.main(["--config", "/fixture/config", "--cohort", "aa" * 32, "--operation", "fixture"])
     assert result.value.code == 130
     assert json.loads(capsys.readouterr().out)["status"] == "interrupted"
+
+
+def test_cli_selects_capacity_control_without_replacing_original_config(monkeypatch, capsys):
+    observed = []
+
+    async def reconcile(path, **kwargs):
+        observed.append((path, kwargs))
+        return {"status": "reconciled", "publication_authorized": False}
+
+    monkeypatch.setattr(cli, "reconcile_reward_cutover", reconcile)
+    cli.main(
+        [
+            "--config",
+            "/fixture/original.json",
+            "--cohort",
+            "aa" * 32,
+            "--operation",
+            "fixture",
+            "--original-owner-selection",
+            "/fixture/owner.json",
+            "--history-capacity-config",
+            "/fixture/capacity64.json",
+        ]
+    )
+    assert observed == [
+        (
+            Path("/fixture/original.json"),
+            {
+                "cohort": "aa" * 32,
+                "operation": "fixture",
+                "original_owner_selection": Path("/fixture/owner.json"),
+                "history_capacity_config": Path("/fixture/capacity64.json"),
+            },
+        )
+    ]
+    assert not json.loads(capsys.readouterr().out)["publication_authorized"]
 
 
 async def test_initial_finality_retries_only_missing_head_and_keeps_selected_budget(

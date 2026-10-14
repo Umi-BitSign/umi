@@ -25,6 +25,7 @@ async def _run(args):
                 cohort=args.cohort,
                 operation=args.operation,
                 original_owner_selection=args.original_owner_selection,
+                history_capacity_config=args.history_capacity_config,
             ),
             stop,
         )
@@ -65,6 +66,7 @@ def main(argv=None):
     parser.add_argument("--cohort", required=True)
     parser.add_argument("--operation", required=True)
     parser.add_argument("--original-owner-selection", type=Path)
+    parser.add_argument("--history-capacity-config", type=Path)
     args = parser.parse_args(argv)
     try:
         with _logs():
