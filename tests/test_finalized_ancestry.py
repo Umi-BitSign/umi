@@ -22,7 +22,7 @@ from .test_competition_chain import chain_config as chain_config
 from .test_open_competition import policy as policy
 
 
-def make_headers(first, last):
+def make_headers(first, last, *, digest_item="0x00"):
     headers, by_height = {}, {}
     parent = "0x" + "11" * 32
     for number in range(first, last + 1):
@@ -31,7 +31,7 @@ def make_headers(first, last):
             "number": hex(number),
             "stateRoot": "0x" + hashlib.sha256(str(number).encode()).hexdigest(),
             "extrinsicsRoot": "0x" + "33" * 32,
-            "digest": {"logs": ["0x00"]},
+            "digest": {"logs": [digest_item]},
         }
         encoded = encode_rpc_header(value)
         block_hash = "0x" + hashlib.blake2b(bytes.fromhex(encoded[2:]), digest_size=32).hexdigest()

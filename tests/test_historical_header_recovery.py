@@ -286,10 +286,12 @@ async def test_new_anchor_rechecks_durable_links(walk, monkeypatch, chain_config
     assert len(loaded) == w.anchor.height - w.target.block_number
 
 
-async def test_verified_memory_eviction_preserves_recoverability(walk, monkeypatch):
+async def test_verified_memory_eviction_preserves_recoverability(walk):
     w = walk
-    monkeypatch.setattr("umi.historical_header_recovery.MAXIMUM_VERIFIED_HEADER_BYTES", 600)
-    service = HistoricalHeaderRecovery(w.connect)
+    await finish(HistoricalHeaderRecovery(w.connect), w)
+    # Existing durable hints remain usable with an explicitly smaller memory
+    # budget; only new persisted hints need additional disk capacity.
+    service = HistoricalHeaderRecovery(w.connect, maximum_bytes=600)
     await finish(service, w)
     assert 0 < service._verified_bytes <= 600
     height = w.anchor.height - 1
@@ -417,3 +419,60 @@ async def test_supplied_target_header_cannot_mask_corrupt_durable_hint(walk):
     with pytest.raises(ValueError, match="committed parent"):
         await service.recover(w.anchor, w.target, w.request, target_header=encoded)
     assert service._load(w.target.block_hash) != encoded
+
+
+async def test_selected_budget_retains_large_interval_without_repeated_walks(
+    walk, monkeypatch, chain_config, policy
+):
+    """A cohort fitting its budget must not be split by a hidden 8 MiB cap."""
+    from collections import OrderedDict
+
+    w = walk
+    first = w.target.block_number
+    w.headers, w.by_height = make_headers(
+        first, first + 160, digest_item="0x" + "00" * 32768
+    )
+    w.anchor = make_anchor(chain_config, policy, w.headers, w.by_height)
+    header = w.headers[w.by_height[first]]
+    w.target = FinalizedSnapshotRef(
+        first, w.by_height[first], header["parentHash"], header["stateRoot"]
+    )
+
+    async def request(method, params):
+        assert method == "chain_getHeader"
+        w.calls.append(params[0])
+        return w.headers[params[0]]
+
+    w.request = request
+    service = HistoricalHeaderRecovery(w.connect, maximum_bytes=16 * 1024**2)
+    loaded, load = [], service._load
+
+    def counted(block_hash):
+        loaded.append(block_hash)
+        return load(block_hash)
+
+    monkeypatch.setattr(service, "_load", counted)
+    assert (await finish(service, w)).snapshot == w.target
+    assert 8 * 1024**2 < service._verified_bytes <= service.maximum_bytes
+    assert len(loaded) == len(w.calls) == 160
+
+    class NoWholeCacheScan(OrderedDict):
+        def __iter__(self):
+            raise AssertionError("cached identity lookup scanned the full interval")
+
+    service._verified = NoWholeCacheScan(service._verified)
+    for height in range(first, w.anchor.height):
+        block_hash = w.by_height[height]
+        header = w.headers[block_hash]
+        target = FinalizedSnapshotRef(
+            height, block_hash, header["parentHash"], header["stateRoot"]
+        )
+        assert (await service.recover(w.anchor, target, request)).snapshot == target
+    assert len(loaded) == len(w.calls) == 160
+
+    # Durable bytes retain their original semantics; restart reauthenticates
+    # them once, without RPC, rather than converting hints into trusted state.
+    restarted = HistoricalHeaderRecovery(w.connect, maximum_bytes=16 * 1024**2)
+    monkeypatch.setattr(restarted, "_load", counted)
+    assert (await finish(restarted, w)).snapshot == w.target
+    assert len(loaded) == 320 and len(w.calls) == 160

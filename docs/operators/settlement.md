@@ -398,6 +398,16 @@ while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry
 links as completed block proofs or estimating reward activation.
 
+Verified ancestry and pending recovery cursors each use the selected header-byte
+budget (the provider's `maximum_header_bytes`, 256 MiB by default), rather than
+an independent smaller memory cap. Allow memory for both bounded working sets
+plus Python bookkeeping. Once an interval fits this budget, ascending checkpoint
+restoration reuses its checked links without repeating the walk or scanning the
+whole verified set for each hit. Explicitly smaller budgets retain LRU eviction
+and recoverability. Durable header hints remain untrusted after restart; the
+native owner still checks them once from its owned anchor. This compatible
+runtime update keeps existing native checkpoint and signed-state identities.
+
 ### Retained header hints
 
 The additive `umi.historical_header_hint_import_cli` command can transfer

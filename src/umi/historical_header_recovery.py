@@ -20,8 +20,6 @@ from .grandpa_finality import EVIDENCE_CLASS, _decode_header
 from .historical_header_progress import HeaderRecoveryTelemetry
 from .validator_plans import VerifiedFinalizedBlock
 
-MAXIMUM_VERIFIED_HEADER_BYTES = 8 * 1024**2
-
 
 class HistoricalHeaderRecoveryPending(FileNotFoundError):
     """Recovery is unfinished; preserve its target and retry after backoff."""
@@ -58,7 +56,10 @@ class HistoricalHeaderRecovery:
             self._verified_bytes -= len(old)
         self._verified[height] = encoded
         self._verified_bytes += len(encoded)
-        limit = min(self.maximum_bytes, MAXIMUM_VERIFIED_HEADER_BYTES)
+        # Keep the verified working set under the selected header budget.
+        # A separate smaller cap makes ascending replay repeatedly rewalk a
+        # cohort whose durable hints already fit that budget.
+        limit = self.maximum_bytes
         while self._verified_bytes > limit:
             _, old = self._verified.popitem(last=False)
             self._verified_bytes -= len(old)
@@ -72,7 +73,7 @@ class HistoricalHeaderRecovery:
         self._forget_progress(key)
         self.progress[key] = encoded
         self._progress_bytes += len(encoded)
-        while self._progress_bytes > min(self.maximum_bytes, MAXIMUM_VERIFIED_HEADER_BYTES):
+        while self._progress_bytes > self.maximum_bytes:
             _, old = self.progress.popitem(last=False)
             self._progress_bytes -= len(old)
 
@@ -208,15 +209,16 @@ class HistoricalHeaderRecovery:
         # Another request may already have proved a closer descendant under
         # this exact anchor. Continue from that link instead of repeating the
         # entire walk when, for example, the next target is its parent.
-        nearest = min(
-            (number for number in self._verified if height < number < current["number"]),
-            default=None,
-        )
-        if nearest is not None:
-            encoded = self._verified[nearest]
-            current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-            if current["number"] != nearest:
-                raise ValueError("historical registration differs from finalized ancestry")
+        if cached is None:
+            nearest = min(
+                (number for number in self._verified if height < number < current["number"]),
+                default=None,
+            )
+            if nearest is not None:
+                encoded = self._verified[nearest]
+                current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+                if current["number"] != nearest:
+                    raise ValueError("historical registration differs from finalized ancestry")
         self.telemetry.begin(
             anchor.finality_evidence_sha256, anchor.height, height, current["number"]
         )
