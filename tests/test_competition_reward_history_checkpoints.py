@@ -173,6 +173,10 @@ async def test_completed_restart_uses_only_compact_results_and_current_finality(
     assert h.reader.progress.native_completed == 0
     assert h.reader.progress.restored_completed == h.end - h.old.height + 1
     assert h.reader.progress.latest["percent"] == 100
+    assert h.reader.progress.latest["stage"] == "checkpoint_restore"
+    assert h.reader.progress.latest["stage_completed_blocks"] == h.end - h.old.height + 1
+    assert h.reader.progress.latest["stage_eta_seconds"] == 0
+    assert h.reader.progress.latest["blocks_per_second"] is None
     assert set(h.rpc_calls) <= {"chain_getHeader", "chain_getBlockHash"}
     assert tips == [h.end]
 
@@ -337,6 +341,9 @@ async def test_export_failure_does_not_repeat_successful_native_verification(
     monkeypatch.setattr(module, "capture_control_writes", forbidden)
     assert (await h.reader.advance(h.item.provider, through_block=h.old.height)).history is not None
     assert h.reader.checkpoints.load(h.old.height)["exports"]
+    assert h.reader.progress.latest["stage"] == "checkpoint_restore"
+    assert h.reader.progress.latest["stage_completed_blocks"] == 1
+    assert h.reader.progress.latest["stage_eta_seconds"] == 0
 
 
 async def test_lost_checkpoint_acknowledgement_restores_without_native_replay(

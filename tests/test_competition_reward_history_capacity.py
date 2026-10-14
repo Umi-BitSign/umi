@@ -16,8 +16,7 @@ def test_history_supports_explicit_large_budget_without_enlarging_other_journals
 
     journal = _HistoryJournal(tmp_path / "history", {}, maximum_bytes=maximum)
     journal.put("control_history_block", "10", {"retained": True})
-    with journal.transaction() as db:
-        assert db.execute("PRAGMA max_page_count").fetchone()[0] == (maximum + 16 * 1024**2) // 4096
+    assert journal.maximum_bytes == maximum
     assert journal.path.stat().st_size < 1024**2
     assert journal.maximum_records == maximum
     assert RoundJournal(tmp_path / "defaults", {}).maximum_records == 1024 * 80

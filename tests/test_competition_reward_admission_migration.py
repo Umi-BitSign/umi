@@ -221,6 +221,10 @@ async def test_completed_interval_restores_original_digest_and_verifies_all_late
     assert actual.history == c.expected
     assert h.reader.progress.native_completed == 0
     assert h.reader.progress.latest["completed_admission_blocks"] == 3
+    assert h.reader.progress.latest["stage"] == "completed_admission_restore"
+    assert h.reader.progress.latest["stage_completed_blocks"] == 3
+    assert h.reader.progress.latest["stage_total_blocks"] == 3
+    assert h.reader.progress.latest["stage_eta_seconds"] == 0
     assert h.reader.checkpoints.load(c.boundary) is None
     with pytest.raises(ValueError, match="not been natively verified"):
         await h.reader.verified_prefix(c.boundary - 1)

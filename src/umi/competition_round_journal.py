@@ -374,7 +374,10 @@ class RoundJournal:
                 db.create_function("umi_round_writer_generation", 0, lambda: 2)
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute("PRAGMA recursive_triggers=ON")
-                db.execute(f"PRAGMA max_page_count={(self.maximum_bytes + 16 * 1024**2) // 4096}")
+                # maximum_bytes admits logical records and reservations, not
+                # physical SQLite pages. Indexes, keys and page fragmentation
+                # need separate disk headroom; deriving another ceiling here
+                # can reject valid work before its logical allowance is used.
                 db.execute("BEGIN IMMEDIATE")
                 version = self._version(db)
                 initial_tables = self._table_names(db)
