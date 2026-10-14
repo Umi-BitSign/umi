@@ -8,6 +8,8 @@
 - [Automatic settlement delivery](#open-competition-settlement-delivery)
 - [Per-round successor signing](#open-competition-round-publisher)
 - [Work progress and ETA logs](#work-progress-and-eta-logs)
+- [Reward-history checkpoints and repair](#reward-history-checkpoints-and-repair)
+- [Existing-owner repair and independent preparation](#existing-owner-repair-and-independent-preparation)
 
 ## Work progress and ETA logs
 
@@ -185,6 +187,26 @@ still use normal recovery. Malformed owned records and corrupt durable hints sto
 the operation instead of falling back to replacement data. These optimizations
 preserve the original evidence format, state bindings and current-finality checks.
 
+Retained signed policies may select the exact older finality observer pin supported
+by the runtime. That compatibility binds the complete canonical policy pin,
+including every target binary, chain specification and bootstrap identity; it
+does not accept arbitrary old builds. Transcript parsing and durable store audit
+use the selected build identity. Keep its selected binary and original signed
+policy available to every replay consumer; do not substitute a newer binary or
+rewrite the policy to match current build constants.
+
+An earlier constructor-only compatibility release could leave an empty finality
+store labeled with newer build metadata before rejecting its first transcript.
+Startup repairs only that exact known empty layout in one audited transaction,
+preserving the original metadata and database identity. Existing accepted
+headers or observer segments refuse this repair; supported schema-v2 accounting
+migration and predecessor policy adoption keep their own checks. Repair logs
+report started, verified-pending-commit and completed states with elapsed time
+and an ETA basis. Retain this reader and repair while an installed or recovery
+consumer uses that exact retained pin or constructor-only empty store. They may
+be removed only after those consumers and their retained replay inputs have a
+separately qualified supported migration.
+
 Retained block verification supports an explicit local
 `service.history_verification` selection in both standing-writer and
 coordinator/reviewer configurations:
@@ -355,6 +377,66 @@ time, an ETA and its basis, and retrying or stalled states. Restored blocks coun
 toward completion but do not inflate measured native throughput. These estimates
 cover history review only, not overall reward finality.
 
+Before native worker submission, that same progress stream distinguishes
+retained-frame loading, the owned-provider lock, header decoding and finalized
+ancestry resolution. It reports the active block, stage reason and stage elapsed
+time. The stage planning range assumes local retained reads or responsive archive
+RPC and covers only that preparation step. Native proof throughput does not
+include this first ancestry wait; the history ETA is withdrawn while preparation
+is pending, stalled or retrying. The completed, captured, verified, replicated
+and applied counts retain their ordinary meanings.
+
+Owned ancestry walks also emit `historical_header_recovery_progress`: anchor,
+target and current block, completed/remaining links, percent, elapsed time and a
+measured ETA after enough new checks. Retained hints, RPC-fetched hints and reused
+process-local ancestry are counted separately; reused links do not inflate the
+measured rate. A 30-second heartbeat identifies stalled RPC or persistence work
+and withdraws unsupported estimates. A completed bounded pass remains running,
+while actual retry, repair or cancellation states withdraw its ETA. History logs
+include this separate ancestry substage and its ETA without counting ancestry
+links as completed block proofs or estimating reward activation.
+
+### Retained header hints
+
+The additive `umi.historical_header_hint_import_cli` command can transfer
+untrusted native-format header hints into an existing isolated provider cache.
+Run it as that cache's installed service account, using the selected runtime's
+header-payload and database capacities:
+
+```sh
+"$QUALIFIED_PYTHON" -m umi.historical_header_hint_import_cli --source "$SOURCE_HINT_DATABASE" --target-directory "$EXISTING_HEADER_DIRECTORY" --operation "$STABLE_IMPORT_OPERATION" --maximum-bytes "$SELECTED_MAXIMUM_HEADER_BYTES" --maximum-database-bytes "$SELECTED_MAXIMUM_HEADER_DATABASE_BYTES"
+```
+
+Both databases must use the supported native hint schema and DELETE journal
+mode. The target directory, database and existing owner marker must already
+belong to that account; source hints must be owned by root or the account and
+must not be group/world writable. The source and target must be disjoint, with
+their original identities retained. The importer never creates a replacement
+cache, changes an existing header, opens the finality database or moves the
+provider's ancestry cursor. A matching encoded header is reused; a different
+encoding for the same hash refuses the batch.
+
+Each bounded batch uses SQLite write serialization and commits its append-only
+transfer checkpoint in the same transaction as the inserted hints. Identity
+checks use directory-relative metadata operations without separately opening or
+closing SQLite files, preserving the active connection's POSIX locks. Native
+writers may continue between batches. Busy writers cause bounded retry, and
+SIGINT/SIGTERM stop after the active batch. Resume with the same operation,
+original paths and identities to reuse committed batches; a completed import
+returns its saved result. Source appends beyond the operation's initial high-water
+row belong to a separately named transfer.
+
+Progress reports processed, inserted and reused headers, elapsed time, percent
+and a measured transfer ETA. Its initial planning rate is explicitly labeled;
+busy, capacity and repair states withdraw the estimate. These counts establish
+only hint transfer. Native ancestry and finality verification still use the
+existing provider and retain their own progress. Keep transfer checkpoints and
+the target cache across restart. If an interrupted operation exposes missing or
+changed inputs, resolve that repair before resuming instead of resetting its
+checkpoint or recreating the cache.
+
+### Existing-owner repair and independent preparation
+
 Unreserved history journals keep transactional record counts and byte totals, so
 adding a block does not recount the entire retained history. Older unreserved
 journals receive a metadata-only migration in place. Reserved journals retain
@@ -393,6 +475,153 @@ publishing role, the original control-writer lock before opening journals. The
 writer uses its native supervisor startup lease and root-approved original boot
 configuration. A coordinator configuration cannot substitute for a writer's
 namespace. Neither route constructs a signer, writer adapter or chain executor.
+
+Independent preparation must not call the writer's repair route while its
+supervisor is active. The native `hold_history_preparation_lease` broker boundary
+authenticates the installed anchor, exact root-owned standing configuration and
+a separate `umi-standing-history-preparation/1` root approval. It owns only a
+disjoint root-private staging directory and binds the selected series, chain,
+verifier semantics, finite target and service-owned history directory across
+restarts. Its three acquisition checks report progress and a local-startup ETA
+basis. It does not read or restore the standing weight approval, acquire the
+original supervisor lock, open a history database or launch a worker. A held
+weight approval therefore stays held.
+
+The root command `python -m umi.competition_reward_history_preparation_cli`
+accepts `readiness` or `replay`, the installed `--unit`, `--config` and
+`--standing-boot`, plus separate root-sealed `--approval` and `--launch` files.
+It creates only a private view of the installed coordinator instance. Readiness
+authenticates the genuine anchor and the three staging checks, then starts the
+isolated child to verify its UID/GID, private namespaces, dropped capabilities,
+exact staging directory and selected native RPC routes. It exits before opening
+a native history database or constructing a provider. The launch control binds the reviewed source tree,
+interpreter, native resource files, portable proof input, optional R2 transport
+and bounded worker profile to the exact preparation approval.
+An explicitly selected RPC transport is bound to its original control digest;
+only that control and its named private credentials are readonly-mounted, and
+the selected environment variable survives environment clearing. Native request
+and response limits still use the unchanged pinned chain configuration.
+
+Root must create mode0700 `history` and `work` children under the root-private
+preparation directory, using the actual installed service UID and primary GID.
+The broker rejects overlapping state, mounted staging subtrees, changed sealed
+controls and source trees, and portable inputs containing a database namespace.
+It repairs a torn first scope write only while native history is still empty;
+missing scope bindings over existing history require explicit recovery.
+
+Replay holds that authentic staging lease while a private PID/mount namespace
+runs the native reader and owned-finality provider under the installed UID/GID,
+without supplementary groups or capabilities. Only the staged history at its
+eventual original logical path and private provider/cache storage are writable.
+Portable proof inputs and native executables are readonly. The child has network
+access for the selected native provider and R2 transport; no wallet, original
+database, approval or supervisor lock is exposed. Successful checkpoints and R2
+transport receipts remain under their private owners across interruption.
+Native history progress separates capture, verification, replication and apply;
+launcher heartbeats report elapsed time and defer estimates to that native scope.
+
+This is still preparation, not a cutover command. Qualify actual retained frames,
+native finality, interruption and repeat execution before selecting a deployment.
+Selection still needs stopped original and staged owners, the genuine
+`SuccessorStartupLease`, native history/control reconciliation and atomic
+directory selection. A staging lease or serialized progress record cannot
+substitute for those checks. Keep the entire staging directory on restart;
+changing its approved target or identity requires a separately approved new
+preparation. A launch can select a shorter work target within that approved
+range. After stopping that invocation, extend only its sealed launch work target
+to continue the same staged native history and reuse the completed prefix;
+neither the approval nor the staging directory and checkpoint bindings change.
+
+The stopped-writer diagnostic entrypoint is
+`python -m umi.competition_reward_writer_review_cli --unit UNIT --config CONFIG
+--standing-boot BOOT --through-block ORIGINAL_PREFIX_TIP`.
+Use `--held-approval PATH` only for the exact original root approval already
+moved out of the boot configuration's active path; this command never restores
+it. Both an active file and a dangling link at that original path refuse the
+held selection. `--history predecessor` requires a configured predecessor.
+Qualify the installed namespace and service-account access before deploying this
+entrypoint. Its source tests establish native lock, control and transaction
+behavior; they do not establish access in a particular installed namespace.
+
+This review acquires the genuine supervisor startup lease, checks the stopped
+systemd unit and Podman container, authenticates root-owned configuration and
+loaded service controls, and refuses pending daemon reloads. It holds existing
+applicable global and series writer locks before any mutable journal constructor.
+Missing weight state remains a handoff requirement, never evidence that legacy
+transactions have resolved. Retained signed attempts pass native original-proof,
+SCALE and signature review even after expiry; an unknown expired outcome remains
+unknown and its original bytes are preserved. C4 and predecessor handoff still
+belong to their ordinary native runtime owners.
+
+For preparation cutover, target only the original retained completed prefix.
+The diagnostic CLI cannot authorize an exchange. The root cutover entrypoint is
+`python -m umi.competition_reward_writer_broker_cli --unit UNIT --config CONFIG
+--standing-boot BOOT --held-approval HELD --preparation-approval PREPARATION
+--launch LAUNCH --operation OPERATION`. The source tree and interpreter in the
+root-sealed launch must contain this broker and match its exact source digest.
+Keep the original boot and preparation approval unchanged. Stop the preparation
+worker before invoking selection so its original staging lease is available.
+The selected launch target must already have complete native checkpoints.
+Use `--readiness-only` with a separately approved empty qualification staging
+root to check the installed root CLI, native namespace, actual account drop,
+and separate staging lease while the original writer may remain active. This
+branch never acquires original startup/journal locks, opens original journals,
+creates a provider or exchanges history. Its authenticated namespace-ready
+packet is not an original-owner capability: `original_owner_checked=false`.
+This is an installed access check, not full history-selection qualification.
+When a fresh child inherits an existing coordinator mount view, it reconstructs
+its own native view capability and validates the installed account again. An
+already service-owned logical mount target is accepted only when its inode is
+the exact selected physical instance root. A different service-owned target
+remains an error; an inherited mount alone grants no owner capability.
+After dropping privileges, the child retains only the root-selected instance
+directory descriptor to recheck its physical descendants and public account
+binding. Its logical mounts and exact UID/GID remain checked, supplementary
+groups remain empty, and the private host parent permissions stay unchanged.
+The capability remains tied to the original process and mount namespace.
+Child failures emit `writer_broker_child_exit` with bounded native cause details,
+including error types, reason codes and source locations, without exception
+messages or request payloads. Diagnostic failure cannot prevent child cleanup.
+
+For actual selection, the root broker starts one fresh child, which enters the exact coordinator view
+and permanently drops supplementary groups, GID and UID to the actual service
+account. It acquires the genuine original startup and stopped-service owners
+before root recovers any interrupted selection. Root authenticates the child's
+PID and UID on every private socket packet and retains duplicate original lock
+file descriptions until the child's entire adopted process tree has drained.
+The root broker is a Linux subreaper, so native workers that start separate
+sessions remain inside this drain boundary. These duplicates preserve exclusion if the child exits unexpectedly; they never
+reconstruct a native verification capability from serialized output.
+
+The same child restores only the original completed prefix, preserving native
+history capabilities across the exchange. A truly empty original uses an explicit
+native absence check that rejects captured sources, remote aliases, missing
+checkpoint metadata and orphan completion records. Raw history without completed
+results requires its supported repair before cutover. The child checks retained
+signed control decisions and the original pending standing transaction without
+changing signed bytes or interpreting expiry as proof of non-inclusion.
+
+Under the genuine staging lease, root writes and fsyncs its bounded selection
+journal and atomically exchanges the two directories with Linux `renameat2`.
+Both directory and database inodes are preserved at the original logical path.
+The child restores candidate checkpoints without new block verification, compares
+the original native prefix and retained signed controls, then verifies a reopened
+candidate owner before root commits. The original directory remains retained.
+Interruption drains native operations before rollback; repeat execution rolls
+back an uncommitted exchange or recognizes an already committed selection.
+A committed selection never automatically rolls back or restores weight approval.
+Unexpected process death that leaves SQLite sidecars refuses mechanical recovery:
+preserve both directories and the approval hold, then qualify the required native
+SQLite recovery under stopped owners before retrying. The broker does not delete
+sidecars or claim that an unqualified interrupted database is safe to exchange.
+
+Qualify the actual installed namespace, retained artifacts, interrupted recovery
+and root/child lifecycle before deploying this command. Source fixture checks do
+not establish access in a particular installation. Selection leaves approval held
+and does not authorize signing: ordinary C4 or predecessor handoff, fresh chain
+state, recipients, nonce and signed activation clocks remain required by the
+publishing runtime. The same parameterized command applies to supported successor
+cohorts without changing their signed plans or clocks.
 
 Repeat the same finite scope to resume after interruption. Completed native facts
 remain in the original journal; unaffected blocks are restored without payload
@@ -489,6 +718,51 @@ has completed admission and has been stopped and fenced against restart, run:
 Use the original service account; running the command as root is refused. The
 result reports preserved history and required economic reconciliation. It does
 not enable or restart any service, even when no later local decision is present.
+Use the stopped-owner reconciliation command after that migration, preserving
+the original service account, root selection, configuration and state paths:
+
+```sh
+"$QUALIFIED_PYTHON" -m umi.competition_reward_cutover_cli --config "$ORIGINAL_REWARD_CONFIG" --cohort "$COHORT_SHA256" --operation "$CUTOVER_OPERATION" --original-owner-selection "$ORIGINAL_OWNER_SELECTION"
+```
+
+This command holds the existing service, host control-writer and transaction
+writer process locks before constructing journals or the proof provider. The
+native journals retain their own compound-operation locks. It requires the
+completed original-admission receipt when the original selection is supplied;
+missing receipt state fails before a provider opens. It verifies every retained
+decision intent, certificate and local vote, then replays the latest pending
+transaction's original proofs and signed bytes even after its era expires.
+An unsigned reservation remains a pending original attempt. Era or nonce expiry
+does not prove an earlier activation never landed.
+
+Each invocation checkpoints a bounded batch against the operation's retained
+finalized target. Repeat the exact command when status is `history_pending` or
+`refresh_required`; completed native block results survive restart. At the end
+it collects fresh control and nonce proofs and reconciles the final tail to that
+exact snapshot. Native ordered history includes overwritten activations, repeated
+commitments, revocation and unresolved writes. A reserved local activation must
+be preserved; a finalized activation requires the existing native revision and
+live-lock review. The signed activation delay remains measured from the actual
+first finalized commitment, never from this command's start or completion.
+
+The returned `cutover_decision` is diagnostic and always includes
+`publication_authorized: false`, `writer_reconciliation_required: true` on a
+complete review, and a requirement for fresh native startup checks. The command
+does not load signing keys, submit transactions, inspect a writer's live reward
+row, sign an adoption, change configuration or start a service. Reconcile the
+writer separately before an authenticated configuration handoff. Original-series
+coordinators may use the same command without the C5 provenance option; successor
+series are explicitly refused until their predecessor ownership is supported.
+Progress and planning estimates cover one local review step, while native history
+reports measured block progress; neither estimates reward activation time.
+Initial finality waits only for the native absent-head or startup-floor condition
+within the configuration's existing startup budget; terminal observer faults and
+invalid proofs fail. Historical-header progress continues bounded passes under
+the same live provider so its verified ancestry cursor can advance. A header
+capacity hold returns `historical_recovery_pending` with
+`capacity_repair_required: true` and withdraws its completion ETA. SIGINT or
+SIGTERM drains owned cleanup and the CLI exits 130 with an interrupted result.
+
 Keep publishing services stopped across runner interruption and retry until exact
 pending/certified decisions, finalized control and the post-B tail have been
 reconciled under the selected runtime. A production cutover still needs that

@@ -23,6 +23,37 @@ from .test_competition_reward_history import series_case as series_case
 pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
 
 
+async def test_completed_benchmark_target_extends_after_restart_without_rechecking_prefix(
+    history_case, monkeypatch
+):
+    h = history_case
+    sample_end = h.old.height + 1
+    completed = (await h.reader.advance(h.item.provider, through_block=sample_end)).history
+    assert completed is not None
+    owner, inode = h.reader.checkpoints.owner, h.reader.journal.path.stat().st_ino
+    retained = {
+        height: h.reader.checkpoints.load(height) for height in range(h.old.height, sample_end + 1)
+    }
+    h.offline_through = sample_end
+    h.reader = await h.restart()
+    load = h.reader._load
+
+    def new_sources_only(height):
+        if height <= sample_end:
+            pytest.fail("completed benchmark payload was reread")
+        return load(height)
+
+    monkeypatch.setattr(h.reader, "_load", new_sources_only)
+    h.body_requests.clear()
+    result = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    assert result is not None and result.tip.block_number == h.end
+    assert await h.reader.verified_prefix(sample_end) == completed
+    assert h.reader.checkpoints.owner == owner
+    assert h.reader.journal.path.stat().st_ino == inode
+    assert all(h.reader.checkpoints.load(height) == saved for height, saved in retained.items())
+    assert h.body_requests == list(range(sample_end + 1, h.end + 1))
+
+
 @pytest.mark.usefixtures("http_log_redaction")
 @pytest.mark.parametrize("damage", ["table", "counter", "trigger"])
 async def test_capacity_repair_preserves_verified_history_and_repeat_reuses_metadata(

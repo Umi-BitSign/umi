@@ -673,6 +673,62 @@ def test_constructor_rejects_symlinked_chain_spec(tmp_path: Path) -> None:
         )
 
 
+def test_retained_policy_pin_preserves_original_build_and_bootstrap(tmp_path, monkeypatch):
+    policy_path = Path(__file__).parents[1] / "docs/competition/C5_TRANSPORT_POLICY.json"
+    pin = FinalityVerifierPin.model_validate(
+        json.loads(policy_path.read_bytes())["implementation_pins"]["finality_verifier"]
+    )
+    checked = []
+    monkeypatch.setattr(
+        GrandpaFinalityObserver,
+        "_assert_file_integrity",
+        lambda *args, **kwargs: checked.append(kwargs),
+    )
+    observer = GrandpaFinalityObserver.from_policy_pin(
+        pin,
+        target_triple="x86_64-unknown-linux-gnu",
+        binary_path=tmp_path / "original-observer",
+        chain_spec_path=tmp_path / "original-chain-spec",
+    )
+    assert observer.expected_binary_sha256 == (
+        "67b4bb856b2230e12d9ce2ec74e0f03fb0e131043802b13326ab18bf9ec78925"
+    )
+    assert observer.expected_chain_spec_sha256 == pin.chain_spec_sha256
+    assert observer.bootstrap_block_number == pin.bootstrap_block_number
+    assert observer.bootstrap_block_hash == "0x" + pin.bootstrap_block_hash
+    assert [item["expected_sha256"] for item in checked] == [
+        observer.expected_binary_sha256,
+        pin.chain_spec_sha256,
+    ]
+    # An old source/build tuple is insufficient: every release and bootstrap
+    # byte must remain that of the explicitly retained signed policy.
+    for changed in (
+        pin.model_copy(update={"source_revision": pin.source_revision + "-changed"}),
+        pin.model_copy(update={"cargo_lock_sha256": "ab" * 32}),
+        pin.model_copy(update={"bootstrap_block_number": pin.bootstrap_block_number + 1}),
+        pin.model_copy(update={"chain_spec_sha256": "ab" * 32}),
+        pin.model_copy(
+            update={"release_sha256_by_target": {"x86_64-unknown-linux-gnu": "ab" * 32}}
+        ),
+        pin.model_copy(
+            update={
+                "release_sha256_by_target": {
+                    "x86_64-unknown-linux-gnu": pin.release_sha256_by_target[
+                        "x86_64-unknown-linux-gnu"
+                    ]
+                }
+            }
+        ),
+    ):
+        with pytest.raises(GrandpaFinalityObserverError, match="policy_build_pin_mismatch"):
+            GrandpaFinalityObserver.from_policy_pin(
+                changed,
+                target_triple="x86_64-unknown-linux-gnu",
+                binary_path=tmp_path / "original-observer",
+                chain_spec_path=tmp_path / "original-chain-spec",
+            )
+
+
 def test_policy_pin_is_the_only_production_bootstrap_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

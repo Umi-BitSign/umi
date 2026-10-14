@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .competition_host_upgrade import HostUpgradeError, _require_root_linux
@@ -118,6 +118,10 @@ def _source(path: Path, service_uid: int) -> int:
     parent = _root_directory(path.parent)
     os.close(parent)
     fd = _open_without_links(path)
+    return _source_descriptor(fd, service_uid)
+
+
+def _source_descriptor(fd: int, service_uid: int) -> int:
     info = os.fstat(fd)
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -129,16 +133,68 @@ def _source(path: Path, service_uid: int) -> int:
     return fd
 
 
-def _check_inner_account(layout: CoordinatorLayout, service_uid: int) -> None:
+def _relative_open(root: int, path: Path) -> int:
+    """Open fixed instance descendants without reopening the private host parent."""
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise HostUpgradeError("coordinator instance descendant must be relative")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    parent = os.dup(root)
+    try:
+        for component in path.parts[:-1]:
+            child = os.open(component, flags | os.O_DIRECTORY, dir_fd=parent)
+            os.close(parent)
+            parent = child
+            info = os.fstat(parent)
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise HostUpgradeError("coordinator instance ancestor is not root-controlled")
+        return os.open(path.name, flags, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
+def _mount_target(path: Path, service_uid: int, expected: tuple[int, ...]) -> int:
+    """Accept a root placeholder or the exact inherited instance bind target.
+
+    A fresh executable inherits mounts, not the previous process's view
+    capability. Its writable logical roots can therefore already be owned by
+    the service account. Rebind only when that target is the same preserved
+    physical inode selected by root; an arbitrary service-owned path is refused.
+    """
+    from .competition_upgrade_namespace import _ensure_base
+
+    try:
+        return _ensure_base(path)
+    except HostUpgradeError as error:
+        descriptor = _source(path, service_uid)
+        if _identity(descriptor) != expected:
+            os.close(descriptor)
+            raise HostUpgradeError(
+                "coordinator inherited target differs from its selected physical root"
+            ) from error
+        return descriptor
+
+
+def _check_inner_account(
+    layout: CoordinatorLayout, service_uid: int, *, root_descriptor: int | None = None
+) -> int:
     from .competition_host_switch import _root_directory
-    from .competition_host_upgrade import _root_file
 
     path = layout.root_directory / "etc/passwd"
-    parent = _root_directory(path.parent)
-    os.close(parent)
-    _root_file(path)
-    fd = _open_without_links(path)
+    if root_descriptor is None:
+        parent = _root_directory(path.parent)
+        os.close(parent)
+        fd = _open_without_links(path)
+    else:
+        fd = _relative_open(root_descriptor, Path("etc/passwd"))
     try:
+        info = os.fstat(fd)
+        if (
+            info.st_uid != 0
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise HostUpgradeError("coordinator account database is not root-controlled")
         payload = os.read(fd, 65537)
         if len(payload) > 65536:
             raise HostUpgradeError("coordinator public account database exceeds its bound")
@@ -156,6 +212,9 @@ def _check_inner_account(layout: CoordinatorLayout, service_uid: int) -> None:
         or selected[0][5] != str(layout.account_home)
     ):
         raise HostUpgradeError("coordinator inner account differs from its host service identity")
+    if not selected[0][3].isdecimal() or int(selected[0][3]) <= 0:
+        raise HostUpgradeError("coordinator inner account needs a non-root service group")
+    return int(selected[0][3])
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,16 +224,59 @@ class CoordinatorHostView:
     pid: int
     namespace: tuple[int, int]
     identities: tuple[tuple[Path, tuple[int, ...]], ...]
+    service_gid: int | None = None
+    _root_descriptor: int | None = field(default=None, repr=False)
+    _root_identity: tuple[int, ...] | None = field(default=None, repr=False)
 
     def recheck(self) -> None:
         from .competition_upgrade_namespace import _namespace_id
 
         if _ACTIVE is not self or self.pid != os.getpid() or self.namespace != _namespace_id():
             raise HostUpgradeError("coordinator view is not active in this process namespace")
-        _check_inner_account(self.layout, self.service_uid)
+        if self._root_descriptor is None or _identity(self._root_descriptor) != self._root_identity:
+            raise HostUpgradeError("coordinator selected instance descriptor changed")
+        root = (os.getuid(), os.geteuid()) == (0, 0)
+        if root:
+            from .competition_host_switch import _root_directory
+
+            named = _root_directory(self.layout.root_directory)
+            try:
+                if _identity(named) != self._root_identity:
+                    raise HostUpgradeError("coordinator named instance root changed")
+            finally:
+                os.close(named)
+            if _check_inner_account(self.layout, self.service_uid) != self.service_gid:
+                raise HostUpgradeError("coordinator inner account group changed")
+        elif (
+            os.getresuid() != (self.service_uid,) * 3
+            or self.service_gid is None
+            or os.getresgid() != (self.service_gid,) * 3
+            or os.getgroups()
+        ):
+            raise HostUpgradeError("coordinator view differs from its dropped service identity")
+        elif (
+            _check_inner_account(
+                self.layout, self.service_uid, root_descriptor=self._root_descriptor
+            )
+            != self.service_gid
+        ):
+            raise HostUpgradeError("coordinator inner account group changed")
         for logical, expected in self.identities:
-            for path in (logical, self.layout.physical(logical)):
-                fd = _source(path, self.service_uid)
+            for physical in (False, True):
+                # Root keeps full named-path checks. The dropped child checks
+                # the same physical descendants through ONLY its root-selected
+                # instance directory, retaining live account and inode checks
+                # without supplementary groups or a /proc/self/fd shortcut.
+                fd = (
+                    _source_descriptor(
+                        _relative_open(self._root_descriptor, logical.relative_to("/")),
+                        self.service_uid,
+                    )
+                    if physical and not root
+                    else _source(
+                        self.layout.physical(logical) if physical else logical, self.service_uid
+                    )
+                )
                 try:
                     if _identity(fd) != expected:
                         raise HostUpgradeError("coordinator view changed its preserved inode")
@@ -228,7 +330,6 @@ def prepare_coordinator_host_view(*, unit_name: str, service_uid: int) -> Coordi
         _MS_NOSUID,
         _MS_RDONLY,
         _MS_REMOUNT,
-        _ensure_base,
         _fd_path,
         _mount,
         _namespace_id,
@@ -240,16 +341,25 @@ def prepare_coordinator_host_view(*, unit_name: str, service_uid: int) -> Coordi
     if type(service_uid) is not int or service_uid <= 0 or _ACTIVE is not None:
         raise HostUpgradeError("coordinator view needs one non-root service identity")
     root = _root_directory(layout.root_directory)
-    os.close(root)
-    _check_inner_account(layout, service_uid)
+    root_identity = _identity(root)
+    retained = False
     descriptors: list[int] = []
     try:
+        service_gid = _check_inner_account(layout, service_uid)
         for logical, _ in _ROOTS:
             descriptors.append(_source(layout.physical(logical), service_uid))
         identities = tuple(
             (logical, _identity(fd)) for (logical, _), fd in zip(_ROOTS, descriptors, strict=True)
         )
         _unshare_mounts()
+        fresh_root = _root_directory(layout.root_directory)
+        if _identity(fresh_root) != root_identity:
+            os.close(fresh_root)
+            raise HostUpgradeError(
+                "coordinator selected instance changed across namespace creation"
+            )
+        os.close(root)
+        root = fresh_root
         for index, ((logical, readonly), (_, expected)) in enumerate(
             zip(_ROOTS, identities, strict=True)
         ):
@@ -261,7 +371,7 @@ def prepare_coordinator_host_view(*, unit_name: str, service_uid: int) -> Coordi
                 raise HostUpgradeError("coordinator source changed across namespace creation")
             os.close(descriptors[index])
             descriptors[index] = fresh
-            target = _ensure_base(logical)
+            target = _mount_target(logical, service_uid, expected)
             try:
                 _mount(_fd_path(fresh), _fd_path(target), None, _MS_BIND)
             finally:
@@ -276,10 +386,22 @@ def prepare_coordinator_host_view(*, unit_name: str, service_uid: int) -> Coordi
                 _mount(None, _fd_path(mounted), None, flags)
             finally:
                 os.close(mounted)
-        view = CoordinatorHostView(layout, service_uid, os.getpid(), _namespace_id(), identities)
+        view = CoordinatorHostView(
+            layout,
+            service_uid,
+            os.getpid(),
+            _namespace_id(),
+            identities,
+            service_gid,
+            root,
+            root_identity,
+        )
         _ACTIVE = view
         view.recheck()
+        retained = True
         return view
     finally:
         for descriptor in descriptors:
             os.close(descriptor)
+        if not retained:
+            os.close(root)

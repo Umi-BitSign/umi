@@ -21,6 +21,10 @@ from .host_memory_runtime import compact_memory_error, history_memory_window
 
 
 async def _load_input(reader, height):
+    reader.progress.preparation_start(
+        "retained_history_loading", height, "load_checkpoint_or_selected_retained_frame"
+    )
+    reader.progress.report(reader, "running")
     try:
         completed = await run_owned_thread(reader.checkpoints.load, height)
     except HistoryCheckpointRepairRequired:
@@ -104,6 +108,12 @@ async def _persist(reader, pool, future, fields, retained):
 async def _window(reader, provider, pool, entries, stop):
     tasks = []
     error = None
+    reader.progress.preparation_start(
+        "owned_history_provider_wait",
+        entries[0][0] if entries else None,
+        "acquire_running_owned_provider_lock",
+    )
+    reader.progress.report(reader, "running")
     async with provider._lock:
         if provider._closed or not provider._owned:
             raise ValueError("parallel history requires a running owned provider")
@@ -112,15 +122,26 @@ async def _window(reader, provider, pool, entries, stop):
             for height, fields, retained in entries:
                 if stop.is_set():
                     break
+                reader.progress.preparation_start(
+                    "retained_history_header", height, "decode_retained_header_hint"
+                )
+                reader.progress.report(reader, "running")
                 snapshot, header = await run_owned_thread(
                     archive_header_hint, fields["slot_evidence"]
                 )
                 if snapshot.block_number != height:
                     raise ValueError("history frame differs from selected owner context")
+                reader.progress.preparation_start(
+                    "owned_history_header_resolution",
+                    height,
+                    "resolve_header_and_finalized_ancestry_before_native_submission",
+                )
+                reader.progress.report(reader, "running")
                 timestamp, ceiling = await provider._resolve_control_header(snapshot, header)
                 if stop.is_set():
                     break
                 reader.progress.native_start(retained=retained, repair=bool(reader._repair_reason))
+                reader.progress.report(reader, "running")
                 future = pool.submit(
                     snapshot=snapshot,
                     header=header,

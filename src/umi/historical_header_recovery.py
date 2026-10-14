@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 
 from .chain_evidence import FinalizedSnapshotRef
 from .concurrency import run_owned_thread
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES, MAXIMUM_PATH_BYTES, encode_rpc_header
 from .grandpa_finality import EVIDENCE_CLASS, _decode_header
+from .historical_header_progress import HeaderRecoveryTelemetry
 from .validator_plans import VerifiedFinalizedBlock
 
 MAXIMUM_VERIFIED_HEADER_BYTES = 8 * 1024**2
@@ -49,6 +50,7 @@ class HistoricalHeaderRecovery:
         self._anchor = None
         self._verified = OrderedDict()
         self._verified_bytes = 0
+        self.telemetry = HeaderRecoveryTelemetry()
 
     def _remember(self, height, encoded):
         old = self._verified.pop(height, None)
@@ -126,14 +128,39 @@ class HistoricalHeaderRecovery:
         if not isinstance(target, FinalizedSnapshotRef):
             raise TypeError("historical recovery requires an exact target")
         async with self._lock:
-            return await self._recover(anchor, target, request, target_header=target_header)
+            return await self._observed_recover(
+                anchor, target, request, target_header=target_header
+            )
 
     async def recover_height(self, anchor, height: int, request):
         """Derive the historical identity from the owned anchor, never RPC height claims."""
         if type(height) is not int:
             raise TypeError("historical recovery requires an integer height")
         async with self._lock:
-            return await self._recover(anchor, height, request)
+            return await self._observed_recover(anchor, height, request)
+
+    async def _observed_recover(self, anchor, target, request, *, target_header=None):
+        with self.telemetry.monitor():
+            try:
+                result = await self._recover(anchor, target, request, target_header=target_header)
+            except BaseException as error:
+                self.telemetry.finish(
+                    "running"
+                    if isinstance(error, HistoricalHeaderRecoveryProgress)
+                    else "stopped"
+                    if isinstance(error, asyncio.CancelledError)
+                    else "repair_required"
+                    if isinstance(error, ValueError)
+                    else "retrying",
+                    error_type=type(error).__name__,
+                )
+                # Diagnostic metadata is not an ancestry or verification capability.
+                if self.telemetry.prepared:
+                    with suppress(Exception):
+                        error.ancestry_progress = dict(self.telemetry.latest)
+                raise
+            self.telemetry.finish("completed")
+            return result
 
     async def _recover(self, anchor, target, request, *, target_header=None):
         if not isinstance(anchor, VerifiedFinalizedBlock):
@@ -190,28 +217,37 @@ class HistoricalHeaderRecovery:
             current = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
             if current["number"] != nearest:
                 raise ValueError("historical registration differs from finalized ancestry")
+        self.telemetry.begin(
+            anchor.finality_evidence_sha256, anchor.height, height, current["number"]
+        )
         used = 0
         for _ in range(self.batch_size):
             if current["number"] == height:
                 break
             block_hash = current["parent_hash"]
+            self.telemetry.phase("load_retained_hint")
             next_encoded = await run_owned_thread(self._load, block_hash)
             missing = next_encoded is None
+            source = "retained"
             if missing:
                 # Presence in an archive establishes no ancestry. Supply the
                 # target bytes only when the walk reaches its committed edge;
                 # the same hash/height checks below authenticate that link.
                 # Existing durable hints must still be checked, including
                 # corruption; an archive must not silently replace them.
+                supplied = target_header is not None and current["number"] - 1 == height
+                source = "supplied" if supplied else "rpc"
+                self.telemetry.phase("supplied_target_hint" if supplied else "fetch_archive_header")
                 next_encoded = (
                     target_header
-                    if target_header is not None and current["number"] - 1 == height
+                    if supplied
                     else encode_rpc_header(await request("chain_getHeader", (block_hash,)))
                 )
             next_header = _decode_header(next_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
             if (next_header["number"], next_header["hash"]) != (current["number"] - 1, block_hash):
                 raise ValueError("historical header is not the committed parent")
             if missing:
+                self.telemetry.phase("persist_verified_hint")
                 await run_owned_thread(self._save, block_hash, next_encoded)
             # Advance only after the exact hint is durable. Cancellation during
             # persistence leaves the old cursor; retry rechecks the stored hint.
@@ -219,6 +255,7 @@ class HistoricalHeaderRecovery:
             self._remember_progress(key, next_encoded)
             encoded = next_encoded
             current = next_header
+            self.telemetry.advance(current["number"], source)
             used += (len(encoded) - 2) // 2
             if used >= MAXIMUM_PATH_BYTES:
                 break
