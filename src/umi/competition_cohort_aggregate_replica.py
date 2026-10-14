@@ -14,6 +14,10 @@ import tempfile
 from pathlib import Path
 from typing import BinaryIO
 
+from .competition_aggregate_replica_binding import (
+    VerifiedAggregateReplica,
+    _issue_verified_replica,
+)
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_transport_verification import (
     ByteCheckpoints,
@@ -21,6 +25,7 @@ from .competition_transport_verification import (
     verification_tick,
     verifier_semantics,
 )
+from .competition_verification_snapshot import VerifiedPackageSnapshot
 from .file_identity import file_fingerprint
 from .private_files import ensure_private_directory, lock_private_file, private_path
 
@@ -102,13 +107,19 @@ def replicate_verified_aggregate(
     *,
     expected_digest: str,
     maximum_bytes: int,
-) -> None:
+    verified_source: VerifiedPackageSnapshot | None = None,
+) -> VerifiedAggregateReplica | None:
     """Copy exact verified bytes privately; missing originals remain mandatory.
 
+    A genuine owning-store snapshot can reuse its original byte identity on
+    the first copy; a caller-supplied digest alone still needs the byte check.
     Successful byte checks persist under the destination's private metadata
     directory. Exact retries inspect file identities without payload reads.
     Legacy files and damaged receipts receive a visible scoped first check or
     repair. A matching destination stays in place across lost acknowledgements.
+    With a native source, return a byte-only destination binding after its own
+    first stable check; unsupported identity clocks return None and retain the
+    ordinary native consumer import path.
     """
     maximum_bytes = check_aggregate_evidence_bytes(maximum_bytes)
     if (
@@ -124,6 +135,20 @@ def replicate_verified_aggregate(
     lock = lock_private_file(destination.parent / ".publish.lock")
     try:
         source_identity = _stamp(source, maximum_bytes)
+        if verified_source is not None:
+            if type(verified_source) is not VerifiedPackageSnapshot:
+                raise TypeError("aggregate source reuse requires a native snapshot capability")
+            verified_path, verified_stamp = verified_source.original_identity(
+                maximum_bytes=maximum_bytes
+            )
+            # Snapshot descriptors preserve their historical uid/gid/mode order.
+            native_identity = [verified_stamp[i] for i in (0, 1, 4, 2, 3, 5, 6, 7, 8)]
+            if (
+                verified_path != source
+                or verified_source.sha256 != expected_digest
+                or native_identity != source_identity
+            ):
+                raise ValueError("aggregate source differs from native snapshot selection")
         exists = destination.exists() or destination.is_symlink()
         target_identity = _stamp(destination, maximum_bytes) if exists else None
         total = int(source_identity[6]) + (
@@ -144,11 +169,14 @@ def replicate_verified_aggregate(
             TransferProgress("aggregate_replica", total) as progress,
             ByteCheckpoints(root, context, progress) as saved,
         ):
+            binding = None
             if exists:
                 for path, stamp in ((source, source_identity), (destination, target_identity)):
                     if path == destination == source and progress.completed:
                         continue
-                    if saved.load(str(path), stamp) == expected_digest:
+                    if (path == source and verified_source is not None) or (
+                        saved.load(str(path), stamp) == expected_digest
+                    ):
                         progress.advance(int(stamp[6]), restored=True)
                     else:
                         progress.emit("running")
@@ -159,7 +187,9 @@ def replicate_verified_aggregate(
                         if reusable:
                             saved.remember(str(path), observed, expected_digest)
             else:
-                verified = saved.load(str(source), source_identity) == expected_digest
+                verified = verified_source is not None or (
+                    saved.load(str(source), source_identity) == expected_digest
+                )
                 reusable = verified or verification_tick(int(source_identity[-1]), progress)
                 descriptor, name = tempfile.mkstemp(prefix=".pending-", dir=destination.parent)
                 try:
@@ -195,6 +225,34 @@ def replicate_verified_aggregate(
                 finally:
                     if os.path.exists(name):
                         os.unlink(name)
+            if verified_source is not None:
+                # Newly created output requires its own stable native byte
+                # check. The source snapshot skips source hashing, not this
+                # distinct destination integrity boundary.
+                verified_source.original_identity(maximum_bytes=maximum_bytes)
+                if source != destination and (
+                    saved.load(str(destination), target_identity) != expected_digest
+                ):
+                    if verification_tick(int(target_identity[-1]), progress):
+                        with TransferProgress(
+                            "aggregate_replica_destination", int(target_identity[6])
+                        ) as destination_progress:
+                            observed = _transfer(
+                                destination,
+                                None,
+                                expected_digest,
+                                maximum_bytes,
+                                progress=destination_progress,
+                            )
+                        if observed != target_identity:
+                            raise ValueError("aggregate replica destination changed before check")
+                        saved.remember(str(destination), observed, expected_digest)
+                    else:
+                        progress.emit("repair_required", reason="replica_binding_clock_unqualified")
+                if source == destination or (
+                    saved.load(str(destination), target_identity) == expected_digest
+                ):
+                    binding = _issue_verified_replica(destination, expected_digest, target_identity)
             if _stamp(source, maximum_bytes) != source_identity:
                 raise ValueError("aggregate replica source changed during publication")
             if _stamp(destination, maximum_bytes) != target_identity:
@@ -204,5 +262,6 @@ def replicate_verified_aggregate(
                 os.fsync(directory)
             finally:
                 os.close(directory)
+            return binding
     finally:
         os.close(lock)

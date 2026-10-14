@@ -574,6 +574,43 @@ preserves the first valid signature envelope. Interrupted export retries the
 original bytes; completed packages need no source fetch.
 Model/promotion assets use their separate preservation and native import path.
 
+Package preparation persists the checked immutable source identity, bounded
+native envelope and per-object verification independently of the large package.
+Offer discovery, publication, coordinator readback, reviewer, coverage and writer
+load that snapshot across polls and restarts. A genuine source snapshot also
+avoids rehashing the original during local replication; a distinct destination
+still needs its own first byte check. Native semantic verdicts remain bound to
+the policy, authority and verifier semantics; package presence or a supplied
+digest alone grants no authority.
+
+A source with no previous preparation imports automatically. An interrupted
+first preparation resumes its completed object checks. Missing or damaged
+completed records, changed source identities and damaged retained objects stop
+with `VerificationSnapshotRepairRequired`; they do not silently start another
+full import. Restore the original signed source in place and use the supported
+wallet-free repair command under the consuming service account:
+
+```text
+python -m umi.competition_verification_snapshot_cli repair --store STORE --source SOURCE --kind reward --maximum-bytes BYTES --package-sha256 SHA256 --reason 'restore missing verification metadata'
+```
+
+Use the configured package byte bound and the original authenticated package
+digest. For reward files, `STORE` is `FILES/verification/packages` and `SOURCE`
+is `FILES/packages/SHA256.json`. Settlement offer inputs use their existing
+cohort-named source file and the same `FILES/verification/packages` store.
+Settlement input preparation uses
+`STATE_DIRECTORY/SERIES_SHA256/COHORT_SHA256/verification/packages`, its existing
+input source path, and `--kind settlement`. `STATE_DIRECTORY` is the settlement
+configuration’s `state_directory`; the two digests identify its configured series
+and cohort. Do not copy a different owner's
+verification directory or delete state to force a first preparation. The command
+serializes with the store owner, retains the repair reason and emits counted
+progress, elapsed time and ETA basis. It never loads a key, changes signed input
+bytes, submits a transaction or replaces a live service. `prepare` explicitly
+prepares a new source; `check` inspects existing metadata without payload reads.
+After repair, normal consumers reuse the restored completion. Keep this repair
+path for all supported installations retaining package snapshots.
+
 `StandingControlPublisher` consumes that complete certified prefix and local
 delivery readback. It proves the current reserved control slot and every write
 since authority issuance, then retains the exact mortal transaction and its

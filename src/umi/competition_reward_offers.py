@@ -6,7 +6,6 @@ evidence before retaining a decision or asking any evaluator to sign it.
 
 from pathlib import Path
 
-from .competition_cohort_aggregate_files import read_aggregate_model
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
@@ -31,6 +30,7 @@ from .competition_reward_opportunity import (
     opportunity_rule,
 )
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
+from .competition_verification_snapshot import verified_package_digest
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
@@ -64,6 +64,7 @@ class StandingRewardOffers:
         self.predecessor = predecessor
         self.reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
         self.settlements = Path(private_path(str(settlements)))
+        self.packages = files.package_store
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
         prefix = verify_reward_decisions(
@@ -77,7 +78,7 @@ class StandingRewardOffers:
         ):
             raise ValueError("reward offer must extend the next admitted cohort")
         # Completion is small and may take hours. Check it before reparsing a
-        # potentially large settlement package on each pending poll.
+        # potentially large settlement package on its first preparation.
         prior = digest(self.handoff)
         if not index and type(self.handoff) is StandingRewardHandoffPlan:
             prior = self.predecessor.certificate_sha256()
@@ -99,7 +100,7 @@ class StandingRewardOffers:
                 activation=predecessor,
             )
         try:
-            package = read_aggregate_model(
+            package = self.packages.load(
                 self.settlements / (cohort + ".json"),
                 CohortRewardPackage,
                 maximum_bytes=self.files.maximum_package_bytes,
@@ -125,7 +126,7 @@ class StandingRewardOffers:
         return RewardActivation(
             cohort_sha256=cohort,
             allocation_sha256=digest(package.allocation),
-            package_sha256=digest(package),
+            package_sha256=verified_package_digest(package),
             recovery_tip_sha256=digest(tip),
             prior_opportunity_sha256=prior,
             reward_adoption_sha256=None if adoption is None else digest(adoption.adoption),

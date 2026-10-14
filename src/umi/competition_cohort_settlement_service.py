@@ -643,6 +643,15 @@ class CohortSettlementService:
         if self.package_reference is None:
             raise RuntimeError("settlement has no verified original package")
         path, sha256 = self.package_reference
+        snapshot = await run_owned_thread(
+            partial(
+                self.verified_packages.load_existing,
+                path,
+                SettlementInputPackage,
+                maximum_bytes=self.config.maximum_package_bytes,
+                expected_sha256=sha256,
+            )
+        )
         await run_owned_thread(
             partial(
                 replicate_verified_aggregate,
@@ -652,6 +661,7 @@ class CohortSettlementService:
                 / (self.cohort + ("-reference.json" if self.reference else ".json")),
                 expected_digest=sha256,
                 maximum_bytes=self.config.maximum_package_bytes,
+                verified_source=snapshot,
             )
         )
 
