@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_reward_admission_provenance as provenance
 from umi import competition_reward_cutover_cli as cli
 from umi import competition_reward_cutover_ownership as ownership
 from umi import competition_reward_cutover_runtime as runtime
@@ -73,6 +74,65 @@ def components(config):
     ):
         path.touch(mode=0o600, exist_ok=True)
     return root, reader, history, decisions, transactions
+
+
+@pytest.fixture
+def original_selection(config_case, monkeypatch, tmp_path):
+    config = config_case.config
+    # Capture configuration identity through the real provenance file reader.
+    # Substitute only root/kernel selection ports, never the digest convention.
+    monkeypatch.setattr(provenance, "_ROOT_UID", os.getuid())
+    monkeypatch.setattr(provenance, "_TRUST_ROOT", tmp_path)
+    raw, bound = provenance._read_root(config_case.path, 8 * 1024**2, modes={0o444})
+    assert raw == canonical_json_bytes(config)
+    assert bound["sha256"] != digest(config)
+    selection = {
+        "owner_uid": os.getuid(),
+        "paths": {"service_root": str(Path(config.state_directory) / digest(config.series))},
+        "series_sha256": digest(config.series),
+        "policy_sha256": digest(config.policy),
+        "chain_config_sha256": digest(config.chain),
+        "configuration": bound,
+    }
+    monkeypatch.setattr(ownership, "load_provenance", lambda _: selection)
+    monkeypatch.setattr(ownership, "validate_provenance", lambda *a, **k: None)
+    return selection
+
+
+def test_captured_config_file_hash_preserves_native_lease_identity(config_case, original_selection):
+    config = config_case.config
+    components(config)
+    for _ in range(2):
+        with ownership.hold_reward_cutover_owner(
+            config, original_owner_selection=Path("fixture")
+        ) as lease:
+            assert lease.config_sha256 == digest(config)
+            assert lease.config_sha256 != original_selection["configuration"]["sha256"]
+            lease.recheck(config)
+            changed = config.model_copy(
+                update={"maximum_header_bytes": config.maximum_header_bytes + 1}
+            )
+            with pytest.raises(ValueError, match="live coordinator"):
+                lease.recheck(changed)
+
+
+@pytest.mark.parametrize("change", ["domain_digest", "history_capacity", "other_field"])
+def test_changed_original_config_refused_before_state(
+    config_case, original_selection, monkeypatch, change
+):
+    config = config_case.config
+    if change == "domain_digest":
+        original_selection["configuration"]["sha256"] = digest(config)
+    elif change == "history_capacity":
+        config = config.model_copy(update={"maximum_history_bytes": 64 * 1024**3})
+    else:
+        config = config.model_copy(update={"maximum_header_bytes": config.maximum_header_bytes + 1})
+    monkeypatch.setattr(ownership, "_existing", lambda *a, **k: pytest.fail("state inspected"))
+    with (
+        pytest.raises(ValueError, match="selected original owner"),
+        ownership.hold_reward_cutover_owner(config, original_owner_selection=Path("fixture")),
+    ):
+        pytest.fail("changed original selected")
 
 
 @pytest.mark.parametrize("which", [0, 1, 2])
@@ -236,20 +296,12 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
     assert not (root / "transactions").joinpath("signed").exists()
 
 
-async def test_original_missing_migration_fails_before_provider(config_case, monkeypatch):
+async def test_original_missing_migration_fails_before_provider(
+    config_case, original_selection, monkeypatch
+):
     config = config_case.config
-    root, *_ = components(config)
-    selection = {
-        "owner_uid": os.getuid(),
-        "paths": {"service_root": str(root)},
-        "series_sha256": digest(config.series),
-        "policy_sha256": digest(config.policy),
-        "chain_config_sha256": digest(config.chain),
-        "configuration": {"sha256": digest(config)},
-    }
-    # Only the independent root/kernel provenance port is replaced.
-    monkeypatch.setattr(ownership, "load_provenance", lambda _: selection)
-    monkeypatch.setattr(ownership, "validate_provenance", lambda *a, **k: None)
+    components(config)
+    selection = original_selection
     monkeypatch.setattr(
         runtime,
         "HistoricalRewardControlProvider",
@@ -300,25 +352,15 @@ async def test_capacity_selection_refuses_changes_before_owner_or_provider(
 
 
 async def test_capacity_selection_keeps_original_provenance_and_requires_migration(
-    config_case, monkeypatch, tmp_path
+    config_case, original_selection, monkeypatch, tmp_path
 ):
     config = config_case.config
-    root, *_ = components(config)
+    components(config)
     selected = tmp_path / "capacity.json"
     config_case.save(
         selected,
         canonical_json_bytes(config.model_copy(update={"maximum_history_bytes": 64 * 1024**3})),
     )
-    selection = {
-        "owner_uid": os.getuid(),
-        "paths": {"service_root": str(root)},
-        "series_sha256": digest(config.series),
-        "policy_sha256": digest(config.policy),
-        "chain_config_sha256": digest(config.chain),
-        "configuration": {"sha256": digest(config)},
-    }
-    monkeypatch.setattr(ownership, "load_provenance", lambda _: selection)
-    monkeypatch.setattr(ownership, "validate_provenance", lambda *a, **k: None)
     monkeypatch.setattr(
         runtime, "HistoricalRewardControlProvider", lambda *a, **k: pytest.fail("provider opened")
     )

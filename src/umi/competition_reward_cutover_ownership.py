@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import stat
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 from .competition_reward_admission_provenance import load_provenance, validate_provenance
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .open_competition import digest
+from .protocol import canonical_json_bytes
 
 _ISSUER = object()
 
@@ -102,7 +104,10 @@ def hold_reward_cutover_owner(
             or provenance["series_sha256"] != digest(config.series)
             or provenance["policy_sha256"] != digest(config.policy)
             or provenance["chain_config_sha256"] != digest(config.chain)
-            or provenance["configuration"]["sha256"] != digest(config)
+            # Provenance captures the exact canonical file bytes. The live
+            # lease and protocol objects keep their separate domain digest.
+            or provenance["configuration"]["sha256"]
+            != hashlib.sha256(canonical_json_bytes(config)).hexdigest()
         ):
             raise HistoryCheckpointRepairRequired("cutover changes the selected original owner")
     identities = {}
