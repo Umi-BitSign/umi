@@ -164,7 +164,12 @@ def review_reward_decision(
         index = tuple(digest(c) for c in series.cohorts).index(activation.cohort_sha256)
         if decision.kind == "revise_activation":
             validate_revision_clearance(
-                revision_clearance, decision=decision, prefix=prefix, series=series, history=history
+                revision_clearance,
+                decision=decision,
+                prefix=prefix,
+                series=series,
+                history=history,
+                reward_adoptions=reader.reward_adoptions,
             )
         if decision.kind == "resume_activation":
             validate_live_lock(live_lock, decision=decision, series=series)

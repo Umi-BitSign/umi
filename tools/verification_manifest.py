@@ -41,6 +41,7 @@ seeds = [
     # Supported recovery and isolated selection entrypoints consume persisted
     # native results without necessarily being imported by the standing owner.
     "competition_reward_cutover_cli",
+    "competition_reward_timing_review",
     "competition_reward_history_preparation_cli",
     "competition_reward_history_preparation_capacity_cli",
     "competition_reward_writer_broker_cli",

@@ -34,6 +34,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader, validate_control_history
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_signing import RewardDecisionJournal
+from .competition_reward_timing_review import review_activation_age
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES
@@ -397,6 +398,17 @@ class NativeRewardCutoverReview:
                 raise ValueError("cutover local decisions changed during review")
             if await run_owned_thread(self.transactions.pending) != pending:
                 raise ValueError("cutover pending transaction changed during review")
+            plan = next(p for p in self.config.series.cohorts if digest(p) == cohort)
+            activation_age = None
+            if self.history.first_block <= plan.not_before_block <= history.tip.block_number:
+                activation_age = await review_activation_age(
+                    self.provider,
+                    series=self.config.series,
+                    plan=plan,
+                    observation=state.control,
+                    history=self.history,
+                    receipt_directory=self.lease.root / "activation-age-receipts",
+                )
             if time.monotonic_ns() > state.control.expires_monotonic_ns:
                 report("retrying", reason="fresh_control_expired_during_decision_review")
                 return {
@@ -436,8 +448,28 @@ class NativeRewardCutoverReview:
                 "history_through_block": history.tip.block_number,
                 "history_evidence_sha256": history.evidence_sha256,
                 "control_evidence_sha256": state.control.evidence_sha256,
+                "activation_age": None
+                if activation_age is None
+                else activation_age.model_dump(mode="json", by_alias=True),
                 "signed_delay_blocks": self.config.series.maximum_proof_lag_blocks
                 + self.config.series.maximum_transaction_lifetime_blocks,
+                "selected_activation_delay_blocks": (
+                    0
+                    if self.config.reward_adoptions is not None
+                    and self.config.reward_adoptions.latest(cohort) is not None
+                    and self.config.reward_adoptions.latest(cohort).adoption.activation_age
+                    is not None
+                    and self.config.reward_adoptions.latest(
+                        cohort
+                    ).adoption.activation_age.skips_activation_delay
+                    else self.config.series.maximum_proof_lag_blocks
+                    + self.config.series.maximum_transaction_lifetime_blocks
+                ),
+                "current_activation_delay_remaining_blocks": (
+                    None
+                    if selection is None or selection.selection.effective_at_block is None
+                    else max(0, selection.selection.effective_at_block - history.tip.block_number)
+                ),
                 "publication_authorized": False,
                 "writer_reconciliation_required": True,
                 "live_reward_row_checked": False,
