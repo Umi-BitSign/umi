@@ -303,14 +303,13 @@ def hold_history_preparation_lease(anchor, *, standing_boot: Path, approval_path
         yield lease
 
 
-@contextmanager
-def _hold_history_preparation_lease(anchor, *, standing_boot, approval_path, progress):
+def _authenticated_scope(anchor, *, standing_boot, approval_path):
+    """Authenticate immutable controls and directories without taking ownership."""
     if (os.getuid(), os.geteuid()) != (_root_owner_uid(), _root_owner_uid()):
         raise HistoryPreparationError("history preparation requires the root broker")
     if type(anchor) is not MaterializedSuccessorAnchor:
         raise HistoryPreparationError("preparation requires a genuine installed anchor")
     anchor.recheck_for_parent_repair()
-    progress.advance()
     approval_raw, approval_control = _control(approval_path, MAX_PREPARATION_CONTROL_BYTES)
     approval = StandingHistoryPreparationApproval.model_validate_json(approval_raw)
     boot_raw, boot_control = _control(standing_boot, MAX_BOOT_BYTES)
@@ -342,7 +341,6 @@ def _hold_history_preparation_lease(anchor, *, standing_boot, approval_path, pro
     history_stamp = _private_directory(history, anchor.service_uid, approval.service_gid)
     _disjoint_preparation(root, _protected_roots(anchor, config))
     logical = Path(anchor.config.state_root) / "standing-rewards" / digest(selected) / "history"
-    progress.advance()
     payload = canonical_json_bytes(
         {
             "approval": digest(approval),
@@ -352,6 +350,36 @@ def _hold_history_preparation_lease(anchor, *, standing_boot, approval_path, pro
             "logical_history": str(logical),
         }
     )
+    return (
+        approval,
+        config,
+        logical,
+        selected,
+        root,
+        history,
+        root_stamp,
+        history_stamp,
+        payload,
+        (approval_control, boot_control),
+    )
+
+
+@contextmanager
+def _hold_history_preparation_lease(anchor, *, standing_boot, approval_path, progress):
+    (
+        approval,
+        config,
+        logical,
+        selected,
+        root,
+        history,
+        root_stamp,
+        history_stamp,
+        payload,
+        controls,
+    ) = _authenticated_scope(anchor, standing_boot=standing_boot, approval_path=approval_path)
+    progress.advance()
+    progress.advance()
     descriptor = _lock_file(root / "preparation.lock", create=True)
     lease = None
     try:
@@ -382,7 +410,7 @@ def _hold_history_preparation_lease(anchor, *, standing_boot, approval_path, pro
             history,
             selected.recovery.authority.issued_at_block,
             anchor,
-            (approval_control, boot_control),
+            controls,
             (
                 (root, _root_owner_uid(), None, root_stamp),
                 (history, anchor.service_uid, approval.service_gid, history_stamp),

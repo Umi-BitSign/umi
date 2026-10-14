@@ -372,6 +372,41 @@ replay. The current owned operation and cleanup finish before process ownership
 is released; shutdown need not finish the remaining replay batch. This does not
 add a forced termination deadline or permit a replacement writer to overlap.
 
+For an existing isolated history preparation whose operational allowance is
+too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
+This supported transition is retained while deployed preparation directories
+carry the version-1 sealed scope. Stop and drain only that preparation service;
+the command checks its exact native launch and empty cgroup, then acquires the
+original preparation and native history mutexes. It does not stop the installed
+coordinator or writer, open the history database, or change signed clocks.
+
+Stage a canonical root-owned mode-0444 boot that changes only
+`maximum_history_bytes` to a larger value within the native 512 GiB bound. This
+is an allowance, not preallocated space; separately qualify filesystem and
+durable archive capacity. The final dropped writer account must be able to
+traverse the new boot's parents. Stage a corresponding preparation approval
+changing only `standing_boot_raw_sha256`, and both preparation and final writer
+launch controls changing only `preparation_approval_sha256`. Preserve the original
+boot, approvals, launches and held ordinary writer approval.
+
+Pass `--unit`, `--config`, `--preparation-unit`, `--old-boot`, `--new-boot`,
+`--old-approval`, `--new-approval`, `--old-preparation-launch`,
+`--new-preparation-launch`, `--old-writer-launch`, `--new-writer-launch`, and
+`--held-approval` when the ordinary writer approval is held. The command durably
+records the exact old/new selections and native inode/content metadata before
+rewriting the same preparation mutex inode. An interrupted call resumes with
+the same arguments, repairing only its retained deterministic writes. Missing
+intent, replaced locks, changed native data, or an existing history-selection
+journal requires explicit investigation; never delete state to bypass it.
+
+The four counted migration steps report elapsed time, a local-operation planning
+ETA, and repairing or blocked state. Their completion excludes native restore,
+certification and rewards. Select the new boot, approval and launch together on
+preparation resume and on final writer cutover. Any later signed reward-adoption
+staging must preserve that selected history allowance. The native reader restores
+the original completed verification results without replaying unchanged proof
+bodies. Verify that actual restore and resumed progress before declaring readiness.
+
 While first-activation replay is pending, predecessor reconciliation publishes
 the same `umi-successor-host-status/1` reports as the ordinary supervisor.
 Monitoring uses the current service invocation's native result: a held writer

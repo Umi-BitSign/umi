@@ -204,7 +204,13 @@ def _expected_cgroup(unit_name: str) -> str:
 
 def _require_empty_cgroup(unit_name: str, reported: str) -> None:
     # A stopped service may have lost its cgroup. Never treat / as its group.
-    expected = _expected_cgroup(unit_name)
+    _require_empty_cgroup_path(_expected_cgroup(unit_name), reported)
+
+
+def _require_empty_cgroup_path(expected: str, reported: str) -> None:
+    """Inspect an already selected absolute cgroup, independent of host views."""
+    if not expected.startswith("/") or expected == "/" or ".." in Path(expected).parts:
+        raise HostUpgradeError("expected cgroup must be an exact non-root path")
     if reported not in {"", expected}:
         raise HostUpgradeError("supervisor cgroup is outside its fixed system slice")
     root = Path("/sys/fs/cgroup") / expected.lstrip("/")

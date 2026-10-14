@@ -123,6 +123,33 @@ def prohibit_proof_replay(monkeypatch, reader):
     monkeypatch.setattr(module, "capture_control_writes", forbidden)
 
 
+async def test_larger_capacity_restart_preserves_native_results_without_proof_reads(
+    history_case, monkeypatch
+):
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    journal, owner = h.reader.journal, h.reader.checkpoints.owner
+    inode = journal.path.stat().st_ino
+    with journal.read_transaction() as db:
+        binding = db.execute("SELECT body FROM binding").fetchall()
+        records = db.execute("SELECT kind,id,body FROM records ORDER BY kind,id").fetchall()
+    h.offline_through = h.end
+    for _ in range(2):
+        h.reader = h.new_reader(maximum_bytes=64 * 1024**3)
+        prohibit_proof_replay(monkeypatch, h.reader)
+        assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+        assert h.reader.progress.native_completed == 0
+        assert h.reader.checkpoints.owner == owner
+        assert h.reader.journal.path.stat().st_ino == inode
+        assert h.reader.journal.maximum_bytes == 64 * 1024**3
+        with h.reader.journal.read_transaction() as db:
+            assert db.execute("SELECT body FROM binding").fetchall() == binding
+            assert (
+                db.execute("SELECT kind,id,body FROM records ORDER BY kind,id").fetchall()
+                == records
+            )
+
+
 async def test_completed_restart_uses_only_compact_results_and_current_finality(
     history_case, monkeypatch
 ):
