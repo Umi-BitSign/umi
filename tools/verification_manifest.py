@@ -42,6 +42,7 @@ seeds = [
     # native results without necessarily being imported by the standing owner.
     "competition_reward_cutover_cli",
     "competition_reward_history_preparation_cli",
+    "competition_reward_history_preparation_capacity_cli",
     "competition_reward_writer_broker_cli",
     "competition_reward_writer_broker_worker",
     "competition_reward_writer_review_cli",
