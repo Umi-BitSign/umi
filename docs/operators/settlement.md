@@ -230,8 +230,17 @@ start the coverage/history owner at launch, retain the complete finalized interv
 from its original authority block, and monitor catch-up during intake, paid work
 and certification. Selecting workers alone does not start a missing capture owner.
 
-The parent authenticates each child header against its owned finalized chain;
-spawned workers receive only immutable evidence and the selected native verifier
+The parent authenticates each child header against its owned finalized chain.
+Each bounded retained-proof window obtains one verified finalized head and reuses
+it only for the historical headers in that window. Every header still requires
+its own exact owned block or authenticated ancestry check. The resolver is local
+to the locked owner task and expires when the window exits, including failure
+and cancellation. Later windows, checkpoint restoration, current control reads
+and transaction preflight obtain fresh state. This scheduling change preserves
+the proof predicates, signed bytes and successful checkpoint ABI; no receipt
+migration or native re-verification is needed for unchanged completed blocks.
+
+Spawned workers receive only immutable evidence and the selected native verifier
 context. They share the serial archive parser, runtime/slot proof checks and
 complete body/event scanner, including parent-runtime changes. Each successful
 result is committed independently, even when an earlier block fails. Only one

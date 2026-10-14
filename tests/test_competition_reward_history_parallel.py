@@ -4,6 +4,7 @@ import asyncio
 import json
 import multiprocessing
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -376,3 +377,61 @@ async def test_one_worker_byte_window_keeps_supported_inputs_and_bounds_dispatch
     assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
     assert all(count == 1 and size <= workers.MAX_FRAME_BYTES for count, size in pending)
     assert len(h.pools) == 1
+
+
+async def test_parallel_windows_refresh_once_each_and_restart_checks_fresh_tip(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    provider = h.item.provider
+    acquire = provider._proofs.finalized_snapshot
+    heads = []
+
+    async def counted():
+        head = await acquire()
+        heads.append(head)
+        return head
+
+    monkeypatch.setattr(provider._proofs, "finalized_snapshot", counted)
+    assert await h.reader.advance(provider, through_block=h.end) == h.expected
+    window_size = min(
+        h.reader.verification_profile.maximum_in_flight,
+        h.reader.verification_profile.maximum_in_flight_bytes // workers.MAX_FRAME_BYTES,
+    )
+    assert len(heads) == (len(h.frames) + window_size - 1) // window_size
+    before = len(heads)
+    h.reader = h.open_parallel()
+    assert await h.reader.advance(provider, through_block=h.end) == h.expected
+    assert len(heads) == before + 1
+    assert h.reader.progress.native_completed == 0
+
+
+async def test_failed_later_header_drains_and_retains_started_worker(parallel_case, monkeypatch):
+    h = parallel_case
+    provider = h.item.provider
+    window = provider._control_header_window
+    first = h.reader.first_block
+    h.fixture["delay"] = {first: 0.2}
+
+    @asynccontextmanager
+    async def fail_second():
+        async with window() as resolve:
+
+            async def checked(ref, header):
+                if ref.block_number == first + 1:
+                    raise ValueError("injected second historical header failure")
+                return await resolve(ref, header)
+
+            yield checked
+
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_control_header_window", fail_second)
+        with pytest.raises(ValueError, match="second historical header failure"):
+            await h.reader.advance(provider, through_block=h.end)
+    assert h.reader.checkpoints.load(first) is not None
+    assert h.reader.checkpoints.load(first + 1) is None
+    assert not provider._lock.locked()
+    assert all(not child.is_alive() for child in multiprocessing.active_children())
+    h.reader = h.open_parallel()
+    assert await h.reader.advance(provider, through_block=h.end) == h.expected
+    assert h.reader.progress.native_completed == len(h.frames) - 1

@@ -119,39 +119,54 @@ async def _window(reader, provider, pool, entries, stop):
             raise ValueError("parallel history requires a running owned provider")
         _cache_usage(provider._cache_root, provider.config.maximum_cache_bytes)
         try:
-            for height, fields, retained in entries:
-                if stop.is_set():
-                    break
-                reader.progress.preparation_start(
-                    "retained_history_header", height, "decode_retained_header_hint"
-                )
-                reader.progress.report(reader, "running")
-                snapshot, header = await run_owned_thread(
-                    archive_header_hint, fields["slot_evidence"]
-                )
-                if snapshot.block_number != height:
-                    raise ValueError("history frame differs from selected owner context")
+            if entries and not stop.is_set():
                 reader.progress.preparation_start(
                     "owned_history_header_resolution",
-                    height,
-                    "resolve_header_and_finalized_ancestry_before_native_submission",
+                    entries[0][0],
+                    "resolve_finalized_head_for_bounded_native_batch",
                 )
                 reader.progress.report(reader, "running")
-                timestamp, ceiling = await provider._resolve_control_header(snapshot, header)
-                if stop.is_set():
-                    break
-                reader.progress.native_start(retained=retained, repair=bool(reader._repair_reason))
-                reader.progress.report(reader, "running")
-                future = pool.submit(
-                    snapshot=snapshot,
-                    header=header,
-                    timestamp=timestamp,
-                    ceiling=ceiling,
-                    fields=fields,
-                )
-                tasks.append(
-                    (future, asyncio.create_task(_persist(reader, pool, future, fields, retained)))
-                )
+                async with provider._control_header_window() as resolve:
+                    for height, fields, retained in entries:
+                        if stop.is_set():
+                            break
+                        reader.progress.preparation_start(
+                            "retained_history_header", height, "decode_retained_header_hint"
+                        )
+                        reader.progress.report(reader, "running")
+                        snapshot, header = await run_owned_thread(
+                            archive_header_hint, fields["slot_evidence"]
+                        )
+                        if snapshot.block_number != height:
+                            raise ValueError("history frame differs from selected owner context")
+                        reader.progress.preparation_start(
+                            "owned_history_header_resolution",
+                            height,
+                            "resolve_header_and_finalized_ancestry_before_native_submission",
+                        )
+                        reader.progress.report(reader, "running")
+                        timestamp, ceiling = await resolve(snapshot, header)
+                        if stop.is_set():
+                            break
+                        reader.progress.native_start(
+                            retained=retained, repair=bool(reader._repair_reason)
+                        )
+                        reader.progress.report(reader, "running")
+                        future = pool.submit(
+                            snapshot=snapshot,
+                            header=header,
+                            timestamp=timestamp,
+                            ceiling=ceiling,
+                            fields=fields,
+                        )
+                        tasks.append(
+                            (
+                                future,
+                                asyncio.create_task(
+                                    _persist(reader, pool, future, fields, retained)
+                                ),
+                            )
+                        )
             # Checkpoint coroutines run as each worker finishes; gathering here
             # never imposes block order on durable completion.
             results = await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
