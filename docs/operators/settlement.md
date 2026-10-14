@@ -701,6 +701,11 @@ signature. A certificate, exported proof archive, progress log or raw block
 range cannot substitute for this local result; the signature alone does not
 authenticate the history digest.
 
+The selection's configuration hash is SHA-256 of the exact canonical file bytes.
+Reconciliation compares that file identity without replacing it with the native
+domain-separated digest used by live leases and protocol objects. Keep the
+original sealed configuration unchanged; no resealing or journal reset is needed.
+
 Capture and retain the prospective selection while the original invocation is
 still running. At migration, stop that owner through its supported service
 lifecycle and prevent competing restart. Keep the original configuration and
