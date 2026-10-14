@@ -11,6 +11,8 @@
 - [Reward-history checkpoints and repair](#reward-history-checkpoints-and-repair)
 - [Existing-owner repair and independent preparation](#existing-owner-repair-and-independent-preparation)
 
+Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
+
 ## Work progress and ETA logs
 
 The intake owner, phase reviewer, settlement service and reward runtime emit

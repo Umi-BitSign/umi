@@ -161,7 +161,11 @@ class CohortIntake:
         eligible_tracks: tuple[Literal["endpoint", "model"], ...] = ("endpoint",),
         capacity: AdmissionCapacity | None = None,
         initialize: bool = False,
+        read_only: bool = False,
     ):
+        if initialize and read_only:
+            raise ValueError("read-only cohort intake cannot initialize or migrate state")
+        self._read_only = read_only
         self.config = CohortIntakeConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if not eligible_tracks or not set(eligible_tracks) <= {"endpoint", "model"}:
@@ -180,7 +184,7 @@ class CohortIntake:
             raise ValueError("cohort intake state must not traverse symlinks")
         if initialize:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self._connection():
+        with self._connection(prefer_history=read_only):
             pass
         self._initialize = False
 
@@ -195,6 +199,8 @@ class CohortIntake:
             raise ValueError("cohort intake directory must be private and operator-owned")
 
     def _file(self, name, *, read_only=False):
+        if self._read_only and not read_only:
+            raise ValueError("read-only cohort intake cannot open writable state")
         fd = os.open(
             self.directory / name,
             (os.O_RDONLY if read_only else os.O_RDWR)

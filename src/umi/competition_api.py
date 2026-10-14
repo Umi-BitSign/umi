@@ -20,6 +20,7 @@ from starlette.types import Lifespan
 from .competition_chain import RegistrationCapture
 from .competition_cohort_api import CohortModelPayloads, cohort_routes
 from .competition_cohort_intake import CohortIntake
+from .competition_cohort_public_api import CohortPublicApiConfig, cohort_public_routes
 from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import IntakeRuntimeSource, PublicIntakeDeployment, PublicRoundSchedule
@@ -69,6 +70,7 @@ def create_app(
     historical_archives: tuple[LoadedIntakeArchive, ...] = (),
     public_results_sources: tuple[PublicResultsSource, ...] = (),
     public_results_directory: PublicResultsDirectory | None = None,
+    cohort_public_results: CohortPublicApiConfig | None = None,
     cohort_intake: CohortIntake | None = None,
     cohort_capture_provider: Callable[[], Awaitable[RegistrationCapture]] | None = None,
     cohort_archive_provider: Callable[[ExecutionBoundary], Awaitable[tuple[bytes, bytes]]]
@@ -125,6 +127,8 @@ def create_app(
     )
     app = FastAPI(title=title, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.competition_store = store
+    if cohort_public_results is not None:
+        app.include_router(cohort_public_routes(cohort_public_results))
     durable_read: asyncio.Task | None = None
 
     async def durable_admission_status():
