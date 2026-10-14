@@ -149,7 +149,7 @@ async def reconcile_reward_cutover(
     history_capacity_config: Path | None = None,
     bootstrap_manifest: Path | None = None,
 ) -> dict:
-    """One resumable bounded step; the original stopped owner stays stopped.
+    """Resume bounded batches in one owner; the original service stays stopped.
 
     An original installed owner requires completed-admission migration or an
     explicitly selected complete original-export migration before any provider
@@ -182,7 +182,7 @@ async def reconcile_reward_cutover(
                     else "complete"
                     if state == "completed"
                     else "withdrawn",
-                    "eta_scope": "one_reconciliation_step_excludes_reward_activation",
+                    "eta_scope": "reconciliation_runtime_phases_exclude_reward_activation",
                     "retrying": state == "retrying",
                     "stalled": state == "stalled",
                 },
@@ -375,12 +375,28 @@ async def reconcile_reward_cutover(
                 )
                 while True:
                     result = await review.step(cohort)
-                    if result["status"] != "historical_recovery_progress":
+                    if result["status"] not in {
+                        "historical_recovery_progress",
+                        "history_pending",
+                        "refresh_required",
+                    }:
                         break
-                    # Preserve this genuine provider's bounded in-memory
-                    # ancestry cursor; restarting each pass would rewalk its
-                    # first retained hints indefinitely. Cancellation still
-                    # drains native work and releases the original owner.
+                    # Preserve both authenticated ancestry and ordered applied
+                    # history across bounded batches. Exiting here would make
+                    # every tail batch restore the whole retained prefix again.
+                    # step() still collects fresh signing state and validates
+                    # every native boundary; cancellation drains before release.
+                    logger.info(
+                        "stopped_reward_cutover_continuation %s",
+                        {
+                            "state": "continuing",
+                            "native_status": result["status"],
+                            "elapsed_seconds": time.monotonic() - started,
+                            "eta_seconds": None,
+                            "eta_basis": "native_history_progress_owns_remaining_estimate",
+                            "publication_authorized": False,
+                        },
+                    )
                     await asyncio.sleep(0)
             phase = 3
             progress()

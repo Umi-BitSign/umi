@@ -181,9 +181,10 @@ async def cutover_case(historical, config_case, monkeypatch, tmp_path, request):
 
     async def state(height):
         old = await h.item.provider.capture_control_at(h.item.hotkey, height)
-        _, runtime = await h.item.provider._review_control_runtime_locked(
-            old.evidence, old.metadata
-        )
+        async with h.item.provider._lock:
+            _, runtime = await h.item.provider._review_control_runtime_locked(
+                old.evidence, old.metadata
+            )
         now = time.monotonic_ns()
         observation = current_module.OwnedRewardControlObservation(
             old.snapshot,
