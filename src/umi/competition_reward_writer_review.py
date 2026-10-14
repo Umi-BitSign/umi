@@ -31,6 +31,7 @@ from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_service import _close_provider
 from .competition_reward_transactions import StandingWeightJournal
+from .competition_reward_writer_adoption import select_writer_adoptions
 from .competition_reward_writer_journals import hold_stopped_writer_journals
 from .competition_reward_writer_reconciliation import (
     StoppedStandingWriter,
@@ -205,6 +206,7 @@ async def review_installed_standing_writer(
     through_block: int,
     held_approval: Path | None = None,
     history: str = "current",
+    reward_adoptions: Path | None = None,
 ):
     """Review original history and exact standing attempt without authorizing a switch."""
     started, phase, native_history = time.monotonic(), 0, None
@@ -247,6 +249,7 @@ async def review_installed_standing_writer(
         series = config.series if history == "current" else config.predecessor_series
         if history not in {"current", "predecessor"} or series is None:
             raise ValueError("writer review history is not configured")
+        adoptions = select_writer_adoptions(config, history, reward_adoptions)
         if type(through_block) is not int or not (
             series.recovery.authority.issued_at_block <= through_block < 2**53
         ):
@@ -298,9 +301,7 @@ async def review_installed_standing_writer(
                             expected_series_sha256=digest(series),
                             expected_chain_config_sha256=digest(config.chain),
                             maximum_bytes=config.maximum_reader_bytes,
-                            reward_adoptions=config.reward_adoptions
-                            if history == "current"
-                            else config.predecessor_reward_adoptions,
+                            reward_adoptions=adoptions.selection,
                         )
 
                     control = await run_owned_thread(construct)
@@ -390,6 +391,7 @@ async def review_installed_standing_writer(
                         )
                     await owner.recheck()
                     selected.recheck()
+                    adoptions.recheck()
                     phase = 5
                     report("completed")
                     return {

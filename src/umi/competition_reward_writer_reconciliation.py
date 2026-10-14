@@ -255,7 +255,16 @@ async def reconcile_stopped_control_history(
         ):
             raise ValueError("candidate history differs from the original native prefix")
         progress.advance()
+        from .competition_reward_adoption import bootstrap_admission
+
+        bootstrap = bootstrap_admission(reader.reward_adoptions)
         empty = not candidate.writes and observation.control_sha256 is None
+        if not candidate.writes and not decisions and bootstrap is not None:
+            # Only the authenticated historical slot is pre-admission. Native
+            # unresolved effects were rejected above; retained signed decisions
+            # still have to agree below. No admission result is manufactured.
+            bootstrap[1].check_control(observation)
+            empty = True
         checked = (
             ()
             if empty and not decisions

@@ -27,8 +27,13 @@ def arguments(argv=None):
     parser.add_argument("--through-block", type=int, required=True)
     parser.add_argument("--socket-fd", type=int, required=True)
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--reward-adoptions", type=Path)
+    parser.add_argument("--reward-adoptions-sha256")
     parser.add_argument("--readiness-only", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if (args.reward_adoptions is None) != (args.reward_adoptions_sha256 is None):
+        parser.error("supplemental adoption requires both root-selected path and digest")
+    return args
 
 
 async def _run(args, anchor, channel):
