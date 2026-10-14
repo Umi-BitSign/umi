@@ -22,6 +22,7 @@ from .competition_chain import CompetitionChainConfig, FinalizedRegistrationProv
 from .competition_cohort_direct_model_upload_http import direct_model_upload_routes
 from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_cohort_model_upload_http import model_upload_routes
+from .competition_cohort_public_api import CohortPublicApiConfig
 from .competition_cohort_request_readiness_host import request_readiness_routes
 from .competition_cohort_service_api import service_admission_routes
 from .competition_cohort_service_host import ServiceAdmissionHost, ServiceAdmissionHostConfig
@@ -82,6 +83,7 @@ class CompetitionServiceConfig(StrictProtocolModel):
     historical_archives: Annotated[tuple[IntakeArchiveConfig, ...], Field(max_length=8)] = ()
     public_results_sources: Annotated[tuple[PublicResultsSource, ...], Field(max_length=1024)] = ()
     public_results_directory: PublicResultsDirectory | None = None
+    cohort_public_results: CohortPublicApiConfig | None = None
     recoverable_intake: CohortIntakeConfig | None = None
     recoverable_service: ServiceAdmissionHostConfig | None = None
     # Deal-preserving predecessor policy files, newest first. Their signed submissions
@@ -98,6 +100,8 @@ class CompetitionServiceConfig(StrictProtocolModel):
             value.pop("runtime_source", None)
         if self.public_results_directory is None:
             value.pop("public_results_directory", None)
+        if self.cohort_public_results is None:
+            value.pop("cohort_public_results", None)
         if self.recoverable_intake is None:
             value.pop("recoverable_intake", None)
         if self.recoverable_service is None:
@@ -411,6 +415,7 @@ def _create_intake_app(
         historical_archives=historical_archives,
         public_results_sources=config.public_results_sources,
         public_results_directory=config.public_results_directory,
+        cohort_public_results=config.cohort_public_results,
         cohort_intake=cohort_intake,
         cohort_model_uploads=None if service_host is None else service_host.payloads,
         registration_timeout_seconds=registration_wait_seconds,

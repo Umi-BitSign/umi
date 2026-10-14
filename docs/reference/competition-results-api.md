@@ -1,6 +1,168 @@
 [Documentation](../README.md) / Competition results API
 
-# Competition results API
+# Public cohort results and model downloads
+
+The cohort API exposes retained certified paid-work counts and exact credits,
+and downloads for admitted public-model submissions. It includes public model
+revisions and zero-reward entries. A model's reward rank does not control its
+publication. Endpoint models and private evidence are not download sources.
+
+These results do not establish that rewards are live on chain. Service output
+uses `certification: quorum_certified_service_results` and
+`reward_activation: not_verified_live`; raw service weights are allocation
+integers, not alpha payments. The API never grants chain-submission authority.
+
+## Read results
+
+All paths use the full cohort digest. Lists accept `offset` and `limit` (1–100),
+and return `total`, `next_offset` and `items`.
+
+| GET path | Meaning |
+| --- | --- |
+| `/v1/competition/cohorts/{cohort}/service-results` | All sealed roster hotkeys, including zero-work rows, retained UIDs, successful/failed paid terminals, exact quality credit and certified service weight |
+| `/v1/competition/cohorts/{cohort}/models` | Every exported admitted public submission, original terms and license, revision identity, artifact-release state and download availability |
+| `/v1/competition/cohorts/{cohort}/models/{model}/download` | Native bundle manifest, renewable GET capabilities, optional complete tar archive, and the file-download endpoint |
+| `/v1/competition/cohorts/{cohort}/models/{model}/download-files` | One manifest file's bounded pieces or preserved-payload byte range |
+
+File pages accept `file_index`, `offset` and `limit` (1–128 pieces). A preserved
+chunk page has SHA-256 and byte size per piece. A concatenated R2 payload page
+has `range_start`, byte size and the complete file hash. Files occur in original
+signed manifest order. Zero-byte files have no pieces. A chunk package is not
+a tar archive; `archive` is present only when a complete archive has been
+separately prepared and bound to that package.
+
+Capabilities authorize GET only and expire at `url_expires_at_utc`. Request the
+metadata endpoint again to renew them. The API accepts model identities already
+authorized by the private publication catalog; it has no arbitrary object-key
+signing endpoint. Do not save capability URLs as durable model identities.
+
+An unknown cohort or unpublished result returns 404. A missing, damaged or
+unavailable published metadata record returns 503 and requires repair. It is
+not silently reported as an empty result. Admission, artifact acceptance,
+download availability, benchmark eligibility and reward activation remain
+separate statuses.
+
+## Download with restart support
+
+Run `python -m umi.competition_cohort_public_download_cli --help` for the installed
+client's arguments. Select the configured public API origin and identities from
+the model catalog:
+
+`python -m umi.competition_cohort_public_download_cli --api https://api.example.org --cohort COHORT_SHA256 --model MODEL_SHA256 --output /absolute/model-download`
+
+The client writes `manifest.json` plus `model/` in a new, private output directory.
+It supports original 8 MiB preserved chunks and C6+ concatenated payload ranges,
+streams payloads through 128 KiB buffers, and retains at most one 128-entry URL
+page. It verifies each native file at its final path before recording completion.
+Wait for command success before consuming the output; interrupted output can
+include a file awaiting its final check. It never executes submitted model code
+or extracts an archive. Reserve local space for the complete model; the download
+does not create a second full model copy.
+
+Repeat the same command after an interruption. Keep `.umi-download/` with the
+output: this private journal binds the API origin, cohort, model, transport and
+verifier semantics. Completed pieces survive restart; only an interrupted piece
+is retried. On a qualified Linux timestamp clock, unchanged completed files reuse
+their native verification verdict without reading their payloads again. An
+interrupted publication checks only its uncommitted file again, with repair
+progress and an ETA. Platforms without a qualified clock visibly retain native
+file verification on restart while reusing downloaded bytes. Expired URLs are
+renewed from the same API; capabilities are never persisted in the journal or
+printed in progress output.
+
+A changed local file or missing verdict is reported as a repair. Add
+`--repair-file relative/path/from/manifest` to redownload only that affected file;
+other completed files remain reusable. Preserve a damaged journal for diagnosis;
+do not delete it to force a reset. An unrelated, nonempty output directory is
+refused, and symlinks, hard links and paths outside the manifest are not followed.
+
+Progress includes completed bytes, elapsed time, ETA basis, retry/repair status
+and available local space. `--timeout` controls the per-request idle timeout
+(default 60 seconds), and `--refresh-attempts` controls capability renewal attempts
+(default 3). Neither sets an overall download deadline. Exhausted retries leave
+the journal available for the same command to resume.
+
+## Publish from retained native results
+
+The publisher consumes small native metadata. It does not open original reward
+packages, rehash model payloads, replay evidence or contact chain RPC. Run it as
+the owner of the selected private sources and publication directory:
+
+`python -m umi.competition_cohort_public_cli publish --config /absolute/publisher.json`
+
+`CohortPublicPublisherConfig` contains:
+
+- `api`: the `CohortPublicApiConfig` used by the serving process.
+- `policy`: an immutable metadata pin with `path`, `sha256`, `owner_uid` and exact
+  `size_bytes`, selecting the original native policy JSON.
+- Either `inventory`, another pin selecting `PublicModelInventory`, or
+  `native_intake`, with the original `CohortIntakeConfig`, `cohort_sha256` and
+  original `eligible_tracks`. The native source opens an owned SQLite read
+  snapshot with `mode=ro` and `query_only`; it neither migrates the database nor
+  acquires the native writer lock. It includes admitted superseded submissions.
+- For certified service results, both `snapshot` and `service_quality_receipt`
+  pins. Snapshot preparation and completed snapshot schemas are supported. The
+  native receipt checksum, signed quality digest, evaluator quorum, retained UID
+  bindings and cheap exact allocation arithmetic are checked.
+- For legacy preserved models, `legacy_models`: one entry per model with
+  `model_sha256`, pinned `association` and `package` metadata, plus optional
+  `archive` hash, size and source-package digest. The compatibility reader
+  supports `umi-cohort-model-preserved-package/1` and original 8 MiB chunks.
+- For direct R2 models, `direct_promotion_journal`: its absolute SQLite `path`,
+  `owner_uid` and exact `binding_sha256`. The reader selects only completed
+  `direct-promotion` receipts for the original artifact acceptances, with no
+  journal constructor or write transaction. It binds model, payload, source,
+  preserved key and byte count. Acceptance without durable promotion remains
+  listed while its download remains unavailable.
+
+`inventory.scope` is `all_admitted_model_submissions` for native intake exports.
+A retained settlement roster can instead be labeled `sealed_roster`; that
+scope must not be represented as all admitted revisions. Public release
+requires a signed model submission under supported original terms and quorum
+artifact acceptance. Original contribution-terms versions 3 and 4 are supported;
+an unknown terms digest is listed as `terms_review_required` with no download.
+
+Publication installs content-addressed artifacts and a retained descriptor,
+then atomically advances its checkpoint and serving descriptor under one
+exporter lease. Repeating publication after an interruption restores a missing
+serving descriptor while preserving admitted history and certified results. A
+stale or incomplete inventory cannot remove previously published entries. A
+missing checkpoint artifact or conflicting immutable artifact is an explicit
+repair hold: restore the exact content-addressed metadata from the publication
+backup before retrying. Never delete a checkpoint to force a fresh publication,
+or replace signed inputs or native receipts to resolve a publication problem.
+Retain the small publication metadata and checkpoints durably in R2. Configure a timer
+to rerun publication as C6 and later intake, artifact acceptance and R2 promotion
+advance. Refresh explicit pins only to newly authenticated native exports.
+
+## Serve separately or through intake
+
+A dedicated read-only sidecar avoids restarting native owners:
+
+`python -m umi.competition_cohort_public_cli serve --config /absolute/api.json --port 8108`
+
+The sidecar listens on loopback. Route only the public GET paths through the
+existing public gateway. Its private API configuration has `results.directory`,
+optional `r2_credential_path`, `r2_bucket`, `url_expiry_seconds`,
+`maximum_concurrent_reads` and `maximum_artifact_bytes`. The default metadata
+artifact bound is 64 MiB and can be raised explicitly; it is not a model-size
+or evidence limit. Credentials use the private credential-export format read
+by `umi.r2_sigv4.load_r2_credentials`. Use a bucket-scoped read-only R2 key.
+The API process needs only the published projections and signing credential;
+it does not need native databases, wallets or private evidence.
+
+The same router is available through optional
+`CompetitionServiceConfig.cohort_public_results`. Existing configuration bytes
+are preserved when it is absent. Adding this option changes the runtime
+configuration, so qualify the normal supported intake upgrade before enabling
+it; a sidecar does not require that owner cutover.
+
+Qualify publication, missing/corrupt metadata, repeat execution, client
+interruption, expired capabilities and both retained chunk and direct payload
+formats before a new cohort deployment. Source tests alone do not establish
+that the selected C6 production paths have been deployed.
+
+## Existing round APIs
 
 The public intake origin is `https://api.umi.vision`. Use the round index below
 to discover retained rounds, then follow each item's detail and results URLs.
@@ -8,7 +170,7 @@ The index and C3 provisional score pages are deployed. A missing results URL
 means no score artifact has been published for that round. Scores alone do not
 confirm certification or on-chain rewards.
 
-## Existing reads
+### Existing reads
 
 | Method and path | Meaning |
 | --- | --- |
@@ -26,14 +188,15 @@ Its `projection.allocations` contains UID/hotkey allocations, exact
 `numerator`/`denominator` shares, and `raw_weight`; `projection.uids` and
 `projection.weights` contain the computed row. These are proposed allocations,
 not token payouts, finalized rewards, or a score ranking. Void outcomes are
-not zero scores. There is no separate public rankings or paid-rewards route in
-this intake API. Do not manufacture quality rankings from projected weights.
+not zero scores. These round routes do not provide paid-work results. Use the cohort routes
+above for retained service credits. Do not manufacture quality rankings from
+projected weights.
 
 The settlement response contains replay material as well as the projection.
 The index below returns only an explicit metadata allowlist. Website consumers
 should select the fields they display rather than republishing entire responses.
 
-## Round index
+### Round index
 
 `GET /v1/competition/rounds/index?limit=20`
 
@@ -93,7 +256,7 @@ The new response excludes rosters, private case references, video URLs, model
 outputs, evaluator evidence and packages. Round metadata is bounded to 64 KiB
 per item before parsing and its digest/sequence are checked.
 
-## Progress and certification
+### Progress and certification
 
 | `state` | Evidence in this source |
 | --- | --- |
@@ -119,7 +282,7 @@ The newest retained round is not necessarily the current intake round. Read
 have a frozen round or round SHA. This index does not synthesize one. It makes no
 claim about finality, signing-window validity, active weights or payment.
 
-## Public score pages
+### Public score pages
 
 `GET /v1/competition/rounds/{round_sha256}/results?offset=0&limit=20`
 
@@ -207,7 +370,7 @@ cannot be supplied by a public request. A release-asset copy can serve as the
 immediate static publication; enabling its dynamic API source is a separate
 deployment action.
 
-## Recurring score export and discovery
+### Recurring score export and discovery
 
 The native publisher can export each newly retained settlement without changing
 intake configuration for every round. Add one operator-owned directory to intake:
