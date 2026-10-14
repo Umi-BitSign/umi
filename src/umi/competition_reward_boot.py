@@ -27,6 +27,7 @@ from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
+from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import StandingRewardCoverageService
@@ -116,6 +117,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
+    reward_adoptions: RewardAdoptionSelection | None = None
+    predecessor_reward_adoptions: RewardAdoptionSelection | None = None
     predecessor_approval_sha256: Hex32 | None = None
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
@@ -132,6 +135,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
             "predecessor_series",
             "predecessor_manifest",
             "predecessor_eligibility",
+            "reward_adoptions",
+            "predecessor_reward_adoptions",
             "predecessor_approval_sha256",
         ):
             if getattr(self, name) is None:
@@ -173,6 +178,13 @@ class StandingRewardBootConfig(StrictProtocolModel):
         ):
             raise ValueError("standing boot inputs disagree with selected authority")
         verify_handoff_plan(self.handoff, self.series)
+        verify_adoption_selection(self.reward_adoptions, self.series, self.policy)
+        if self.predecessor_reward_adoptions is not None:
+            if self.predecessor_series is None:
+                raise ValueError("predecessor reward adoption requires its original series")
+            verify_adoption_selection(
+                self.predecessor_reward_adoptions, self.predecessor_series, self.policy
+            )
         if not successor and (
             type(self.handoff) is not LegacyRewardHandoffPlan
             or self.handoff.legacy_policy_sha256 != digest(self.legacy_policy)
@@ -311,6 +323,7 @@ async def run_installed_standing_rewards(
         expected_series_sha256=digest(config.series),
         expected_chain_config_sha256=digest(config.chain),
         maximum_bytes=config.maximum_reader_bytes,
+        reward_adoptions=config.reward_adoptions,
     )
     store = CompetitionStore(Path(config.promotion_directory), config.policy)
     model_artifacts = (
@@ -413,6 +426,7 @@ async def run_installed_standing_rewards(
                 expected_series_sha256=digest(old),
                 expected_chain_config_sha256=digest(config.chain),
                 maximum_bytes=config.maximum_reader_bytes,
+                reward_adoptions=config.predecessor_reward_adoptions,
             )
             old_history = RewardControlHistoryReader(
                 old_root / "history",

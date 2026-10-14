@@ -346,6 +346,9 @@ prefix. Keep it running through its current handoff when preserving that work
 requires avoiding replay; replacing it needs a disclosed first native checkpoint
 pass over its retained legacy records. Source deployment alone cannot recover
 volatile verification facts.
+The completed original C5 admission route below is a narrow exception based on
+an actual durable native decision result; it cannot preserve an incomplete
+process-local prefix.
 
 Migration and history review emit `reward_history_progress` with counts, elapsed
 time, an ETA and its basis, and retrying or stalled states. Restored blocks count
@@ -411,6 +414,91 @@ proofs as completed checks. This command cannot recover an older running reader'
 volatile verified prefix. Keep that owner running through its handoff when
 preserving those completed checks requires it.
 
+### Completed original C5 admission migration
+
+`migrate_completed_admission` in
+`umi.competition_reward_admission_migration` supports the selected original
+installed342 C5 owner after its native sequence-zero admission review completes.
+Its prospective root-sealed selection identifies the existing installation,
+service invocation, service account, configuration and state-file identities.
+The selection asserts no completed verification. Completion requires the
+original immutable native admission intent and that owner's matching retained
+signature. A certificate, exported proof archive, progress log or raw block
+range cannot substitute for this local result; the signature alone does not
+authenticate the history digest.
+
+Capture and retain the prospective selection while the original invocation is
+still running. At migration, stop that owner through its supported service
+lifecycle and prevent competing restart. Keep the original configuration and
+installation in place until migration succeeds. The migrator requires the
+original account and existing service, control-writer, history-journal and
+decision-journal lock files. It refuses a running original invocation, changed
+source/configuration or replaced paths; it opens no replacement empty journal.
+Never infer exclusivity from a watcher seeing completion. Reconcile the actual
+stopped journals while holding all original locks.
+
+The importer validates the exact original series, policy, chain configuration,
+manifest and initial decision, then independently verifies the finalized
+boundary B. It preserves the original first block A and native rolling history
+digest in one atomic completed interval A..B. Repeat execution reuses that
+interval. It creates no per-block receipts for A..B and cannot serve a prefix
+ending before B. Such a prefix requires separately scoped native recovery;
+ordinary restart does not silently replay the whole interval.
+
+An already reserved or certified sequence-one or later decision does not discard
+the valid completed admission interval. The result separately reports its
+later-record inventory and always requires stopped-owner economics reconciliation;
+it never authorizes starting publication. Reconcile the immutable pending intent,
+certified prefix and finalized control before allowing any publishing service to
+restart. The coordinator resumes retained pending decisions before selecting new
+ones; an effective old activation needs the supported suspend, drain and revision
+path, subject to retained live-reward evidence. Do not delete an intent, reset a
+journal or assume a short completion-to-stop interval removes this race. The
+inventory itself does not verify or authorize later economic decisions.
+
+The new reader rechecks the small original native records and current finalized
+ancestry of B, then verifies and checkpoints every B+1 onward block normally.
+Only A..B is preserved by this migration. Any later process-local tail may need
+replay. Report its fixed target H separately: preserved blocks are B-A+1 and
+the initial remaining tail is max(0,H-B); a moving finalized target adds work.
+Use measured target-runtime throughput once available, or an explicitly labeled
+planning range. Never count restored admission blocks as new native throughput
+or replicated R2 proofs.
+
+Retain the root seal, original installation provenance, original history and
+decision database identities, original signed intent/vote and original raw
+history sources. The migration deliberately disables source externalization for
+this owner. Missing or damaged completion metadata, provenance, source records
+or source fences requires explicit restoration in place; it is not a cache miss.
+The four migration milestones report progress, elapsed time, planning ETA and
+stalled/interrupted/repair states; this ETA covers the local result import and
+one boundary check only, excluding later history replay or reward activation.
+
+The no-launch runner requires the original service UID and loads the exact
+configuration selected by the root seal. It inherits the original history,
+header-cache, header-database and memory limits. It constructs and starts the
+historical proof provider only after acquiring all original owner locks; provider
+cleanup finishes before releasing them, including during interruption. It never
+loads a signing key or constructs a publishing role. After the original owner
+has completed admission and has been stopped and fenced against restart, run:
+
+```sh
+"$QUALIFIED_PYTHON" -m umi.competition_reward_admission_runner --selection "$ORIGINAL_OWNER_SELECTION"
+```
+
+Use the original service account; running the command as root is refused. The
+result reports preserved history and required economic reconciliation. It does
+not enable or restart any service, even when no later local decision is present.
+Keep publishing services stopped across runner interruption and retry until exact
+pending/certified decisions, finalized control and the post-B tail have been
+reconciled under the selected runtime. A production cutover still needs that
+qualified configuration handoff and restart; runner fixture qualification alone
+does not establish deployment. Retain this compatibility route and its source
+dependencies while an installed or recovery consumer relies on the completed
+interval. Remove them
+only after every such consumer has a separately qualified replacement receipt
+or complete native per-block results and qualified restart/reward replay.
+
 ## Paid service review budgets and retained capacity
 
 For a cohort whose signed tracks permit endpoint paid work, the selected phase
@@ -443,11 +531,70 @@ all original signed work and already-earned credit through closure and replay.
 ## Recoverable cohort model awards
 
 The recoverable cohort implementation separates model payout from reference-model
-promotion. It requires explicit pre-intake consent through
-`umi-cohort-recovery-authority/3` and the rule
-`baseline_or_better_quality_bucket_best_score_first_complete/1`, with a signed
-500-basis-point bucket width. Existing authorities retain their original
-allocation behavior. Public status identifies the active authority and cohort.
+promotion. Native geometric rewards use `umi-cohort-recovery-authority/4` with
+`baseline_or_better_geometric_bands_first_complete/1` and signed
+`model_reward_parameters`. The parameters are independently configurable:
+
+```json
+{
+  "schema": "umi-geometric-reward-parameters/2",
+  "band_width_bps": 500,
+  "band_decay_bps": 7500,
+  "within_band_decay_bps": 7500,
+  "score_duplicate_tolerance_bps": 1
+}
+```
+
+These defaults mean five-point quality bands and a 0.75 multiplier between
+successive occupied bands and between successive models within a band. Width
+can be any integer from 1 through 10000 basis points. Each decay multiplier can
+independently range from 0 through 10000: zero gives all weight at that level to
+its first rank, while 10000 gives equal weights at that level. A full-scale width
+puts every eligible model in one band. Exact full-scale quality belongs to the
+last band, including when the width does not divide 10000.
+
+Before assigning bands, sort eligible distinct content by exact score, then
+certified acceptance order. Retain the first model and exclude any subsequent
+model whose score is within the signed tolerance of the last retained model,
+including equality. The default one basis point is **0.01 points on the 0–100
+displayed score scale**. Compare exact rational scores, not rounded displays.
+Apply this across band boundaries. Excluded models cannot extend a group: scores
+30.000, 29.995 and 29.988 retain the first and third. Exact-score ties retain the
+first completed certified acceptance. Exclusion affects public-model rewards
+only; independent service-work earnings remain unchanged. Normalize the full
+public pool over the remaining models and occupied bands. Version1 parameters
+retain their original behavior and bytes; the score rule requires version2.
+
+Existing signed authorities and allocations retain their original bytes and
+behavior. Applying geometric rewards or revising their parameters for an
+already signed cohort requires a separately signed and explicitly selected
+reward adoption. That adoption binds the original certified package and a new
+effective allocation; it never rewrites original consent, certification,
+service amounts or cohort clocks. Parameter revisions remain possible until
+reward activation is verified live on-chain. Original reward verification,
+revision lineage, pending transactions and the finalized activation lock must
+be qualified across coordinator, reviewer, coverage and writer before cutover.
+Public status must identify the selected authority, cohort and adoption.
+
+Select the complete signed adoption lineage in `reward_adoptions` on the
+coordinator, reviewers and standing writer. A successor consuming an adopted
+predecessor also selects that predecessor's lineage in
+`predecessor_reward_adoptions`; its current adoption cannot stand in for the
+predecessor's. Omitted fields preserve the original canonical startup bytes.
+Keep the original host approval, state directories and journal identities;
+the separately signed adoption is selected by the root-owned startup configuration.
+
+Changing the desired adoption stops stale preparations before reservation,
+signing and sending. An activation already reserved keeps its exact signed
+bytes. The coordinator suspends that activation, waits for finalized proof-lag
+and transaction-mortality drainage, then checks every designated writer over
+the interval in which those rewards could have become live. Completed native
+coverage and revision results are retained across restart. If the old allocation
+became live, the coordinator resumes that exact activation and keeps its
+economics locked. Otherwise it can publish the selected revision. A current
+matching row or an adoption signature alone cannot replace this historical
+clearance. Missing retained completion state requires explicit repair; it must
+not silently start the complete review again.
 
 The complete sealed model roster must have independently certified quality,
 complete preserved bundles and signed rights/reconstruction acceptances. Model
@@ -456,22 +603,33 @@ on the frozen suite and runtime. Equality qualifies, including an unchanged
 baseline or a baseline below the promotion threshold. Exact-content
 deduplication uses the first complete certified acceptance's score and
 eligibility; later aliases cannot create another benchmark trial. Each eligible
-distinct model then enters its fixed quality band. Each
-occupied band creates one credit for the model with the highest exact score in
-that band. The pool assigns `model budget * credit score / sum(credit scores)`
-to those band credits. Apportion integer weights by largest remainder, breaking
-rounding ties by band index, before summing by recipient. Service earnings are
-added independently. A sole occupied eligible band receives the whole model
-pool. If every occupied credit is zero, divide equally among occupied bands; no
-eligible band burns the pool. Missing evidence remains pending and cannot be
-removed from the roster.
+distinct model then enters its fixed quality band. Geometric rewards rank
+occupied bands from highest to lowest, skipping empty bands. Within each band,
+rank models by exact score, then certified acceptance ordinal, then submission
+digest. Normalize the geometric band weights to sum to one, independently
+normalize each band's model weights to sum to one, then multiply those exact
+fractions. Perform one largest-remainder integer apportionment over **all model
+credits**, with equal remainders following that deterministic rank order. Do not
+round band budgets first. Aggregate the resulting credits by hotkey, then add
+unchanged service earnings and service burn. When no model is eligible, the
+model pool goes to burn. Missing evidence remains pending and cannot be removed
+from the roster. The native geometric award and allocation are version 4 and version 5,
+respectively; historical versions remain readable with unchanged digests.
 
-Duplicate content retains one representative and the earliest certified
-complete-artifact acceptance's recipient. Its evaluations must agree. Tiny
-runnable changes remain one credit while their score stays in the same fixed
-band. The content digest ignores paths and license/provenance-only changes; it
-does not detect semantic copies with changed runnable bytes. A variant can still
-cross a published band boundary, so this is not complete Sybil resistance.
+Duplicate content retains the earliest certified complete-artifact acceptance's
+recipient, score and eligibility. A later alias cannot make originally ineligible
+content eligible. Distinct runnable content within one band receives successive
+geometric ranks. The content digest ignores paths and license/provenance-only
+changes; it does not detect semantic copies with changed runnable bytes, so
+this is not complete Sybil resistance.
+
+The retained version 3 quality-bucket rule selects one best model per occupied
+band, weights those band winners by score, and apportions with band-index ties;
+all-zero occupied credits split equally. Earlier single-winner and
+content-proportional rules keep their own original native replay. Preserve these
+compatibility readers while original signed packages or recovery consumers use
+them. An adopted effective allocation is derived from the original complete
+candidate evidence, not from the original rule's already rounded winner amounts.
 
 Under the configured `CompetitionStore` directory, the reward owner reads
 `model-reward-acceptances/<cohort-sha256>/<submission-sha256>.json` as private

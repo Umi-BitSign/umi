@@ -13,10 +13,12 @@ from pydantic import Field, model_validator
 
 from .competition_reward_decisions import (
     RewardActivation,
-    SignedRewardControlDecision,
     StandingRewardControlReader,
     StandingRewardSelection,
     StandingRewardSeries,
+    effective_activation_decision,
+    original_activation_decision,
+    retained_reward_decisions,
 )
 from .competition_reward_handoff_models import VerifiedLegacyRewardHandoff, validate_legacy_handoff
 from .competition_reward_manifest import (
@@ -172,26 +174,34 @@ def require_previous_opportunity(
     index = tuple(digest(p) for p in reader.series.cohorts).index(
         selection.activation.cohort_sha256
     )
+    if (
+        index == 0
+        and reader.series.predecessor is None
+        and (type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None)
+    ):
+        raise ValueError("first standing activation requires qualified legacy handoff evidence")
+    if index != 0:
+        validate_opportunity(value)
+    prefix = retained_reward_decisions(reader)
+    original = original_activation_decision(prefix, selection.activation.cohort_sha256)
+    current = effective_activation_decision(
+        prefix, selection.activation.cohort_sha256, through_sequence=selection.sequence
+    )
+    if (
+        original is None
+        or current is None
+        or digest(current) != selection.decision_sha256
+        or current.activation != selection.activation
+    ):
+        raise ValueError("reward handoff differs from its selected activation revision")
     if index == 0:
-        if reader.series.predecessor is None and (
-            type(value) is not VerifiedLegacyRewardHandoff or validator_hotkey is None
-        ):
-            raise ValueError("first standing activation requires qualified legacy handoff evidence")
-        first = SignedRewardControlDecision.model_validate_json(
-            canonical_json_bytes(reader.journal.get("reward_control_decision", "0001"))
-        ).decision
-        if (
-            first.kind != "activate"
-            or first.sequence != 1
-            or digest(first) != selection.decision_sha256
-            or first.activation != selection.activation
-        ):
+        if original.sequence != 1:
             raise ValueError("first handoff changes the selected first activation")
         if reader.series.predecessor is None:
             validate_legacy_handoff(
                 value,
                 series=reader.series,
-                activation=selection.activation,
+                activation=original.activation,
                 validator_hotkey=validator_hotkey,
                 block=current_block,
             )
@@ -212,26 +222,21 @@ def require_previous_opportunity(
             validate_standing_predecessor_opportunity(
                 value,
                 plan=plan,
-                activation=selection.activation,
+                activation=original.activation,
                 block=current_block,
             )
         return
-    validate_opportunity(value)
-    prior = SignedRewardControlDecision.model_validate_json(
-        canonical_json_bytes(reader.journal.get("reward_control_decision", f"{index:04d}"))
-    ).decision
-    current = SignedRewardControlDecision.model_validate_json(
-        canonical_json_bytes(reader.journal.get("reward_control_decision", f"{index + 1:04d}"))
-    ).decision
+    prior = effective_activation_decision(
+        prefix, digest(reader.series.cohorts[index - 1]), through_sequence=original.sequence - 1
+    )
     if (
-        prior.activation is None
-        or prior.kind != "activate"
+        prior is None
+        or prior.activation is None
         or prior.activation.cohort_sha256 != digest(reader.series.cohorts[index - 1])
-        or current.predecessor_sha256 != digest(prior)
-        or digest(current) != selection.decision_sha256
-        or current.activation != selection.activation
+        or original.predecessor_sha256 != digest(prior)
         or current.activation.prior_opportunity_sha256 != digest(value.certificate)
-        or max(c.through_block for c in value.certificate.contributions) > current.observed_at_block
+        or max(c.through_block for c in value.certificate.contributions)
+        > original.observed_at_block
     ):
         raise ValueError("reward handoff changes its predecessor, certificate or evidence cutoff")
     check_opportunity_claim(

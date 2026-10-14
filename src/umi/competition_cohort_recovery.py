@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 from pydantic import Field, TypeAdapter, model_serializer, model_validator
 from typing_extensions import Self
 
+from .competition_geometric_rewards import GeometricRewardParameters
 from .open_competition import (
     Bps,
     CompetitionPolicy,
@@ -318,8 +319,19 @@ class ModelRewardCohortAuthority(StandingCohortRecoveryAuthority):
         return self
 
 
+class GeometricModelRewardCohortAuthority(ModelRewardCohortAuthority):
+    """Native geometric awards; later changes require authenticated adoption."""
+
+    schema_: Literal["umi-cohort-recovery-authority/4"] = Field(alias="schema")
+    model_reward_rule: Literal["baseline_or_better_geometric_bands_first_complete/1"]
+    model_reward_parameters: GeometricRewardParameters
+
+
 RecoveryAuthority = Annotated[
-    CohortRecoveryAuthority | StandingCohortRecoveryAuthority | ModelRewardCohortAuthority,
+    CohortRecoveryAuthority
+    | StandingCohortRecoveryAuthority
+    | ModelRewardCohortAuthority
+    | GeometricModelRewardCohortAuthority,
     Field(discriminator="schema_"),
 ]
 _AUTHORITY_ADAPTER = TypeAdapter(RecoveryAuthority)

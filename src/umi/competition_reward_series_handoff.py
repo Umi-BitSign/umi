@@ -8,8 +8,9 @@ from typing import Literal
 from .competition_reward_coverage_service import (
     CoverageCompletion,
     StandingRewardCoverageService,
+    coverage_work_key,
 )
-from .competition_reward_decisions import RewardActivation, SignedRewardControlDecision
+from .competition_reward_decisions import RewardActivation, retained_reward_decisions
 from .competition_reward_handoff_models import (
     StandingRewardHandoffPlan,
     verify_handoff_plan,
@@ -22,7 +23,6 @@ from .competition_reward_opportunity import (
     validate_opportunity,
 )
 from .open_competition import digest, identity
-from .protocol import canonical_json_bytes
 
 _ISSUER = object()
 
@@ -116,16 +116,19 @@ class StandingRewardPredecessorOpportunity:
     def _activation(self) -> RewardActivation:
         self._check()
         reader, prior = self.coverage.preparation.reader, self.plan.predecessor
-        index = tuple(digest(c) for c in reader.series.cohorts).index(prior.cohort_sha256)
-        retained = reader.journal.get("reward_control_decision", f"{index + 1:04d}")
-        if retained is None:
+        decision = next(
+            (
+                signed.decision
+                for signed in retained_reward_decisions(reader)
+                if digest(signed.decision) == prior.decision_sha256
+            ),
+            None,
+        )
+        if decision is None:
             raise ValueError("predecessor reward selection is not retained")
-        decision = SignedRewardControlDecision.model_validate_json(
-            canonical_json_bytes(retained)
-        ).decision
         activation = decision.activation
         if (
-            decision.kind != "activate"
+            decision.kind not in {"activate", "revise_activation", "resume_activation"}
             or digest(decision) != prior.decision_sha256
             or activation is None
             or digest(activation) != prior.activation_sha256
@@ -138,7 +141,7 @@ class StandingRewardPredecessorOpportunity:
         """Return a discovery hint only after static certificate checks."""
         activation = self._activation()
         retained = self.coverage.journal.journal.get(
-            "coverage_completion", activation.cohort_sha256
+            "coverage_completion", coverage_work_key(activation)
         )
         if retained is None:
             return None

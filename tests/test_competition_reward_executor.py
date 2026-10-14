@@ -47,6 +47,7 @@ def executing(retained, monkeypatch):
     t.end, t.fenced, t.mutate = None, True, lambda _: None
     t.owner._authority = lambda: None
     t.owner._check_prepared = lambda _: None
+    t.owner.reader.reward_adoptions = None
 
     def fence(*args, **kwargs):
         if not t.fenced:
@@ -467,6 +468,97 @@ async def test_changed_decision_after_signing_cannot_submit(executing):
     with e.hold_writer(), pytest.raises(ValueError, match="current selection"):
         await e.step()
     assert t.journal.pending().signed is not None and not t.sent
+
+
+def _revision_activations():
+    original = RewardActivation(
+        cohort_sha256="10" * 32,
+        allocation_sha256="11" * 32,
+        package_sha256="12" * 32,
+        recovery_tip_sha256="13" * 32,
+        prior_opportunity_sha256="14" * 32,
+    )
+    revised = original.model_copy(
+        update={"reward_adoption_sha256": "15" * 32, "effective_allocation_sha256": "16" * 32}
+    )
+    return original, revised
+
+
+async def test_revision_after_signing_preserves_original_bytes_without_transmission(executing):
+    t, e = executing, executing.executor
+    original, revised = _revision_activations()
+    e.first = t.current.prepared = SimpleNamespace(activation=original)
+    t.current.selection.activation = original
+    e._prepared = {digest(original): e.first}
+    t.mutate = lambda _: setattr(t.current, "prepared", SimpleNamespace(activation=revised))
+    with e.hold_writer(), pytest.raises(ValueError, match="current selection"):
+        await e.step()
+    pending = t.journal.pending()
+    assert pending.intent.activation_sha256 == digest(original)
+    assert pending.signed is not None and not t.sent
+    assert t.reopen().pending() == pending
+
+
+async def test_revised_first_cohort_uses_original_held_handoff(executing):
+    t, e = executing, executing.executor
+    original, revised = _revision_activations()
+    e.first = SimpleNamespace(activation=original)
+    adopted = SimpleNamespace(activation=revised)
+    t.current.prepared = adopted
+    t.current.selection.activation = revised
+    e._prepared = {digest(revised): adopted}
+    with e.hold_writer():
+        assert (await e.step()).status == "submitted_unconfirmed"
+    assert t.journal.pending().intent.activation_sha256 == digest(revised)
+    assert t.checks and all(args[-1] == e.handoff for args in t.checks)
+
+
+async def test_suspended_cohort_cannot_sign_or_submit(executing):
+    t, e = executing, executing.executor
+    t.current.selection.state = "suspended"
+    with e.hold_writer():
+        assert (await e.step()).status == "selection_pending"
+    assert not t.signed and not t.sent and t.journal.pending() is None
+
+
+@pytest.mark.parametrize("when", ["before_reserve", "before_sign", "before_send"])
+async def test_new_host_adoption_fences_each_transaction_boundary(executing, monkeypatch, when):
+    t, e = executing, executing.executor
+    requested = when == "before_reserve"
+    # Current host-adoption selection is an explicit substituted port here;
+    # its signed-prefix validation is covered by adoption/preparation tests.
+    monkeypatch.setattr(execution, "activation_requires_revision", lambda *args: requested)
+    if when == "before_sign":
+        reserve = e.preparation.reserve_transaction
+
+        async def update_after_reservation(*args, **kwargs):
+            nonlocal requested
+            value = await reserve(*args, **kwargs)
+            requested = True
+            return value
+
+        monkeypatch.setattr(e.preparation, "reserve_transaction", update_after_reservation)
+    elif when == "before_send":
+
+        def update_after_signature(_):
+            nonlocal requested
+            requested = True
+
+        t.mutate = update_after_signature
+    with e.hold_writer():
+        if when == "before_reserve":
+            assert (await e.step()).status == "reward_revision_pending"
+            assert t.journal.pending() is None and not t.signed
+        else:
+            with pytest.raises(ValueError, match="require a native activation revision"):
+                await e.step()
+            pending = t.journal.pending()
+            assert pending is not None and (pending.signed is not None) == (when == "before_send")
+            assert len(t.signed) == (when == "before_send")
+            e.journal = t.journal = t.reopen()
+            assert e.journal.pending() == pending
+            assert (await e.step()).status == "transaction_pending"
+    assert not t.sent
 
 
 async def test_final_freshness_check_follows_host_and_journal_io(executing):

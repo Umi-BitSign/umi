@@ -151,6 +151,10 @@ class StandingControlPublisher:
                 package = self.files.package(activation.package_sha256)
                 if digest(package.allocation) != activation.allocation_sha256:
                     raise ValueError("delivered package differs from control allocation")
+                if activation.reward_adoption_sha256 is not None and self.files.adoption(
+                    activation.reward_adoption_sha256
+                ) != self.reader.reward_adoptions.get(activation.reward_adoption_sha256):
+                    raise ValueError("delivered adoption differs from selected signed lineage")
                 del package  # Release before the next prefix item is decoded.
 
     async def _observed(self, prefix):
@@ -210,7 +214,10 @@ class StandingControlPublisher:
             raise ValueError("pending control transaction conflicts with selected prefix")
         # Quorum and original proofs are checked even after the era expired.
         verify_reward_decisions(
-            self.series, self.reader.policy, (*prefix[:sequence], intent.decision)
+            self.series,
+            self.reader.policy,
+            (*prefix[:sequence], intent.decision),
+            reward_adoptions=self.reader.reward_adoptions,
         )
         original = await review_control_signing_state(
             self.provider,
@@ -237,7 +244,12 @@ class StandingControlPublisher:
             return await await_owned_task(asyncio.create_task(self._step(decisions)))
 
     async def _step(self, decisions):
-        prefix = verify_reward_decisions(self.series, self.reader.policy, decisions)
+        prefix = verify_reward_decisions(
+            self.series,
+            self.reader.policy,
+            decisions,
+            reward_adoptions=self.reader.reward_adoptions,
+        )
         wanted = digest(prefix[-1].decision)
         await run_memory_thread(self._delivered, prefix)
         pending = await run_owned_thread(self.journal.pending)

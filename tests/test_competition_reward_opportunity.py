@@ -5,6 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi.competition_geometric_rewards import GeometricRewardParameters
+from umi.competition_reward_adoption import (
+    RewardAdoptionSelection,
+    RewardModelAdoption,
+    SignedRewardModelAdoption,
+)
 from umi.competition_reward_decisions import (
     RewardActivation,
     RewardControlDecision,
@@ -35,7 +41,7 @@ from umi.competition_reward_opportunity import (
 from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
 
-from .test_competition_reward_decisions import signed
+from .test_competition_reward_decisions import signatures, signed
 from .test_competition_reward_manifest import chain as chain
 from .test_competition_reward_manifest import chain_config as chain_config
 from .test_competition_reward_manifest import control as control
@@ -69,6 +75,16 @@ def opportunity_case(manifest_case, tmp_path):
         expected_chain_config_sha256=c.reader.chain_config_sha256,
         maximum_bytes=8 * 1024**2,
     )
+    admission = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(series),
+        sequence=0,
+        predecessor_sha256=None,
+        kind="admit_series",
+        observed_at_block=series.recovery.authority.issued_at_block,
+        activation=None,
+    )
+    reader.journal.put("reward_control_decision", "0000", signed(admission))
     activation = RewardActivation(
         cohort_sha256=digest(series.cohorts[0]),
         allocation_sha256="01" * 32,
@@ -97,6 +113,7 @@ def opportunity_case(manifest_case, tmp_path):
         manifest=manifest,
         series=series,
         reader=reader,
+        admission=admission,
         policy=c.policy,
         activation=activation,
         certificate=certificate,
@@ -178,7 +195,7 @@ def handoff(c, *, through=10000, prior_sha=None):
         schema="umi-reward-control-decision/1",
         series_sha256=digest(c.series),
         sequence=1,
-        predecessor_sha256="ee" * 32,
+        predecessor_sha256=digest(c.admission),
         kind="activate",
         observed_at_block=200,
         activation=c.activation,
@@ -256,7 +273,8 @@ def test_minimum_certificate_cannot_replace_legacy_first_handoff(opportunity_cas
 
 
 @pytest.mark.parametrize(
-    "change", [None, "copy", "other_validator", "old_block", "ended_lease", "other_decision"]
+    "change",
+    [None, "revised", "copy", "other_validator", "old_block", "ended_lease", "other_decision"],
 )
 def test_first_activation_rechecks_exact_local_handoff(opportunity_case, change):
     c = opportunity_case
@@ -273,7 +291,7 @@ def test_first_activation_rechecks_exact_local_handoff(opportunity_case, change)
         schema="umi-reward-control-decision/1",
         series_sha256=digest(c.series),
         sequence=1,
-        predecessor_sha256="ee" * 32,
+        predecessor_sha256=digest(c.admission),
         kind="activate",
         observed_at_block=200,
         activation=activation,
@@ -299,6 +317,60 @@ def test_first_activation_rechecks_exact_local_handoff(opportunity_case, change)
     selection = StandingRewardSelection(
         digest(c.series), digest(first), 1, "selected", 200, 360, activation
     )
+    if change == "revised":
+        adoption = RewardModelAdoption(
+            schema="umi-standing-model-reward-adoption/1",
+            series_sha256=digest(c.series),
+            policy_sha256=digest(c.policy),
+            cohort_sha256=activation.cohort_sha256,
+            authority_sha256=digest(c.series.recovery.authority),
+            package_sha256=activation.package_sha256,
+            allocation_sha256=activation.allocation_sha256,
+            service_certificate_sha256="a1" * 32,
+            quality_manifest_sha256="a2" * 32,
+            effective_allocation_sha256="a3" * 32,
+            parameters=GeometricRewardParameters(),
+            revision=1,
+            predecessor_adoption_sha256=None,
+            issued_at_block=201,
+            lifetime="until_first_verified_live_reward_then_locked",
+        )
+        c.reader.reward_adoptions = RewardAdoptionSelection(
+            schema="umi-standing-reward-adoption-selection/1",
+            adoptions=(
+                SignedRewardModelAdoption(adoption=adoption, signatures=signatures(adoption)),
+            ),
+        )
+        suspended = first.model_copy(
+            update={
+                "schema_": "umi-reward-control-decision/3",
+                "kind": "suspend_activation",
+                "sequence": 2,
+                "predecessor_sha256": digest(first),
+                "observed_at_block": 400,
+            }
+        )
+        revised = suspended.model_copy(
+            update={
+                "kind": "revise_activation",
+                "sequence": 3,
+                "predecessor_sha256": digest(suspended),
+                "observed_at_block": 500,
+                "activation": activation.model_copy(
+                    update={
+                        "reward_adoption_sha256": digest(adoption),
+                        "effective_allocation_sha256": adoption.effective_allocation_sha256,
+                    }
+                ),
+                # Static selected-prefix fixture only, not native clearance.
+                "revision_clearance_sha256": "a4" * 32,
+            }
+        )
+        c.reader.journal.put("reward_control_decision", "0002", signed(suspended))
+        c.reader.journal.put("reward_control_decision", "0003", signed(revised))
+        selection = StandingRewardSelection(
+            digest(c.series), digest(revised), 3, "selected", 500, 660, revised.activation
+        )
     args = dict(
         reader=c.reader,
         manifest=c.manifest,
@@ -316,7 +388,7 @@ def test_first_activation_rechecks_exact_local_handoff(opportunity_case, change)
         active = False
     elif change == "other_decision":
         args["selection"] = replace(selection, decision_sha256="ff" * 32)
-    if change:
+    if change not in (None, "revised"):
         with pytest.raises(ValueError):
             require_previous_opportunity(value, **args)
     else:

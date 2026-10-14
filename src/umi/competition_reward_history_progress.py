@@ -32,6 +32,7 @@ class HistoryProgress:
         self.export_identity = None
         self.inventory_completed = 0
         self.restored_completed = 0
+        self.completed_admission_through = first_block - 1
         self.target = None
         self.state = "pending"
         self.stage = "native_history"
@@ -196,6 +197,10 @@ class HistoryProgress:
                 low, high = self.planning_blocks_per_second
                 planning = [remaining / high, remaining / low]
                 basis = f"planning_assumption_{low:g}_to_{high:g}_native_blocks_per_second"
+            completed_admission = max(
+                0, min(self.target, self.completed_admission_through) - self.first_block + 1
+            )
+            verified = self.counts["verified"] + completed_admission
             self.latest = {
                 "stage": self.stage,
                 "state": "stalled" if stalled else state,
@@ -207,8 +212,9 @@ class HistoryProgress:
                 "percent": 100.0 * done / total if total else 0.0,
                 "native_completed": self.native_completed,
                 "captured_blocks": self.counts["captured"],
-                "verified_blocks": self.counts["verified"],
-                "verified_ahead_of_applied_blocks": max(0, self.counts["verified"] - done),
+                "verified_blocks": verified,
+                "completed_admission_blocks": completed_admission,
+                "verified_ahead_of_applied_blocks": max(0, verified - done),
                 "exported_blocks": self.counts["exported"],
                 "export_scope": "selected_r2_proof_archive"
                 if self.remote_export_selected

@@ -8,12 +8,14 @@ from pathlib import Path
 
 from .competition_cohort_aggregate_files import read_aggregate_model
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import CoverageCompletion
 from .competition_reward_decisions import (
     RewardActivation,
     StandingRewardSeries,
+    effective_activation_decision,
     verify_reward_decisions,
 )
 from .competition_reward_files import StandingRewardFiles
@@ -48,6 +50,7 @@ class StandingRewardOffers:
         files: StandingRewardFiles,
         coverage: RewardCoverageJournal,
         predecessor: StandingRewardPredecessorOpportunity | None = None,
+        reward_adoptions: RewardAdoptionSelection | None = None,
     ):
         verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
         handoff = verify_handoff_plan(handoff, series)
@@ -59,11 +62,14 @@ class StandingRewardOffers:
         self.series, self.policy, self.manifest = series, policy, manifest
         self.handoff, self.files, self.coverage = handoff, files, coverage
         self.predecessor = predecessor
+        self.reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
         self.settlements = Path(private_path(str(settlements)))
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
-        prefix = verify_reward_decisions(self.series, self.policy, prefix)
-        index = len(prefix) - 1
+        prefix = verify_reward_decisions(
+            self.series, self.policy, prefix, reward_adoptions=self.reward_adoptions
+        )
+        index = sum(v.decision.kind == "activate" for v in prefix)
         if (
             not 0 <= index < len(self.series.cohorts)
             or prefix[-1].decision.kind == "revoke"
@@ -78,7 +84,7 @@ class StandingRewardOffers:
             if prior is None:
                 return None
         if index:
-            predecessor = prefix[-1].decision.activation
+            predecessor = effective_activation_decision(prefix).activation
             assert predecessor is not None
             raw = self.coverage.journal.get("coverage_completion", predecessor.cohort_sha256)
             if raw is None:
@@ -115,10 +121,15 @@ class StandingRewardOffers:
         # repeats exact immutable publication; it cannot reserve a signing slot.
         self.files.retain_package(package)
         tip = history.transitions[-1].transition if history.transitions else history.genesis
+        adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
         return RewardActivation(
             cohort_sha256=cohort,
             allocation_sha256=digest(package.allocation),
             package_sha256=digest(package),
             recovery_tip_sha256=digest(tip),
             prior_opportunity_sha256=prior,
+            reward_adoption_sha256=None if adoption is None else digest(adoption.adoption),
+            effective_allocation_sha256=None
+            if adoption is None
+            else adoption.adoption.effective_allocation_sha256,
         )

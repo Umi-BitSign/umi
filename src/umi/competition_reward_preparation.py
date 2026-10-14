@@ -21,6 +21,7 @@ from .competition_cohort_direct_model_review import DirectModelSettlementVerifie
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     CohortRewardProjection,
+    derive_effective_reward_allocation,
     project_owned_reward_allocation,
 )
 from .competition_cohort_reward_package import (
@@ -29,6 +30,7 @@ from .competition_cohort_reward_package import (
     _replay_detached_reward_package,
     _validated_reward_snapshot,
 )
+from .competition_reward_adoption import verify_reward_adoption
 from .competition_reward_control import (
     OwnedRewardControlObservation,
     validate_owned_reward_control,
@@ -39,6 +41,7 @@ from .competition_reward_decisions import (
     HistoryVerifiedStandingRewardSelection,
     RewardActivation,
     StandingRewardControlReader,
+    activation_requires_revision,
 )
 from .competition_reward_history import OwnedRewardControlHistory
 from .competition_reward_manifest import (
@@ -55,6 +58,7 @@ from .competition_reward_transactions import (
     standing_weight_call,
 )
 from .competition_store import CompetitionStore
+from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
@@ -103,8 +107,9 @@ class StandingRewardPreparation:
 
     The caller retains private packages and promotion assets with the existing
     stores. Restart reconstructs native reviews from those bytes; a serialized
-    success flag cannot populate this process-local cache. At most one selected
-    immutable package per admitted cohort is retained here.
+    success flag cannot populate this process-local cache. One compact result per
+    authenticated activation revision is retained here. Original package
+    verification remains reusable when only authenticated reward parameters change.
     """
 
     def __init__(
@@ -262,11 +267,24 @@ class StandingRewardPreparation:
             != digest(self.reader.series.recovery.authority)
         ):
             raise ValueError("reward package differs from current standing activation")
-        retained = self._prepared.get(activation.cohort_sha256)
+        adoption = (
+            None
+            if activation.reward_adoption_sha256 is None
+            else verify_reward_adoption(
+                getattr(self.reader, "reward_adoptions", None),
+                activation.reward_adoption_sha256,
+                series=self.reader.series,
+                policy=self.reader.policy,
+                activation=activation,
+                package=package,
+                current_block=block,
+            )
+        )
+        retained = self._prepared.get(digest(activation))
         if retained is not None:
             self._check_prepared(retained)
             if retained.activation != activation:
-                raise ValueError("standing activation changed an already prepared cohort")
+                raise ValueError("standing activation changed its retained revision")
             # Replay at an earlier root must recheck that the original cohort
             # certification and artifacts were valid by that block. A later
             # successful review cannot backdate their validity.
@@ -289,6 +307,17 @@ class StandingRewardPreparation:
                 None if self.model_artifacts is None else self.model_artifacts.verify_candidate
             ),
         )
+        if adoption is not None:
+            with TransferProgress(
+                "reward_effective_allocation",
+                1,
+                unit="allocations",
+                planning_unit_seconds=(0.001, 1),
+            ) as progress:
+                allocation = derive_effective_reward_allocation(package, adoption.parameters)
+                if digest(allocation) != activation.effective_allocation_sha256:
+                    raise ValueError("effective reward allocation differs from signed adoption")
+                progress.advance(1)
         prepared = PreparedStandingReward(
             self.series_sha256,
             activation,
@@ -300,7 +329,7 @@ class StandingRewardPreparation:
         object.__setattr__(prepared, "_binding", _binding(prepared))
         # Retain completion inside the owned thread, even if its waiter was
         # cancelled. Proof expiry during replay never discards immutable work.
-        self._prepared[activation.cohort_sha256] = prepared
+        self._prepared[digest(activation)] = prepared
         return prepared
 
     async def _ensure_model_artifacts(self, package: CohortRewardPackage) -> None:
@@ -326,6 +355,20 @@ class StandingRewardPreparation:
             != digest(self.manifest.requirement(prepared.activation.cohort_sha256))
         ):
             raise ValueError("reward preparation was not issued by this native replay owner")
+        if prepared.activation.reward_adoption_sha256 is not None:
+            verify_reward_adoption(
+                getattr(self.reader, "reward_adoptions", None),
+                prepared.activation.reward_adoption_sha256,
+                series=self.reader.series,
+                policy=self.reader.policy,
+                activation=prepared.activation,
+                current_block=prepared.reviewed_at_block,
+            )
+        expected = (
+            prepared.activation.effective_allocation_sha256 or prepared.activation.allocation_sha256
+        )
+        if digest(prepared.allocation) != expected:
+            raise ValueError("prepared rewards changed their effective allocation")
 
     async def project(
         self,
@@ -375,6 +418,8 @@ class StandingRewardPreparation:
             not in {identity(k) for k in self.reader.series.validators}
         ):
             raise ValueError("prepared rewards lack current standing selection and validator state")
+        if activation_requires_revision(self.reader, current.selection):
+            raise ValueError("selected reward parameters require a native activation revision")
         if isinstance(self.manifest, StandingRewardOpportunityManifest):
             require_previous_opportunity(
                 prior_opportunity,

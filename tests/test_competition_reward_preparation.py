@@ -5797,6 +5797,54 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
     with pytest.raises(ValueError, match="lost its native result"):
         await foreign.credit(*restored)
 
+    # Reproduce an older compact completion that did not retain row-match/update
+    # metadata. Preserve the exact original endpoint/proof bytes and old fact;
+    # absence of the added field means unknown until explicit native repair.
+    legacy_result = dict(fresh.checkpoints.load(keys[0]))
+    legacy_result.pop("row_state")
+
+    def select_legacy(db):
+        db.execute(
+            "UPDATE coverage_checkpoint_index SET result=? WHERE id=?",
+            (digest(legacy_result), keys[0]),
+        )
+
+    fresh.journal.put_many(
+        (("coverage_verified", digest(legacy_result), legacy_result),), index=select_legacy
+    )
+    restarted._cache.clear()
+    legacy_endpoint = await restarted.replay(keys[0])
+    assert legacy_endpoint.row_matches is None and legacy_endpoint.validator_last_update is None
+    restarted._package_loader = lambda: p.package
+    repaired = await restarted.repair(keys[0], reason="reward_revision_row_state_upgrade")
+    assert repaired.row_matches == endpoints[0].row_matches
+    metadata = fresh.checkpoints.load(keys[0])
+    assert metadata["row_state"] == {
+        "row_matches": endpoints[0].row_matches,
+        "validator_last_update": endpoints[0].eligibility.subject.validator_last_update,
+    }
+    assert metadata["repair"] == "reward_revision_row_state_upgrade"
+    assert fresh.journal.get("coverage_verified", digest(legacy_result)) == legacy_result
+    fresh, remote, owner = open_owner()
+    restarted = NativeRewardCoverageSource(
+        provider=h.item.provider,
+        journal=fresh,
+        history=h.reader,
+        preparation=owner,
+        package_loader=unavailable_package,
+        package_sha256=digest(p.package),
+        decisions=c.source,
+        profile=h.item.profile,
+        maximum_history_blocks=4096,
+    )
+    with monkeypatch.context() as m:
+        m.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        m.setattr(coverage_module, "review_reward_coverage", prohibit)
+        fixed = await restarted.replay(keys[0])
+        assert fixed.row_matches == repaired.row_matches
+        assert fixed.validator_last_update == metadata["row_state"]["validator_last_update"]
+    assert not loads
+
     # An observed missing remote source remains a hold across restart. Restoring
     # its exact generation requires one explicit transport repair, no proof replay.
     alias = fresh.journal.get("coverage_remote_source", digest(["coverage_endpoint", keys[0]]))

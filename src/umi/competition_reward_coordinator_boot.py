@@ -25,6 +25,7 @@ from .competition_cohort_recovery import cohort_model_delivery
 from .competition_host_activation import _read_root_control_path
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
+from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
@@ -49,6 +50,7 @@ from .competition_reward_manifest import StandingRewardOpportunityManifest, veri
 from .competition_reward_offers import StandingRewardOffers
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_reward_revision import NativeRewardRevisionReviewer
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, _close_provider, _stop_task
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
@@ -105,6 +107,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
+    reward_adoptions: RewardAdoptionSelection | None = None
+    predecessor_reward_adoptions: RewardAdoptionSelection | None = None
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -120,6 +124,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             "predecessor_series",
             "predecessor_manifest",
             "predecessor_eligibility",
+            "reward_adoptions",
+            "predecessor_reward_adoptions",
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
@@ -171,6 +177,13 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 "reward coordinator configuration changes its approved role or authority"
             )
         verify_handoff_plan(self.handoff, self.series)
+        verify_adoption_selection(self.reward_adoptions, self.series, self.policy)
+        if self.predecessor_reward_adoptions is not None:
+            if self.predecessor_series is None:
+                raise ValueError("predecessor reward adoption requires its original series")
+            verify_adoption_selection(
+                self.predecessor_reward_adoptions, self.predecessor_series, self.policy
+            )
         if successor:
             prior = self.series.predecessor
             old, manifest, eligibility = predecessor_inputs
@@ -256,6 +269,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             expected_series_sha256=digest(config.series),
             expected_chain_config_sha256=digest(config.chain),
             maximum_bytes=config.maximum_reader_bytes,
+            reward_adoptions=config.reward_adoptions,
         )
         imported, exported = await run_owned_thread(
             selected_proof_archives,
@@ -336,6 +350,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 expected_series_sha256=digest(old),
                 expected_chain_config_sha256=digest(config.chain),
                 maximum_bytes=config.maximum_reader_bytes,
+                reward_adoptions=config.predecessor_reward_adoptions,
             )
             old_history = RewardControlHistoryReader(
                 old_root / "history",
@@ -392,6 +407,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 config.signer_hotkey,
                 expected_chain_config_sha256=digest(config.chain),
                 maximum_bytes=config.service.maximum_journal_bytes,
+                reward_adoptions=config.reward_adoptions,
             ),
             sign,
         )
@@ -408,6 +424,11 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             maximum_history_blocks=config.service.maximum_history_blocks,
             model_artifacts=model_artifacts,
             predecessor=predecessor,
+            revision_reviewer=(
+                NativeRewardRevisionReviewer(coverage=coverage)
+                if config.reward_adoptions is not None
+                else None
+            ),
         )
         exchange = RewardReviewExchange(
             signer=signer,
@@ -451,6 +472,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                     files=files,
                     coverage=coverage.journal,
                     predecessor=predecessor,
+                    reward_adoptions=config.reward_adoptions,
                 ),
                 readback=StandingRewardFiles(
                     Path(config.readback_directory),

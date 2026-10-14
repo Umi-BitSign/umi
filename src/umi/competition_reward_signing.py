@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .competition_cohort_recovery import verify_recovery_authority, verify_recovery_quorum
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_decision_review import (
     ReviewedRewardDecision,
     RewardDecisionIntent,
@@ -25,6 +26,7 @@ from .competition_reward_decisions import (
     RewardControlDecision,
     SignedRewardControlDecision,
     StandingRewardSeries,
+    reward_decision_capacity,
     verify_reward_decision_proposal,
     verify_reward_decisions,
 )
@@ -53,6 +55,7 @@ class RewardDecisionJournal:
         *,
         expected_chain_config_sha256: str,
         maximum_bytes: int,
+        reward_adoptions: RewardAdoptionSelection | None = None,
     ):
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -61,6 +64,9 @@ class RewardDecisionJournal:
         if self.series.policy_sha256 != digest(self.policy) or self.signer not in self.reviewers:
             raise ValueError("reward signer differs from its approved series or evaluators")
         verify_recovery_authority(self.series.recovery, self.policy)
+        self.reward_adoptions = verify_adoption_selection(
+            reward_adoptions, self.series, self.policy
+        )
         self.chain_config_sha256 = expected_chain_config_sha256
         if len(self.chain_config_sha256) != 64 or any(
             v not in "0123456789abcdef" for v in self.chain_config_sha256
@@ -80,7 +86,9 @@ class RewardDecisionJournal:
         )
 
     def _slot(self, sequence: int) -> str:
-        if type(sequence) is not int or not 0 <= sequence < len(self.series.cohorts) + 2:
+        if type(sequence) is not int or not 0 <= sequence < reward_decision_capacity(
+            self.series, self.reward_adoptions
+        ):
             raise ValueError("reward sequence lies outside its admitted series")
         return f"{sequence:04d}"
 
@@ -96,7 +104,9 @@ class RewardDecisionJournal:
             values.append(
                 SignedRewardControlDecision.model_validate_json(canonical_json_bytes(raw))
             )
-        return verify_reward_decisions(self.series, self.policy, tuple(values))
+        return verify_reward_decisions(
+            self.series, self.policy, tuple(values), reward_adoptions=self.reward_adoptions
+        )
 
     def load(self, sequence: int) -> RewardDecisionIntent | None:
         raw = self.journal.get("reward_intent", self._slot(sequence))
@@ -110,7 +120,11 @@ class RewardDecisionJournal:
         ):
             raise ValueError("retained reward intent changed its slot or selected authority")
         verify_reward_decision_proposal(
-            self.series, self.policy, self.prefix(sequence), intent.decision
+            self.series,
+            self.policy,
+            self.prefix(sequence),
+            intent.decision,
+            reward_adoptions=self.reward_adoptions,
         )
         return intent
 
@@ -119,7 +133,9 @@ class RewardDecisionJournal:
         intent = validate_reward_decision_review(review)
         sequence, body = intent.decision.sequence, intent.decision
         slot = self._slot(sequence)
-        verify_reward_decision_proposal(self.series, self.policy, review.preceding, body)
+        verify_reward_decision_proposal(
+            self.series, self.policy, review.preceding, body, reward_adoptions=self.reward_adoptions
+        )
         if (
             intent.manifest_sha256 != self.series.manifest_sha256
             or intent.chain_config_sha256 != self.chain_config_sha256
@@ -231,7 +247,12 @@ class RewardDecisionJournal:
             if len(groups) < self.policy.required_evaluator_groups:
                 raise RewardQuorumPending("reward decision awaits independent evaluator quorum")
             result = SignedRewardControlDecision(decision=intent.decision, signatures=tuple(votes))
-        verify_reward_decisions(self.series, self.policy, (*self.prefix(sequence), result))
+        verify_reward_decisions(
+            self.series,
+            self.policy,
+            (*self.prefix(sequence), result),
+            reward_adoptions=self.reward_adoptions,
+        )
         self.journal.put("reward_certificate", self._slot(sequence), result)
         return result
 
@@ -301,6 +322,7 @@ class RewardDecisionSigner:
                 self.journal.policy,
                 self.journal.prefix(sequence + 1),
                 packages,
+                reward_adoptions=self.journal.reward_adoptions,
             )
 
         async with self.serial:

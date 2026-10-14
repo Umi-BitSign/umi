@@ -41,9 +41,16 @@ def scenario(legacy_scenario, request):
         old.plan,
         p,
         model_rewards=request.param
-        in {"model-awards", "proportional-model-awards", "quality-bucket-model-awards"},
+        in {
+            "model-awards",
+            "proportional-model-awards",
+            "quality-bucket-model-awards",
+            "geometric-model-awards",
+        },
         model_rule=(
-            "baseline_or_better_quality_bucket_best_score_first_complete/1"
+            "baseline_or_better_geometric_bands_first_complete/1"
+            if request.param == "geometric-model-awards"
+            else "baseline_or_better_quality_bucket_best_score_first_complete/1"
             if request.param == "quality-bucket-model-awards"
             else "baseline_or_better_proportional_score_first_complete/1"
             if request.param == "proportional-model-awards"
@@ -51,6 +58,11 @@ def scenario(legacy_scenario, request):
         ),
         model_quality_bucket_width_bps=(
             500 if request.param == "quality-bucket-model-awards" else None
+        ),
+        model_reward_parameters=(
+            {"schema": "umi-geometric-reward-parameters/2"}
+            if request.param == "geometric-model-awards"
+            else None
         ),
     )
     h = CohortRecoveryHistory(

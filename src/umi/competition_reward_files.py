@@ -11,6 +11,7 @@ from .competition_cohort_aggregate_files import publish_aggregate_model, read_ag
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_digest
+from .competition_reward_adoption import MAX_REWARD_ADOPTION_BYTES, SignedRewardModelAdoption
 from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardControlDecision
 from .competition_reward_opportunity import RewardOpportunityCertificate, RewardOpportunityWitness
 from .competition_reward_opportunity_review import MAX_CERTIFICATE_BYTES
@@ -38,13 +39,29 @@ class StandingRewardFiles:
         value = reader(self.root / kind / (sha + ".json"), model, maximum_bytes=maximum)
         # Decisions are addressed by their signed body, independently of the
         # envelope's signature ordering. Other objects use their complete body.
-        selected = value.decision if kind == "decisions" else value
+        selected = (
+            value.decision
+            if kind == "decisions"
+            else value.adoption
+            if kind == "adoptions"
+            else value
+        )
         if digest(selected) != sha:
             raise ValueError("standing input differs from its requested identity")
         return value
 
     def package(self, sha: str) -> CohortRewardPackage:
         return self._read("packages", sha, CohortRewardPackage, self.maximum_package_bytes)
+
+    def adoption(self, sha: str) -> SignedRewardModelAdoption:
+        return self._read("adoptions", sha, SignedRewardModelAdoption, MAX_REWARD_ADOPTION_BYTES)
+
+    def retain_adoption(self, value: SignedRewardModelAdoption) -> None:
+        publish_private_model(
+            self.root / "adoptions" / (digest(value.adoption) + ".json"),
+            value,
+            maximum_bytes=MAX_REWARD_ADOPTION_BYTES,
+        )
 
     def verified_package(self, sha: str):
         checked_digest(sha)

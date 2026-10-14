@@ -24,6 +24,12 @@ from .competition_cohort_recovery import (
     verify_recovery_authority,
     verify_recovery_quorum,
 )
+from .competition_reward_adoption import (
+    MAX_REWARD_DECISIONS,
+    RewardAdoptionSelection,
+    verify_adoption_selection,
+    verify_reward_adoption,
+)
 from .competition_reward_control import (
     OwnedRewardControlObservation,
     validate_owned_reward_control,
@@ -43,7 +49,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_DECISION_BYTES = 128 * 1024
 MAX_ADMISSION_BYTES = MAX_CONTROL_ARCHIVE_BYTES + 2 * MAX_CONTROL_METADATA_BYTES + 1024
-MAX_DECISIONS = 514
+MAX_DECISIONS = MAX_REWARD_DECISIONS
 DecisionSource = Callable[[str], bytes]
 
 
@@ -126,18 +132,51 @@ class RewardActivation(StrictProtocolModel):
     # The first activation names qualified legacy handoff evidence. Later
     # activations name the preceding cohort's certified reward opportunity.
     prior_opportunity_sha256: Hex32
+    reward_adoption_sha256: Hex32 | None = None
+    effective_allocation_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_activation(self, handler):
+        value = handler(self)
+        if self.reward_adoption_sha256 is None:
+            value.pop("reward_adoption_sha256", None)
+            value.pop("effective_allocation_sha256", None)
+        return value
+
+    @model_validator(mode="after")
+    def adopted_pair(self):
+        if (self.reward_adoption_sha256 is None) != (self.effective_allocation_sha256 is None):
+            raise ValueError("effective rewards require their exact authenticated adoption")
+        return self
 
 
 class RewardControlDecision(StrictProtocolModel):
-    schema_: Literal["umi-reward-control-decision/1", "umi-reward-control-decision/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-reward-control-decision/1",
+        "umi-reward-control-decision/2",
+        "umi-reward-control-decision/3",
+    ] = Field(alias="schema")
     series_sha256: Hex32
     sequence: Annotated[int, Field(ge=0, le=MAX_DECISIONS - 1)]
     predecessor_sha256: Hex32 | None
-    kind: Literal["admit_series", "activate", "revoke"]
+    kind: Literal[
+        "admit_series",
+        "activate",
+        "revoke",
+        "suspend_activation",
+        "revise_activation",
+        "resume_activation",
+    ]
     observed_at_block: Block
     activation: RewardActivation | None
+    revision_clearance_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_decision(self, handler):
+        value = handler(self)
+        if self.revision_clearance_sha256 is None:
+            value.pop("revision_clearance_sha256", None)
+        return value
 
     @model_validator(mode="after")
     def shape(self):
@@ -146,7 +185,23 @@ class RewardControlDecision(StrictProtocolModel):
             (self.sequence == 0) != (self.kind == "admit_series")
             or (self.sequence == 0 and successor != (self.predecessor_sha256 is not None))
             or (self.sequence != 0 and self.predecessor_sha256 is None)
-            or (self.kind == "activate") != (self.activation is not None)
+            or (
+                self.kind
+                in {"activate", "suspend_activation", "revise_activation", "resume_activation"}
+            )
+            != (self.activation is not None)
+            or (self.kind == "revise_activation") != (self.revision_clearance_sha256 is not None)
+            or (
+                self.schema_ != "umi-reward-control-decision/3"
+                and (
+                    self.kind in {"suspend_activation", "revise_activation", "resume_activation"}
+                    or (
+                        self.activation is not None
+                        and self.activation.reward_adoption_sha256 is not None
+                    )
+                )
+            )
+            or (self.sequence == 0 and self.schema_ == "umi-reward-control-decision/3")
         ):
             raise ValueError("reward decision fields do not match its transition")
         return self
@@ -164,7 +219,7 @@ class StandingRewardSelection:
     series_sha256: str
     decision_sha256: str
     sequence: int
-    state: Literal["admitted", "draining", "selected", "revoked"]
+    state: Literal["admitted", "draining", "selected", "revoked", "suspended"]
     committed_at_block: int
     effective_at_block: int | None
     activation: RewardActivation | None
@@ -218,6 +273,8 @@ def verify_reward_decisions(
     series: StandingRewardSeries,
     policy: CompetitionPolicy,
     decisions: tuple[SignedRewardControlDecision, ...],
+    *,
+    reward_adoptions: RewardAdoptionSelection | None = None,
 ) -> tuple[SignedRewardControlDecision, ...]:
     """Verify the complete signed prefix without inferring past chain effects."""
     series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
@@ -225,13 +282,23 @@ def verify_reward_decisions(
     if series.policy_sha256 != digest(policy):
         raise ValueError("standing series policy differs from selected policy")
     verify_recovery_authority(series.recovery, policy)
-    if not 1 <= len(decisions) <= len(series.cohorts) + 2:
+    reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
+    if not 1 <= len(decisions) <= reward_decision_capacity(series, reward_adoptions):
         raise ValueError("reward history is empty or exceeds the admitted series")
     selected, previous, activated = [], None, 0
     for index, raw in enumerate(decisions):
         item = SignedRewardControlDecision.model_validate_json(canonical_json_bytes(raw))
         body = item.decision
-        _decision_body(series, policy, index, previous, activated, body)
+        _decision_body(
+            series,
+            policy,
+            index,
+            previous,
+            activated,
+            body,
+            preceding=tuple(selected),
+            reward_adoptions=reward_adoptions,
+        )
         verify_recovery_quorum(body, item.signatures, policy)
         selected.append(item)
         previous = body
@@ -239,7 +306,9 @@ def verify_reward_decisions(
     return tuple(selected)
 
 
-def _decision_body(series, policy, index, previous, activated, body):
+def _decision_body(
+    series, policy, index, previous, activated, body, *, preceding=(), reward_adoptions=None
+):
     predecessor = None if series.predecessor is None else series.predecessor.decision_sha256
     expected_schema = (
         "umi-reward-control-decision/1"
@@ -247,13 +316,20 @@ def _decision_body(series, policy, index, previous, activated, body):
         else "umi-reward-control-decision/2"
     )
     if (
-        body.schema_ != expected_schema
+        (
+            body.schema_ != expected_schema
+            and not (
+                body.schema_ == "umi-reward-control-decision/3"
+                and reward_adoptions is not None
+                and body.sequence > 0
+            )
+        )
         or body.series_sha256 != digest(series)
         or body.sequence != index
         or body.predecessor_sha256 != (digest(previous) if previous else predecessor)
         or (previous is not None and body.observed_at_block < previous.observed_at_block)
         or (previous is not None and previous.kind == "revoke")
-        or body.sequence >= len(series.cohorts) + 2
+        or body.sequence >= reward_decision_capacity(series, reward_adoptions)
     ):
         raise ValueError("reward history changed authority, order, parent or a revoked series")
     if previous is None:
@@ -271,6 +347,52 @@ def _decision_body(series, policy, index, previous, activated, body):
         or body.activation.cohort_sha256 != digest(series.cohorts[activated])
     ):
         raise ValueError("reward history skipped, repeated or reordered an admitted cohort")
+    if body.activation is not None and body.activation.reward_adoption_sha256 is not None:
+        verify_reward_adoption(
+            reward_adoptions,
+            body.activation.reward_adoption_sha256,
+            series=series,
+            policy=policy,
+            activation=body.activation,
+            current_block=body.observed_at_block,
+        )
+    if (
+        previous is not None
+        and previous.kind == "suspend_activation"
+        and body.kind not in {"revise_activation", "resume_activation", "revoke"}
+    ):
+        raise ValueError("suspended rewards require revision, explicit resume or revocation")
+    if body.kind in {"suspend_activation", "revise_activation", "resume_activation"}:
+        original = effective_activation_decision(preceding)
+        if original is None or original.activation is None:
+            raise ValueError("reward revision has no preceding effective activation")
+        old, new = original.activation, body.activation
+        if body.kind == "suspend_activation":
+            if previous.kind == "suspend_activation" or new != old:
+                raise ValueError("reward suspension changes the preceding activation")
+        elif previous.kind != "suspend_activation":
+            raise ValueError("reward revision requires a finalized writer suspension")
+        elif body.kind == "resume_activation":
+            if new != old:
+                raise ValueError("reward resume cannot change the suspended allocation")
+        else:
+            fixed = (
+                "cohort_sha256",
+                "allocation_sha256",
+                "package_sha256",
+                "recovery_tip_sha256",
+                "prior_opportunity_sha256",
+            )
+            if any(getattr(old, k) != getattr(new, k) for k in fixed) or (
+                new.reward_adoption_sha256 is None
+                or new.reward_adoption_sha256 == old.reward_adoption_sha256
+            ):
+                raise ValueError("reward revision changes original evidence or repeats economics")
+            adopted = reward_adoptions.get(new.reward_adoption_sha256).adoption
+            if old.reward_adoption_sha256 is not None and adopted.revision <= (
+                reward_adoptions.get(old.reward_adoption_sha256).adoption.revision
+            ):
+                raise ValueError("reward revision rolls back its signed adoption lineage")
     return body
 
 
@@ -279,6 +401,8 @@ def verify_reward_decision_proposal(
     policy: CompetitionPolicy,
     preceding: tuple[SignedRewardControlDecision, ...],
     decision: RewardControlDecision,
+    *,
+    reward_adoptions: RewardAdoptionSelection | None = None,
 ) -> RewardControlDecision:
     """Check unsigned ordering; native evidence review must precede signing."""
     series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
@@ -286,7 +410,12 @@ def verify_reward_decision_proposal(
     if series.policy_sha256 != digest(policy):
         raise ValueError("standing series policy differs from selected policy")
     verify_recovery_authority(series.recovery, policy)
-    prefix = verify_reward_decisions(series, policy, preceding) if preceding else ()
+    reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
+    prefix = (
+        verify_reward_decisions(series, policy, preceding, reward_adoptions=reward_adoptions)
+        if preceding
+        else ()
+    )
     body = RewardControlDecision.model_validate_json(canonical_json_bytes(decision))
     return _decision_body(
         series,
@@ -295,7 +424,76 @@ def verify_reward_decision_proposal(
         prefix[-1].decision if prefix else None,
         sum(v.decision.kind == "activate" for v in prefix),
         body,
+        preceding=prefix,
+        reward_adoptions=reward_adoptions,
     )
+
+
+def reward_decision_capacity(series, reward_adoptions=None):
+    return (
+        len(series.cohorts) + 2 if reward_adoptions is None else reward_adoptions.maximum_decisions
+    )
+
+
+def effective_activation_decision(prefix, cohort=None, *, through_sequence=None):
+    """Latest economics selection; suspend leaves the previous historical row effective."""
+    for signed in reversed(prefix):
+        body = signed.decision
+        if through_sequence is not None and body.sequence > through_sequence:
+            continue
+        if body.kind in {"activate", "revise_activation", "resume_activation"} and (
+            cohort is None or body.activation.cohort_sha256 == cohort
+        ):
+            return body
+    return None
+
+
+def original_activation_decision(prefix, cohort):
+    return next(
+        (
+            v.decision
+            for v in prefix
+            if v.decision.kind == "activate" and v.decision.activation.cohort_sha256 == cohort
+        ),
+        None,
+    )
+
+
+def retained_reward_decisions(reader):
+    with reader.journal.locked():
+        values = tuple(
+            SignedRewardControlDecision.model_validate_json(
+                canonical_json_bytes(reader.journal.get("reward_control_decision", key))
+            )
+            for key in reader.journal.keys("reward_control_decision")
+        )
+    return (
+        verify_reward_decisions(
+            reader.series, reader.policy, values, reward_adoptions=reader.reward_adoptions
+        )
+        if values
+        else ()
+    )
+
+
+def activation_requires_revision(reader, selection):
+    """Fence stale economics after a newer explicit selection reaches this writer.
+
+    A signed native-reviewed resume is the sole exception: it attests that the
+    preceding row won the live-chain race and its economics are permanently
+    locked. Ordinary old activate/revise decisions cannot use that exception.
+    """
+    selected = reader.reward_adoptions
+    if selected is None or selection.activation is None:
+        return False
+    latest = selected.latest(selection.activation.cohort_sha256)
+    if latest is None or digest(latest.adoption) == selection.activation.reward_adoption_sha256:
+        return False
+    prefix = retained_reward_decisions(reader)
+    current = next(
+        (v.decision for v in prefix if digest(v.decision) == selection.decision_sha256), None
+    )
+    return current is None or current.kind != "resume_activation"
 
 
 class StandingRewardControlReader:
@@ -311,6 +509,7 @@ class StandingRewardControlReader:
         expected_chain_config_sha256: str,
         maximum_bytes: int,
         expected_admission_chain_config_sha256: str | None = None,
+        reward_adoptions: RewardAdoptionSelection | None = None,
     ):
         self.series = StandingRewardSeries.model_validate_json(canonical_json_bytes(series))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -334,6 +533,9 @@ class StandingRewardControlReader:
         if self.series.policy_sha256 != digest(self.policy):
             raise ValueError("standing reader policy differs from its series")
         verify_recovery_authority(self.series.recovery, self.policy)
+        self.reward_adoptions = verify_adoption_selection(
+            reward_adoptions, self.series, self.policy
+        )
         self.journal = RoundJournal(
             root,
             {
@@ -472,7 +674,7 @@ class StandingRewardControlReader:
             committed_at_block
             + self.series.maximum_proof_lag_blocks
             + self.series.maximum_transaction_lifetime_blocks
-            if decision.kind == "activate"
+            if decision.kind in {"activate", "revise_activation", "resume_activation"}
             else None
         )
         state = (
@@ -480,6 +682,8 @@ class StandingRewardControlReader:
             if decision.kind == "admit_series"
             else "revoked"
             if decision.kind == "revoke"
+            else "suspended"
+            if decision.kind == "suspend_activation"
             else "draining"
             if current_block < effective
             else "selected"
@@ -539,7 +743,7 @@ class StandingRewardControlReader:
             raise ValueError("standing control commitment is absent")
         with self.journal.locked():
             keys = self.journal.keys("reward_control_decision")
-            if len(keys) > len(self.series.cohorts) + 2:
+            if len(keys) > reward_decision_capacity(self.series, self.reward_adoptions):
                 raise ValueError("retained reward history exceeds the admitted series")
             retained = {}
             for index, key in enumerate(keys):
@@ -562,7 +766,9 @@ class StandingRewardControlReader:
                     raise ValueError(
                         "current reward history does not reach its predecessor boundary"
                     )
-                if len(reversed_chain) >= len(self.series.cohorts) + 2:
+                if len(reversed_chain) >= reward_decision_capacity(
+                    self.series, self.reward_adoptions
+                ):
                     raise ValueError("current reward history exceeds the admitted series")
                 item = retained.get(key)
                 if item is None:
@@ -577,7 +783,10 @@ class StandingRewardControlReader:
                 reversed_chain.append(item)
                 key = item.decision.predecessor_sha256
             decisions = verify_reward_decisions(
-                self.series, self.policy, tuple(reversed(reversed_chain))
+                self.series,
+                self.policy,
+                tuple(reversed(reversed_chain)),
+                reward_adoptions=self.reward_adoptions,
             )
             committed_blocks = (
                 None

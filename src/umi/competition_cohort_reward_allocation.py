@@ -1,7 +1,8 @@
 """Immutable service/model amounts and fresh registration projection.
 
 Version 1 uses promotion attribution, version 2 a single model award, version 3
-content-proportional model awards, and version 4 fixed quality-bucket awards.
+content-proportional model awards, version 4 fixed quality-bucket awards, and
+version 5 independently normalized geometric occupied bands and model ranks.
 All require certification before submission.
 """
 
@@ -9,7 +10,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from fractions import Fraction
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
@@ -20,18 +21,24 @@ from .competition_chain_state import (
 )
 from .competition_cohort_model_award import (
     MODEL_AWARD_ADAPTER,
+    GeometricModelAward,
     ModelArtifactVerifier,
     ModelAward,
     ProportionalModelAward,
     QualityBucketModelAward,
     build_model_award,
+    derive_geometric_model_award,
     read_model_acceptances,
 )
 from .competition_cohort_quality import ClosedQualityReview
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
-from .competition_cohort_recovery import ModelRewardCohortAuthority
+from .competition_cohort_recovery import (
+    GeometricModelRewardCohortAuthority,
+    ModelRewardCohortAuthority,
+)
 from .competition_cohort_service_allocation import (
     RawWeight,
+    ServiceAllocation,
     ServiceRecipientAmount,
     apportion_work_budget,
 )
@@ -40,11 +47,15 @@ from .competition_cohort_service_certification import (
     ServiceAllocationReview,
     verify_service_allocation_certificate,
 )
+from .competition_geometric_rewards import GeometricRewardParameters
 from .competition_round_journal import RecordReservation, RoundJournal
 from .competition_settlement import PromotionHeadBinding
 from .competition_store import CompetitionStore
 from .open_competition import CompetitionPolicy, Hotkey, RegistrationSnapshot, digest, identity
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
+
+if TYPE_CHECKING:
+    from .competition_cohort_reward_package import CohortRewardPackage
 
 
 class CohortRewardAllocation(StrictProtocolModel):
@@ -53,6 +64,7 @@ class CohortRewardAllocation(StrictProtocolModel):
         "umi-cohort-reward-allocation/2",
         "umi-cohort-reward-allocation/3",
         "umi-cohort-reward-allocation/4",
+        "umi-cohort-reward-allocation/5",
     ] = Field(alias="schema")
     policy_sha256: Hex32
     round_sha256: Hex32
@@ -80,10 +92,13 @@ class CohortRewardAllocation(StrictProtocolModel):
                 raise ValueError("legacy reward allocation requires only promotion attribution")
         elif self.model_award is None or self.promotion_head is not None:
             raise ValueError("model award allocation requires only the cohort model decision")
-        elif (self.schema_ == "umi-cohort-reward-allocation/4") != isinstance(
-            self.model_award, QualityBucketModelAward
-        ) or (self.schema_ == "umi-cohort-reward-allocation/3") != isinstance(
-            self.model_award, ProportionalModelAward
+        elif (
+            (self.schema_ == "umi-cohort-reward-allocation/5")
+            != isinstance(self.model_award, GeometricModelAward)
+            or (self.schema_ == "umi-cohort-reward-allocation/4")
+            != isinstance(self.model_award, QualityBucketModelAward)
+            or (self.schema_ == "umi-cohort-reward-allocation/3")
+            != isinstance(self.model_award, ProportionalModelAward)
         ):
             raise ValueError("reward allocation version differs from its model award")
         keys = [identity(r.hotkey) for r in self.recipients]
@@ -135,7 +150,15 @@ def build_reward_allocation(
             or model_award.rule != benchmark_review.history.authority.authority.model_reward_rule
         ):
             raise ValueError("model award belongs to different quality or authority")
-        if isinstance(model_award, (ProportionalModelAward, QualityBucketModelAward)):
+        if isinstance(model_award, GeometricModelAward):
+            authority = benchmark_review.history.authority.authority
+            if (
+                not isinstance(authority, GeometricModelRewardCohortAuthority)
+                or model_award.parameters != authority.model_reward_parameters
+            ):
+                raise ValueError("geometric model parameters differ from signed authority")
+            model_recipients, model_credits = _geometric_credit_maps(model_award)
+        elif isinstance(model_award, (ProportionalModelAward, QualityBucketModelAward)):
             bucketed = isinstance(model_award, QualityBucketModelAward)
             model_recipients = {
                 f"bucket:{c.bucket_index:04d}" if bucketed else c.content_sha256: c.recipient_hotkey
@@ -167,6 +190,44 @@ def build_reward_allocation(
         or service_amounts.request_closure_sha256 != benchmark.request_closure_sha256
     ):
         raise ValueError("service and benchmark evidence must belong to the same closed round")
+    recipients, burn = _combine_model_credits(service_amounts, model_recipients, model_credits)
+    return CohortRewardAllocation(
+        schema="umi-cohort-reward-allocation/5"
+        if isinstance(model_award, GeometricModelAward)
+        else "umi-cohort-reward-allocation/4"
+        if isinstance(model_award, QualityBucketModelAward)
+        else "umi-cohort-reward-allocation/3"
+        if isinstance(model_award, ProportionalModelAward)
+        else "umi-cohort-reward-allocation/2"
+        if model_award is not None
+        else "umi-cohort-reward-allocation/1",
+        policy_sha256=statement.policy_sha256,
+        round_sha256=statement.round_sha256,
+        service_certificate_sha256=digest(service),
+        quality_manifest_sha256=digest(benchmark),
+        promotion_head=promotion,
+        model_award=model_award,
+        recipients=recipients,
+        burn_weight=burn,
+    )
+
+
+def _geometric_credit_maps(award: GeometricModelAward):
+    # A single apportionment over all model credits precedes hotkey aggregation.
+    # Equal fractional remainders follow the exact score/acceptance rank order.
+    recipients, weights = {}, {}
+    for rank, credit in enumerate(award.credits):
+        key = f"rank:{rank:04d}:{credit.content_sha256}"
+        recipients[key] = credit.recipient_hotkey
+        weights[key] = Fraction(int(credit.weight.numerator), int(credit.weight.denominator))
+    return recipients, weights
+
+
+def _combine_model_credits(
+    service_amounts: ServiceAllocation,
+    model_recipients: dict[str, str],
+    model_credits: dict[str, Fraction],
+) -> tuple[tuple[ServiceRecipientAmount, ...], int]:
     amounts, hotkeys = defaultdict(int), {}
     for item in service_amounts.recipients:
         who = identity(item.hotkey)
@@ -182,25 +243,68 @@ def build_reward_allocation(
         key = identity(model_recipient)
         amounts[key] += amount
         hotkeys[key] = min(hotkeys.get(key, model_recipient), model_recipient)
-    return CohortRewardAllocation(
-        schema="umi-cohort-reward-allocation/4"
-        if isinstance(model_award, QualityBucketModelAward)
-        else "umi-cohort-reward-allocation/3"
-        if isinstance(model_award, ProportionalModelAward)
-        else "umi-cohort-reward-allocation/2"
-        if model_award is not None
-        else "umi-cohort-reward-allocation/1",
-        policy_sha256=statement.policy_sha256,
-        round_sha256=statement.round_sha256,
-        service_certificate_sha256=digest(service),
-        quality_manifest_sha256=digest(benchmark),
-        promotion_head=promotion,
-        model_award=model_award,
-        recipients=tuple(
+    return (
+        tuple(
             ServiceRecipientAmount(hotkey=hotkeys[key], raw_weight=amount)
             for key, amount in sorted(amounts.items())
             if amount
         ),
+        burn,
+    )
+
+
+def derive_effective_reward_allocation(
+    package: CohortRewardPackage, parameters: GeometricRewardParameters
+) -> CohortRewardAllocation:
+    """Pure adopted allocation from original certified inputs, without rewriting them.
+
+    Callers must first natively verify the original reward package and authenticate
+    the signed adoption. This operation grants no signing or chain authority and
+    does not read, rehash or replay the package's large retained payload inventory.
+    """
+    original = CohortRewardAllocation.model_validate_json(canonical_json_bytes(package.allocation))
+    service = CertifiedServiceAllocation.model_validate_json(canonical_json_bytes(package.service))
+    award = original.model_award
+    authority = package.inputs.history.authority.authority
+    if award is None or not isinstance(authority, ModelRewardCohortAuthority):
+        raise ValueError("geometric adoption requires original certified model award evidence")
+    if (
+        original.policy_sha256 != package.policy_sha256
+        or original.service_certificate_sha256 != digest(service)
+        or original.quality_manifest_sha256 != digest(package.benchmark)
+        or service.statement.policy_sha256 != original.policy_sha256
+        or service.statement.round_sha256 != original.round_sha256
+        or award.policy_sha256 != original.policy_sha256
+        or award.round_sha256 != original.round_sha256
+        or award.quality_manifest_sha256 != original.quality_manifest_sha256
+        or award.authority_sha256 != digest(authority)
+        or award.rule != authority.model_reward_rule
+        or service.statement.allocation.request_closure_sha256
+        != package.benchmark.request_closure_sha256
+    ):
+        raise ValueError("geometric adoption original inputs have inconsistent bindings")
+    if isinstance(award, GeometricModelAward) and (
+        not isinstance(authority, GeometricModelRewardCohortAuthority)
+        or award.parameters != authority.model_reward_parameters
+    ):
+        raise ValueError("original geometric parameters differ from signed authority")
+    amounts = service.statement.allocation
+    if (
+        amounts.service_budget + amounts.model_budget != 65535
+        or sum(item.raw_weight for item in amounts.recipients) + amounts.burn_weight
+        != amounts.service_budget
+    ):
+        raise ValueError("original service allocation does not conserve its signed budgets")
+    effective = derive_geometric_model_award(award, parameters)
+    recipients, burn = _combine_model_credits(amounts, *_geometric_credit_maps(effective))
+    return CohortRewardAllocation(
+        schema="umi-cohort-reward-allocation/5",
+        policy_sha256=original.policy_sha256,
+        round_sha256=original.round_sha256,
+        service_certificate_sha256=original.service_certificate_sha256,
+        quality_manifest_sha256=original.quality_manifest_sha256,
+        model_award=effective,
+        recipients=recipients,
         burn_weight=burn,
     )
 
