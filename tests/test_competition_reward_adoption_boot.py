@@ -25,7 +25,7 @@ from .test_competition_reward_coordinator_boot import config_case as config_case
 from .test_open_competition import wallet
 
 
-def selected_adoption(config, *, series=None):
+def selected_adoption(config, *, series=None, timing=False):
     series = series or config.series
     body = RewardModelAdoption(
         schema="umi-standing-model-reward-adoption/1",
@@ -44,6 +44,29 @@ def selected_adoption(config, *, series=None):
         issued_at_block=series.recovery.authority.issued_at_block,
         lifetime="until_first_verified_live_reward_then_locked",
     )
+    if timing:
+        from umi.competition_reward_timing import THREE_DAYS_MS, RewardActivationAge
+
+        start = series.cohorts[0].not_before_block
+        body = RewardModelAdoption.model_validate(
+            {
+                **body.model_dump(by_alias=True),
+                "schema": "umi-standing-model-reward-adoption/2",
+                "issued_at_block": start + 1,
+                "activation_age": RewardActivationAge(
+                    schema="umi-reward-activation-age/1",
+                    rule="skip_activation_delay_if_older_than_three_days",
+                    cohort_start_block=start,
+                    cohort_start_hash="c1" * 32,
+                    cohort_start_timestamp_ms=1,
+                    start_evidence_sha256="c2" * 32,
+                    observed_at_block=start + 1,
+                    observed_block_hash="d1" * 32,
+                    observed_timestamp_ms=THREE_DAYS_MS + 2,
+                    observation_evidence_sha256="d2" * 32,
+                ),
+            }
+        )
     signed = SignedRewardModelAdoption(
         adoption=body,
         signatures=tuple(
@@ -59,12 +82,17 @@ def selected_adoption(config, *, series=None):
 
 
 @pytest.mark.parametrize("role", ["writer", "coordinator"])
-def test_optional_adoption_preserves_old_bytes_and_original_state(inputs, config_case, role):
+@pytest.mark.parametrize("timing", [False, True])
+def test_optional_adoption_preserves_old_bytes_and_original_state(
+    inputs, config_case, role, timing
+):
     original = inputs.value if role == "writer" else config_case.config
     raw = canonical_json_bytes(original)
     assert b'"reward_adoptions"' not in raw
     assert b'"predecessor_reward_adoptions"' not in raw
-    selected = original.model_copy(update={"reward_adoptions": selected_adoption(original)})
+    selected = original.model_copy(
+        update={"reward_adoptions": selected_adoption(original, timing=timing)}
+    )
     checked = type(original).model_validate_json(canonical_json_bytes(selected))
     assert checked.reward_adoptions == selected.reward_adoptions
     assert canonical_json_bytes(checked.model_copy(update={"reward_adoptions": None})) == raw

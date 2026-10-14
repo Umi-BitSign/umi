@@ -23,6 +23,7 @@ from .competition_reward_decisions import (
     original_activation_decision,
 )
 from .competition_reward_revision_journal import RevisionProgressJournal
+from .competition_reward_timing import activation_effective_block
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
@@ -112,7 +113,9 @@ def validate_live_lock(value, *, decision, series):
     return value
 
 
-def validate_revision_clearance(value, *, decision, prefix, series, history=None):
+def validate_revision_clearance(
+    value, *, decision, prefix, series, history=None, reward_adoptions=None
+):
     if (
         type(value) is not OwnedRewardRevisionClearance
         or value._issuer is not _ISSUER
@@ -137,7 +140,10 @@ def validate_revision_clearance(value, *, decision, prefix, series, history=None
         or prefix[-1].decision.kind != "suspend_activation"
         or not writes
         or facts.suspension_committed_at_block != writes.get(decision.predecessor_sha256)
-        or facts.first_block != writes.get(digest(original), -delay) + delay
+        or facts.first_block
+        != activation_effective_block(
+            series, original, writes.get(digest(original), -delay), reward_adoptions
+        )
         or facts.drained_at_block != facts.suspension_committed_at_block + delay
         or facts.through_block != decision.observed_at_block
         or facts.drained_at_block > facts.through_block
@@ -291,10 +297,8 @@ class NativeRewardRevisionReviewer:
         # check for reservation and again before submission. An older coincident
         # row is not a C5 activation. No supported C5 writer can authorize an
         # original C5 transaction before this exact first-effective boundary.
-        first = (
-            original_write
-            + series.maximum_proof_lag_blocks
-            + series.maximum_transaction_lifetime_blocks
+        first = activation_effective_block(
+            series, original, original_write, reader.reward_adoptions
         )
         accounts = tuple(identity(k) for k in series.validators)
         binding = digest([digest(suspension), first, through, accounts])
@@ -305,9 +309,9 @@ class NativeRewardRevisionReviewer:
         economics = tuple(
             (
                 v.decision.activation,
-                writes[digest(v.decision)]
-                + series.maximum_proof_lag_blocks
-                + series.maximum_transaction_lifetime_blocks,
+                activation_effective_block(
+                    series, v.decision, writes[digest(v.decision)], reader.reward_adoptions
+                ),
             )
             for v in prefix
             if v.decision.kind in {"activate", "revise_activation", "resume_activation"}

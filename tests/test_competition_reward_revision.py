@@ -53,7 +53,7 @@ def revision_case(series_case, tmp_path):
         update={"maximum_proof_lag_blocks": 1, "maximum_transaction_lifetime_blocks": 2}
     )
     journal = RoundJournal(tmp_path / "revision", series)
-    reader = SimpleNamespace(series=series)
+    reader = SimpleNamespace(series=series, reward_adoptions=None)
     reader.review_history = lambda control, source, history: SimpleNamespace(
         selection=SimpleNamespace(
             decision_sha256=digest(h.suspension.decision), committed_at_block=h.suspension_block
@@ -306,6 +306,7 @@ async def test_repeated_revision_reuses_original_endpoints_and_selects_historica
     await h.owner().review(prefix=h.prefix, control=h.control(505), history=h.history)
     first_captured = set(h.captured)
     _, selected = adoption_case(c)
+    h.coverage.preparation.reader.reward_adoptions = selected
     active = revised(h.old, selected.adoptions[0])
     revision = transition(
         c, h.prefix, "revise_activation", active, clearance="c1" * 32, observed=505

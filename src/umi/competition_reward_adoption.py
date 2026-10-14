@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_recovery import Block, verify_recovery_quorum
 from .competition_cohort_reward_allocation import derive_effective_reward_allocation
 from .competition_geometric_rewards import GeometricRewardParameters
+from .competition_reward_timing import RewardActivationAge
 from .competition_verification_snapshot import verified_package_digest
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -24,7 +25,9 @@ MAX_REWARD_DECISIONS = 10000
 
 
 class RewardModelAdoption(StrictProtocolModel):
-    schema_: Literal["umi-standing-model-reward-adoption/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-standing-model-reward-adoption/1", "umi-standing-model-reward-adoption/2"
+    ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
     cohort_sha256: Hex32
@@ -41,8 +44,25 @@ class RewardModelAdoption(StrictProtocolModel):
     lifetime: Literal["until_first_verified_live_reward_then_locked"]
     original_signed_inputs_unchanged: Literal[True] = True
 
+    activation_age: RewardActivationAge | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_adoption(self, handler):
+        value = handler(self)
+        if self.activation_age is None:
+            value.pop("activation_age", None)
+        return value
+
     @model_validator(mode="after")
     def lineage(self):
+        if (self.schema_ == "umi-standing-model-reward-adoption/2") != (
+            self.activation_age is not None
+        ):
+            raise ValueError("reward timing requires an explicit versioned adoption")
+        if self.activation_age is not None and (
+            self.activation_age.observed_at_block > self.issued_at_block
+        ):
+            raise ValueError("reward timing observation is ahead of adoption issuance")
         if (self.revision == 1) != (self.predecessor_adoption_sha256 is None):
             raise ValueError("reward adoption requires its exact revision predecessor")
         return self
@@ -112,7 +132,7 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
     value = RewardAdoptionSelection.model_validate_json(canonical_json_bytes(selection))
     if value.maximum_decisions < len(series.cohorts) + 2:
         raise ValueError("reward decision capacity cannot contain the admitted cohorts")
-    cohorts = {digest(c) for c in series.cohorts}
+    cohorts = {digest(c): c for c in series.cohorts}
     for signed in value.adoptions:
         body = signed.adoption
         if (
@@ -123,6 +143,8 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
             or body.issued_at_block < series.recovery.authority.issued_at_block
         ):
             raise ValueError("reward adoption differs from the selected standing authority")
+        if body.activation_age is not None:
+            body.activation_age.check_plan(cohorts[body.cohort_sha256])
         # The original policy selects the independent quorum, not new economics.
         # This distinct forward contract is selected explicitly by every host.
         verify_recovery_quorum(body, signed.signatures, policy)

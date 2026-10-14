@@ -922,6 +922,31 @@ predecessor's. Omitted fields preserve the original canonical startup bytes.
 Keep the original host approval, state directories and journal identities;
 the separately signed adoption is selected by the root-owned startup configuration.
 
+Reward adoption version 2 can carry `activation_age` with the rule
+`skip_activation_delay_if_older_than_three_days`. It binds native chain timestamps
+at the signed cohort's `not_before_block` and a finalized observation, their block
+hashes and evidence identities. Strictly more than 259,200,000 milliseconds
+waives the additional activation delay; equality and younger observations retain
+the series delay. The adopted activation becomes effective at its finalized
+commitment. Local wall time and nominal block cadence do not establish age.
+
+Stopped-owner reconciliation automatically prepares these age facts when the
+cohort start is within its completed history. `review_activation_age` verifies
+only the start's scoped timestamp proof and reuses a durable successful receipt;
+the current timestamp comes from the already owned fresh control observation.
+Refresh a younger unsigned observation before signing if preparation crosses
+three days. Publish the age in a new signed version-2 adoption and select its
+complete lineage on every consuming host. This does not amend an older signed
+activation or retroactively change its effective boundary. Original version-1
+adoptions and signed history retain their bytes and timing.
+
+The reconciliation report distinguishes original `signed_delay_blocks`, desired
+`selected_activation_delay_blocks`, and the current finalized activation's
+remaining blocks. An age waiver removes only the activation start delay.
+Pending transactions, suspension drains, predecessor handoff, native proof work
+and finalized reward-row verification remain required. A source release alone
+does not establish that an installed cohort selected this amendment.
+
 Changing the desired adoption stops stale preparations before reservation,
 signing and sending. An activation already reserved keeps its exact signed
 bytes. The coordinator suspends that activation, waits for finalized proof-lag

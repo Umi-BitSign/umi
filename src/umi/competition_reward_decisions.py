@@ -42,6 +42,7 @@ from .competition_reward_control_archive import (
     validate_historical_reward_control,
 )
 from .competition_reward_history import OwnedRewardControlHistory, validate_control_history
+from .competition_reward_timing import activation_effective_block
 from .competition_round_journal import RoundJournal
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
@@ -670,12 +671,8 @@ class StandingRewardControlReader:
     def _selection_at(
         self, decision: RewardControlDecision, committed_at_block: int, current_block: int
     ) -> StandingRewardSelection:
-        effective = (
-            committed_at_block
-            + self.series.maximum_proof_lag_blocks
-            + self.series.maximum_transaction_lifetime_blocks
-            if decision.kind in {"activate", "revise_activation", "resume_activation"}
-            else None
+        effective = activation_effective_block(
+            self.series, decision, committed_at_block, self.reward_adoptions
         )
         state = (
             "admitted"

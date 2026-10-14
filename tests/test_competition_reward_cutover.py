@@ -68,19 +68,38 @@ async def cutover_case(historical, config_case, monkeypatch, tmp_path, request):
     h, original = historical, config_case.config
     first = h.old.height
     authority = original.series.recovery.authority.model_copy(update={"issued_at_block": first})
+    plans = original.series.cohorts
+    if mode == "age":
+        plans = tuple(p.model_copy(update={"not_before_block": first}) for p in plans)
+        authority = authority.model_copy(
+            update={"cohort_sha256s": tuple(sorted(digest(p) for p in plans))}
+        )
+    manifest = original.manifest.model_copy(
+        update={
+            "cohorts": tuple(
+                r.model_copy(update={"cohort_sha256": digest(p)})
+                for r, p in zip(original.manifest.cohorts, plans, strict=True)
+            )
+        }
+    )
     series = original.series.model_copy(
         update={
             "recovery": SignedCohortRecoveryAuthority(
                 authority=authority, signatures=signatures(authority)
             ),
             "maximum_proof_lag_blocks": 7200,
+            "cohorts": plans,
+            "manifest_sha256": digest(manifest),
         }
     )
     config = original.model_copy(
         update={
             "series": series,
+            "manifest": manifest,
             "chain": h.item.config,
-            "handoff": original.handoff.model_copy(update={"series_sha256": digest(series)}),
+            "handoff": original.handoff.model_copy(
+                update={"series_sha256": digest(series), "cohort_sha256": digest(plans[0])}
+            ),
         }
     )
     config = type(config).model_validate_json(canonical_json_bytes(config))
@@ -376,3 +395,41 @@ async def test_native_header_recovery_is_resumable_or_capacity_pending(
         assert "recovery_eta_basis" in result
         monkeypatch.setattr(review, "_recover", original)
         assert (await review.step(c.cohort))["status"] == "reconciled"
+
+
+@pytest.mark.parametrize("cutover_case", ["age"], indirect=True)
+async def test_reconciliation_produces_native_age_and_reuses_it_on_restart(
+    cutover_case, monkeypatch
+):
+    c = cutover_case
+    with hold_reward_cutover_owner(c.config) as lease:
+        first = await c.review(lease).step(c.cohort)
+    age = first["activation_age"]
+    assert age["cohort_start_block"] == c.history.first_block
+    assert age["observed_at_block"] == first["history_through_block"]
+    assert age["observed_timestamp_ms"] >= age["cohort_start_timestamp_ms"]
+    assert first["selected_activation_delay_blocks"] == 7328
+    c.restart()
+    import umi.competition_reward_timing_review as timing
+
+    async def cannot_repeat(*args, **kwargs):
+        raise AssertionError("unchanged cohort timestamp must be reused")
+
+    monkeypatch.setattr(timing, "verify_slot_archive", cannot_repeat)
+
+    def cannot_parse(*args, **kwargs):
+        raise AssertionError("unchanged start proof must not be read or hashed")
+
+    monkeypatch.setattr(timing, "_Archive", cannot_parse)
+    original_load = c.history._load
+
+    def bounded_load(height):
+        if height == c.history.first_block:
+            cannot_parse()
+        return original_load(height)
+
+    monkeypatch.setattr(c.history, "_load", bounded_load)
+    with hold_reward_cutover_owner(c.config) as lease:
+        second = await c.review(lease).step(c.cohort)
+    assert second["activation_age"] == age
+    assert not second["publication_authorized"]
