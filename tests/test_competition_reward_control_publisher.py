@@ -18,9 +18,13 @@ from umi import competition_reward_control_signing as nonce_module
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
 from umi.competition_reward_control_journal import (
     RewardControlTransactionJournal,
+    check_control_transaction,
     verify_control_transaction_bytes,
 )
-from umi.competition_reward_control_publisher import StandingControlPublisher
+from umi.competition_reward_control_publisher import (
+    StandingControlPublisher,
+    check_control_transmission,
+)
 from umi.competition_reward_decisions import StandingRewardControlReader
 from umi.competition_reward_files import StandingRewardFiles
 from umi.competition_reward_history import RewardControlHistoryReader
@@ -28,6 +32,7 @@ from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.signed_extrinsic import encode_mortal_call
 
+from .test_competition_reward_bootstrap import bootstrap_case
 from .test_competition_reward_decisions import chain as chain
 from .test_competition_reward_decisions import chain_config as chain_config
 from .test_competition_reward_decisions import control as control
@@ -332,3 +337,44 @@ async def test_missing_delivery_and_unowned_writer_cannot_submit(publisher_case)
     with h.publisher.hold_writer(), pytest.raises((ValueError, OSError)):
         await h.publisher.step((h.c.genesis,))
     assert h.signs == h.sends == []
+
+
+async def test_bootstrap_transaction_recovery_and_preflight_reject_same_hash_recommit(
+    publisher_case,
+):
+    h, b = publisher_case, bootstrap_case(publisher_case.c)
+    h.publisher.reader.reward_adoptions = b.selection
+    h.files.retain_decision(b.genesis)
+    h.files.retain_adoption(b.adoption)
+
+    def state(committed):
+        value = h.state(current=b.anchor.control_sha256)
+        control = replace(value.control, committed_at_block=committed)
+        control = replace(control, _binding=control_module._binding(control))
+        value = replace(value, control=control)
+        return replace(value, _binding=nonce_module._binding(value))
+
+    h.current = state(130)
+    with h.publisher.hold_writer():
+        result = await h.publisher.step((b.genesis,))
+    assert result.status == "submitted_unconfirmed"
+    pending = h.publisher.journal.pending()
+    check_control_transaction(pending.intent, h.current, h.c.series)
+    verify_control_transaction_bytes(
+        pending.intent, bytes.fromhex(pending.signed.encoded), h.current, h.c.series
+    )
+    changed = state(131)
+    with pytest.raises(ValueError, match="original signing context"):
+        check_control_transaction(pending.intent, changed, h.c.series)
+    with pytest.raises(ValueError, match="original signing context"):
+        verify_control_transaction_bytes(
+            pending.intent, bytes.fromhex(pending.signed.encoded), changed, h.c.series
+        )
+    with pytest.raises(ValueError, match="current predecessor"):
+        check_control_transmission(
+            pending,
+            original=h.current,
+            fresh=changed,
+            config=digest(h.item.config),
+            hotkey=h.item.hotkey,
+        )

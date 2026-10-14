@@ -686,6 +686,62 @@ proofs as completed checks. This command cannot recover an older running reader'
 volatile verified prefix. Keep that owner running through its handoff when
 preserving those completed checks requires it.
 
+### Original successful exports without completed admission
+
+The selected installed342 owner may finish native block verification but fail
+before recording its initial admission intent. Do not manufacture that intent or
+use the completed-admission migrator. The supported local export migration
+preserves individual successful native checks and reconstructs all writes and
+unresolved effects with the native decoder. The ordinary history reader still
+applies those effects in block order and checks fresh finalized ancestry before
+issuing history. Admission and reward authority remain separate.
+
+This migration requires an explicit administrator-selected origin contract for
+the original private export namespace. The deployment and transport history must
+establish its exclusive original publisher; generic archives, imported frames
+and a supplied checksum do not qualify. While that exact original owner is
+still running, capture the selection with
+`python -m umi.competition_reward_history_origin_cli capture --original-owner PATH --through-block HEIGHT --select-exclusive-original-namespace`.
+Seal its exact stdout as a root-owned mode0444 file under root-only writable
+ancestors. Capture checks the unchanged installed source, original owner seal,
+configuration, service invocation, namespace identities and a fresh original
+export. Its prefix evidence establishes completed native block checks, never an
+empty write list or aggregate admission completion.
+
+After qualifying the full cutover and provisioning metadata capacity, stop and
+fence the original owner cooperatively. Under the original service account run
+`python -m umi.competition_reward_history_origin_cli migrate --origin PATH --maximum-history-bytes BYTES`.
+The command takes the existing stopped-owner locks before initializing mutation
+tracking, writes normal atomic per-block checkpoints in the original journal,
+and preserves every raw proof and signed input. A bounded `--maximum-blocks`
+invocation or interruption resumes from completed checkpoints. SIGTERM and
+SIGINT drain the current block before returning a resumable interrupted result.
+It exposes count,
+elapsed time, planning/measured ETA and stalled/repair states; these estimates
+exclude fresh finality, admission, writer preparation and rewards activation.
+
+After all selected blocks have checkpoints, pass the same root seal to the
+no-publishing cutover runner as `--original-export-origin PATH`, together with
+`--original-owner-selection PATH`. This route requires complete indexed coverage
+before constructing any provider; it does not require or create a completed
+admission certificate. The ordinary reader checks every retained result and its
+source revisions, then reconstructs ordered history and fresh finality. The
+operation pins the origin digest across restart. An incomplete migration must
+resume with the migration command; reconciliation never fills its gaps by
+silently repeating the old proof pass.
+
+Projection reads the required metadata, extrinsics and event values while
+retaining dependencies on unchanged proof/code objects. It does not re-execute
+their verification. Split fields whose old format lacks a whole-field digest
+require bounded original expansion. Source revisions invalidate affected
+checkpoints; missing checkpoint markers, changed sources or origin seals require
+explicit repair. Retain both root seals, original journal identity and selected
+export namespace while migrated results depend on them. Removing or relocating
+these dependencies requires a qualified follow-up migration. This compatibility
+path is needed only by supported installed342 recovery consumers; successor
+owners already retain normal successful block checkpoints during verification.
+It does not by itself migrate a different writer's independent history state.
+
 ### Completed original admission migration
 
 `migrate_completed_admission` in
@@ -946,6 +1002,31 @@ remaining blocks. An age waiver removes only the activation start delay.
 Pending transactions, suspension drains, predecessor handoff, native proof work
 and finalized reward-row verification remain required. A source release alone
 does not establish that an installed cohort selected this amendment.
+
+An initial standing series whose reserved control slot still contains a historical
+bootstrap manifest needs an explicit bootstrap transition. Reward adoption version
+3 carries `bootstrap_predecessor`: the original signed manifest, reserved control
+hotkey and exact commitment block, which must precede recovery-authority issuance.
+It may also carry `activation_age`. The historical bootstrap coordinator signature
+is verified under its original policy; its key need not equal the standing control
+key. This recognition does not renew the bootstrap service interval.
+
+The first standing decision uses version 4 and binds that exact first adoption and
+commitment block. All hosts select the same immutable lineage, and replication
+delivers the adoption before the admission decision. Native admission still requires
+the complete selected history with no intervening writes or unresolved effects and
+an exact current slot match. A same-hash recommit is not the original boundary.
+Later economics revisions cannot change the initial anchor or reinterpret an
+already retained ordinary admission. Original series, decisions and adoptions keep
+their canonical bytes; standing successor boundaries are unchanged.
+
+Before signing, stopped-owner reconciliation can take `--bootstrap-manifest` as a
+bounded diagnostic input. Its original signature, native commitment and empty
+effects must match, with no conflicting retained decision, intent or pending
+transaction. The report supplies an unsigned `bootstrap_predecessor`; it grants no
+signing or publication authority. Keep this input and operation unchanged across
+retries. The completed-admission migration remains applicable only when its original
+native signed admission exists; a failed admission is not such a checkpoint.
 
 Changing the desired adoption stops stale preparations before reservation,
 signing and sending. An activation already reserved keeps its exact signed

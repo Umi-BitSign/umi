@@ -15,6 +15,7 @@ from dataclasses import asdict
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
+from .competition_reward_history_origin import check_checkpoint_origin
 from .competition_verification_rules import runtime_identity
 from .open_competition import digest
 
@@ -101,6 +102,7 @@ class HistoryCheckpoints:
 
     def _initialize(self, journal, binding):
         self.journal = journal
+        self._original_export_origins = {}
         self.remote_sources = None
         directory = journal.root.stat()
         database = journal.path.stat()
@@ -311,6 +313,7 @@ class HistoryCheckpoints:
                 )
             self.validate(value)
             self.check_sources(value["sources"], db)
+            check_checkpoint_origin(self.journal, value, db, self._original_export_origins)
             return value
 
     def validate(self, value):

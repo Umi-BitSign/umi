@@ -45,6 +45,9 @@ def retain_standing_reward_inputs(
     """
     prefix = verify_reward_decisions(series, policy, decisions, reward_adoptions=reward_adoptions)
     for signed in prefix:
+        admission = signed.decision.admission_adoption_sha256
+        if admission is not None:
+            files.retain_adoption(reward_adoptions.get(admission))
         activation = signed.decision.activation
         if activation is None:
             continue

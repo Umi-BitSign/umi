@@ -77,6 +77,7 @@ def coordinator_case(publisher_case, tmp_path, monkeypatch):
             wallet("Charlie").hotkey.ss58_address,
             expected_chain_config_sha256=digest(h.item.config),
             maximum_bytes=16 * 1024**2,
+            reward_adoptions=h.publisher.reader.reward_adoptions,
         )
 
         async def sign(body):
@@ -324,3 +325,28 @@ async def test_bounded_header_progress_continues_without_failure_backoff(role, o
     assert len(calls) == (2 if outcome == "progress" else 1)
     if outcome != "progress":
         assert waits == [True]
+
+
+async def test_bootstrap_producer_and_restart_require_adoption_readback(coordinator_case):
+    from .test_competition_reward_bootstrap import bootstrap_case
+
+    h = coordinator_case
+    b = bootstrap_case(h.c)
+    h.publisher.reader.reward_adoptions = b.selection
+    h.coordinator = h.reopen_coordinator()
+    with h.publisher.hold_writer():
+        assert (await h.coordinator.step()).status == "certified_delivery_pending"
+        genesis = h.owner.journal.prefix(1)[0]
+        assert genesis.decision.schema_ == "umi-reward-control-decision/4"
+        assert genesis.decision.predecessor_sha256 == b.anchor.control_sha256
+        assert genesis.decision.admission_adoption_sha256 == digest(b.adoption.adoption)
+        assert genesis.decision.admission_predecessor_committed_at_block == 130
+        assert h.publisher.files.adoption(digest(b.adoption.adoption)) == b.adoption
+    h.coordinator = h.reopen_coordinator()
+    h.readback.retain_decision(genesis)
+    with h.publisher.hold_writer():
+        assert (await h.coordinator.step()).status == "delivery_pending"
+        assert not h.sends
+        h.readback.retain_adoption(b.adoption)
+        h.coordinator._readback((genesis,))
+        assert h.owner.journal.prefix(1)[0] == genesis

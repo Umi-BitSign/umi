@@ -17,6 +17,7 @@ from functools import partial
 
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_progress import _failure_details
+from .competition_reward_adoption import initial_reward_boundary
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_publisher import StandingControlPublisher
 from .competition_reward_decision_review import ReviewedRewardDecision, review_reward_decision
@@ -310,6 +311,11 @@ class StandingRewardCoordinator:
             sha = digest(item.decision)
             if self.readback.decision(sha) != self.publisher.files.decision(sha):
                 raise ValueError("independent decision readback differs from original delivery")
+            admission = item.decision.admission_adoption_sha256
+            if admission is not None and (
+                self.readback.adoption(admission) != self.publisher.files.adoption(admission)
+            ):
+                raise ValueError("independent admission readback changes its signed adoption")
             activation = item.decision.activation
             if activation is not None:
                 package = self.readback.verified_package(activation.package_sha256)
@@ -407,11 +413,10 @@ class StandingRewardCoordinator:
                 return RewardCoordinationProgress("revoked", sequence - 1, effect.decision_sha256)
         self.phase = "select_decision"
         body = await run_owned_thread(self._pending, sequence)
-        predecessor = (
-            (None if p.series.predecessor is None else p.series.predecessor.decision_sha256)
-            if not prefix
-            else digest(prefix[-1].decision)
+        boundary, committed, admission_adoption_sha = initial_reward_boundary(
+            p.series, p.reader.reward_adoptions
         )
+        predecessor = boundary if not prefix else digest(prefix[-1].decision)
         candidate = self._unreviewed
         if body is None and candidate is not None:
             if candidate.sequence == sequence and candidate.predecessor_sha256 == predecessor:
@@ -445,7 +450,9 @@ class StandingRewardCoordinator:
                 kind, activation, clearance, height = revision
             body = RewardControlDecision(
                 schema=(
-                    "umi-reward-control-decision/3"
+                    "umi-reward-control-decision/4"
+                    if sequence == 0 and admission_adoption_sha is not None
+                    else "umi-reward-control-decision/3"
                     if revision is not None
                     or (activation is not None and activation.reward_adoption_sha256 is not None)
                     else "umi-reward-control-decision/1"
@@ -459,6 +466,10 @@ class StandingRewardCoordinator:
                 observed_at_block=height,
                 activation=activation,
                 revision_clearance_sha256=clearance,
+                admission_adoption_sha256=admission_adoption_sha if sequence == 0 else None,
+                admission_predecessor_committed_at_block=committed
+                if sequence == 0 and admission_adoption_sha is not None
+                else None,
             )
             # Bounded history recovery must finish a fixed target even if the
             # chain grows faster than a slow host can replay it. This is only

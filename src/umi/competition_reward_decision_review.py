@@ -19,7 +19,11 @@ from .competition_cohort_reward_package import (
     CohortRewardPackage,
     replay_reward_package,
 )
-from .competition_reward_adoption import verify_reward_adoption
+from .competition_reward_adoption import (
+    bootstrap_admission,
+    initial_reward_boundary,
+    verify_reward_adoption,
+)
 from .competition_reward_control_archive import (
     OwnedHistoricalRewardControl,
     validate_historical_reward_control,
@@ -151,9 +155,12 @@ def review_reward_decision(
     if decision.kind == "revoke":
         raise ValueError("automatic reward signing cannot infer revocation")
     if not prefix:
-        predecessor = None if series.predecessor is None else series.predecessor.decision_sha256
+        predecessor, _, _ = initial_reward_boundary(series, reader.reward_adoptions)
         if history.unresolved_blocks or history.writes or control.control_sha256 != predecessor:
             raise ValueError("series admission requires its exact predecessor control history")
+        anchor = bootstrap_admission(reader.reward_adoptions)
+        if anchor is not None:
+            anchor[1].check_control(control)
     else:
         objects = {digest(v.decision): canonical_json_bytes(v) for v in prefix}
         selected = reader.review_history(control, objects.__getitem__, history)

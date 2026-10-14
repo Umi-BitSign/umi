@@ -13,6 +13,10 @@ import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from .bootstrap_weights import SignedBootstrapEligibilityManifest
+from .competition_evidence_codec import checked_digest
+from .competition_reward_adoption import bootstrap_admission, initial_reward_boundary
+from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import (
     RewardControlTransactionJournal,
@@ -135,6 +139,8 @@ class NativeRewardCutoverReview:
         transactions: RewardControlTransactionJournal,
         files: StandingRewardFiles,
         operation: str,
+        bootstrap_manifest: SignedBootstrapEligibilityManifest | None = None,
+        history_origin_sha256: str | None = None,
     ):
         if (
             type(lease) is not RewardCutoverLease
@@ -183,15 +189,24 @@ class NativeRewardCutoverReview:
         self.history, self.reader = history, reader
         self.decisions, self.transactions, self.files = decisions, transactions, files
         self.operation = operation
+        self.bootstrap_manifest = bootstrap_manifest
         self._recovery_started = time.monotonic()
+        binding = {
+            "schema": "umi-standing-reward-cutover-target/1",
+            "config": digest(config),
+            "series": digest(config.series),
+            "chain": chain,
+        }
+        if history_origin_sha256 is not None:
+            checked_digest(history_origin_sha256)
+            binding["history_origin_sha256"] = history_origin_sha256
+        if bootstrap_manifest is not None:
+            # Pins optional diagnostic input across interruption without changing
+            # the original owner config or granting forward reward authority.
+            binding["bootstrap_manifest"] = digest(bootstrap_manifest)
         self.targets = RoundJournal(
             root / "cutover-reconciliation" / operation,
-            {
-                "schema": "umi-standing-reward-cutover-target/1",
-                "config": digest(config),
-                "series": digest(config.series),
-                "chain": chain,
-            },
+            binding,
             maximum_bytes=config.service.maximum_journal_bytes,
         )
 
@@ -390,6 +405,9 @@ class NativeRewardCutoverReview:
             selection, chain_prefix = await run_owned_thread(
                 self._select_history, state, history, prefix
             )
+            bootstrap = self._bootstrap_candidate(state.control)
+            if bootstrap is not None and (prefix or intents or pending is not None or chain_prefix):
+                raise ValueError("bootstrap diagnostic cannot replace retained admission work")
             status = _pending_status(pending, state, history)
             action, reserved, finalized = _decision(cohort, prefix, intents, chain_prefix, status)
             # All mutable owners and the fresh proof must still be the exact
@@ -448,6 +466,9 @@ class NativeRewardCutoverReview:
                 "history_through_block": history.tip.block_number,
                 "history_evidence_sha256": history.evidence_sha256,
                 "control_evidence_sha256": state.control.evidence_sha256,
+                "bootstrap_predecessor": None
+                if bootstrap is None
+                else bootstrap.model_dump(mode="json", by_alias=True),
                 "activation_age": None
                 if activation_age is None
                 else activation_age.model_dump(mode="json", by_alias=True),
@@ -546,10 +567,38 @@ class NativeRewardCutoverReview:
             "native_startup_recheck_required": True,
         }
 
+    def _bootstrap_candidate(self, control):
+        if self.bootstrap_manifest is None:
+            return None
+        if control.committed_at_block is None:
+            raise ValueError("bootstrap diagnostic lacks the native commitment block")
+        value = BootstrapRewardPredecessor(
+            schema="umi-bootstrap-reward-predecessor/1",
+            signed_manifest=self.bootstrap_manifest,
+            control_hotkey=self.config.series.control_hotkey,
+            committed_at_block=control.committed_at_block,
+        )
+        value.check_series(self.config.series)
+        value.check_control(control)
+        selected = bootstrap_admission(self.config.reward_adoptions)
+        if selected is not None and selected[1] != value:
+            raise ValueError("bootstrap diagnostic differs from selected signed adoption")
+        return value
+
     def _select_history(self, state, history, local_prefix):
-        if state.control.control_sha256 is None:
-            if history.writes or self.reader.journal.keys("reward_control_decision"):
-                raise ValueError("empty control slot conflicts with retained or ordered history")
+        boundary, _, _ = initial_reward_boundary(self.config.series, self.config.reward_adoptions)
+        bootstrap = self._bootstrap_candidate(state.control)
+        if state.control.control_sha256 == boundary or bootstrap is not None:
+            if (
+                (bootstrap is not None and local_prefix)
+                or history.writes
+                or history.unresolved_blocks
+                or self.reader.journal.keys("reward_control_decision")
+            ):
+                raise ValueError("initial control slot conflicts with retained or ordered history")
+            selected = bootstrap_admission(self.config.reward_adoptions)
+            if selected is not None:
+                selected[1].check_control(state.control)
             return None, ()
         local = {digest(s.decision): s for s in local_prefix}
 

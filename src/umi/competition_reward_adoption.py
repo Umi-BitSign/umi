@@ -15,6 +15,7 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_cohort_recovery import Block, verify_recovery_quorum
 from .competition_cohort_reward_allocation import derive_effective_reward_allocation
 from .competition_geometric_rewards import GeometricRewardParameters
+from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_timing import RewardActivationAge
 from .competition_verification_snapshot import verified_package_digest
 from .open_competition import CompetitionPolicy, Signature, digest
@@ -26,7 +27,9 @@ MAX_REWARD_DECISIONS = 10000
 
 class RewardModelAdoption(StrictProtocolModel):
     schema_: Literal[
-        "umi-standing-model-reward-adoption/1", "umi-standing-model-reward-adoption/2"
+        "umi-standing-model-reward-adoption/1",
+        "umi-standing-model-reward-adoption/2",
+        "umi-standing-model-reward-adoption/3",
     ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
@@ -45,17 +48,23 @@ class RewardModelAdoption(StrictProtocolModel):
     original_signed_inputs_unchanged: Literal[True] = True
 
     activation_age: RewardActivationAge | None = None
+    bootstrap_predecessor: BootstrapRewardPredecessor | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_adoption(self, handler):
         value = handler(self)
         if self.activation_age is None:
             value.pop("activation_age", None)
+        if self.bootstrap_predecessor is None:
+            value.pop("bootstrap_predecessor", None)
         return value
 
     @model_validator(mode="after")
     def lineage(self):
-        if (self.schema_ == "umi-standing-model-reward-adoption/2") != (
+        bootstrap = self.schema_ == "umi-standing-model-reward-adoption/3"
+        if bootstrap != (self.bootstrap_predecessor is not None):
+            raise ValueError("bootstrap admission requires an explicit versioned adoption")
+        if not bootstrap and (self.schema_ == "umi-standing-model-reward-adoption/2") != (
             self.activation_age is not None
         ):
             raise ValueError("reward timing requires an explicit versioned adoption")
@@ -145,10 +154,50 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
             raise ValueError("reward adoption differs from the selected standing authority")
         if body.activation_age is not None:
             body.activation_age.check_plan(cohorts[body.cohort_sha256])
+        if body.bootstrap_predecessor is not None:
+            if body.cohort_sha256 != digest(series.cohorts[0]):
+                raise ValueError("bootstrap adoption must bind the first standing cohort")
+            body.bootstrap_predecessor.check_series(series)
         # The original policy selects the independent quorum, not new economics.
         # This distinct forward contract is selected explicitly by every host.
         verify_recovery_quorum(body, signed.signatures, policy)
+    bootstrap_admission(value)
     return value
+
+
+def bootstrap_admission(selection):
+    """Return the immutable first authorization, retaining it through revisions.
+
+    Callers must already have authenticated the host's full adoption selection.
+    Later economic revisions cannot replace the original admission anchor.
+    """
+    anchor = None
+    if selection is not None:
+        for signed in selection.adoptions:
+            body = signed.adoption
+            if body.bootstrap_predecessor is None:
+                continue
+            if anchor is None:
+                if body.revision != 1:
+                    raise ValueError("bootstrap admission requires the original adoption revision")
+                anchor = (digest(body), body.bootstrap_predecessor)
+            elif body.bootstrap_predecessor != anchor[1]:
+                raise ValueError("reward revision changed its original bootstrap predecessor")
+    return anchor
+
+
+def initial_reward_boundary(series, selection):
+    """Shared boundary for production, review, traversal and publication."""
+    anchor = bootstrap_admission(selection)
+    if anchor is not None:
+        if series.predecessor is not None:
+            raise ValueError("standing successor cannot replace its predecessor with bootstrap")
+        sha, value = anchor
+        return value.control_sha256, value.committed_at_block, sha
+    if series.predecessor is not None:
+        prior = series.predecessor
+        return prior.decision_sha256, prior.decision_committed_at_block, None
+    return None, 0, None
 
 
 def verify_reward_adoption(
