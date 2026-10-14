@@ -5,6 +5,7 @@ checks do not qualify the installed coordinator namespace or source broker CLI.
 """
 
 import asyncio
+import os
 import socket
 import struct
 import subprocess
@@ -26,18 +27,20 @@ from umi.protocol import canonical_json_bytes
 
 from . import test_competition_reward_history as history_fixtures
 from .test_competition_reward_boot import inputs as inputs
+from .test_competition_reward_control import commitment
 from .test_competition_reward_decisions import (
     control as control,
 )
 from .test_competition_reward_decisions import (
     series_case as series_case,
 )
-from .test_competition_reward_decisions import signatures
+from .test_competition_reward_decisions import signatures, signed
 from .test_competition_reward_history import historical as historical
 from .test_competition_reward_history import make_history_case
 from .test_competition_reward_transaction_recovery import (
     original as original,
 )
+from .test_competition_reward_writer_adoption import signed_adoptions
 from .test_competition_reward_writer_reconciliation import (
     activation_case as activation_case,
 )
@@ -157,10 +160,32 @@ finally:
 
 
 @pytest.mark.parametrize("original_blocks", [0, 2])
-@pytest.mark.parametrize("fault", ["none", "candidate_gap", "interrupted", "namespace_readiness"])
+@pytest.mark.parametrize(
+    "fault,bootstrap",
+    [
+        ("none", False),
+        ("candidate_gap", False),
+        ("interrupted", False),
+        ("namespace_readiness", False),
+        ("none", True),
+        ("partial", True),
+        ("candidate_gap", True),
+        ("interrupted", True),
+        ("namespace_readiness", True),
+        ("missing_adoption", True),
+        ("wrong_hash", True),
+        ("recommit", True),
+        ("write", True),
+        ("unresolved", True),
+        ("retained_conflict", True),
+    ],
+)
 async def test_native_empty_and_completed_original_assemble_control_and_absent_pending(
-    selected_boot, historical, monkeypatch, tmp_path, original_blocks, fault
+    selected_boot, historical, monkeypatch, tmp_path, original_blocks, fault, bootstrap
 ):
+    from umi import competition_reward_history_preparation as preparation
+
+    monkeypatch.setattr(preparation, "_root_owner_uid", os.getuid)
     c, item = selected_boot
     h = historical
     first = h.old.height
@@ -206,6 +231,33 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
     held = active.with_suffix(".held")
     active.rename(held)
     h.c.control_writes = {height: () for height in range(first, first + 5)}
+    adoptions, adoption_path = None, None
+    if bootstrap:
+        adoptions = signed_adoptions(config, h.c)
+        anchor = adoptions.adoptions[0].adoption.bootstrap_predecessor
+        h.c.initial_commitment = commitment(
+            "aa" * 32 if fault == "wrong_hash" else anchor.control_sha256,
+            anchor.committed_at_block + (1 if fault == "recommit" else 0),
+        )
+        if fault == "write":
+            ordinary_genesis = signed(
+                h.c.genesis.decision.model_copy(
+                    update={
+                        "series_sha256": digest(series),
+                        "observed_at_block": first + 2,
+                    }
+                )
+            )
+            sha = digest(ordinary_genesis.decision)
+            h.c.control_writes[first + 2] = (sha,)
+            delivery = Path(config.delivery_directory) / "decisions"
+            delivery.mkdir(parents=True, mode=0o700)
+            item.save(delivery / (sha + ".json"), canonical_json_bytes(ordinary_genesis))
+        elif fault == "unresolved":
+            h.c.cleared_blocks = {first + 2}
+        if fault != "missing_adoption":
+            adoption_path = tmp_path / "supplemental-adoptions.json"
+            item.save(adoption_path, canonical_json_bytes(adoptions))
     h = await make_history_case(h, monkeypatch, tmp_path)
     root = c.root / "standing-rewards" / digest(series)
     root.parent.mkdir(mode=0o700)
@@ -221,7 +273,7 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
         )
 
     original = reader()
-    StandingRewardControlReader(
+    control_reader = StandingRewardControlReader(
         root / "control",
         series,
         config.policy,
@@ -229,6 +281,13 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
         expected_chain_config_sha256=digest(config.chain),
         maximum_bytes=config.maximum_reader_bytes,
     )
+    if fault == "retained_conflict":
+        old_genesis = signed(
+            h.c.genesis.decision.model_copy(update={"series_sha256": digest(series)})
+        )
+        control_reader.journal.put(
+            "reward_control_decision", "0000000000000000", old_genesis.model_dump(by_alias=True)
+        )
     if original_blocks:
         await original.advance(h.item.provider, through_block=first + original_blocks - 1)
     original_inode = original.journal.path.stat().st_ino
@@ -236,7 +295,8 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
     staged = tmp_path / "candidate-history"
     (root / "history").rename(saved)
     candidate = reader()
-    await candidate.advance(h.item.provider, through_block=h.end)
+    target = first + 2 if fault == "partial" else h.end
+    await candidate.advance(h.item.provider, through_block=target)
     candidate_inode = candidate.journal.path.stat().st_ino
     before_requests = list(h.body_requests)
     if fault == "candidate_gap":
@@ -296,7 +356,8 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             standing_boot=item.path,
             held_approval=held,
             history="current",
-            through_block=h.end,
+            through_block=target,
+            reward_adoptions=adoption_path,
             unit=c.unit,
             config=c.config_path,
             readiness_only=fault == "namespace_readiness",
@@ -322,8 +383,11 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
                 )
             assert result["status"] == "namespace_readiness_passed"
             for field in (
-                "original_owner_checked", "original_locks_acquired", "original_journals_opened",
-                "original_services_changed", "directory_exchange_performed",
+                "original_owner_checked",
+                "original_locks_acquired",
+                "original_journals_opened",
+                "original_services_changed",
+                "directory_exchange_performed",
                 "chain_submission_authorized",
             ):
                 assert result[field] is False
@@ -331,7 +395,7 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             assert not active.exists()
             assert (root / "history" / "rounds.sqlite3").stat().st_ino == original_inode
             assert (staged / "rounds.sqlite3").stat().st_ino == candidate_inode
-        elif fault == "none":
+        elif fault in {"none", "partial"}:
             result = await asyncio.wait_for(
                 exchange.exchange_installed_standing_writer(c.anchor, args, channel), 30
             )
@@ -351,6 +415,8 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
                 HistoryCheckpointRepairRequired
                 if fault == "candidate_gap"
                 else asyncio.CancelledError
+                if fault == "interrupted"
+                else ValueError
             )
             with pytest.raises(expected):
                 await asyncio.wait_for(
@@ -360,6 +426,13 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             assert (staged / "rounds.sqlite3").stat().st_ino == candidate_inode
             assert not active.exists()
         assert h.body_requests == before_requests
+        if fault == "partial":
+            # The final writer continues ordinary native history from the
+            # selected prefix; already completed blocks need no new body RPCs.
+            await h.restart()
+            resumed = reader()
+            await resumed.advance(h.item.provider, through_block=h.end)
+            assert h.body_requests == before_requests + list(range(target + 1, h.end + 1))
 
     finally:
         if connection is not None:
@@ -371,4 +444,6 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             except TimeoutError:
                 peer.kill()
         _output, error = peer.communicate()
-    assert peer.returncode == (0 if fault in {"none", "namespace_readiness"} else 2), error.decode()
+    assert peer.returncode == (0 if fault in {"none", "partial", "namespace_readiness"} else 2), (
+        error.decode()
+    )

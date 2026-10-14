@@ -605,6 +605,34 @@ root-sealed launch must contain this broker and match its exact source digest.
 Keep the original boot and preparation approval unchanged. Stop the preparation
 worker before invoking selection so its original staging lease is available.
 The selected launch target must already have complete native checkpoints.
+If a separately signed reward adoption was selected after preparation began,
+pass `--reward-adoptions ADOPTION_SELECTION` to the broker (or the stopped-writer
+diagnostic CLI). This bounded, root-owned mode-0444 file contains a canonical
+`umi-standing-reward-adoption-selection/1` object, including every retained signed
+revision. Both root and the actual service-account child authenticate its quorum
+against the original boot's policy and authority. The file must be readable at
+the same absolute path in both installed namespaces. Qualify this with the
+readiness branch before stopping the writer. Do not replace the original prepared
+boot with the adopted boot: its exact bytes remain bound to the preparation approval.
+
+The broker pins the supplemental bytes before launching its child and watches
+the original file identity throughout selection. A new selection journal records
+the supplemental path and digest with schema `umi-writer-history-selection/2`.
+Keep that input available unchanged for restart, rollback and committed-repeat
+checks; omitting it or changing its path or bytes refuses recovery before moving
+either history. Historical `/1` journals remain supported with no supplemental
+input. Existing retained revisions cannot be removed or replaced. After selection,
+the ordinary writer's final boot must independently select the same signed lineage;
+the broker does not publish adoption, restore approval or authorize rewards.
+
+A historical bootstrap commitment is pre-admission only when this authenticated
+selection binds its exact manifest digest and original committed block, and native
+history contains no writes, unresolved effects or conflicting retained decisions.
+A recommit of the same digest at another block still refuses. This check also
+applies to shorter completed prefixes; later history must continue under the
+ordinary writer before rewards become eligible. Supplemental selection remains
+necessary while supported prepared histories predate their signed adoption; remove
+that operational requirement only after those preparations are consumed or retired.
 Use `--readiness-only` with a separately approved empty qualification staging
 root to check the installed root CLI, native namespace, actual account drop,
 and separate staging lease while the original writer may remain active. This

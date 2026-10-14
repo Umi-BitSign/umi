@@ -19,7 +19,9 @@ import pytest
 from umi import competition_reward_history_preparation as preparation
 from umi import competition_reward_writer_broker as broker
 from umi import competition_reward_writer_selection as selection
+from umi.protocol import canonical_json_bytes
 
+from .test_competition_reward_writer_adoption import signed_adoptions
 from .test_competition_reward_writer_selection import (  # noqa: F401
     activation_case,
     anchor_case,
@@ -132,8 +134,9 @@ def assert_locked(paths):
 @pytest.mark.parametrize(
     "fault", ["parent_recheck", "channel_loss", "child_death", "hot_child_death", "root_stop"]
 )
+@pytest.mark.parametrize("supplemental", [False, True])
 async def test_actual_root_orchestration_drains_before_rollback(
-    prepared, monkeypatch, tmp_path, fault
+    prepared, monkeypatch, tmp_path, fault, supplemental, request
 ):
     case = prepared
     assert (os.getuid(), os.geteuid()) == (0, 0)
@@ -155,6 +158,12 @@ async def test_actual_root_orchestration_drains_before_rollback(
     original_db_inode = (case.original / "rounds.sqlite3").stat().st_ino
     candidate_db_inode = (case.root / "history" / "rounds.sqlite3").stat().st_ino
     controls = (preparation._control(case.path, 65536)[1],)
+    adoption_path = None
+    if supplemental:
+        adoption_path = tmp_path / "root-selected-adoptions.json"
+        adoptions = signed_adoptions(case.config, request.getfixturevalue("series_case"))
+        case.save(adoption_path, canonical_json_bytes(adoptions))
+        controls += (preparation._control(adoption_path, 256 * 1024)[1],)
 
     def command(_anchor, _args, descriptor):
         return (
@@ -221,6 +230,7 @@ async def test_actual_root_orchestration_drains_before_rollback(
         preparation_approval=case.path,
         operation="qualified-v1",
         readiness_only=False,
+        reward_adoptions=adoption_path,
     )
     try:
         with pytest.raises((ValueError, ConnectionError, OSError)):

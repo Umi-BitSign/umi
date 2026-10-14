@@ -26,6 +26,7 @@ from .competition_reward_history_preparation_runtime import (
     _readonly_source,
     preparation_source_identity,
 )
+from .competition_reward_writer_adoption import select_writer_adoptions
 from .competition_reward_writer_broker_channel import WriterBrokerChannel
 from .competition_reward_writer_review import select_stopped_writer_boot
 from .competition_reward_writer_selection import (
@@ -166,7 +167,15 @@ def writer_broker_command(anchor, args, descriptor):
     ]
     if args.readiness_only:
         command.append("--readiness-only")
-    return command, approval, (launch_identity, approval_identity)
+    adoptions = select_writer_adoptions(
+        selected.config, args.history, getattr(args, "reward_adoptions", None)
+    )
+    controls = (launch_identity, approval_identity)
+    if adoptions.control is not None:
+        path, _, _, checksum = adoptions.control
+        command.extend(["--reward-adoptions", str(path), "--reward-adoptions-sha256", checksum])
+        controls += (adoptions.control,)
+    return command, approval, controls
 
 
 def _own_child_tree():
@@ -306,6 +315,7 @@ async def launch_writer_history_selection(anchor, args, stop):
                         last = time.monotonic()
                     await asyncio.wait({task}, timeout=1)
                 message = task.result()
+                recheck()
                 if message.action in {
                     "original_reviewed",
                     "candidate_reviewed",
@@ -355,6 +365,7 @@ async def launch_writer_history_selection(anchor, args, stop):
                 standing_boot=args.standing_boot,
                 approval_path=args.preparation_approval,
                 operation=args.operation,
+                reward_adoptions=getattr(args, "reward_adoptions", None),
             )
             if recovered == "committed":
                 await channel.send("already_committed")
@@ -382,9 +393,14 @@ async def launch_writer_history_selection(anchor, args, stop):
                     if path.exists()
                 ]
                 _retain_native_locks(original, paths, retained)
-                with hold_writer_history_selection(lease, operation=args.operation) as selected:
+                with hold_writer_history_selection(
+                    lease,
+                    operation=args.operation,
+                    reward_adoptions=getattr(args, "reward_adoptions", None),
+                ) as selected:
                     selection = selected
                     try:
+                        recheck()
                         selection.exchange()
                         child_quiescent = False
                         await channel.send(

@@ -35,6 +35,7 @@ def main(argv=None):
     parser.add_argument("--preparation-approval", type=Path, required=True)
     parser.add_argument("--launch", type=Path, required=True)
     parser.add_argument("--operation", required=True)
+    parser.add_argument("--reward-adoptions", type=Path)
     parser.add_argument("--readiness-only", action="store_true")
     parser.add_argument("--history", choices=("current", "predecessor"), default="current")
     args = parser.parse_args(argv)

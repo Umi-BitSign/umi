@@ -25,12 +25,14 @@ from pathlib import Path
 from . import competition_reward_history_preparation as preparation
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_reward_boot import MAX_BOOT_BYTES, StandingRewardBootConfig
+from .competition_reward_writer_adoption import select_writer_adoptions
 from .open_competition import digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
 
 MAX_SELECTION_BYTES = 64 * 1024
 _SCHEMA = "umi-writer-history-selection/1"
+_ADOPTION_SCHEMA = "umi-writer-history-selection/2"
 _PHASES = {
     "prepared",
     "exchange_pending",
@@ -104,8 +106,9 @@ def _read(path):
     value = json.loads(raw)
     if (
         canonical_json_bytes(value) != raw
-        or value.get("schema") != _SCHEMA
+        or value.get("schema") not in {_SCHEMA, _ADOPTION_SCHEMA}
         or value.get("phase") not in _PHASES
+        or (value.get("schema") == _ADOPTION_SCHEMA) != ("reward_adoptions" in value)
     ):
         raise ValueError("history selection journal requires explicit repair")
     return value
@@ -256,11 +259,14 @@ def _placement(value, *, allow_busy=False):
 class WriterHistorySelection:
     """Root mechanical selection under a genuine already-held staging lease."""
 
-    def __init__(self, lease, *, operation):
+    def __init__(self, lease, *, operation, reward_adoptions=None):
         self.started = time.monotonic()
         _report(self.started, "authenticating")
         _root()
         preparation.validate_history_preparation_lease(lease)
+        self.adoptions = select_writer_adoptions(
+            lease.config, lease.approval.history, reward_adoptions
+        )
         self.lease, self.active = lease, True
         self.original, self.staged = lease.logical_history, lease.staged_history
         root = Path(lease.approval.preparation_directory)
@@ -291,6 +297,10 @@ class WriterHistorySelection:
             "service_uid": uid,
             "service_gid": gid,
         }
+        if self.adoptions.journal_binding is not None:
+            self.value.update(
+                schema=_ADOPTION_SCHEMA, reward_adoptions=self.adoptions.journal_binding
+            )
         if self.path.exists() or self.path.is_symlink():
             existing = _read(self.path)
             comparable = {**existing, "phase": "prepared"}
@@ -329,6 +339,8 @@ class WriterHistorySelection:
         for path, maximum, stamp, checksum in lease._controls:
             if preparation._control(path, maximum)[1] != (path, maximum, stamp, checksum):
                 raise ValueError("history selection sealed controls changed")
+        self.adoptions.recheck()
+        _validate_adoptions(self.value, self.adoptions)
         if _read(self.path) != self.value:
             raise ValueError("history selection journal changed during ownership")
         return _placement(
@@ -452,9 +464,11 @@ def _validate_scope(value, anchor, approval, config, scope_bytes, descriptor):
 
 
 @contextmanager
-def hold_writer_history_selection(lease, *, operation):
+def hold_writer_history_selection(lease, *, operation, reward_adoptions=None):
     """Caller keeps native ownership alive; uncommitted exit restores both paths."""
-    selection = WriterHistorySelection(lease, operation=operation)
+    selection = WriterHistorySelection(
+        lease, operation=operation, reward_adoptions=reward_adoptions
+    )
     try:
         yield selection
     finally:
@@ -465,7 +479,16 @@ def hold_writer_history_selection(lease, *, operation):
             selection.active = False
 
 
-def recover_writer_history_selection(anchor, *, standing_boot, approval_path, operation):
+def _validate_adoptions(value, adoptions):
+    if value.get("reward_adoptions") != adoptions.journal_binding:
+        raise ValueError("history selection supplemental adoption changed or is missing")
+    if (value["schema"] == _ADOPTION_SCHEMA) != (adoptions.journal_binding is not None):
+        raise ValueError("history selection supplemental adoption schema differs")
+
+
+def recover_writer_history_selection(
+    anchor, *, standing_boot, approval_path, operation, reward_adoptions=None
+):
     """Restore an interrupted root exchange; never authorize or commit a candidate.
 
     Call only under the broker's authenticated stopped native owner. This acquires
@@ -484,16 +507,20 @@ def recover_writer_history_selection(anchor, *, standing_boot, approval_path, op
     config = StandingRewardBootConfig.model_validate_json(boot_raw)
     if canonical_json_bytes(approval) != approval_raw or canonical_json_bytes(config) != boot_raw:
         raise ValueError("history recovery requires original canonical controls")
+    adoptions = select_writer_adoptions(config, approval.history, reward_adoptions)
     root = Path(approval.preparation_directory)
     path = _journal_path(root, operation)
     value = _read(path)
     if value["operation"] != operation:
         raise ValueError("history recovery operation differs")
+    _validate_adoptions(value, adoptions)
     descriptor = preparation._lock_file(root / "preparation.lock")
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
         def recheck():
+            adoptions.recheck()
+            _validate_adoptions(value, adoptions)
             for selected in (approval_control, boot_control):
                 if preparation._control(selected[0], selected[1])[1] != selected:
                     raise ValueError("history recovery sealed controls changed")

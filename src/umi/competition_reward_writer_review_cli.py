@@ -56,6 +56,7 @@ async def _run(args, anchor):
                 through_block=args.through_block,
                 history=args.history,
                 held_approval=args.held_approval,
+                reward_adoptions=args.reward_adoptions,
             ),
             stop,
         )
@@ -70,6 +71,7 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--standing-boot", type=Path, required=True)
     parser.add_argument("--held-approval", type=Path)
+    parser.add_argument("--reward-adoptions", type=Path)
     parser.add_argument("--history", choices=("current", "predecessor"), default="current")
     parser.add_argument("--through-block", type=int, required=True)
     args = parser.parse_args(argv)

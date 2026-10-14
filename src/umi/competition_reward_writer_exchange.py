@@ -16,6 +16,7 @@ from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_service import _close_provider
 from .competition_reward_transactions import StandingWeightJournal
+from .competition_reward_writer_adoption import select_writer_adoptions
 from .competition_reward_writer_journals import hold_stopped_writer_journals
 from .competition_reward_writer_prefix import (
     restore_completed_prefix,
@@ -46,6 +47,17 @@ async def exchange_installed_standing_writer(anchor, args, channel):
     series = config.series if args.history == "current" else config.predecessor_series
     if series is None or args.through_block < series.recovery.authority.issued_at_block:
         raise ValueError("writer exchange history interval differs")
+    adoptions = select_writer_adoptions(
+        config,
+        args.history,
+        getattr(args, "reward_adoptions", None),
+        expected_sha256=getattr(args, "reward_adoptions_sha256", None),
+    )
+
+    def recheck_inputs():
+        selected.recheck()
+        adoptions.recheck()
+
     if getattr(args, "readiness_only", False):
         # This non-authorizing environment check runs while the original writer
         # may still be active. It never acquires an original startup/journal
@@ -62,7 +74,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                 _existing(directory / name)
                 if not os.access(directory / name, os.R_OK | os.W_OK):
                     raise ValueError("writer service account cannot open original journal")
-        selected.recheck()
+        recheck_inputs()
         from .competition_coordinator_namespace import active_coordinator_view
 
         view = active_coordinator_view(args.unit)
@@ -95,7 +107,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
             begin = await channel.receive()
             if begin.action == "already_committed":
                 begin.validate("already_committed")
-                selected.recheck()
+                recheck_inputs()
                 await owner.recheck()
                 result = {
                     "status": "already_selected",
@@ -146,9 +158,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         expected_series_sha256=digest(series),
                         expected_chain_config_sha256=digest(config.chain),
                         maximum_bytes=config.maximum_reader_bytes,
-                        reward_adoptions=config.reward_adoptions
-                        if args.history == "current"
-                        else config.predecessor_reward_adoptions,
+                        reward_adoptions=adoptions.selection,
                     )
                 )
                 provider = HistoricalRewardControlProvider(
@@ -204,7 +214,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                             }
                         progress.advance()
                         journals.recheck()
-                        selected.recheck()
+                        recheck_inputs()
                         if original_tip < original_reader.first_block:
                             await run_owned_thread(review_empty_original, original_reader, journals)
                         await channel.send(
@@ -272,7 +282,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         )
                         progress.advance()
                         journals.recheck()
-                        selected.recheck()
+                        recheck_inputs()
                         reopened = await run_owned_thread(history_reader)
                         if reopened.checkpoints.owner != candidate_reader.checkpoints.owner:
                             raise ValueError("selected history reopen changed owner")
@@ -289,7 +299,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         message.validate("committed")
                         progress.advance()
                         journals.recheck()
-                        selected.recheck()
+                        recheck_inputs()
                         await owner.recheck()
                         progress.advance()
                         result = {
