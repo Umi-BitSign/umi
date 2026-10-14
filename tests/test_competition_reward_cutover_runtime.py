@@ -191,11 +191,25 @@ def test_replaced_path_and_forged_lease_rejected(config_case):
             lease.recheck(config)
 
 
-@pytest.mark.parametrize("mode", ["success", "error", "cancel", "progress"])
+@pytest.mark.parametrize(
+    "mode,pending",
+    [
+        ("success", ()),
+        ("error", ()),
+        ("cancel", ()),
+        ("success", ("historical_recovery_progress",)),
+        ("success", ("history_pending",)),
+        ("success", ("refresh_required",)),
+        *[
+            (mode, ("historical_recovery_progress", "history_pending", "refresh_required"))
+            for mode in ("success", "error", "cancel", "historical_recovery_pending")
+        ],
+    ],
+)
 @pytest.mark.parametrize("capacity", [False, True])
 @pytest.mark.parametrize("migrated_origin", [False, True])
 async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
-    config_case, original_selection, monkeypatch, mode, capacity, migrated_origin, tmp_path
+    config_case, original_selection, monkeypatch, mode, pending, capacity, migrated_origin, tmp_path
 ):
     config = config_case.config
     selected_path = None
@@ -240,6 +254,9 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
 
     class Review:
         def __init__(self, **kwargs):
+            events.append("construct_review")
+            self.reader = kwargs["reader"]
+            self.history = kwargs["history"]
             kwargs["lease"].recheck(config)
             assert type(kwargs["history"]) is RewardControlHistoryReader
             assert kwargs["history"].journal.maximum_bytes == (
@@ -250,15 +267,22 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
 
         async def step(self, cohort):
             locked()
-            started.set()
             events.append("review")
-            if mode == "progress" and events.count("review") == 1:
-                return {"status": "historical_recovery_progress", "publication_authorized": False}
+            count = events.count("review")
+            # Mutable ordered state stays on this reader throughout the sequence.
+            assert getattr(self.reader, "fixture_step_count", 0) == count - 1
+            self.reader.fixture_step_count = count
+            if count <= len(pending):
+                return {"status": pending[count - 1], "publication_authorized": False}
+            started.set()
             if mode == "cancel":
                 await asyncio.Event().wait()
             if mode == "error":
                 raise ValueError("synthetic review failure")
-            return {"status": "reconciled", "publication_authorized": False}
+            return {
+                "status": "reconciled" if mode == "success" else mode,
+                "publication_authorized": False,
+            }
 
     async def close(provider):
         locked()
@@ -287,6 +311,7 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
             await work
     else:
         result = await work
+        assert result["status"] == ("reconciled" if mode == "success" else mode)
         assert not result["publication_authorized"]
         assert not result["publishing_roles_started"]
         assert not result["service_restart_performed"]
@@ -302,8 +327,8 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
         *(["selected_migration"] if migrated_origin else []),
         "construct",
         "start",
-        "review",
-        *(["review"] if mode == "progress" else []),
+        "construct_review",
+        *(["review"] * (len(pending) + 1)),
         "closed",
     ]
     with ownership.hold_reward_cutover_owner(config):

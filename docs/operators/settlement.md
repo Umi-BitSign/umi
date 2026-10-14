@@ -891,11 +891,15 @@ transaction's original proofs and signed bytes even after its era expires.
 An unsigned reservation remains a pending original attempt. Era or nonce expiry
 does not prove an earlier activation never landed.
 
-Each invocation checkpoints a bounded batch against the operation's retained
-finalized target. Repeat the exact command when status is `history_pending` or
-`refresh_required`; completed native block results survive restart. At the end
-it collects fresh control and nonce proofs and reconciles the final tail to that
-exact snapshot. Native ordered history includes overwritten activations, repeated
+Each invocation continues bounded batches against the operation's retained
+finalized target. `history_pending`, `refresh_required` and advancing historical
+recovery keep the same provider, ordered reader and original lease alive, avoiding
+repeated restoration of the saved prefix. Every native step still checks retained
+attempts and refreshes control and nonce proofs before completing the final tail.
+Progress logs distinguish continuation from terminal completion. Cooperative
+interruption drains work before releasing ownership; repeat the exact command to
+resume completed checkpoints after interruption or `finality_pending`. A terminal
+`historical_recovery_pending` still requires its reported repair before retrying. Native ordered history includes overwritten activations, repeated
 commitments, revocation and unresolved writes. A reserved local activation must
 be preserved; a finalized activation requires the existing native revision and
 live-lock review. The signed activation delay remains measured from the actual
