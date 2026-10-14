@@ -37,6 +37,7 @@ seeds = [
     "competition_cohort_settlement_service",
     "competition_reward_preparation",
     "competition_reward_coordinator",
+    "competition_reward_admission_runner",
     "competition_model_source_verification",
     "competition_cohort_model_client",
     "competition_cohort_direct_model_client",

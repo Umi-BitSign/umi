@@ -1,8 +1,9 @@
 """Replay model awards from a complete roster and preserved, reviewed artifacts.
 
-The signed authority selects this rule before miner consent. An award does not
-promote a reference model or transfer authorship. Rights reviewers must retain
-their original review evidence and verify permission to distribute the bundle.
+The signed native authority selects the original rule before miner consent.
+Authenticated reward adoption may derive a separate effective award from that
+original evidence. An award does not promote a reference model or transfer
+authorship. Rights reviewers retain the original distribution-rights evidence.
 """
 
 from __future__ import annotations
@@ -24,8 +25,16 @@ from .competition_cohort_model_acceptance import (
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_quality import ClosedQualityReview, ExactQuality
 from .competition_cohort_quality_signing import CohortQualityManifest, review_quality_manifest
-from .competition_cohort_recovery import ModelRewardCohortAuthority
+from .competition_cohort_recovery import (
+    GeometricModelRewardCohortAuthority,
+    ModelRewardCohortAuthority,
+)
 from .competition_cohort_roster import RecoverableRosterParticipant
+from .competition_geometric_rewards import (
+    GEOMETRIC_MODEL_REWARD_RULE,
+    GeometricRewardParameters,
+    normalized_geometric_weights,
+)
 from .competition_work_progress import WorkProgress
 from .open_competition import Hotkey, digest, model_content_digest
 from .private_files import read_private_model
@@ -232,8 +241,158 @@ class QualityBucketModelAward(ModelAwardEvidence):
         return self
 
 
+class GeometricModelCredit(ModelScoreCredit):
+    band_index: Annotated[int, Field(ge=0, le=9999)]
+    band_rank: Annotated[int, Field(ge=0)]
+    within_band_rank: Annotated[int, Field(ge=0)]
+    weight: ExactQuality
+
+
+class GeometricModelAward(ModelAwardEvidence):
+    schema_: Literal["umi-cohort-model-award/4"] = Field(alias="schema")
+    rule: Literal["baseline_or_better_geometric_bands_first_complete/1"]
+    parameters: GeometricRewardParameters
+    credits: Annotated[tuple[GeometricModelCredit, ...], Field(max_length=512)]
+
+    @model_validator(mode="after")
+    def canonical_credits(self):
+        if self.credits != geometric_model_credits(self, self.parameters):
+            raise ValueError("geometric model credits differ from canonical evidence")
+        return self
+
+
+def geometric_model_credits(
+    evidence: ModelAwardEvidence, parameters: GeometricRewardParameters
+) -> tuple[GeometricModelCredit, ...]:
+    """Canonicalize before eligibility, rank occupied bands, normalize each level.
+
+    This checks mathematical/evidence consistency. The caller still authenticates
+    original certificates and quality through native reward package replay.
+    """
+    candidates = {c.submission_sha256: c for c in evidence.candidates}
+    certificates = {c.acceptance.submission_sha256: c for c in evidence.acceptances}
+    ordinals = {key: c.acceptance.accepted_ordinal for key, c in certificates.items()}
+    if (
+        len(candidates) != len(evidence.candidates)
+        or len(certificates) != len(evidence.acceptances)
+        or candidates.keys() != certificates.keys()
+        or len(set(ordinals.values())) != len(ordinals)
+    ):
+        raise ValueError("geometric model evidence has inconsistent roster identities")
+    ordered = sorted(candidates, key=ordinals.__getitem__)
+    blocks = [certificates[key].acceptance.accepted_at_block for key in ordered]
+    if blocks != sorted(blocks):
+        raise ValueError("geometric model acceptance order contradicts block order")
+    baselines = {_fraction(c.baseline_aggregate) for c in evidence.candidates}
+    if len(baselines) > 1:
+        raise ValueError("geometric model evidence has inconsistent baselines")
+    canonical = {}
+    for key in ordered:
+        candidate, certificate = candidates[key], certificates[key]
+        acceptance = certificate.acceptance
+        if (
+            candidate.eligible
+            != (_fraction(candidate.aggregate) >= _fraction(candidate.baseline_aggregate))
+            or candidate.acceptance_sha256 != digest(certificate)
+            or acceptance.policy_sha256 != evidence.policy_sha256
+            or acceptance.authority_sha256 != evidence.authority_sha256
+            or (
+                candidate.model_sha256,
+                candidate.content_sha256,
+                candidate.recipient_hotkey,
+            )
+            != (
+                acceptance.model_sha256,
+                acceptance.content_sha256,
+                acceptance.recipient_hotkey,
+            )
+        ):
+            raise ValueError("geometric model candidate is not canonical")
+        canonical.setdefault(candidate.content_sha256, candidate)
+    ranked = sorted(
+        (candidate for candidate in canonical.values() if candidate.eligible),
+        key=lambda c: (
+            -_fraction(c.aggregate),
+            ordinals[c.submission_sha256],
+            c.submission_sha256,
+        ),
+    )
+    bands: dict[int, list[ModelAwardCandidate]] = {}
+    tolerance = (
+        None
+        if parameters.score_duplicate_tolerance_bps is None
+        else Fraction(parameters.score_duplicate_tolerance_bps, 10000)
+    )
+    last_retained_score = None
+    for candidate in ranked:
+        score = _fraction(candidate.aggregate)
+        # Compare to the last retained winner, never chain through excluded
+        # candidates. Apply globally before bands so a boundary cannot evade it.
+        if (
+            tolerance is not None
+            and last_retained_score is not None
+            and last_retained_score - score <= tolerance
+        ):
+            continue
+        last_retained_score = score
+        index = quality_bucket_index(score, parameters.band_width_bps)
+        bands.setdefault(index, []).append(candidate)
+    band_weights = normalized_geometric_weights(len(bands), parameters.band_decay_bps)
+    credits = []
+    for band_rank, index in enumerate(sorted(bands, reverse=True)):
+        members = sorted(
+            bands[index],
+            key=lambda c: (
+                -_fraction(c.aggregate),
+                ordinals[c.submission_sha256],
+                c.submission_sha256,
+            ),
+        )
+        member_weights = normalized_geometric_weights(
+            len(members), parameters.within_band_decay_bps
+        )
+        for rank, candidate in enumerate(members):
+            weight = band_weights[band_rank] * member_weights[rank]
+            credits.append(
+                GeometricModelCredit(
+                    content_sha256=candidate.content_sha256,
+                    submission_sha256=candidate.submission_sha256,
+                    recipient_hotkey=candidate.recipient_hotkey,
+                    score=candidate.aggregate,
+                    band_index=index,
+                    band_rank=band_rank,
+                    within_band_rank=rank,
+                    weight=ExactQuality(
+                        numerator=str(weight.numerator), denominator=str(weight.denominator)
+                    ),
+                )
+            )
+    return tuple(credits)
+
+
+def derive_geometric_model_award(
+    original: ModelAwardEvidence, parameters: GeometricRewardParameters
+) -> GeometricModelAward:
+    """Derive new award bytes while preserving every original signed input."""
+    evidence = ModelAwardEvidence.model_validate_json(
+        canonical_json_bytes(
+            original.model_dump(
+                mode="json", by_alias=True, include=set(ModelAwardEvidence.model_fields)
+            )
+        )
+    )
+    parameters = GeometricRewardParameters.model_validate_json(canonical_json_bytes(parameters))
+    return GeometricModelAward(
+        schema="umi-cohort-model-award/4",
+        **evidence.model_dump(by_alias=True),
+        rule=GEOMETRIC_MODEL_REWARD_RULE,
+        parameters=parameters,
+        credits=geometric_model_credits(evidence, parameters),
+    )
+
+
 ModelAward = Annotated[
-    CohortModelAward | ProportionalModelAward | QualityBucketModelAward,
+    CohortModelAward | ProportionalModelAward | QualityBucketModelAward | GeometricModelAward,
     Field(discriminator="schema_"),
 ]
 MODEL_AWARD_ADAPTER = TypeAdapter(ModelAward)
@@ -268,7 +427,7 @@ def build_model_award(
     archive: Path,
     *,
     verify_artifact: ModelArtifactVerifier | None = None,
-) -> CohortModelAward | ProportionalModelAward | QualityBucketModelAward:
+) -> ModelAward:
     """Replay every model and apply the rule selected before intake.
 
     The archive is selected by the host, never by a submission or package path.
@@ -283,7 +442,7 @@ def build_model_award(
     )
     authority = review.history.authority.authority
     if not isinstance(authority, ModelRewardCohortAuthority) or view.state.phase == "revoked":
-        raise ValueError("model awards require the selected version 3 cohort authority")
+        raise ValueError("model awards require the selected model reward cohort authority")
     outcomes = review_quality_manifest(benchmark, review)
     models = tuple(r for r in outcomes if r.track == "model")
     accepted = tuple(
@@ -357,9 +516,9 @@ def build_model_award(
             if baseline is not None and baseline != result.incumbent:
                 raise PendingModelAward("paired model evaluations disagree on the frozen baseline")
             baseline = result.incumbent
-            if (
-                authority.model_reward_rule
-                != "baseline_or_better_quality_bucket_best_score_first_complete/1"
+            if authority.model_reward_rule not in (
+                "baseline_or_better_quality_bucket_best_score_first_complete/1",
+                GEOMETRIC_MODEL_REWARD_RULE,
             ):
                 if (
                     content in legacy_content_quality
@@ -404,6 +563,13 @@ def build_model_award(
         if review.closure.schema_ == "umi-cohort-request-closure/3"
         else None,
     )
+    if isinstance(authority, GeometricModelRewardCohortAuthority):
+        return derive_geometric_model_award(
+            ModelAwardEvidence.model_validate(
+                {key: value for key, value in evidence.items() if key != "rule"}
+            ),
+            authority.model_reward_parameters,
+        )
     if authority.model_reward_rule == "baseline_or_better_best_score_first_complete/1":
         winner = min(choices) if choices else None
         return CohortModelAward(

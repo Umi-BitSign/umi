@@ -55,6 +55,8 @@ class OwnedRetainedCoverageEndpoint:
     point: CoveragePoint
     package_sha256: str
     receipt_sha256: str
+    row_matches: bool | None = None
+    validator_last_update: int | None = None
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
 
@@ -64,12 +66,20 @@ class OwnedRetainedCoverageEndpoint:
 
 
 def _retained_binding(value):
-    return digest([digest(value.point), value.package_sha256, value.receipt_sha256])
+    parts = [digest(value.point), value.package_sha256, value.receipt_sha256]
+    if value.row_matches is not None or value.validator_last_update is not None:
+        parts += [value.row_matches, value.validator_last_update]
+    return digest(parts)
 
 
-def _issue_retained_coverage(point, package_sha256, receipt_sha256):
+def _issue_retained_coverage(point, package_sha256, receipt_sha256, *, row_state=None):
     value = OwnedRetainedCoverageEndpoint(
-        point, package_sha256, receipt_sha256, _issuer=_RETAINED_ISSUER
+        point,
+        package_sha256,
+        receipt_sha256,
+        row_matches=None if row_state is None else row_state["row_matches"],
+        validator_last_update=None if row_state is None else row_state["validator_last_update"],
+        _issuer=_RETAINED_ISSUER,
     )
     object.__setattr__(value, "_binding", _retained_binding(value))
     return value

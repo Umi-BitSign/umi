@@ -18,7 +18,11 @@ from functools import partial
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_control_archive import HistoricalRewardControlProvider
-from .competition_reward_decisions import DecisionSource, RewardActivation
+from .competition_reward_decisions import (
+    DecisionSource,
+    RewardActivation,
+    activation_requires_revision,
+)
 from .competition_reward_handoff_models import (
     StandingRewardHandoffPlan,
     VerifiedLegacyRewardHandoff,
@@ -262,6 +266,8 @@ class StandingRewardExecutor:
         control, history, current = await self._selection()
         if current.selection.state != "selected":
             return StandingExecutionProgress("selection_pending")
+        if activation_requires_revision(self.preparation.reader, current.selection):
+            return StandingExecutionProgress("reward_revision_pending")
         activation = current.selection.activation
         key = digest(activation)
         prepared = self._prepared.get(key)
@@ -271,11 +277,16 @@ class StandingRewardExecutor:
         prior = (
             getattr(self, "prior", self.handoff)
             if prepared.activation == self.first.activation
+            or (
+                type(prepared.activation) is RewardActivation
+                and type(self.first.activation) is RewardActivation
+                and prepared.activation.cohort_sha256 == self.first.activation.cohort_sha256
+            )
             else await self.opportunity(prepared.activation)
         )
         # Slow immutable replay above has no aggregate timeout. Refresh proofs
         # after it instead of throwing its result away and starting over.
-        options, _ = await self._context(prepared, prior)
+        options, projection = await self._context(prepared, prior)
         self._fence(options["chain"].block)
         pending = await self.preparation.reserve_transaction(
             prepared, self.journal, mortality_period=self.period, previous=ended, **options
@@ -285,6 +296,8 @@ class StandingRewardExecutor:
         if pending.signed is not None:
             raise ValueError("standing executor cannot replace an existing signature")
         self._fence(options["chain"].block)
+        if activation_requires_revision(self.preparation.reader, projection.current.selection):
+            raise ValueError("selected reward parameters require a native activation revision")
         chain = options["chain"]
         encoded = await run_owned_thread(
             partial(
@@ -309,6 +322,8 @@ class StandingRewardExecutor:
         # Slow local inspection must not leave an expired proof ready to send.
         self._fence(fresh["chain"].block)
         projection = await self.preparation.project(prepared, **fresh)
+        if activation_requires_revision(self.preparation.reader, projection.current.selection):
+            raise ValueError("selected reward parameters require a native activation revision")
         _check_transmission(pending, original=chain, fresh=fresh["chain"], projection=projection)
         logger.info("standing_transmission intent_sha256=%s", digest(pending.intent))
         await wait_for_owned(self.transport.submit(encoded, self.signer), timeout=self.timeout)

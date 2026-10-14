@@ -23,7 +23,12 @@ from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_collector import RewardCoverageCollector
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_source import CoverageHistoryPending, NativeRewardCoverageSource
-from .competition_reward_decisions import RewardActivation, SignedRewardControlDecision
+from .competition_reward_decisions import (
+    RewardActivation,
+    effective_activation_decision,
+    original_activation_decision,
+    retained_reward_decisions,
+)
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader
@@ -49,6 +54,15 @@ class CoverageWork(StrictProtocolModel):
 class CoverageCompletion(StrictProtocolModel):
     schema_: Literal["umi-reward-coverage-completion/1"] = Field(alias="schema")
     certificate_sha256: Hex32
+
+
+def coverage_work_key(activation: RewardActivation) -> str:
+    """Preserve existing cohort slots; adopted revisions own distinct progress."""
+    return (
+        activation.cohort_sha256
+        if activation.reward_adoption_sha256 is None
+        else digest(activation)
+    )
 
 
 class StandingRewardCoverageService:
@@ -112,7 +126,7 @@ class StandingRewardCoverageService:
             return
         selection = await self._selection(self._target)
         if selection is not None:
-            key = selection.activation.cohort_sha256
+            key = coverage_work_key(selection.activation)
             retained = await run_owned_thread(self.journal.journal.get, "coverage_work", key)
             work = (
                 CoverageWork.model_validate(retained)
@@ -126,7 +140,7 @@ class StandingRewardCoverageService:
             )
             if (
                 work.activation != selection.activation
-                or work.first_block != selection.effective_at_block
+                or work.first_block > selection.effective_at_block
             ):
                 raise ValueError("retained coverage work changes the effective activation")
             await run_owned_thread(self.journal.journal.put, "coverage_work", key, work)
@@ -176,24 +190,37 @@ class StandingRewardCoverageService:
     async def _collect(self):
         keys = await run_owned_thread(self.journal.journal.keys, "coverage_work")
         ordered = tuple(digest(c) for c in self.preparation.reader.series.cohorts)
-        if not set(keys) <= set(ordered):
-            raise ValueError("coverage work is outside the selected series")
-        pending = [key for key in ordered if key in keys and key not in self._completed]
+        latest = {}
+        for key in keys:
+            work = CoverageWork.model_validate(
+                await run_owned_thread(self.journal.journal.get, "coverage_work", key)
+            )
+            cohort = work.activation.cohort_sha256
+            if cohort not in ordered or key != coverage_work_key(work.activation):
+                raise ValueError("coverage work is outside the selected series or revision")
+            prior = latest.get(cohort)
+            if prior is None or (work.first_block, work.observed_block) > (
+                prior[1].first_block,
+                prior[1].observed_block,
+            ):
+                latest[cohort] = (key, work)
+        pending = [
+            latest[cohort]
+            for cohort in ordered
+            if cohort in latest and latest[cohort][0] not in self._completed
+        ]
         if not pending:
             return
         # Keep one package/source in memory and its replay cursor across passes.
         # Capture the newest allocation first while its current state is easily
         # available, then finish retained predecessors. Recreating collectors
         # every pass would repeatedly replay the same first page after restart.
-        key = pending[-1]
+        key, work = pending[-1]
         if self._active != key:
-            work = CoverageWork.model_validate(
-                await run_owned_thread(self.journal.journal.get, "coverage_work", key)
-            )
             selection = await self._selection(work.observed_block)
             if (
                 selection is None
-                or work.activation.cohort_sha256 != key
+                or coverage_work_key(work.activation) != key
                 or selection.activation != work.activation
                 or selection.effective_at_block != work.first_block
             ):
@@ -276,16 +303,18 @@ class StandingRewardCoverageService:
             index = tuple(digest(c) for c in reader.series.cohorts).index(activation.cohort_sha256)
             if index == 0:
                 raise ValueError("initial opportunity requires the native legacy handoff")
-            prior = SignedRewardControlDecision.model_validate_json(
-                canonical_json_bytes(
-                    await run_owned_thread(
-                        reader.journal.get, "reward_control_decision", f"{index:04d}"
-                    )
-                )
-            ).decision
-            if prior.activation is None:
+            prefix = await run_owned_thread(retained_reward_decisions, reader)
+            original = original_activation_decision(prefix, activation.cohort_sha256)
+            if original is None:
+                raise ValueError("standing selected activation is unavailable")
+            prior = effective_activation_decision(
+                prefix,
+                digest(reader.series.cohorts[index - 1]),
+                through_sequence=original.sequence - 1,
+            )
+            if prior is None or prior.activation is None:
                 raise ValueError("standing predecessor activation is unavailable")
-            verified = self._completed.get(prior.activation.cohort_sha256)
+            verified = self._completed.get(coverage_work_key(prior.activation))
             if (
                 verified is None
                 or digest(verified.certificate) != activation.prior_opportunity_sha256
@@ -314,23 +343,17 @@ class StandingRewardCoverageService:
                 index = cohorts.index(activation.cohort_sha256)
             except ValueError:
                 raise ValueError("completed opportunity is outside the selected series") from None
-            selected = SignedRewardControlDecision.model_validate_json(
-                canonical_json_bytes(
-                    await run_owned_thread(
-                        reader.journal.get,
-                        "reward_control_decision",
-                        f"{index + 1:04d}",
-                    )
-                )
-            ).decision
-            if selected.kind != "activate" or selected.activation != activation:
+            prefix = await run_owned_thread(retained_reward_decisions, reader)
+            selected = effective_activation_decision(prefix, cohorts[index])
+            if selected is None or selected.activation != activation:
                 raise ValueError("completed opportunity differs from signed reward selection")
-            verified = self._completed.get(activation.cohort_sha256)
+            key = coverage_work_key(activation)
+            verified = self._completed.get(key)
             if verified is None:
                 retained = await run_owned_thread(
                     self.journal.journal.get,
                     "coverage_completion",
-                    activation.cohort_sha256,
+                    key,
                 )
                 if retained is None:
                     raise ValueError("predecessor reward opportunity is incomplete")
@@ -340,7 +363,7 @@ class StandingRewardCoverageService:
                     activation,
                     await self._source(activation),
                 )
-                self._completed[activation.cohort_sha256] = verified
+                self._completed[key] = verified
             return verified
 
     async def run(self, stop: asyncio.Event, *, poll_seconds: float):

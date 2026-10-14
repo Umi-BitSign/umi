@@ -10,6 +10,7 @@ from umi.competition_cohort_participation import admit_recovery_participant
 from umi.competition_cohort_recovery import (
     PHASES,
     CohortRecoveryAuthority,
+    GeometricModelRewardCohortAuthority,
     ModelRewardCohortAuthority,
     SignedCohortRecoveryAuthority,
     StandingCohortRecoveryAuthority,
@@ -40,10 +41,19 @@ def standing(
     model_rewards=False,
     model_rule="baseline_or_better_best_score_first_complete/1",
     model_quality_bucket_width_bps=None,
+    model_reward_parameters=None,
 ):
-    selected = ModelRewardCohortAuthority if model_rewards else StandingCohortRecoveryAuthority
+    selected = (
+        GeometricModelRewardCohortAuthority
+        if model_reward_parameters is not None
+        else ModelRewardCohortAuthority
+        if model_rewards
+        else StandingCohortRecoveryAuthority
+    )
     body = selected(
-        schema="umi-cohort-recovery-authority/3"
+        schema="umi-cohort-recovery-authority/4"
+        if model_reward_parameters is not None
+        else "umi-cohort-recovery-authority/3"
         if model_rewards
         else "umi-cohort-recovery-authority/2",
         policy_sha256=digest(policy),
@@ -58,6 +68,11 @@ def standing(
                 "model_quality_bucket_width_bps": model_quality_bucket_width_bps,
             }
             if model_rewards
+            else {}
+        ),
+        **(
+            {"model_reward_parameters": model_reward_parameters}
+            if model_reward_parameters is not None
             else {}
         ),
     )

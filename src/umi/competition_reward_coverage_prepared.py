@@ -5,6 +5,7 @@ from functools import partial
 
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
 from .concurrency import run_owned_thread
+from .open_competition import digest
 
 
 class CoveragePackageReplayRequired(Exception):
@@ -32,9 +33,18 @@ def _reuse(preparation, retained, control, history, source):
     selected = preparation.reader.review_history(control, source, history).effective_selection
     if selected is None or selected.state != "selected" or selected.activation is None:
         raise ValueError("historical control has no effective reward package")
-    if selected.activation != retained.prepared.activation:
+    if any(
+        getattr(selected.activation, name) != getattr(retained.prepared.activation, name)
+        for name in (
+            "cohort_sha256",
+            "allocation_sha256",
+            "package_sha256",
+            "recovery_tip_sha256",
+            "prior_opportunity_sha256",
+        )
+    ):
         raise ValueError("retained coverage package differs from historical activation")
-    cached = preparation._prepared.get(selected.activation.cohort_sha256)
+    cached = preparation._prepared.get(digest(selected.activation))
     if cached is None:
         raise CoveragePackageReplayRequired
     preparation._check_prepared(cached)

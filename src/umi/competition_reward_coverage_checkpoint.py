@@ -13,6 +13,7 @@ from .competition_reward_coverage_models import (
     CoverageModelDependencies,
     check_coverage_model_metadata,
 )
+from .competition_reward_decisions import RewardActivation
 from .competition_transport_verification import TransferProgress
 from .competition_verification_rules import runtime_identity
 from .open_competition import digest
@@ -291,7 +292,7 @@ class CoverageCheckpoints:
         if (
             type(value) is not dict
             or digest(value) != index[0]
-            or set(value) - {"model_dependencies"}
+            or set(value) - {"model_dependencies", "activation", "row_state"}
             != {
                 "schema",
                 "owner",
@@ -312,6 +313,27 @@ class CoverageCheckpoints:
                 "coverage result, owner or native semantics changed"
             )
         point = CoveragePoint.model_validate(value["point"])
+        if "row_state" in value:
+            state = value["row_state"]
+            if (
+                type(state) is not dict
+                or set(state) != {"row_matches", "validator_last_update"}
+                or type(state["row_matches"]) is not bool
+                or type(state["validator_last_update"]) is not int
+                or not 0 <= state["validator_last_update"] <= point.block
+                or (point.covered and not state["row_matches"])
+            ):
+                raise CoverageCheckpointRepairRequired("coverage original row state changed")
+        if "activation" in value:
+            activation = RewardActivation.model_validate(value["activation"])
+            if (
+                digest(activation) != point.activation_sha256
+                or activation.cohort_sha256 != value["cohort_sha256"]
+                or activation.package_sha256 != value["package_sha256"]
+                or (activation.effective_allocation_sha256 or activation.allocation_sha256)
+                != point.allocation_sha256
+            ):
+                raise CoverageCheckpointRepairRequired("coverage adopted allocation changed")
         if "model_dependencies" in value:
             check_coverage_model_metadata(
                 CoverageModelDependencies.model_validate_json(
@@ -370,6 +392,13 @@ class CoverageCheckpoints:
             "repair": repair_reason,
         }
         dependencies = getattr(endpoint, "model_dependencies", None)
+        if type(getattr(endpoint, "row_matches", None)) is bool:
+            value["row_state"] = {
+                "row_matches": endpoint.row_matches,
+                "validator_last_update": endpoint.eligibility.subject.validator_last_update,
+            }
+        if getattr(prepared.activation, "reward_adoption_sha256", None) is not None:
+            value["activation"] = prepared.activation.model_dump(mode="json", by_alias=True)
         if dependencies is not None:
             dependencies = CoverageModelDependencies.model_validate_json(
                 canonical_json_bytes(dependencies)
@@ -380,11 +409,16 @@ class CoverageCheckpoints:
         if prior is not None:
             if {**prior, "repair": None} == value:
                 return
-            if "model_dependencies" not in prior and {**prior, "repair": None} == {
-                k: v for k, v in value.items() if k != "model_dependencies"
+            additions = {"model_dependencies", "row_state"} & (set(value) - set(prior))
+            if additions and {**prior, "repair": None} == {
+                k: v for k, v in value.items() if k not in additions
             }:
                 migration = True
-                value["repair"] = "native model dependency migration"
+                value["repair"] = (
+                    "native model dependency migration"
+                    if additions == {"model_dependencies"}
+                    else "native coverage dependency migration"
+                )
             else:
                 raise CoverageCheckpointRepairRequired("coverage successful result changed")
 

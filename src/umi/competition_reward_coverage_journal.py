@@ -27,6 +27,7 @@ from .competition_history_source_externalization import (
     JournalSourceExternalizer,
     source_journal_version,
 )
+from .competition_reward_adoption import verify_reward_adoption
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage import review_reward_coverage
 from .competition_reward_coverage_checkpoint import (
@@ -49,7 +50,7 @@ from .competition_reward_coverage_models import (
     restore_coverage_model_dependencies,
 )
 from .competition_reward_coverage_prepared import RetainedCoveragePackage, retained_package_sha256
-from .competition_reward_decisions import DecisionSource
+from .competition_reward_decisions import DecisionSource, RewardActivation
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_eligibility_archive import review_reward_eligibility
 from .competition_reward_history import OwnedRewardControlHistory, validate_control_history
@@ -681,6 +682,17 @@ class RewardCoverageJournal:
             raise CoverageCheckpointRepairRequired(
                 "coverage history has unresolved effects or lacks chain admission"
             )
+        if "activation" in value:
+            activation = RewardActivation.model_validate(value["activation"])
+            if activation.reward_adoption_sha256 is not None:
+                verify_reward_adoption(
+                    getattr(preparation.reader, "reward_adoptions", None),
+                    activation.reward_adoption_sha256,
+                    series=preparation.reader.series,
+                    policy=preparation.reader.policy,
+                    activation=activation,
+                    current_block=point.block,
+                )
         try:
             model_dependencies_ready = await restore_coverage_model_dependencies(
                 preparation, value.get("model_dependencies")
@@ -691,4 +703,6 @@ class RewardCoverageJournal:
             return None
         if await run_owned_thread(self.checkpoints.load, key) != value:
             raise CoverageCheckpointRepairRequired("coverage result changed during history restore")
-        return _issue_retained_coverage(point, value["package_sha256"], digest(value))
+        return _issue_retained_coverage(
+            point, value["package_sha256"], digest(value), row_state=value.get("row_state")
+        )

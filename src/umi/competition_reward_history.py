@@ -35,6 +35,7 @@ from .competition_history_source_externalization import (
     JournalSourceExternalizer,
     source_journal_version,
 )
+from .competition_reward_admission_checkpoint import CompletedAdmissionCheckpoint
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
@@ -241,6 +242,7 @@ class RewardControlHistoryReader:
             remote_store=self.remote_store,
         )
         self.checkpoints = HistoryCheckpoints(self.journal, binding)
+        self.completed_admission = CompletedAdmissionCheckpoint(self.checkpoints)
         self.remote_sources = JournalSourceExternalizer(
             self.journal,
             self.checkpoints,
@@ -599,6 +601,7 @@ class RewardControlHistoryReader:
             if through_block < self.first_block or through_block < self._next - 1:
                 raise ValueError("control history target regressed")
             with self.journal.locked():
+                await self._restore_completed_admission(provider, through_block)
                 last = min(through_block, self._next + maximum_blocks - 1)
                 pending = following = None
                 try:
@@ -679,6 +682,44 @@ class RewardControlHistoryReader:
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)
                 return ControlHistoryProgress(self._next, through_block, history)
+
+    async def _restore_completed_admission(self, provider, through_block):
+        try:
+            value = await run_owned_thread(self.completed_admission.load)
+        except HistoryCheckpointRepairRequired:
+            self.progress.completed_admission_through = self.first_block - 1
+            raise
+        if value is None:
+            return
+        if (value["first_block"], value["control_hotkey"], value["chain_config_sha256"]) != (
+            self.first_block,
+            self.hotkey,
+            self.config_sha256,
+        ):
+            raise HistoryCheckpointRepairRequired("completed admission history binding changed")
+        boundary = value["snapshot"]["block_number"]
+        if through_block < boundary:
+            raise HistoryCheckpointRepairRequired(
+                "earlier admission prefix requires separate scoped native recovery"
+            )
+        if self._next > boundary:
+            return
+        if self._next != self.first_block:
+            raise HistoryCheckpointRepairRequired(
+                "completed admission overlaps partial owner state"
+            )
+        self.progress.stage = "completed_admission_restore"
+        self.progress.report(self, "running", force=True)
+        await self._validate_checkpoint_tip(provider, value)
+        if await run_owned_thread(self.completed_admission.load) != value:
+            raise HistoryCheckpointRepairRequired("completed admission changed during finality")
+        snapshot = FinalizedSnapshotRef(**value["snapshot"])
+        self._tip = _HistoryTip(snapshot, None, None)
+        self._evidence_sha256 = value["history_sha256"]
+        self._prefixes[boundary] = (snapshot, self._evidence_sha256, 0, 0)
+        self._next = boundary + 1
+        self.progress.completed_admission_through = boundary
+        self.progress.report(self, "running", force=True)
 
     def _apply_checkpoint(self, value):
         self.progress.record("verified", value["snapshot"]["block_number"])
@@ -816,6 +857,19 @@ class RewardControlHistoryReader:
             return self._externalize_sources_locked(maximum_records)
 
     def _externalize_sources_locked(self, maximum_records):
+        if self.completed_admission.load() is not None:
+            # The imported result binds this original retained raw owner. New
+            # blocks still use the selected proof export archive, but deleting
+            # these legacy sources needs its own qualified dependency migration.
+            result = {
+                "replicated_records": 0,
+                "restored_records": 0,
+                "released_logical_bytes": 0,
+                "state": "retained_completed_admission_sources",
+                "disk_reclamation_basis": "original_local_sources_required_by_admission_migration",
+            }
+            self.progress.local_release = result
+            return result
         keys = []
         with self.journal.read_transaction() as db:
             # Bound index traversal as well as payload work. A mixed-direction

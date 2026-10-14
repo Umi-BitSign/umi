@@ -23,6 +23,7 @@ from .competition_reward_decisions import (
     MAX_DECISIONS,
     RewardControlDecision,
     SignedRewardControlDecision,
+    reward_decision_capacity,
     verify_reward_decision_proposal,
 )
 from .competition_reward_signing import RewardDecisionSigner
@@ -55,7 +56,10 @@ class RewardReviewExchange:
         for path in (self.inbox, self.outbox):
             ensure_private_directory(path)
         self.series = digest(signer.journal.series)
-        self.maximum_bytes = (len(signer.journal.series.cohorts) + 2) * MAX_DECISION_BYTES
+        self.maximum_bytes = (
+            reward_decision_capacity(signer.journal.series, signer.journal.reward_adoptions)
+            * MAX_DECISION_BYTES
+        )
 
     def _request_path(self, root: Path, sequence: int) -> Path:
         return root / "requests" / self.series / (self.signer.journal._slot(sequence) + ".json")
@@ -71,7 +75,13 @@ class RewardReviewExchange:
 
     def _check(self, request: RewardReviewRequest, sequence: int) -> RewardReviewRequest:
         j = self.signer.journal
-        verify_reward_decision_proposal(j.series, j.policy, request.preceding, request.decision)
+        verify_reward_decision_proposal(
+            j.series,
+            j.policy,
+            request.preceding,
+            request.decision,
+            reward_adoptions=j.reward_adoptions,
+        )
         if (
             request.decision.sequence != sequence
             or identity(request.proposer_vote.hotkey) != self.proposer
@@ -167,7 +177,11 @@ class RewardReviewExchange:
             reviewer.provider.ensure_observer_running()
             # Fixed approved slots, not an unbounded directory scan. An early
             # missing or failed request cannot starve a delivered successor.
-            for sequence in range(len(self.signer.journal.series.cohorts) + 1):
+            for sequence in range(
+                reward_decision_capacity(
+                    self.signer.journal.series, self.signer.journal.reward_adoptions
+                )
+            ):
                 if stop.is_set():
                     break
                 try:

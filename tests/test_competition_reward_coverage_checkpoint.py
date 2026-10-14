@@ -10,6 +10,8 @@ from umi.competition_reward_coverage_checkpoint import (
     CoverageCheckpointRepairRequired,
     CoverageCheckpoints,
 )
+from umi.competition_reward_coverage_intervals import _issue_retained_coverage, coverage_point
+from umi.competition_reward_decisions import RewardActivation
 from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
 
@@ -225,3 +227,53 @@ def test_native_model_dependency_migration_preserves_old_success(checkpoint):
     assert migrated["repair"] == "native model dependency migration"
     assert checkpoint.journal.get("coverage_verified", digest(original)) == original
     assert remember(checkpoint) == migrated
+
+
+def test_original_row_state_migration_preserves_legacy_coverage_success(checkpoint):
+    case = checkpoint
+    original = remember(case)
+    case.endpoint.row_matches = True
+    case.endpoint.eligibility.subject = SimpleNamespace(validator_last_update=98)
+    migrated = remember(case)
+    assert migrated["row_state"] == {"row_matches": True, "validator_last_update": 98}
+    assert migrated["repair"] == "native coverage dependency migration"
+    assert case.journal.get("coverage_verified", digest(original)) == original
+    assert case.owner.load(case.key) == migrated
+    restored = _issue_retained_coverage(
+        case.endpoint.point,
+        migrated["package_sha256"],
+        digest(migrated),
+        row_state=migrated["row_state"],
+    )
+    assert restored.row_matches is True and restored.validator_last_update == 98
+    assert coverage_point(restored, case.rule) == case.endpoint.point
+    legacy = _issue_retained_coverage(case.endpoint.point, "11" * 32, digest(original))
+    assert legacy.row_matches is None  # Unknown must never be interpreted as absence.
+
+
+def test_adopted_coverage_completion_binds_effective_allocation(checkpoint):
+    case = checkpoint
+    activation = RewardActivation(
+        cohort_sha256=case.endpoint.prepared.activation.cohort_sha256,
+        package_sha256=case.endpoint.prepared.activation.package_sha256,
+        allocation_sha256="77" * 32,
+        recovery_tip_sha256="88" * 32,
+        prior_opportunity_sha256="99" * 32,
+        reward_adoption_sha256="aa" * 32,
+        effective_allocation_sha256="bb" * 32,
+    )
+    case.endpoint.prepared.activation = activation
+    case.endpoint.point = case.endpoint.point.model_copy(
+        update={
+            "activation_sha256": digest(activation),
+            "allocation_sha256": activation.effective_allocation_sha256,
+        }
+    )
+    saved = remember(case)
+    assert saved["activation"] == activation.model_dump(mode="json", by_alias=True)
+    case.endpoint.prepared.activation = activation.model_copy(
+        update={"reward_adoption_sha256": "cc" * 32}
+    )
+    with pytest.raises(CoverageCheckpointRepairRequired, match="successful result changed"):
+        remember(case)
+    assert case.owner.load(case.key) == saved

@@ -13,11 +13,13 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_cohort_model_award import ModelArtifactVerifier
+from .competition_cohort_reward_allocation import derive_effective_reward_allocation
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
     replay_reward_package,
 )
+from .competition_reward_adoption import verify_reward_adoption
 from .competition_reward_control_archive import (
     OwnedHistoricalRewardControl,
     validate_historical_reward_control,
@@ -26,6 +28,7 @@ from .competition_reward_decisions import (
     RewardControlDecision,
     SignedRewardControlDecision,
     StandingRewardControlReader,
+    effective_activation_decision,
     verify_reward_decision_proposal,
     verify_reward_decisions,
 )
@@ -45,6 +48,7 @@ from .competition_reward_opportunity import (
     check_opportunity_claim,
     validate_opportunity,
 )
+from .competition_reward_revision import validate_live_lock, validate_revision_clearance
 from .competition_reward_series_handoff import (
     VerifiedStandingPredecessorOpportunity,
     validate_standing_predecessor_opportunity,
@@ -107,6 +111,8 @@ def review_reward_decision(
     maximum_promotion_bytes: int,
     maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
     verify_model_artifact: ModelArtifactVerifier | None = None,
+    revision_clearance=None,
+    live_lock=None,
 ) -> ReviewedRewardDecision:
     """Replay at the proposal's original finalized block; elapsed time is irrelevant.
 
@@ -120,8 +126,14 @@ def review_reward_decision(
     manifest = verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
     if not isinstance(manifest, StandingRewardOpportunityManifest):
         raise ValueError("reward signing requires approved opportunity terms")
-    prefix = verify_reward_decisions(series, policy, preceding) if preceding else ()
-    decision = verify_reward_decision_proposal(series, policy, prefix, decision)
+    prefix = (
+        verify_reward_decisions(series, policy, preceding, reward_adoptions=reader.reward_adoptions)
+        if preceding
+        else ()
+    )
+    decision = verify_reward_decision_proposal(
+        series, policy, prefix, decision, reward_adoptions=reader.reward_adoptions
+    )
     validate_historical_reward_control(
         control,
         expected_control_hotkey=series.control_hotkey,
@@ -149,7 +161,14 @@ def review_reward_decision(
             raise ValueError("reward proposal does not extend the proved control predecessor")
         activation = decision.activation
         assert activation is not None
-        if decision.sequence == 1:
+        index = tuple(digest(c) for c in series.cohorts).index(activation.cohort_sha256)
+        if decision.kind == "revise_activation":
+            validate_revision_clearance(
+                revision_clearance, decision=decision, prefix=prefix, series=series, history=history
+            )
+        if decision.kind == "resume_activation":
+            validate_live_lock(live_lock, decision=decision, series=series)
+        if index == 0:
             if approved_handoff is None:
                 raise ValueError("first reward activation lacks its approved handoff")
             plan = verify_handoff_plan(approved_handoff, series)
@@ -168,7 +187,9 @@ def review_reward_decision(
                 )
         else:
             certificate = validate_opportunity(previous_opportunity)
-            prior = prefix[-1].decision.activation
+            prior = effective_activation_decision(
+                prefix, digest(series.cohorts[index - 1])
+            ).activation
             assert prior is not None
             check_opportunity_claim(
                 certificate, manifest=manifest, series=series, policy=policy, activation=prior
@@ -203,6 +224,19 @@ def review_reward_decision(
         )
         if digest(allocation) != activation.allocation_sha256:
             raise ValueError("reward proposal allocation differs from native package replay")
+        if activation.reward_adoption_sha256 is not None:
+            adoption = verify_reward_adoption(
+                reader.reward_adoptions,
+                activation.reward_adoption_sha256,
+                series=series,
+                policy=policy,
+                activation=activation,
+                package=package,
+                current_block=decision.observed_at_block,
+            )
+            effective = derive_effective_reward_allocation(package, adoption.parameters)
+            if digest(effective) != activation.effective_allocation_sha256:
+                raise ValueError("reward proposal differs from native effective allocation")
     intent = RewardDecisionIntent(
         schema="umi-reward-decision-intent/1",
         decision=decision,
