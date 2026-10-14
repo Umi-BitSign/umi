@@ -709,7 +709,7 @@ class RewardControlHistoryReader:
             raise HistoryCheckpointRepairRequired(
                 "completed admission overlaps partial owner state"
             )
-        self.progress.stage = "completed_admission_restore"
+        self.progress.restore_start(self._next, boundary - self._next + 1, admission=True)
         self.progress.report(self, "running", force=True)
         await self._validate_checkpoint_tip(provider, value)
         if await run_owned_thread(self.completed_admission.load) != value:
@@ -790,6 +790,7 @@ class RewardControlHistoryReader:
             values.append(value)
         if not values:
             return
+        self.progress.restore_start(self._next, len(values))
         self.progress.report(self, "restoring_checkpoint")
         await self._validate_checkpoint_tip(provider, values[-1])
         # Recheck source identities after asynchronous finality, before issuing
@@ -828,6 +829,7 @@ class RewardControlHistoryReader:
         # Retain the old successful result and bind the new delivery fact to the
         # same original source identities in the atomic checkpoint transaction.
         height = value["snapshot"]["block_number"]
+        prior_stage = self.progress.stage
         self.progress.stage = "checkpoint_export"
         self.progress.report(self, "running", force=True)
         fields = await run_owned_thread(self._load, height)
@@ -840,6 +842,8 @@ class RewardControlHistoryReader:
             partial(self.checkpoints.remember, updated, repair_reason="new_export_destination")
         )
         self.progress.record("exported", height)
+        if self.progress.stage == "checkpoint_export":
+            self.progress.stage = prior_stage
         return updated
 
     async def advance(self, provider, *, through_block, maximum_blocks=64):

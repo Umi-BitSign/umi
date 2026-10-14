@@ -90,6 +90,7 @@ async def reconcile_reward_cutover(
     cohort: str,
     operation: str,
     original_owner_selection: Path | None = None,
+    history_capacity_config: Path | None = None,
 ) -> dict:
     """One resumable bounded step; the original stopped owner stays stopped.
 
@@ -148,6 +149,29 @@ async def reconcile_reward_cutover(
     timer = loop.call_later(30, heartbeat)
     try:
         config = await run_owned_thread(load_reward_coordinator_config, Path(config_path))
+        history_maximum = config.maximum_history_bytes
+        capacity_selection = None
+        if history_capacity_config is not None:
+            selected = await run_owned_thread(
+                load_reward_coordinator_config, Path(history_capacity_config)
+            )
+            if (
+                selected.maximum_history_bytes <= config.maximum_history_bytes
+                or selected
+                != config.model_copy(
+                    update={"maximum_history_bytes": selected.maximum_history_bytes}
+                )
+            ):
+                raise ValueError("cutover capacity selection must only increase history bytes")
+            history_maximum = selected.maximum_history_bytes
+            capacity_selection = {
+                "original_config_sha256": digest(config),
+                "selected_config_sha256": digest(selected),
+                "original_maximum_history_bytes": config.maximum_history_bytes,
+                "selected_maximum_history_bytes": history_maximum,
+                "original_provenance_unchanged": True,
+            }
+            logger.info("reward_cutover_history_capacity %s", capacity_selection)
         if cohort not in {digest(value) for value in config.series.cohorts}:
             raise ValueError("cutover cohort differs from the selected series")
         async with AsyncExitStack() as resources:
@@ -195,7 +219,7 @@ async def reconcile_reward_cutover(
                     control_hotkey=config.series.control_hotkey,
                     chain_config_sha256=chain,
                     first_block=config.series.recovery.authority.issued_at_block,
-                    maximum_bytes=config.maximum_history_bytes,
+                    maximum_bytes=history_maximum,
                     verification_profile=config.service.history_verification,
                     archive=imported,
                     export_archive=exported,
@@ -295,6 +319,7 @@ async def reconcile_reward_cutover(
             "elapsed_seconds": time.monotonic() - started,
             "publishing_roles_started": False,
             "service_restart_performed": False,
+            "history_capacity_selection": capacity_selection,
         }
     except asyncio.CancelledError:
         progress("interrupted")

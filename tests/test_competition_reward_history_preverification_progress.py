@@ -41,7 +41,8 @@ def test_preparation_time_never_becomes_proof_rate_and_stops_with_owner(monkeypa
     now[0] = 1000
     progress.report(reader, "pending")
     assert progress.latest["stage_elapsed_seconds"] == 61
-    assert progress.latest["elapsed_seconds"] == 61
+    assert progress.latest["elapsed_seconds"] == 1000
+    assert progress.latest["active_elapsed_seconds"] == 61
     assert progress.latest["stage_planning_eta_seconds"] is None
     progress.start(19, 10)
     progress.report(reader, "running")
@@ -60,6 +61,7 @@ def test_native_rate_starts_after_first_resolution_and_keeps_existing_pipeline_c
     now[0] = 23
     for height in (10, 11, 12):
         progress.native_finished(height)
+        progress.applied(height)
     reader._next = 13
     progress.report(reader, "running")
     assert progress.latest["stage"] == "legacy_checkpoint_migration"

@@ -41,17 +41,22 @@ class HistoryProgress:
         self.started = self.changed = time.monotonic()
         self.elapsed = self.native_elapsed = 0.0
         self.native_started = None
+        self.wall_started = self.wall_finished = self.native_wall_started = None
+        self.native_stage = None
+        self.retry_next = None
         self.last_next = first_block
         self.last_emitted = 0.0
         self.latest = {}
         self.remote_export_selected = False
         self.local_release = None
         self.preparation = None
+        self.restoration = None
         self.ancestry_progress = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
-        if target != self.target:
+        reset = target != self.target or next_block < self.last_next
+        if reset:
             self.target = target
             self.counts = {
                 name: sum(height <= target for height in heights)
@@ -60,11 +65,19 @@ class HistoryProgress:
             self.native_elapsed = 0.0
             self.native_completed = self.restored_completed = self.native_applied = 0
             self._new_native.clear()
-        self.started = self.changed = now
+            self.elapsed = 0.0
+            self.wall_started, self.wall_finished = now, None
+            self.native_wall_started = self.native_stage = self.retry_next = None
+            self.restoration = None
+        if reset or next_block != self.last_next:
+            self.changed = now
+        self.started = now
         self.active = True
         self.last_next = next_block
         self.state = "running"
-        self.stage = "scoped_checkpoint_repair" if repair else "checkpoint_restore"
+        self.stage = (
+            "scoped_checkpoint_repair" if repair else self.native_stage or "history_preparation"
+        )
         self.native_started = None
         self.preparation = None
         self.ancestry_progress = None
@@ -106,6 +119,7 @@ class HistoryProgress:
             return
         started = time.monotonic()
         total = self.target - first + 1
+        prior_stage = self.stage
         self.stage = "history_progress_inventory"
         for low in range(first, self.target + 1, 512):
             high = min(low + 511, self.target)
@@ -133,6 +147,8 @@ class HistoryProgress:
                         "eta_scope": "progress_inventory_only",
                     },
                 )
+        if self.stage == "history_progress_inventory":
+            self.stage = prior_stage
 
     def preparation_start(self, stage, height, reason):
         """Describe owned preparation without counting it as native proof work."""
@@ -145,8 +161,29 @@ class HistoryProgress:
             "finished": None,
         }
 
+    def restore_start(self, first, total, *, admission=False):
+        stage = "completed_admission_restore" if admission else "checkpoint_restore"
+        if self.restoration is not None and (
+            self.restoration["stage"],
+            self.restoration["height"],
+            self.restoration["total"],
+        ) == (stage, first, total):
+            self.stage, self.preparation = stage, self.restoration
+            self.preparation["finished"] = None
+        else:
+            self.preparation_start(
+                stage,
+                first,
+                "restore_completed_admission"
+                if admission
+                else "restore_completed_checkpoint_batch",
+            )
+            self.preparation["total"] = total
+            self.restoration = self.preparation
+
     def native_start(self, *, retained=False, repair=False):
         self.preparation = None
+        self.restoration = None
         self.ancestry_progress = None
         self.stage = (
             "scoped_checkpoint_repair"
@@ -155,6 +192,9 @@ class HistoryProgress:
             if retained
             else "native_history"
         )
+        self.native_stage = self.stage
+        if self.native_wall_started is None:
+            self.native_wall_started = time.monotonic()
         if self.native_started is None:
             self.native_started = time.monotonic()
 
@@ -180,6 +220,8 @@ class HistoryProgress:
                 self.stage = "owned_historical_ancestry"
             if reader._next != self.last_next:
                 self.changed, self.last_next = now, reader._next
+            if self.retry_next is not None and reader._next != self.retry_next:
+                self.retry_next = None
             self.state = state
             total = max(0, self.target - self.first_block + 1)
             done = min(total, max(0, reader._next - self.first_block))
@@ -189,6 +231,15 @@ class HistoryProgress:
                 and now - self.changed >= self.stalled_seconds
                 and state not in {"completed", "pending", "retrying", "repair_required"}
             )
+            if stalled or state in {"retrying", "repair_required"}:
+                self.retry_next = reader._next
+            if state == "completed" and self.wall_finished is None:
+                self.wall_finished = now
+            wall_now = now if self.wall_finished is None else self.wall_finished
+            elapsed = 0.0 if self.wall_started is None else wall_now - self.wall_started
+            native_wall_elapsed = (
+                0.0 if self.native_wall_started is None else wall_now - self.native_wall_started
+            )
             native_elapsed = self.native_elapsed + (
                 now - self.native_started if self.native_started is not None else 0.0
             )
@@ -197,11 +248,10 @@ class HistoryProgress:
             basis = "waiting_for_native_samples"
             proof_rate = self.native_completed / native_elapsed if native_elapsed > 0 else None
             pipeline_rate = self.native_applied / native_elapsed if native_elapsed > 0 else None
-            sampled = (
-                self.native_applied
-                if getattr(reader, "verification_profile", None)
-                else self.native_completed
-            )
+            # Both serial prefetch and parallel workers may verify ahead of the
+            # applied prefix. Only newly verified AND applied blocks predict
+            # completion; restored checkpoints never enter this numerator.
+            sampled = self.native_applied
             preparation = self.preparation
             if preparation is not None and preparation["stage"] != self.stage:
                 preparation = None
@@ -213,8 +263,19 @@ class HistoryProgress:
             )
             preparation_planning = None
             preparation_basis = None
+            preparation_eta = preparation_done = preparation_total = None
             if preparation is not None:
-                if stalled or state in {"retrying", "repair_required"} or not self.active:
+                preparation_total = preparation.get("total")
+                if preparation_total is not None:
+                    preparation_done = min(
+                        preparation_total, max(0, reader._next - preparation["height"])
+                    )
+                if (
+                    stalled
+                    or self.retry_next is not None
+                    or state in {"retrying", "repair_required"}
+                    or not self.active
+                ):
                     preparation_basis = "withdrawn_stalled_retrying_or_stopped"
                 elif preparation_elapsed <= self.preparation_planning_seconds[1]:
                     preparation_planning = [
@@ -224,9 +285,27 @@ class HistoryProgress:
                     preparation_basis = "planning_local_retained_reads_or_responsive_archive_rpc"
                 else:
                     preparation_basis = "withdrawn_preparation_exceeded_planning_range"
+                if preparation_total is not None and preparation_done == preparation_total:
+                    preparation_eta, preparation_planning = 0.0, None
+                    preparation_basis = "completed_checkpoint_restore_batch"
+                elif (
+                    preparation_done is not None
+                    and preparation_done >= 3
+                    and preparation_elapsed >= 1
+                    and self.active
+                    and not stalled
+                    and self.retry_next is None
+                ):
+                    preparation_eta = (
+                        (preparation_total - preparation_done)
+                        * preparation_elapsed
+                        / preparation_done
+                    )
+                    preparation_planning = None
+                    preparation_basis = "measured_checkpoint_restore_blocks_per_wall_second"
             if state == "completed":
                 eta, basis = 0.0, "complete_selected_history_interval"
-            elif stalled or state in {"retrying", "repair_required"}:
+            elif stalled or state in {"retrying", "repair_required"} or self.retry_next is not None:
                 basis = "withdrawn_stalled_or_retrying"
             elif preparation is not None:
                 # Native throughput excludes the first ancestry resolution. A
@@ -234,15 +313,11 @@ class HistoryProgress:
                 basis = "waiting_for_retained_history_preparation"
             elif self.ancestry_progress is not None:
                 basis = "waiting_for_owned_historical_ancestry"
-            elif sampled >= 3 and native_elapsed >= 1.0:
-                rate = sampled / native_elapsed
+            elif sampled >= 3 and native_wall_elapsed >= 1.0:
+                rate = sampled / native_wall_elapsed
                 eta, basis = (
                     remaining / rate,
-                    (
-                        "measured_ordered_pipeline_blocks_per_active_second"
-                        if getattr(reader, "verification_profile", None)
-                        else "measured_native_blocks_per_active_second"
-                    ),
+                    "measured_ordered_native_blocks_per_wall_second",
                 )
             elif remaining:
                 low, high = self.planning_blocks_per_second
@@ -258,10 +333,16 @@ class HistoryProgress:
                 "stage_reason": None if preparation is None else preparation["reason"],
                 "active_block": None if preparation is None else preparation["height"],
                 "stage_elapsed_seconds": preparation_elapsed,
-                "stage_eta_seconds": None,
+                "stage_completed_blocks": preparation_done,
+                "stage_total_blocks": preparation_total,
+                "stage_eta_seconds": preparation_eta,
                 "stage_planning_eta_seconds": preparation_planning,
                 "stage_eta_basis": preparation_basis,
-                "stage_eta_scope": "current_retained_preparation_only"
+                "stage_eta_scope": (
+                    "current_checkpoint_restore_batch_only"
+                    if preparation_total is not None
+                    else "current_retained_preparation_only"
+                )
                 if preparation is not None
                 else None,
                 "state": "stalled" if stalled else state,
@@ -289,8 +370,12 @@ class HistoryProgress:
                 "local_release": self.local_release,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
-                "elapsed_seconds": self.elapsed + (now - self.started if self.active else 0.0),
+                "elapsed_seconds": elapsed,
+                "active_elapsed_seconds": self.elapsed
+                + (now - self.started if self.active else 0.0),
                 "native_elapsed_seconds": native_elapsed,
+                "native_wall_elapsed_seconds": native_wall_elapsed,
+                "rate_window_scope": "current_process_and_target_since_first_native_attempt",
                 "blocks_per_second": rate,
                 "native_verified_blocks_per_second": proof_rate,
                 "ordered_native_blocks_per_second": pipeline_rate,

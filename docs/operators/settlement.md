@@ -261,9 +261,18 @@ batches, and then advance counts as work commits. `captured_blocks`,
 their dependencies. A filesystem exporter has no remote acknowledgement, so its
 replication count remains null with an explicit unavailable-receipt basis. A past
 replication receipt does not assert current R2 availability. Ordered pipeline and
-ahead-of-prefix verification rates are separate; history ETAs use the ordered
-rate. `local_release` separately reports original SQL records moved to R2 and
+ahead-of-prefix verification rates are separate; history ETAs use newly verified,
+ordered blocks per wall-clock second, including retries and cooldowns.
+`local_release` separately reports original SQL records moved to R2 and
 logical bytes released. It does not report a smaller SQLite file on disk.
+
+History journal byte allowances cover logical retained records and reservations,
+not a physical disk reservation. SQLite keys, indexes and page utilization need
+additional space. Journal writers preserve the existing database page size and
+do not impose a second physical ceiling derived from logical bytes. Monitor disk
+headroom for retained pages, rollback journals, uploads and maintenance, and keep
+the host's storage admission guards in place. Increasing or using a logical
+allowance does not establish that physical capacity is available.
 
 ### Optional R2 proof archives
 
@@ -370,7 +379,7 @@ prefix. Keep it running through its current handoff when preserving that work
 requires avoiding replay; replacing it needs a disclosed first native checkpoint
 pass over its retained legacy records. Source deployment alone cannot recover
 volatile verification facts.
-The completed original C5 admission route below is a narrow exception based on
+The completed original admission route below is a narrow exception based on
 an actual durable native decision result; it cannot preserve an incomplete
 process-local prefix.
 
@@ -378,6 +387,28 @@ Migration and history review emit `reward_history_progress` with counts, elapsed
 time, an ETA and its basis, and retrying or stalled states. Restored blocks count
 toward completion but do not inflate measured native throughput. These estimates
 cover history review only, not overall reward finality.
+
+`elapsed_seconds` measures the current target from its first advance in this
+process, including gaps between bounded calls and retry cooldowns. The native
+wall-rate window begins at the first native attempt after initial preparation;
+`native_wall_elapsed_seconds` includes every later wait. `blocks_per_second`
+counts only new native results already applied in order, even for serial
+prefetch. The active timers (`active_elapsed_seconds`, `native_elapsed_seconds`)
+and active verification rates remain separate diagnostics, not ETA denominators.
+A process restart, changed target, or explicit repair that resets the cursor
+starts new timing samples; retained verification counts keep their usual meaning.
+Completion freezes the target's elapsed time. A retry or stall withdraws the ETA
+until ordered progress returns, and resumed estimates retain the wait time.
+Repeated short advances without cursor progress do not reset the stalled clock.
+
+Cold start reports `history_preparation`; `checkpoint_restore` appears only when
+an actual completed batch is being restored. A bounded advance does not restart
+that label after native work has begun. Restore batches report their own
+`stage_completed_blocks`, `stage_total_blocks`, elapsed time and ETA basis.
+Their substage ETA covers only that batch, including any retry of the same batch;
+it cannot predict remaining proof verification. Completed-admission restoration
+is separately labeled `completed_admission_restore`. Successful metadata inventory
+and export return to the enclosing stage, preserving its restore counts and ETA.
 
 Before native worker submission, that same progress stream distinguishes
 retained-frame loading, the owned-provider lock, header decoding and finalized
@@ -562,7 +593,7 @@ applicable global and series writer locks before any mutable journal constructor
 Missing weight state remains a handoff requirement, never evidence that legacy
 transactions have resolved. Retained signed attempts pass native original-proof,
 SCALE and signature review even after expiry; an unknown expired outcome remains
-unknown and its original bytes are preserved. C4 and predecessor handoff still
+unknown and its original bytes are preserved. Legacy and predecessor handoff still
 belong to their ordinary native runtime owners.
 
 For preparation cutover, target only the original retained completed prefix.
@@ -630,7 +661,7 @@ sidecars or claim that an unqualified interrupted database is safe to exchange.
 Qualify the actual installed namespace, retained artifacts, interrupted recovery
 and root/child lifecycle before deploying this command. Source fixture checks do
 not establish access in a particular installation. Selection leaves approval held
-and does not authorize signing: ordinary C4 or predecessor handoff, fresh chain
+and does not authorize signing: ordinary legacy or predecessor handoff, fresh chain
 state, recipients, nonce and signed activation clocks remain required by the
 publishing runtime. The same parameterized command applies to supported successor
 cohorts without changing their signed plans or clocks.
@@ -655,11 +686,13 @@ proofs as completed checks. This command cannot recover an older running reader'
 volatile verified prefix. Keep that owner running through its handoff when
 preserving those completed checks requires it.
 
-### Completed original C5 admission migration
+### Completed original admission migration
 
 `migrate_completed_admission` in
 `umi.competition_reward_admission_migration` supports the selected original
-installed342 C5 owner after its native sequence-zero admission review completes.
+installed342 owner after its native sequence-zero admission review completes.
+Retain this route while that installed owner or a recovery consumer still needs
+its completed-admission interval; remove it only after those consumers migrate.
 Its prospective root-sealed selection identifies the existing installation,
 service invocation, service account, configuration and state-file identities.
 The selection asserts no completed verification. Completion requires the
@@ -737,6 +770,19 @@ the original service account, root selection, configuration and state paths:
 "$QUALIFIED_PYTHON" -m umi.competition_reward_cutover_cli --config "$ORIGINAL_REWARD_CONFIG" --cohort "$COHORT_SHA256" --operation "$CUTOVER_OPERATION" --original-owner-selection "$ORIGINAL_OWNER_SELECTION"
 ```
 
+When the retained history needs additional local capacity, append
+`--history-capacity-config "$CAPACITY_REWARD_CONFIG"`. This optional root-owned,
+canonical configuration must differ from the original only by increasing
+`maximum_history_bytes` within the native history bound. Keep the original
+configuration and provenance unchanged through completed-admission migration and
+reconciliation. The runner uses the larger allowance only for the existing history
+journal; its completed admission, verification checkpoints, signed inputs, owner
+and clocks retain their identities. The result reports both configuration digests
+and capacities. A capacity selection does not complete migration, clear pending
+transactions or authorize publication. Preserve the selected capacity when later
+staging the final coordinator configuration. Local disk availability and remote
+replication/reclamation still require independent checks.
+
 This command holds the existing service, host control-writer and transaction
 writer process locks before constructing journals or the proof provider. The
 native journals retain their own compound-operation locks. It requires the
@@ -763,8 +809,9 @@ complete review, and a requirement for fresh native startup checks. The command
 does not load signing keys, submit transactions, inspect a writer's live reward
 row, sign an adoption, change configuration or start a service. Reconcile the
 writer separately before an authenticated configuration handoff. Original-series
-coordinators may use the same command without the C5 provenance option; successor
-series are explicitly refused until their predecessor ownership is supported.
+coordinators may use the same command without the original-owner provenance
+option; successor series are explicitly refused until their predecessor ownership
+is supported.
 Progress and planning estimates cover one local review step, while native history
 reports measured block progress; neither estimates reward activation time.
 Initial finality waits only for the native absent-head or startup-floor condition

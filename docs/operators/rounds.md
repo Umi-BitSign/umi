@@ -1660,7 +1660,12 @@ by `batch_size` (default 16, maximum 256); `poll_seconds` defaults to 5. Missing
 proofs, capacity exhaustion and unavailable finality leave work pending. Increasing
 `admission_capacity` or the signer's storage limits permits an unchanged retry.
 These byte limits cover logical records; provision separate disk headroom for
-SQLite, finality state, backups and migration.
+SQLite, finality state, backups and migration. The round journal does not derive a
+physical SQLite page ceiling from that logical allowance: keys, indexes and page
+utilization consume additional space, including on retained databases with a
+nondefault page size. Logical byte, record, reservation and per-call admission
+checks still apply. The allowance is not a disk reservation; monitor free space
+and retain the host's operational storage guards.
 
 The admission worker can also prepare rounds automatically. Set its optional
 `preparation` object to select `promotion_directory` and `output_directory`.

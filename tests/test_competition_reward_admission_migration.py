@@ -184,13 +184,13 @@ async def admission_case(historical, monkeypatch, tmp_path):
     monkeypatch.setattr(source, "validate_state_identities", lambda _: None)
     monkeypatch.setattr(migration, "open_existing_owner_locks", lambda _: nullcontext())
 
-    async def migrate_result():
+    async def migrate_result(maximum_history_bytes=4 * 1024**2):
         return await migration.migrate_completed_admission(
             tmp_path / "root-selection.json",
             provider=h.item.provider,
             series=series,
             policy=h.item.policy,
-            maximum_history_bytes=4 * 1024**2,
+            maximum_history_bytes=maximum_history_bytes,
         )
 
     async def migrate():
@@ -221,6 +221,10 @@ async def test_completed_interval_restores_original_digest_and_verifies_all_late
     assert actual.history == c.expected
     assert h.reader.progress.native_completed == 0
     assert h.reader.progress.latest["completed_admission_blocks"] == 3
+    assert h.reader.progress.latest["stage"] == "completed_admission_restore"
+    assert h.reader.progress.latest["stage_completed_blocks"] == 3
+    assert h.reader.progress.latest["stage_total_blocks"] == 3
+    assert h.reader.progress.latest["stage_eta_seconds"] == 0
     assert h.reader.checkpoints.load(c.boundary) is None
     with pytest.raises(ValueError, match="not been natively verified"):
         await h.reader.verified_prefix(c.boundary - 1)
@@ -245,6 +249,44 @@ async def test_repeat_migration_does_not_recheck_completed_boundary(admission_ca
 
     monkeypatch.setattr(c.h.item.provider, "review_control", forbidden)
     assert await c.migrate() == first
+
+
+@pytest.mark.parametrize("page_size", [4096, 8192])
+async def test_capacity_increase_retains_admission_then_tail_and_repeat_without_reverification(
+    admission_case, page_size
+):
+    c, h = admission_case, admission_case.h
+    path = h.reader.journal.path
+    journal_identity = path.stat().st_ino
+    # Exercise migration from a retained journal already converted in place,
+    # then preserve that layout through capacity selection and native replay.
+    with sqlite3.connect(path, isolation_level=None) as db:
+        db.execute(f"PRAGMA page_size={page_size}")
+        db.execute("VACUUM")
+    assert path.stat().st_ino == journal_identity
+    completed = (await c.migrate_result(16 * 1024**3)).checkpoint
+    h.reader = h.new_reader(16 * 1024**3)
+    owner, semantics = h.reader.checkpoints.owner, h.reader.checkpoints.semantics
+    sources = h.reader.journal.keys("control_history_block")
+    before = {key: h.reader.journal.get("control_history_block", key) for key in sources}
+    h.reader = h.new_reader(64 * 1024**3)
+    assert h.reader.journal.path.stat().st_ino == journal_identity
+    assert (h.reader.checkpoints.owner, h.reader.checkpoints.semantics) == (owner, semantics)
+    assert h.reader.completed_admission.load() == completed
+    assert {key: h.reader.journal.get("control_history_block", key) for key in sources} == before
+    original = await h.reader.advance(h.item.provider, through_block=c.boundary)
+    assert original.history == c.expected and h.reader.progress.native_completed == 0
+    later = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    calls = tuple(h.body_requests)
+    for _ in range(2):
+        h.reader = h.new_reader(64 * 1024**3)
+        assert h.reader.completed_admission.load() == completed
+        assert (await h.reader.advance(h.item.provider, through_block=h.end)).history == later
+        assert h.reader.progress.native_completed == 0
+        assert tuple(h.body_requests) == calls
+        assert h.reader.journal.path.stat().st_ino == journal_identity
+        with h.reader.journal.read_transaction() as db:
+            assert db.execute("PRAGMA page_size").fetchone()[0] == page_size
 
 
 @pytest.mark.parametrize("damage", ["intent", "vote", "boundary"])
