@@ -947,6 +947,31 @@ Pending transactions, suspension drains, predecessor handoff, native proof work
 and finalized reward-row verification remain required. A source release alone
 does not establish that an installed cohort selected this amendment.
 
+An initial standing series whose reserved control slot still contains a historical
+bootstrap manifest needs an explicit bootstrap transition. Reward adoption version
+3 carries `bootstrap_predecessor`: the original signed manifest, reserved control
+hotkey and exact commitment block, which must precede recovery-authority issuance.
+It may also carry `activation_age`. The historical bootstrap coordinator signature
+is verified under its original policy; its key need not equal the standing control
+key. This recognition does not renew the bootstrap service interval.
+
+The first standing decision uses version 4 and binds that exact first adoption and
+commitment block. All hosts select the same immutable lineage, and replication
+delivers the adoption before the admission decision. Native admission still requires
+the complete selected history with no intervening writes or unresolved effects and
+an exact current slot match. A same-hash recommit is not the original boundary.
+Later economics revisions cannot change the initial anchor or reinterpret an
+already retained ordinary admission. Original series, decisions and adoptions keep
+their canonical bytes; standing successor boundaries are unchanged.
+
+Before signing, stopped-owner reconciliation can take `--bootstrap-manifest` as a
+bounded diagnostic input. Its original signature, native commitment and empty
+effects must match, with no conflicting retained decision, intent or pending
+transaction. The report supplies an unsigned `bootstrap_predecessor`; it grants no
+signing or publication authority. Keep this input and operation unchanged across
+retries. The completed-admission migration remains applicable only when its original
+native signed admission exists; a failed admission is not such a checkpoint.
+
 Changing the desired adoption stops stale preparations before reservation,
 signing and sending. An activation already reserved keeps its exact signed
 bytes. The coordinator suspends that activation, waits for finalized proof-lag

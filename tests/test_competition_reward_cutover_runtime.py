@@ -432,7 +432,9 @@ def test_cli_selects_capacity_control_without_replacing_original_config(monkeypa
                 "cohort": "aa" * 32,
                 "operation": "fixture",
                 "original_owner_selection": Path("/fixture/owner.json"),
+                "original_export_origin": None,
                 "history_capacity_config": Path("/fixture/capacity64.json"),
+                "bootstrap_manifest": None,
             },
         )
     ]

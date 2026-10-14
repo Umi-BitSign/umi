@@ -230,7 +230,7 @@ async def make_history_case(historical, monkeypatch, tmp_path, *, distance=5):
         h.c, "cleared_blocks", set() if hasattr(h.c, "control_writes") else {first + 3}
     )
     raws, decoded, events, values, roots = {}, {}, {}, {}, {}
-    last = None
+    last = getattr(h.c, "initial_commitment", None)
     for height, writes in histories.items():
         header = w.headers[w.heights[height]]
         root = bytes.fromhex(header["stateRoot"][2:])

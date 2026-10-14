@@ -17,6 +17,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
 
+from .competition_reward_adoption import bootstrap_admission, initial_reward_boundary
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import (
     PendingControlTransaction,
@@ -146,6 +147,11 @@ class StandingControlPublisher:
             )
             if saved != item:
                 raise ValueError("control decision lacks its exact retained delivery")
+            admission = item.decision.admission_adoption_sha256
+            if admission is not None and (
+                self.files.adoption(admission) != self.reader.reward_adoptions.get(admission)
+            ):
+                raise ValueError("delivered admission differs from selected signed adoption")
             activation = item.decision.activation
             if activation is not None:
                 package = self.files.verified_package(activation.package_sha256)
@@ -178,12 +184,13 @@ class StandingControlPublisher:
             control_hotkey=self.hotkey,
             chain_config_sha256=self.config_sha256,
         )
-        predecessor = (
-            None if self.series.predecessor is None else self.series.predecessor.decision_sha256
-        )
+        predecessor, _, _ = initial_reward_boundary(self.series, self.reader.reward_adoptions)
         if control.control_sha256 == predecessor:
             if history.writes or history.unresolved_blocks:
                 raise ValueError("reserved control slot has prior or unresolved successor writes")
+            anchor = bootstrap_admission(self.reader.reward_adoptions)
+            if anchor is not None:
+                anchor[1].check_control(control)
             selected = -1
         else:
             if control.control_sha256 is None:
@@ -378,6 +385,11 @@ def check_control_transmission(
         or (ref.block_number == intent.block and ref.block_hash != intent.block_hash)
         or fresh.nonce != intent.nonce
         or fresh.control.control_sha256 != intent.decision.decision.predecessor_sha256
+        or (
+            intent.decision.decision.admission_predecessor_committed_at_block is not None
+            and fresh.control.committed_at_block
+            != intent.decision.decision.admission_predecessor_committed_at_block
+        )
         or fresh.runtime.metadata_bytes != original.runtime.metadata_bytes
         or fresh.runtime.runtime_version_bytes != original.runtime.runtime_version_bytes
     ):

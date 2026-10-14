@@ -27,6 +27,7 @@ from .competition_cohort_recovery import (
 from .competition_reward_adoption import (
     MAX_REWARD_DECISIONS,
     RewardAdoptionSelection,
+    initial_reward_boundary,
     verify_adoption_selection,
     verify_reward_adoption,
 )
@@ -156,6 +157,7 @@ class RewardControlDecision(StrictProtocolModel):
         "umi-reward-control-decision/1",
         "umi-reward-control-decision/2",
         "umi-reward-control-decision/3",
+        "umi-reward-control-decision/4",
     ] = Field(alias="schema")
     series_sha256: Hex32
     sequence: Annotated[int, Field(ge=0, le=MAX_DECISIONS - 1)]
@@ -171,19 +173,29 @@ class RewardControlDecision(StrictProtocolModel):
     observed_at_block: Block
     activation: RewardActivation | None
     revision_clearance_sha256: Hex32 | None = None
+    admission_adoption_sha256: Hex32 | None = None
+    admission_predecessor_committed_at_block: Block | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_decision(self, handler):
         value = handler(self)
         if self.revision_clearance_sha256 is None:
             value.pop("revision_clearance_sha256", None)
+        if self.admission_adoption_sha256 is None:
+            value.pop("admission_adoption_sha256", None)
+        if self.admission_predecessor_committed_at_block is None:
+            value.pop("admission_predecessor_committed_at_block", None)
         return value
 
     @model_validator(mode="after")
     def shape(self):
-        successor = self.schema_ == "umi-reward-control-decision/2"
+        bootstrap = self.schema_ == "umi-reward-control-decision/4"
+        successor = self.schema_ == "umi-reward-control-decision/2" or bootstrap
         if (
             (self.sequence == 0) != (self.kind == "admit_series")
+            or bootstrap != (self.admission_adoption_sha256 is not None)
+            or bootstrap != (self.admission_predecessor_committed_at_block is not None)
+            or (bootstrap and self.sequence != 0)
             or (self.sequence == 0 and successor != (self.predecessor_sha256 is not None))
             or (self.sequence != 0 and self.predecessor_sha256 is None)
             or (
@@ -310,9 +322,11 @@ def verify_reward_decisions(
 def _decision_body(
     series, policy, index, previous, activated, body, *, preceding=(), reward_adoptions=None
 ):
-    predecessor = None if series.predecessor is None else series.predecessor.decision_sha256
+    predecessor, committed, adoption_sha = initial_reward_boundary(series, reward_adoptions)
     expected_schema = (
-        "umi-reward-control-decision/1"
+        "umi-reward-control-decision/4"
+        if index == 0 and adoption_sha is not None
+        else "umi-reward-control-decision/1"
         if series.predecessor is None
         else "umi-reward-control-decision/2"
     )
@@ -328,6 +342,9 @@ def _decision_body(
         or body.series_sha256 != digest(series)
         or body.sequence != index
         or body.predecessor_sha256 != (digest(previous) if previous else predecessor)
+        or body.admission_adoption_sha256 != (adoption_sha if index == 0 else None)
+        or body.admission_predecessor_committed_at_block
+        != (committed if index == 0 and adoption_sha is not None else None)
         or (previous is not None and body.observed_at_block < previous.observed_at_block)
         or (previous is not None and previous.kind == "revoke")
         or body.sequence >= reward_decision_capacity(series, reward_adoptions)
@@ -337,12 +354,20 @@ def _decision_body(
         if not (
             max(
                 series.recovery.authority.issued_at_block,
-                0 if series.predecessor is None else series.predecessor.decision_committed_at_block,
+                committed,
             )
             <= body.observed_at_block
             <= policy.valid_through_block
         ):
             raise ValueError("series genesis was not signed under timely recovery authority")
+        if adoption_sha is not None:
+            verify_reward_adoption(
+                reward_adoptions,
+                adoption_sha,
+                series=series,
+                policy=policy,
+                current_block=body.observed_at_block,
+            )
     elif body.kind == "activate" and (
         activated >= len(series.cohorts)
         or body.activation.cohort_sha256 != digest(series.cohorts[activated])
@@ -754,9 +779,7 @@ class StandingRewardControlReader:
                     raise ValueError("retained reward decision is in a different sequence slot")
                 retained[digest(item.decision)] = item
 
-            boundary = (
-                None if self.series.predecessor is None else self.series.predecessor.decision_sha256
-            )
+            boundary, _, _ = initial_reward_boundary(self.series, self.reward_adoptions)
             reversed_chain, key = [], observation.control_sha256
             while key != boundary:
                 if key is None:

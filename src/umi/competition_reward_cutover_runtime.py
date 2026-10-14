@@ -8,8 +8,11 @@ import time
 from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 
+from .bootstrap_weights import SignedBootstrapEligibilityManifest
 from .competition_chain import _AwaitingFinality
 from .competition_proof_archive_selection import selected_proof_archives
+from .competition_reward_admission_provenance import provenance_selection_digest
+from .competition_reward_adoption import MAX_REWARD_ADOPTION_BYTES
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
 from .competition_reward_coordinator_boot import load_reward_coordinator_config
@@ -19,6 +22,9 @@ from .competition_reward_decisions import StandingRewardControlReader
 from .competition_reward_files import StandingRewardFiles
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
+from .competition_reward_history_origin import ABI as ORIGIN_ABI
+from .competition_reward_history_origin import REASON as ORIGIN_REASON
+from .competition_reward_history_origin import load_original_export_origin
 from .competition_reward_service import _close_provider
 from .competition_reward_signing import RewardDecisionJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -27,6 +33,52 @@ from .host_memory_runtime import memory_runtime
 from .open_competition import digest
 
 logger = logging.getLogger(__name__)
+
+
+def _load_bootstrap_manifest(path):
+    with Path(path).open("rb") as source:
+        raw = source.read(MAX_REWARD_ADOPTION_BYTES + 1)
+    if not 0 < len(raw) <= MAX_REWARD_ADOPTION_BYTES:
+        raise ValueError("bootstrap manifest exceeds the bounded adoption input")
+    return SignedBootstrapEligibilityManifest.model_validate_json(raw)
+
+
+def _original_export_migration_selection(history, lease, path):
+    """Require complete coverage; ordinary restore checks every native result.
+
+    This metadata preflight prevents partial migration from silently starting a
+    new full proof pass. Source revisions, effects, continuity and finality are
+    checked by the ordinary reader under the same exclusive owner lease.
+    """
+    origin, owner = load_original_export_origin(path)
+    if lease.provenance is None or (
+        provenance_selection_digest(owner) != provenance_selection_digest(lease.provenance)
+        or origin["first_block"] != history.first_block
+        or owner["paths"]["history_root"] != str(history.journal.root)
+    ):
+        raise HistoryCheckpointRepairRequired("cutover original export owner differs")
+    key = provenance_selection_digest(origin)
+    first, last = origin["first_block"], origin["through_block"]
+    with history.journal.read_transaction() as db:
+        history.checkpoints.check_schema(db)
+        record = history.journal.get("control_history_original_export_origin", key, db=db)
+        count = db.execute(
+            "SELECT COUNT(*) FROM history_checkpoint_index WHERE height>=? AND height<=?",
+            (first, last),
+        ).fetchone()[0]
+    if record != {"schema": ORIGIN_ABI, "path": str(path), "sha256": key} or count != last-first+1:
+        raise HistoryCheckpointRepairRequired("cutover requires complete original export migration")
+    for height in {first, last}:
+        result = history.checkpoints.load(height)
+        if result is None or result["repair"] != {"reason": ORIGIN_REASON, "operation": key}:
+            raise HistoryCheckpointRepairRequired("cutover original export boundary differs")
+    return {
+        "origin_sha256": key,
+        "first_block": first,
+        "through_block": last,
+        "checkpoint_blocks": count,
+        "aggregate_completion_claimed": False,
+    }
 
 
 async def _await_initial_finality(provider: HistoricalRewardControlProvider):
@@ -90,16 +142,21 @@ async def reconcile_reward_cutover(
     cohort: str,
     operation: str,
     original_owner_selection: Path | None = None,
+    original_export_origin: Path | None = None,
     history_capacity_config: Path | None = None,
+    bootstrap_manifest: Path | None = None,
 ) -> dict:
     """One resumable bounded step; the original stopped owner stays stopped.
 
-    An original installed-owner selection requires its completed-admission
-    migration before any provider is constructed. A missing or damaged native
-    success record is an explicit repair, never a fresh full-history pass.
+    An original installed owner requires completed-admission migration or an
+    explicitly selected complete original-export migration before any provider
+    is constructed. Missing/damaged results require explicit scoped repair.
     """
+    if original_export_origin is not None and original_owner_selection is None:
+        raise ValueError("original export selection requires its original owner selection")
     started, phase = time.monotonic(), 0
     history = None
+    original_export_selection = None
 
     def progress(state="running"):
         elapsed = time.monotonic() - started
@@ -149,6 +206,11 @@ async def reconcile_reward_cutover(
     timer = loop.call_later(30, heartbeat)
     try:
         config = await run_owned_thread(load_reward_coordinator_config, Path(config_path))
+        historical_bootstrap = None
+        if bootstrap_manifest is not None:
+            historical_bootstrap = await run_owned_thread(
+                _load_bootstrap_manifest, bootstrap_manifest
+            )
         history_maximum = config.maximum_history_bytes
         capacity_selection = None
         if history_capacity_config is not None:
@@ -200,6 +262,7 @@ async def reconcile_reward_cutover(
             )
 
             def assemble():
+                nonlocal original_export_selection
                 files = StandingRewardFiles(
                     Path(config.files_directory),
                     maximum_package_bytes=config.maximum_package_bytes,
@@ -224,7 +287,11 @@ async def reconcile_reward_cutover(
                     archive=imported,
                     export_archive=exported,
                 )
-                if (
+                if original_export_origin is not None:
+                    original_export_selection = _original_export_migration_selection(
+                        history, lease, original_export_origin
+                    )
+                elif (
                     original_owner_selection is not None
                     and history.completed_admission.load() is None
                 ):
@@ -297,6 +364,10 @@ async def reconcile_reward_cutover(
                         transactions=transactions,
                         files=files,
                         operation=operation,
+                        bootstrap_manifest=historical_bootstrap,
+                        history_origin_sha256=None
+                        if original_export_selection is None
+                        else original_export_selection["origin_sha256"],
                     )
                 )
                 while True:
@@ -320,6 +391,7 @@ async def reconcile_reward_cutover(
             "publishing_roles_started": False,
             "service_restart_performed": False,
             "history_capacity_selection": capacity_selection,
+            "original_export_migration_selection": original_export_selection,
         }
     except asyncio.CancelledError:
         progress("interrupted")

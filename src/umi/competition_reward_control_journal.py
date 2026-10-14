@@ -300,6 +300,11 @@ def check_control_transaction(intent, state, series):
         or intent.nonce_evidence_sha256 != hashlib.sha256(state.nonce_evidence).hexdigest()
         or intent.metadata_sha256 != state.runtime.metadata_sha256
         or state.control.control_sha256 != intent.decision.decision.predecessor_sha256
+        or (
+            intent.decision.decision.admission_predecessor_committed_at_block is not None
+            and state.control.committed_at_block
+            != intent.decision.decision.admission_predecessor_committed_at_block
+        )
     ):
         raise ValueError("control transaction differs from its original signing context")
 
