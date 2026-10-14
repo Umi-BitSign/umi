@@ -19,6 +19,7 @@ from .competition_reward_decisions import (
     verify_reward_decisions,
 )
 from .competition_reward_files import StandingRewardFiles
+from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .open_competition import CompetitionPolicy, digest
 from .private_files import lock_private_file
 from .protocol import canonical_json_bytes
@@ -29,7 +30,7 @@ def retain_standing_reward_inputs(
     series: StandingRewardSeries,
     policy: CompetitionPolicy,
     decisions: tuple[SignedRewardControlDecision, ...],
-    packages: Callable[[str], CohortRewardPackage],
+    packages: Callable[[str], CohortRewardPackage | VerifiedPackageSnapshot],
     *,
     reward_adoptions: RewardAdoptionSelection | None = None,
 ) -> str:
@@ -48,21 +49,25 @@ def retain_standing_reward_inputs(
         if activation is None:
             continue
         try:
-            package = files.package(activation.package_sha256)
+            package = files.verified_package(activation.package_sha256)
+            retained_package = True
         except FileNotFoundError:
             package = packages(activation.package_sha256)
-        package = CohortRewardPackage.model_validate_json(canonical_json_bytes(package))
+            retained_package = False
+        if type(package) is not VerifiedPackageSnapshot:
+            package = CohortRewardPackage.model_validate_json(canonical_json_bytes(package))
         history = package.inputs.history
         tip = digest(history.transitions[-1].transition if history.transitions else history.genesis)
         if (
-            digest(package) != activation.package_sha256
+            verified_package_digest(package) != activation.package_sha256
             or package.policy_sha256 != digest(policy)
             or digest(history.plan) != activation.cohort_sha256
             or digest(package.allocation) != activation.allocation_sha256
             or tip != activation.recovery_tip_sha256
         ):
             raise ValueError("reward delivery package differs from its certified decision")
-        files.retain_package(package)
+        if not retained_package:
+            files.retain_package(package)
         if activation.reward_adoption_sha256 is not None:
             verify_reward_adoption(
                 reward_adoptions,

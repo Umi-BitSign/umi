@@ -148,7 +148,7 @@ class StandingControlPublisher:
                 raise ValueError("control decision lacks its exact retained delivery")
             activation = item.decision.activation
             if activation is not None:
-                package = self.files.package(activation.package_sha256)
+                package = self.files.verified_package(activation.package_sha256)
                 if digest(package.allocation) != activation.allocation_sha256:
                     raise ValueError("delivered package differs from control allocation")
                 if activation.reward_adoption_sha256 is not None and self.files.adoption(

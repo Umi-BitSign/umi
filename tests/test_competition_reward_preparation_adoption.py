@@ -5,6 +5,7 @@ documents. Adoption signatures, original package replay, durable native reuse,
 effective arithmetic and projection remain real.
 """
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -101,12 +102,26 @@ def _adoption(p, parameters, *, revision=1, predecessor=None):
     ids=["legacy_v1", "upgrade_to_score_v2", "score_v2"],
 )
 async def test_native_preparation_preserves_package_and_isolates_adopted_revisions(
-    preparation_case, monkeypatch, parameter_version, revision_version
+    preparation_case, tmp_path, monkeypatch, parameter_version, revision_version, record_property
 ):
+    from umi.competition_reward_files import StandingRewardFiles
+
+    from .reward_snapshot_assertions import NativeContextReads, forbid_expensive_native_replay
+
     p = preparation_case
     original_bytes = canonical_json_bytes(p.package)
+    files = StandingRewardFiles(
+        tmp_path / "adopted-reward-inputs",
+        maximum_package_bytes=64 * 1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_package(p.package)
+    package_sha = digest(p.package)
+    snapshot = files.verified_package(package_sha)
     observations = await p.observations()
-    original = await p.preparation.prepare(p.package, **replay_args(observations))
+    original = await p.preparation.prepare(snapshot, **replay_args(observations))
+    reads = NativeContextReads(monkeypatch, p.package, snapshot)
+    forbid_expensive_native_replay(monkeypatch)
     selected = p.reader.select_history(**replay_args(observations))
     first, activation, effective = _adoption(
         p, GeometricRewardParameters(schema=f"umi-geometric-reward-parameters/{parameter_version}")
@@ -130,8 +145,9 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
 
     monkeypatch.setattr(p.reader, "select_history", current)
     monkeypatch.setattr(p.reader, "review_history", historical)
-    adopted = await p.preparation.prepare(p.package, **replay_args(observations))
+    adopted = await p.preparation.prepare(snapshot, **replay_args(observations))
     assert adopted.allocation == effective
+    assert reads.check()["objects"] > 0
     assert adopted.allocation.model_award.parameters.schema_.endswith(f"/{parameter_version}")
     assert adopted.allocation.model_award.parameters.score_duplicate_tolerance_bps == (
         None if parameter_version == 1 else 1
@@ -169,8 +185,9 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     retained = RetainedCoveragePackage(adopted)
     with pytest.raises(CoveragePackageReplayRequired):
         await prepare_retained_coverage(p.preparation, retained, **replay_args(observations))
-    revised = await p.preparation.prepare(p.package, **replay_args(observations))
+    revised = await p.preparation.prepare(snapshot, **replay_args(observations))
     assert revised.allocation == effective2 and revised.activation != adopted.activation
+    reads.check()
     assert revised.allocation.model_award.parameters.schema_.endswith(f"/{revision_version}")
     assert (
         await prepare_retained_coverage(p.preparation, retained, **replay_args(observations))
@@ -179,15 +196,18 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     with pytest.raises(ValueError, match="current standing selection"):
         await p.preparation.project(adopted, **observations)
     reopened = p.reopen()
-    restored = await reopened.prepare(p.package, **replay_args(observations))
+    snapshot = files.verified_package(package_sha)
+    restored = await reopened.prepare(snapshot, **replay_args(observations))
     assert restored.allocation == revised.allocation
+    reads.check()
     chosen.activation = original.activation
-    assert await p.preparation.prepare(p.package, **replay_args(observations)) is original
+    assert await p.preparation.prepare(snapshot, **replay_args(observations)) is original
     assert canonical_json_bytes(p.package) == original_bytes
     chosen.activation = activation2
     p.reader.reward_adoptions = None
     with pytest.raises(ValueError, match="explicit host adoption"):
         await reopened.project(restored, **observations)
+    record_property("warm_context_reads", json.dumps(reads.checks))
 
 
 @pytest.mark.parametrize("parameter_version", [1, 2], ids=["legacy_v1", "score_v2"])

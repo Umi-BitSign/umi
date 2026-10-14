@@ -971,7 +971,11 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
     from umi.competition_reward_control_signing import review_control_signing_state
 
     current_control_finality(h, h.end)
-    files_before = tuple(files.root.rglob("*.json"))
+    files_before = {
+        path: path.read_bytes()
+        for kind in ("packages", "decisions")
+        for path in (files.root / kind).glob("*.json")
+    }
     for restart in (False, True):
         if restart:
             c.reader, h.reader = c.reopen(), await h.restart()
@@ -1010,7 +1014,11 @@ async def test_native_control_publisher_recovers_original_proofs_and_finalized_h
             with pytest.raises(ValueError, match="selected prefix"):
                 await publisher.step((c.genesis,))
         assert journal.pending() == reserved
-        assert tuple(files.root.rglob("*.json")) == files_before
+        assert {
+            path: path.read_bytes()
+            for kind in ("packages", "decisions")
+            for path in (files.root / kind).glob("*.json")
+        } == files_before
 
 
 @pytest.mark.parametrize("preparation_case", [8], indirect=True)
@@ -1238,7 +1246,7 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
 
 @pytest.mark.parametrize("successor", [False, True])
 async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
-    native_package, tmp_path, successor
+    native_package, tmp_path, successor, monkeypatch
 ):
     """Discovery only: later-slot authority and interval claims are synthetic.
 
@@ -1420,10 +1428,35 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     assert offer.package_sha256 == digest(package)
     assert offer.prior_opportunity_sha256 == (digest(certificate) if successor else digest(handoff))
     assert files.package(offer.package_sha256) == package
-    assert offers(cohort, prefix) == offer
-    # A conflicting or misrouted settlement cannot change a proposal silently.
+    # Restarted discovery and first downstream preparation reuse the verified
+    # source/replica binding; neither parses the package nor transfers it again.
+    with monkeypatch.context() as warm:
+        from umi import competition_cohort_aggregate_replica as replica_module
+        from umi import competition_verification_snapshot as snapshot_module
+
+        def no_payload(*args, **kwargs):
+            pytest.fail("unchanged offer reread package payload")
+
+        warm.setattr(snapshot_module, "read_aggregate_model", no_payload)
+        warm.setattr(replica_module, "_transfer", no_payload)
+        reopened = StandingRewardOffers(
+            series=series,
+            policy=policy,
+            manifest=manifest,
+            handoff=handoff,
+            settlements=settlements,
+            files=files,
+            coverage=coverage,
+        )
+        assert reopened(cohort, prefix) == offer
+        snapshot = files.verified_package(offer.package_sha256)
+        assert snapshot.sha256 == offer.package_sha256
+    # Replacing a completed source requires explicit repair before a native
+    # consumer may inspect it. It never silently becomes a new first import.
     path.write_bytes(canonical_json_bytes(package.model_copy(update={"policy_sha256": "ee" * 32})))
-    with pytest.raises(ValueError, match="approved cohort"):
+    from umi.competition_verification_snapshot import VerificationSnapshotRepairRequired
+
+    with pytest.raises(VerificationSnapshotRepairRequired):
         offers(cohort, prefix)
 
 
@@ -4396,6 +4429,20 @@ async def test_reviewed_automatic_inputs_require_original_replica(
     assert not h.calls
     path.write_bytes(original)
     path.chmod(0o600)
+    # Restoring exact bytes changes their local identity. The supported repair
+    # explicitly rebinds verified state before recurring settlement resumes.
+    from umi.competition_cohort_settlement_inputs import SettlementInputPackage
+    from umi.competition_verification_snapshot import VerificationSnapshotRepairRequired
+
+    with pytest.raises(VerificationSnapshotRepairRequired):
+        await a.tick()
+    a.verified_packages.repair(
+        path,
+        SettlementInputPackage,
+        maximum_bytes=a.config.maximum_package_bytes,
+        expected_sha256=digest(h.c.package),
+        reason="restored original settlement input after " + damage,
+    )
     h.clock.block += 100000
     with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
@@ -5972,7 +6019,7 @@ def test_settlement_serialization_scope_preserves_native_checks_and_package_byte
 
 
 async def test_durable_snapshot_preparation_reuses_native_work_across_all_consumers(
-    historical_preparation_case, tmp_path, monkeypatch
+    historical_preparation_case, tmp_path, monkeypatch, record_property
 ):
     """Installed file loader, fresh/restarted writer, predecessor and initial replay."""
     from umi import competition_cohort_endpoint_archive as archive_module
@@ -6009,14 +6056,20 @@ async def test_durable_snapshot_preparation_reuses_native_work_across_all_consum
     assert ready.allocation == p.allocation
     cold = counts.copy()
     assert all(value > 0 for value in cold.values())
+    from .reward_snapshot_assertions import NativeContextReads
+
+    reads = NativeContextReads(monkeypatch, p.package, snapshot)
     restored = p.reopen()
     snapshot = files.verified_package(package_sha)
     again = await restored.prepare(snapshot, **replay_args(await p.observations()))
     assert again.allocation == p.allocation
     assert counts == cold
+    assert reads.check()["objects"] > 0
     predecessor = await p.reopen().prepare_historical(snapshot, **historical_args)
+    reads.check()
     chosen.current = replace(chosen.current, initial_selection=chosen.current.selection)
     initial = await p.reopen().prepare_initial(snapshot, **historical_args)
+    reads.check()
     assert predecessor.allocation == initial.allocation == ready.allocation
     assert counts == cold
     fresh = await p.observations()
@@ -6024,3 +6077,100 @@ async def test_durable_snapshot_preparation_reuses_native_work_across_all_consum
     assert sum(projected.projection.weights) == 65535
     assert not projected.chain_submission_authorized
     assert (files.root / "packages" / (package_sha + ".json")).read_bytes() == before
+    record_property("warm_context_reads", json.dumps(reads.checks))
+
+
+async def test_reward_delivery_consumers_reuse_snapshots_and_require_explicit_repair(
+    preparation_case, tmp_path, monkeypatch, capsys
+):
+    """Real signed packages through publication, readback and publisher delivery."""
+    from umi import competition_verification_snapshot as snapshot_module
+    from umi.competition_reward_control_publisher import StandingControlPublisher
+    from umi.competition_reward_coordinator import StandingRewardCoordinator
+    from umi.competition_reward_decisions import SignedRewardControlDecision
+    from umi.competition_reward_files import StandingRewardFiles
+    from umi.competition_reward_publication import retain_standing_reward_inputs
+    from umi.competition_verification_snapshot_cli import main as snapshot_command
+
+    p = preparation_case
+    prefix = tuple(
+        sorted(
+            (SignedRewardControlDecision.model_validate_json(v) for v in p.objects.values()),
+            key=lambda v: v.decision.sequence,
+        )
+    )
+    roots = (tmp_path / "delivery-original", tmp_path / "delivery-readback")
+
+    def open_files(root):
+        return StandingRewardFiles(
+            root, maximum_package_bytes=8 * 1024**2, maximum_witness_bytes=1024**2
+        )
+
+    for root in roots:
+        files = open_files(root)
+        retain_standing_reward_inputs(
+            files, p.reader.series, p.reader.policy, prefix, lambda _: p.package
+        )
+        files.verified_package(digest(p.package))
+    files, readback = map(open_files, roots)
+    publisher = SimpleNamespace(files=files)
+    coordinator = SimpleNamespace(readback=readback, publisher=publisher)
+
+    def no_fetch(*args, **kwargs):
+        pytest.fail("unchanged successful package was fetched or parsed again")
+
+    def consume():
+        assert retain_standing_reward_inputs(
+            files, p.reader.series, p.reader.policy, prefix, no_fetch
+        ) == digest(p.active.decision)
+        StandingControlPublisher._delivered(publisher, prefix)
+        StandingRewardCoordinator._readback(coordinator, prefix)
+
+    with monkeypatch.context() as warm:
+        warm.setattr(snapshot_module, "read_aggregate_model", no_fetch)
+        native_read = snapshot_module._read_bounded_private_bytes
+
+        def metadata_only(path, **kwargs):
+            assert path.suffix != ".bin"
+            assert path not in {root / "packages" / (digest(p.package) + ".json") for root in roots}
+            return native_read(path, **kwargs)
+
+        warm.setattr(snapshot_module, "_read_bounded_private_bytes", metadata_only)
+        consume()
+        record = next(
+            path
+            for path in (files.root / "verification" / "packages").glob("*.json")
+            if json.loads(path.read_bytes()).get("schema") == "umi-private-verification-snapshot/1"
+        )
+        record.unlink()
+        with pytest.raises(snapshot_module.VerificationSnapshotRepairRequired):
+            consume()
+        with pytest.raises(snapshot_module.VerificationSnapshotRepairRequired):
+            StandingControlPublisher._delivered(publisher, prefix)
+
+    # The supported operator entry point restores only the damaged snapshot.
+    # Signed package/decision bytes and source paths are not rewritten.
+    source = files.root / "packages" / (digest(p.package) + ".json")
+    original = source.stat()
+    snapshot_command(
+        [
+            "repair",
+            "--store",
+            str(files.root / "verification" / "packages"),
+            "--source",
+            str(source),
+            "--kind",
+            "reward",
+            "--maximum-bytes",
+            str(files.maximum_package_bytes),
+            "--package-sha256",
+            digest(p.package),
+            "--reason",
+            "missing snapshot completion",
+        ]
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    assert source.stat() == original
+    with monkeypatch.context() as warm:
+        warm.setattr(snapshot_module, "read_aggregate_model", no_fetch)
+        consume()

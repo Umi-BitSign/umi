@@ -94,6 +94,9 @@ def test_interrupted_import_preserves_existing_verified_objects(tmp_path, monkey
         store.load(source, Package, maximum_bytes=1024**2)
     first = store.object_path(digest(values[0])).stat()
     monkeypatch.setattr(module, "read_endpoint_object", native)
+    monkeypatch.setattr(
+        module, "read_aggregate_model", lambda *a, **k: pytest.fail("repeat decode")
+    )
     store.load(source, Package, maximum_bytes=1024**2)
     after = store.object_path(digest(values[0])).stat()
     assert (first.st_ino, first.st_ctime_ns) == (after.st_ino, after.st_ctime_ns)
@@ -151,7 +154,7 @@ def test_nested_warm_verdict_retains_dependencies_without_reading_payloads(
 
 
 @pytest.mark.parametrize("damage", ["invalid_json", "envelope", "object_size"])
-def test_corrupt_snapshot_metadata_repairs_from_original_without_replacing_objects(
+def test_corrupt_snapshot_metadata_repairs_explicitly_without_replacing_objects(
     tmp_path, monkeypatch, damage
 ):
     from umi import competition_verification_snapshot as module
@@ -185,10 +188,18 @@ def test_corrupt_snapshot_metadata_repairs_from_original_without_replacing_objec
         return native_read(*args, **kwargs)
 
     monkeypatch.setattr(module, "read_aggregate_model", read_original)
-    restored = VerificationPackageStore(store.directory).load(
-        source, Package, maximum_bytes=1024**2, expected_sha256=digest(package)
+    with pytest.raises(module.VerificationSnapshotRepairRequired):
+        VerificationPackageStore(store.directory).load(
+            source, Package, maximum_bytes=1024**2, expected_sha256=digest(package)
+        )
+    restored = VerificationPackageStore(store.directory).repair(
+        source,
+        Package,
+        maximum_bytes=1024**2,
+        expected_sha256=digest(package),
+        reason="restore damaged snapshot metadata",
     )
-    assert reads == [source]
+    assert reads == []
     assert restored.name == "original"
     assert restored.records[key].size == object_before.st_size
     assert source.read_bytes() == original_bytes
@@ -200,7 +211,7 @@ def test_corrupt_snapshot_metadata_repairs_from_original_without_replacing_objec
     VerificationPackageStore(store.directory).load(
         source, Package, maximum_bytes=1024**2, expected_sha256=digest(package)
     )
-    assert reads == [source]
+    assert reads == []
 
 
 def test_warm_snapshot_and_receipt_metadata_do_not_consume_declaration_budget(tmp_path, policy):
