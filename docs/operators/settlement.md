@@ -714,9 +714,21 @@ fence the original owner cooperatively. Under the original service account run
 The command takes the existing stopped-owner locks before initializing mutation
 tracking, writes normal atomic per-block checkpoints in the original journal,
 and preserves every raw proof and signed input. A bounded `--maximum-blocks`
-invocation or interruption resumes from completed checkpoints. It exposes count,
+invocation or interruption resumes from completed checkpoints. SIGTERM and
+SIGINT drain the current block before returning a resumable interrupted result.
+It exposes count,
 elapsed time, planning/measured ETA and stalled/repair states; these estimates
 exclude fresh finality, admission, writer preparation and rewards activation.
+
+After all selected blocks have checkpoints, pass the same root seal to the
+no-publishing cutover runner as `--original-export-origin PATH`, together with
+`--original-owner-selection PATH`. This route requires complete indexed coverage
+before constructing any provider; it does not require or create a completed
+admission certificate. The ordinary reader checks every retained result and its
+source revisions, then reconstructs ordered history and fresh finality. The
+operation pins the origin digest across restart. An incomplete migration must
+resume with the migration command; reconciliation never fills its gaps by
+silently repeating the old proof pass.
 
 Projection reads the required metadata, extrinsics and event values while
 retaining dependencies on unchanged proof/code objects. It does not re-execute

@@ -79,6 +79,7 @@ def migrate_original_export_history(
     maximum_history_bytes: int,
     maximum_blocks: int | None = None,
     progress=None,
+    stop_requested: threading.Event | None = None,
 ):
     """Run only after the original owner drains; caller provisions local capacity.
 
@@ -89,6 +90,7 @@ def migrate_original_export_history(
     started = last_changed = time.monotonic()
     done = restored = total = 0
     stop = threading.Event()
+    interrupted = False
     heartbeat = None
     if maximum_blocks is not None and (type(maximum_blocks) is not int or maximum_blocks < 1):
         raise ValueError("migration work window must be positive")
@@ -156,6 +158,9 @@ def migrate_original_export_history(
             finality_sha = chain["finality_pin"]["release_sha256_by_target"][chain["target_triple"]]
             committed = 0
             for height in range(origin["first_block"], origin["through_block"] + 1):
+                if stop_requested is not None and stop_requested.is_set():
+                    interrupted = True
+                    break
                 prior = history.checkpoints.load(height)
                 if prior is not None:
                     if prior["repair"] != {"reason": REASON, "operation": origin_key}:
@@ -226,19 +231,29 @@ def migrate_original_export_history(
                 done=done,
                 total=total,
                 started=started,
-                state="completed" if done == total else "checkpointed",
+                state="completed"
+                if done == total
+                else "interrupted"
+                if interrupted
+                else "checkpointed",
                 restored=restored,
                 last_changed=last_changed,
             )
             return {
-                "status": "semantic_checkpoints_complete" if done == total else "checkpointed",
+                "status": "semantic_checkpoints_complete"
+                if done == total
+                else "interrupted"
+                if interrupted
+                else "checkpointed",
                 "completed_blocks": done,
                 "total_blocks": total,
                 "restored_blocks": restored,
                 "elapsed_seconds": time.monotonic() - started,
                 "origin_sha256": origin_key,
                 "aggregate_completion_claimed": False,
-                "next_action": "native_ordered_history_restore_and_fresh_boundary_review_required",
+                "next_action": "native_ordered_history_restore_and_fresh_boundary_review_required"
+                if done == total
+                else "resume_original_export_migration",
             }
     except (OSError, ValueError, KeyError, TypeError, sqlite3.DatabaseError) as error:
         if total:

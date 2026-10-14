@@ -3,7 +3,10 @@
 import argparse
 import json
 import logging
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .competition_reward_admission_provenance import _canonical
@@ -12,6 +15,19 @@ from .competition_reward_history_origin import (
     load_original_export_origin,
 )
 from .competition_reward_history_origin_migration import migrate_original_export_history
+
+
+@contextmanager
+def _migration_signals():
+    stop = threading.Event()
+    saved = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        for number in saved:
+            signal.signal(number, lambda *_: stop.set())
+        yield stop
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
 
 
 def main(argv=None):
@@ -69,16 +85,14 @@ def main(argv=None):
                 )
             )
         else:
-            print(
-                json.dumps(
-                    migrate_original_export_history(
-                        args.origin,
-                        maximum_history_bytes=args.maximum_history_bytes,
-                        maximum_blocks=args.maximum_blocks,
-                    ),
-                    sort_keys=True,
+            with _migration_signals() as stop:
+                result = migrate_original_export_history(
+                    args.origin,
+                    maximum_history_bytes=args.maximum_history_bytes,
+                    maximum_blocks=args.maximum_blocks,
+                    stop_requested=stop,
                 )
-            )
+            print(json.dumps(result, sort_keys=True))
         completed = True
     finally:
         if args.action != "migrate":

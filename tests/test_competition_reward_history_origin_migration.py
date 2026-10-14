@@ -218,3 +218,29 @@ async def test_unsealed_or_generic_origin_refused(selected):
     c.path.chmod(0o644)
     with pytest.raises(HistoryCheckpointRepairRequired):
         run(c)
+
+
+async def test_cli_sigterm_drains_current_checkpoint_then_resumes(selected, monkeypatch, capsys):
+    import signal
+
+    from umi import competition_reward_history_origin_cli as cli
+
+    c = selected
+    c.running[0] = False
+    before = signal.getsignal(signal.SIGTERM)
+
+    def request_stop(value):
+        if value["completed_blocks"] == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def migrate(path, **kwargs):
+        return migration.migrate_original_export_history(path, progress=request_stop, **kwargs)
+
+    monkeypatch.setattr(cli, "migrate_original_export_history", migrate)
+    cli.main(["migrate", "--origin", str(c.path), "--maximum-history-bytes", str(8 * 1024**2)])
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "interrupted"
+    assert result["completed_blocks"] == 2
+    assert result["next_action"] == "resume_original_export_migration"
+    assert signal.getsignal(signal.SIGTERM) == before
+    assert run(c)["restored_blocks"] == 2

@@ -193,8 +193,9 @@ def test_replaced_path_and_forged_lease_rejected(config_case):
 
 @pytest.mark.parametrize("mode", ["success", "error", "cancel", "progress"])
 @pytest.mark.parametrize("capacity", [False, True])
+@pytest.mark.parametrize("migrated_origin", [False, True])
 async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
-    config_case, monkeypatch, mode, capacity, tmp_path
+    config_case, original_selection, monkeypatch, mode, capacity, migrated_origin, tmp_path
 ):
     config = config_case.config
     selected_path = None
@@ -206,6 +207,16 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
         )
     root, *_ = components(config)
     events, started = [], asyncio.Event()
+    origin_path = tmp_path / "origin.json" if migrated_origin else None
+
+    def migrated(history, lease, path):
+        lease.recheck(config)
+        assert path == origin_path and lease.provenance == original_selection
+        assert history.journal.root == root / "history"
+        events.append("selected_migration")
+        return {"origin_sha256": "a1" * 32}
+
+    monkeypatch.setattr(runtime, "_original_export_migration_selection", migrated)
 
     def locked():
         with pytest.raises(BlockingIOError), ownership.hold_reward_cutover_owner(config):
@@ -235,6 +246,7 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
                 64 * 1024**3 if capacity else config.maximum_history_bytes
             )
             assert kwargs["provider"].__class__ is Provider
+            assert kwargs["history_origin_sha256"] == ("a1" * 32 if migrated_origin else None)
 
         async def step(self, cohort):
             locked()
@@ -261,6 +273,8 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
             cohort=digest(config.series.cohorts[0]),
             operation="fixture-v1",
             history_capacity_config=selected_path,
+            original_owner_selection=Path("fixture-only.json") if migrated_origin else None,
+            original_export_origin=origin_path,
         )
     )
     if mode == "cancel":
@@ -285,6 +299,7 @@ async def test_runtime_cleanup_is_inside_genuine_lease_no_publishing(
         else:
             assert result["history_capacity_selection"] is None
     assert events == [
+        *(["selected_migration"] if migrated_origin else []),
         "construct",
         "start",
         "review",
@@ -475,3 +490,16 @@ async def test_initial_finality_retries_only_missing_head_and_keeps_selected_bud
     provider.current_finalized_block = corrupt
     with pytest.raises(runtime.GrandpaFinalitySupervisorError):
         await runtime._await_initial_finality(provider)
+
+
+async def test_original_export_requires_explicit_owner_before_config(monkeypatch):
+    monkeypatch.setattr(
+        runtime, "load_reward_coordinator_config", lambda *a: pytest.fail("opened config")
+    )
+    with pytest.raises(ValueError, match="requires its original owner"):
+        await runtime.reconcile_reward_cutover(
+            Path("unused"),
+            cohort="a1" * 32,
+            operation="fixture",
+            original_export_origin=Path("origin.json"),
+        )

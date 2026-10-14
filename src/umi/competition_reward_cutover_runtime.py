@@ -66,7 +66,10 @@ def _original_export_migration_selection(history, lease, path):
             "SELECT COUNT(*) FROM history_checkpoint_index WHERE height>=? AND height<=?",
             (first, last),
         ).fetchone()[0]
-    if record != {"schema": ORIGIN_ABI, "path": str(path), "sha256": key} or count != last-first+1:
+    if (
+        record != {"schema": ORIGIN_ABI, "path": str(path), "sha256": key}
+        or count != last - first + 1
+    ):
         raise HistoryCheckpointRepairRequired("cutover requires complete original export migration")
     for height in {first, last}:
         result = history.checkpoints.load(height)
