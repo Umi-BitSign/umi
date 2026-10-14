@@ -71,16 +71,32 @@ def test_old_page_ceiling_failure_retries_same_native_batch(tmp_path, monkeypatc
         assert stored(journal) == (len(records), budget)
 
 
-def test_small_records_with_large_indexes_keep_original_record_limit(tmp_path, monkeypatch):
-    journal = RoundJournal(tmp_path / "rounds", {}, maximum_rounds=128, maximum_bytes=1024**2)
+@pytest.mark.parametrize("page_size", [4096, 8192])
+def test_small_records_with_large_indexes_keep_original_record_limit(
+    tmp_path, monkeypatch, page_size
+):
+    rounds = 128 if page_size == 4096 else 256
+    journal = RoundJournal(tmp_path / "rounds", {}, maximum_rounds=rounds, maximum_bytes=1024**2)
+    inode = journal.path.stat().st_ino
+    if page_size == 8192:
+        with sqlite3.connect(journal.path, isolation_level=None) as db:
+            db.execute("PRAGMA page_size=8192")
+            db.execute("VACUUM")
     records = [
         ("work", f"{number:08d}" + "k" * 1016, {}) for number in range(journal.maximum_records)
     ]
     first = legacy_full(journal, records, monkeypatch)
+    # Reopen an already-converted retained journal after the old writer's
+    # SQLITE_FULL. Its connection ceiling must not become durable state.
+    journal = RoundJournal(journal.root, {}, maximum_rounds=rounds, maximum_bytes=1024**2)
     for low in range(first, len(records), 256):
         journal.put_many(records[low : low + 256])
     assert stored(journal) == (journal.maximum_records, 2 * journal.maximum_records)
-    assert journal.path.stat().st_size > journal.maximum_bytes + 16 * 1024**2
+    old_physical_ceiling = (journal.maximum_bytes + 16 * 1024**2) // 4096 * page_size
+    assert journal.path.stat().st_size > old_physical_ceiling
+    assert journal.path.stat().st_ino == inode
+    with journal.read_transaction() as db:
+        assert db.execute("PRAGMA page_size").fetchone()[0] == page_size
     with pytest.raises(ValueError, match="round journal capacity exhausted"):
         journal.put("work", "one too many", {})
     assert stored(journal) == (journal.maximum_records, 2 * journal.maximum_records)
