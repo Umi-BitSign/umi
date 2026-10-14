@@ -137,15 +137,23 @@ def _seal_directories(root: Path, directories: tuple[str, ...]) -> None:
             os.close(descriptor)
 
 
+def validate_host_stage_slots(maximum: int) -> None:
+    """Validate explicit local retention capacity without removing prior releases."""
+    if type(maximum) is not int or maximum < 1:
+        raise HostUpgradeError("maximum host stage slots must be a positive integer")
+
+
 def stage_successor_host_bundle(
     bundle_path: Path,
     *,
     signed: artifacts.SignedSuccessorHostArtifact,
     config: ValidatorSupervisorConfig,
     expected_manifest_sha256: str,
+    maximum_host_stage_slots: int = MAX_HOST_STAGE_SLOTS,
 ) -> artifacts.VerifiedHostTree:
     """Stage or verify one exact host revision; never execute or switch it."""
     _require_root_linux()
+    validate_host_stage_slots(maximum_host_stage_slots)
     signed = artifacts.parse_signed_host_artifact(canonical_json_bytes(signed))
     config = ValidatorSupervisorConfig.model_validate_json(canonical_json_bytes(config))
     artifacts.verify_host_artifact_authority(
@@ -186,8 +194,11 @@ def stage_successor_host_bundle(
             )
         with os.scandir(parent) as entries:
             for count, _ in enumerate(entries, 1):
-                if count >= MAX_HOST_STAGE_SLOTS:
-                    raise HostUpgradeError("host stage slots exhausted; preserve retained stages")
+                if count >= maximum_host_stage_slots:
+                    raise HostUpgradeError(
+                        "host stage slots exhausted; preserve retained stages and select "
+                        "an explicit larger maximum_host_stage_slots after capacity review"
+                    )
         bundle, original = _input(
             bundle_path, len(HOST_BUNDLE_MAGIC) + signed.manifest.total_size_bytes
         )

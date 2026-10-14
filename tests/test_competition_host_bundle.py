@@ -255,3 +255,44 @@ def test_input_metadata_rejects_mutable_nonroot_or_special_file(field, value):
     fields[field] = value
     with pytest.raises(ValueError, match="root-sealed"):
         bundle._validate_input_info(SimpleNamespace(**fields), 100)
+
+
+def test_explicit_stage_capacity_preserves_retained_hosts_and_reuses_target(case):
+    retained = []
+    for index in range(bundle.MAX_HOST_STAGE_SLOTS + 1):
+        path = case.root / f"retained-{index}"
+        path.mkdir(mode=0o700)
+        (path / "recovery-binding").write_bytes(b"retain original binding")
+        retained.append((path, path.stat().st_ino))
+    with pytest.raises(ValueError, match="slots exhausted"):
+        _stage(case)
+    staged = _stage(case, maximum_host_stage_slots=64)
+    staged.recheck()
+    # Reusing the exact installed release does not allocate another slot, even
+    # if a later caller uses the historical smaller default.
+    assert _stage(case).path.stat().st_ino == staged.path.stat().st_ino
+    for path, inode in retained:
+        assert path.stat().st_ino == inode
+        assert (path / "recovery-binding").read_bytes() == b"retain original binding"
+
+
+@pytest.mark.parametrize("maximum", [0, -1, True, False, 1.5, "64", None])
+def test_invalid_stage_capacity_refuses_before_inputs_or_stage(case, monkeypatch, maximum):
+    monkeypatch.setattr(bundle, "_input", lambda *a: pytest.fail("opened bundle"))
+    with pytest.raises(ValueError, match="positive integer"):
+        _stage(case, maximum_host_stage_slots=maximum)
+    assert not list(case.root.iterdir())
+
+
+def test_explicit_stage_capacity_still_counts_interrupted_stages(case):
+    (case.root / ".host-partial-retained").mkdir(mode=0o700)
+    with pytest.raises(ValueError, match="slots exhausted"):
+        _stage(case, maximum_host_stage_slots=1)
+    assert not case.target.exists()
+    assert (case.root / ".host-partial-retained").is_dir()
+
+
+def test_explicit_capacity_does_not_relax_bundle_authentication(case):
+    with pytest.raises(ValueError):
+        _stage(case, maximum_host_stage_slots=64, expected_manifest_sha256="0" * 64)
+    assert not list(case.root.iterdir())
