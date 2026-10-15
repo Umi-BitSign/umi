@@ -165,3 +165,93 @@ def test_cli_redacts_exception_payload(monkeypatch, capsys):
         "error_type": "ValueError",
         "chain_submission_authorized": False,
     }
+
+
+def test_exact_physical_limits_reach_selected_runtime(monkeypatch):
+    from umi import competition_reward_history_transfer_cli as cli
+
+    expected = (100000000, 2000000, 3000000, 4000000)
+    observed = []
+    monkeypatch.setattr(cli, "_installed_account", lambda args: object())
+
+    async def run(args, selected):
+        budget = args.physical_budget
+        observed.append(
+            (
+                budget.journal.maximum_database_bytes,
+                budget.archive.maximum_file_bytes,
+                budget.journal.minimum_free_bytes,
+                budget.journal.allocation_overhead_bytes,
+            )
+        )
+        assert budget.archive.minimum_free_bytes == expected[2]
+        assert budget.archive.allocation_overhead_bytes == expected[3]
+        return {"status": "complete", "chain_submission_authorized": False}
+
+    monkeypatch.setattr(cli, "_run", run)
+    cli.main(
+        [
+            "--unit",
+            "fixture.service",
+            "--config",
+            "/config",
+            "--standing-boot",
+            "/boot",
+            "--coordinator-config",
+            "/source",
+            "--first-block",
+            "10",
+            "--through-block",
+            "10",
+            "--maximum-target-database-bytes",
+            str(expected[0]),
+            "--maximum-export-file-bytes",
+            str(expected[1]),
+            "--minimum-free-bytes",
+            str(expected[2]),
+            "--allocation-overhead-bytes",
+            str(expected[3]),
+        ]
+    )
+    assert observed == [expected]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--maximum-target-database-bytes", "1000000"],
+        [
+            "--maximum-target-database-bytes",
+            "1000000",
+            "--maximum-export-file-bytes",
+            "100000",
+            "--minimum-free-bytes",
+            "100000",
+            "--allocation-overhead-bytes",
+            "0",
+        ],
+    ],
+)
+def test_partial_or_invalid_physical_limits_refuse_before_account(monkeypatch, extra):
+    from umi import competition_reward_history_transfer_cli as cli
+
+    monkeypatch.setattr(cli, "_installed_account", lambda args: pytest.fail("account opened"))
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "--unit",
+                "fixture.service",
+                "--config",
+                "/config",
+                "--standing-boot",
+                "/boot",
+                "--coordinator-config",
+                "/source",
+                "--first-block",
+                "10",
+                "--through-block",
+                "10",
+                *extra,
+            ]
+        )
+    assert error.value.code == 2
