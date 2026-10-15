@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_reward_history_transfer_owner as transfer
+from umi.canonical_reuse import canonical_json_reuse
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
@@ -222,11 +223,13 @@ async def test_active_owner_refused_before_opening_history(pair, which):
 
 async def test_changed_root_configuration_refuses_during_transfer(pair):
     p = pair
-    async with hold(p) as owner:
-        p.source.save(p.source.path, b" " + canonical_json_bytes(p.source.config))
-        with pytest.raises(ValueError, match="configuration changed"):
+    with canonical_json_reuse():
+        async with hold(p) as owner:
             owner.recheck()
-        p.source.save(p.source.path, canonical_json_bytes(p.source.config))
+            p.source.save(p.source.path, b" " + canonical_json_bytes(p.source.config))
+            with pytest.raises(ValueError, match="configuration changed"):
+                owner.recheck()
+            p.source.save(p.source.path, canonical_json_bytes(p.source.config))
 
 
 @pytest.mark.parametrize("field", transfer._CONTEXT)
@@ -348,3 +351,26 @@ async def test_reader_preparation_failure_exposes_retry_without_completed_scope(
     assert rows[-1]["completed_units"] == 1
     assert rows[-1]["eta_seconds"] is None
     assert not any(value["status"] == "completed" for value in rows)
+
+
+async def test_cached_owner_binding_rejects_mutated_nested_context(pair):
+    p = pair
+    with canonical_json_reuse():
+        async with hold(p) as owner:
+            owner.recheck()
+            # Frozen models may still contain mutable containers. Exact-content
+            # serialization must see a changed binding, never reuse by identity.
+            prior = owner._active[:]
+            owner._active[:] = [False]
+            try:
+                with pytest.raises(ValueError, match="original stopped"):
+                    owner.recheck()
+            finally:
+                owner._active[:] = prior
+            changed = p.source.config.model_copy(update={"reward_adoptions": []})
+            if canonical_json_bytes(changed.reward_adoptions) == canonical_json_bytes(
+                p.source.config.reward_adoptions
+            ):
+                changed = p.source.config.model_copy(update={"reward_adoptions": ["altered"]})
+            with pytest.raises(ValueError, match="configuration differs"):
+                transfer.matching_history_context(changed, p.boot.value)

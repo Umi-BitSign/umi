@@ -14,6 +14,7 @@ from .test_competition_reward_history_transfer import history_case as history_ca
 from .test_competition_reward_history_transfer import policy as policy
 from .test_competition_reward_history_transfer import series_case as series_case
 from .test_competition_reward_history_transfer import transfer_case as transfer_case
+from .test_competition_reward_history_transfer_runtime import runtime_case as runtime_case
 
 _INTERPRETER = os.environ.get("UMI_TEST_INSTALLED_HISTORY_PYTHON")
 pytestmark = [
@@ -46,9 +47,9 @@ print(json.dumps({"facts":facts,"owner":r.checkpoints.owner,"semantics":runtime_
 """
 
 
-async def test_transferred_native_receipts_load_in_unchanged_installed_reader(transfer_case):
-    h = transfer_case
-    h.transfer()
+async def test_transferred_native_receipts_load_in_unchanged_installed_reader(runtime_case):
+    h = runtime_case
+    assert (await h.execute())["status"] == "complete"
     args = {
         "root": str(h.target_root),
         "hotkey": h.source.hotkey,
