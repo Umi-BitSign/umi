@@ -16,26 +16,20 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from .competition_reward_history_preparation import (
-    StandingHistoryPreparationApproval,
-    _control,
-    hold_history_preparation_lease,
-)
+from .competition_reward_history_preparation import _control, hold_history_preparation_lease
 from .competition_reward_history_preparation_runtime import (
-    HistoryPreparationLaunch,
     _readonly_source,
     preparation_source_identity,
 )
 from .competition_reward_writer_adoption import select_writer_adoptions
 from .competition_reward_writer_broker_channel import WriterBrokerChannel
+from .competition_reward_writer_resources import select_writer_resources
 from .competition_reward_writer_review import select_stopped_writer_boot
 from .competition_reward_writer_selection import (
     _journal_path,
     hold_writer_history_selection,
     recover_writer_history_selection,
 )
-from .open_competition import digest
-from .protocol import canonical_json_bytes
 
 _LOG = logging.getLogger(__name__)
 
@@ -107,36 +101,20 @@ def writer_broker_command(anchor, args, descriptor):
     selected = select_stopped_writer_boot(
         anchor, args.standing_boot, held_approval=args.held_approval
     )
-    raw, launch_identity = _control(args.launch, 64 * 1024)
-    launch = HistoryPreparationLaunch.model_validate_json(raw)
-    approval_raw, approval_identity = _control(args.preparation_approval, 64 * 1024)
-    approval = StandingHistoryPreparationApproval.model_validate_json(approval_raw)
-    if (
-        canonical_json_bytes(launch) != raw
-        or canonical_json_bytes(approval) != approval_raw
-        or (
-            launch.preparation_approval_sha256 != digest(approval)
-            or approval.standing_boot_raw_sha256 != selected.boot_raw_sha256
-            or approval.source_config_sha256 != digest(anchor.config)
-            or approval.installation_receipt_sha256 != anchor.receipt_sha256
-            or approval.history != args.history
-        )
-    ):
-        raise ValueError("writer launch differs from original authenticated preparation")
+    native = select_writer_resources(
+        anchor,
+        selected,
+        args.history,
+        launch_path=args.launch,
+        preparation_approval=args.preparation_approval,
+    )
+    launch, approval = native.launch, native.approval
     source, runtime = Path(launch.source_root), Path(launch.python_root)
     for value in (source, runtime):
         _readonly_source(value, directory=True)
     if preparation_source_identity(source) != launch.source_tree_sha256:
         raise ValueError("writer broker source changed")
-    target = approval.through_block if launch.through_block is None else launch.through_block
-    series = (
-        selected.config.series if args.history == "current" else selected.config.predecessor_series
-    )
-    if (
-        series is None
-        or not series.recovery.authority.issued_at_block <= target <= approval.through_block
-    ):
-        raise ValueError("writer selection target exceeds preparation scope")
+    target = native.through_block
     command = [
         str(runtime / ".venv/bin/python"),
         "-I",
@@ -164,6 +142,14 @@ def writer_broker_command(anchor, args, descriptor):
         str(descriptor),
         "--parent-pid",
         str(os.getpid()),
+        "--launch",
+        str(args.launch),
+        "--launch-sha256",
+        native.controls[0][3],
+        "--preparation-approval",
+        str(args.preparation_approval),
+        "--preparation-approval-sha256",
+        native.controls[1][3],
     ]
     if args.readiness_only:
         command.append("--readiness-only")
@@ -172,7 +158,7 @@ def writer_broker_command(anchor, args, descriptor):
     adoptions = select_writer_adoptions(
         selected.config, args.history, getattr(args, "reward_adoptions", None)
     )
-    controls = (launch_identity, approval_identity)
+    controls = native.controls
     if adoptions.control is not None:
         path, _, _, checksum = adoptions.control
         command.extend(["--reward-adoptions", str(path), "--reward-adoptions-sha256", checksum])

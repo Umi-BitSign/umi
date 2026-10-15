@@ -211,6 +211,11 @@ async def test_installed_review_locks_original_writer_before_native_open(
     def forbidden(*args, **kwargs):
         raise AssertionError("mutable constructor ran without original process ownership")
 
+    async def synthetic_resource_preflight(config, resources):
+        assert resources.state_directory == config.state_directory
+        return {"native_artifacts_checked": 3, "chain_submission_authorized": False}
+
+    monkeypatch.setattr(review_module, "preflight_chain_resources", synthetic_resource_preflight)
     monkeypatch.setattr(review_module, "RewardControlHistoryReader", forbidden)
     fd = os.open(lock, os.O_RDWR)
     try:

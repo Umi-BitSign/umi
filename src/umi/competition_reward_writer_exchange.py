@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from functools import partial
 from pathlib import Path
 
-from .competition_chain_resources import CompetitionChainResources
+from .competition_chain_resource_preflight import preflight_chain_resources
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_cutover_ownership import _existing
@@ -30,6 +30,7 @@ from .competition_reward_writer_reconciliation import (
     reconcile_stopped_control_history,
     review_stopped_standing_attempt,
 )
+from .competition_reward_writer_resources import select_writer_resources
 from .competition_reward_writer_review import select_stopped_writer_boot
 from .competition_reward_writer_sources import (
     SourceOnlyOriginalWriterHistory,
@@ -60,10 +61,24 @@ async def exchange_installed_standing_writer(anchor, args, channel):
         getattr(args, "reward_adoptions", None),
         expected_sha256=getattr(args, "reward_adoptions_sha256", None),
     )
+    native = select_writer_resources(
+        anchor,
+        selected,
+        args.history,
+        launch_path=getattr(args, "launch", None),
+        preparation_approval=getattr(args, "preparation_approval", None),
+        expected_launch_sha256=getattr(args, "launch_sha256", None),
+        expected_approval_sha256=getattr(args, "preparation_approval_sha256", None),
+        through_block=args.through_block,
+    )
+    preflight = await preflight_chain_resources(config.chain, native.resources)
 
     def recheck_inputs():
         selected.recheck()
         adoptions.recheck()
+        native.recheck()
+
+    recheck_inputs()
 
     if getattr(args, "readiness_only", False):
         # This non-authorizing environment check runs while the original writer
@@ -94,6 +109,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
             "supplementary_groups": os.getgroups(),
             "mount_namespace": os.readlink("/proc/self/ns/mnt"),
             "native_coordinator_view": view is not None,
+            **preflight,
             "original_owner_checked": False,
             "original_locks_acquired": False,
             "original_journals_opened": False,
@@ -171,7 +187,7 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                 provider = HistoricalRewardControlProvider(
                     config.chain,
                     config.policy,
-                    resources=CompetitionChainResources.from_config(config.chain),
+                    resources=native.resources,
                     runtime_proof_reads=config.runtime_proof_reads,
                     historical_header_directory=root / "headers" / digest(config.chain),
                     historical_header_maximum_bytes=config.maximum_header_bytes,

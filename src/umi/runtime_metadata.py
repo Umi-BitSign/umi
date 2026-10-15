@@ -207,16 +207,51 @@ class RuntimeMetadataExecutor:
         except (ValueError, TypeError, KeyError, RuntimeError) as error:
             raise RuntimeMetadataError("runtime_execution_response_invalid") from error
 
-    def _invoke(self, code: bytes) -> bytes:
-        specification = PinnedArtifact(
+    def _artifact(self):
+        return PinnedArtifact(
             "runtime-metadata",
             self.binary_path,
             self.expected_sha256,
             maximum_bytes=128 * 1024**2,
             executable=True,
         )
+
+    def preflight(self):
+        """Check pinned bytes and OS execution without runtime or chain evidence.
+
+        The native parser must reject empty input normally. Do not turn this
+        diagnostic probe into a successful metadata or chain-verification cache.
+        """
         try:
-            with staged_pinned_artifacts((specification,)) as staged:
+            with staged_pinned_artifacts((self._artifact(),)) as staged:
+                process = subprocess.Popen(
+                    [str(staged["runtime-metadata"])],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                    start_new_session=native_start_new_session(),
+                    env={"LANG": "C", "LC_ALL": "C"},
+                )
+                try:
+                    _, stderr = process.communicate(timeout=self.timeout_seconds)
+                    if process.returncode != 1 or stderr != b"code_size_limit\n":
+                        raise RuntimeMetadataError("runtime_preflight_response_invalid")
+                finally:
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            kill_native_process(process)
+                    process.communicate()
+        except PinnedArtifactError as error:
+            raise RuntimeMetadataError(error.reason_code) from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeMetadataError("runtime_preflight_timeout") from error
+        except OSError as error:
+            raise RuntimeMetadataError("runtime_preflight_execution_failed") from error
+
+    def _invoke(self, code: bytes) -> bytes:
+        try:
+            with staged_pinned_artifacts((self._artifact(),)) as staged:
                 process = subprocess.Popen(
                     [str(staged["runtime-metadata"])],
                     stdin=subprocess.PIPE,
