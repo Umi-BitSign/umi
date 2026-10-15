@@ -330,9 +330,19 @@ class WriterHistorySelection:
             self.value.update(
                 schema=_ADOPTION_SCHEMA, reward_adoptions=self.adoptions.journal_binding
             )
+        # Freeze each owned attempt independently. Candidate native replay may
+        # durably append verified export/checkpoint metadata before a rollback;
+        # the old journal's stamps are not evidence that those writes are bad.
+        # Retain the journal unchanged, including its original stamps, so torn
+        # phase publication and historical recovery keep the same format.
+        self._attempt_content = {
+            name: self.value[name] for name in ("original_content", "staged_content")
+        }
         if self.path.exists() or self.path.is_symlink():
             existing = _read(self.path)
             comparable = {**existing, "phase": "prepared"}
+            if existing["phase"] == "rolled_back":
+                comparable.update(self._attempt_content)
             if comparable != self.value or existing["phase"] not in {"prepared", "rolled_back"}:
                 raise ValueError("history selection requires recovery or a new operation")
             self.value = existing
@@ -341,7 +351,12 @@ class WriterHistorySelection:
             _repair_pending(self.path, self.value, initial=True)
             _write(self.path, self.value)
         self.recheck()
-        _report(self.started, "prepared", completed=1)
+        self._check_frozen_inputs()
+        _report(
+            self.started,
+            "retry_frozen" if self.value["phase"] == "rolled_back" else "prepared",
+            completed=1,
+        )
 
     def recheck(self, *, allow_busy=False):
         _root()
@@ -404,8 +419,8 @@ class WriterHistorySelection:
         # persist legitimate metadata; its result is separately reconciled by
         # that child's original owner, never inferred from these stamps.
         if (
-            _content_stamps(self.original) != self.value["original_content"]
-            or _content_stamps(self.staged) != self.value["staged_content"]
+            _content_stamps(self.original) != self._attempt_content["original_content"]
+            or _content_stamps(self.staged) != self._attempt_content["staged_content"]
         ):
             raise ValueError("history database bytes changed before directory exchange")
 
