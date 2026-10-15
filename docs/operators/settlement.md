@@ -2571,6 +2571,9 @@ after the exact bound archive payload, staging payload, interrupted upload files
 and interrupted archive copy are absent and directory changes are synced. A
 prepared or completed release fences local status, completion, polling and chunk
 retry before local payload creation; a distinct request cannot inherit a refund.
+The allocation check and staging-directory creation hold the upload journal
+lease together, so concurrent release cannot be followed by a stale retry
+recreating an empty model directory. Lock contention retries unchanged.
 These accounting ports do not prove R2 durability, restoration coverage or
 consumer release. Do not invoke them to reclaim a live installation. The remaining
 deployment gate is an authenticated census and migration of every shared archive

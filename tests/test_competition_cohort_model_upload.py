@@ -720,6 +720,56 @@ def _prepare_accounting_release(owner, model):
         owner.allocations._transition(model, "release_prepared", evidence={"fixture": "released"})
 
 
+@pytest.mark.parametrize("operation", ["status", "complete", "put", "poll"])
+def test_release_lease_fences_path_creation_before_local_writes(delivery, operation):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    bundle = h.request.signed_submission.submission.model_bundle
+    stage = owner.root / "files" / digest(bundle)
+    data = (h.source / bundle.files[0].path).read_bytes()
+    assert not stage.exists()
+    with owner.journal.locked():
+        if operation == "poll":
+            status = owner.poll_once()
+            assert status["models_pending"] == 1
+            assert status["last_error_type"] == "PrivateStateBusyError"
+        else:
+            with pytest.raises(BlockingIOError):
+                if operation == "put":
+                    put(owner, key, 0, data)
+                else:
+                    getattr(owner, operation)(key)
+        assert not stage.exists()
+    # A contended attempt did not damage the original reservation or retry.
+    assert owner.status(key)["upload_sha256"] == key
+    assert (stage / "model").is_dir()
+
+
+def test_path_creation_holds_release_lease_after_allocation_check(delivery, monkeypatch):
+    import umi.competition_cohort_model_upload as upload
+
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    original = upload.ensure_private_directory
+    guarded = []
+
+    def check_release_excluded(path):
+        # Simulate a release contender at each actual directory mutation,
+        # after require_local has already succeeded.
+        with pytest.raises(BlockingIOError), owner.journal.locked():
+            pass
+        guarded.append(path)
+        return original(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(upload, "ensure_private_directory", check_release_excluded)
+        owner.status(key)
+    assert len(guarded) == 2
+    _prepare_accounting_release(owner, digest(h.request.signed_submission.submission.model_bundle))
+    with pytest.raises(OSError, match="fenced"):
+        owner.status(key)
+
+
 def test_reservation_refund_requires_full_unlink_and_survives_restart(delivery):
     h, owner = delivery, delivery.owner
     key = owner.reserve(h.request, capture_at(210))

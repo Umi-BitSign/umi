@@ -326,12 +326,16 @@ class CohortModelUploads:
         return key
 
     def _paths(self, key):
-        request = self.retained(key)
-        bundle = request.signed_submission.submission.model_bundle
-        self.allocations.require_local(digest(bundle))
-        staging = self.root / "files" / digest(bundle)
-        ensure_private_directory(staging)
-        ensure_private_directory(staging / "model")
+        # A release owner takes this journal lease before its per-model leases.
+        # Keep the allocation check and directory creation in that same fence:
+        # even an empty tree must not reappear after release preparation.
+        with self.journal.locked():
+            request = self.retained(key)
+            bundle = request.signed_submission.submission.model_bundle
+            self.allocations.require_local(digest(bundle))
+            staging = self.root / "files" / digest(bundle)
+            ensure_private_directory(staging)
+            ensure_private_directory(staging / "model")
         return bundle, staging
 
     def _release_preserved_staging(self, bundle: ModelBundle, staging: Path) -> None:
