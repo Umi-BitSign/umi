@@ -220,18 +220,30 @@ async def reconcile_stopped_control_history(
     with WorkProgress("writer_history_reconciliation", 4, unit="checks") as progress:
         reader._historical_proof(observation)
         from .competition_reward_writer_prefix import EmptyOriginalWriterHistory
+        from .competition_reward_writer_sources import (
+            CoveredOriginalWriterSources,
+            SourceOnlyOriginalWriterHistory,
+        )
 
         empty_original = type(original) is EmptyOriginalWriterHistory
-        if empty_original:
+        source_only = type(original) is SourceOnlyOriginalWriterHistory
+        if source_only:
             original.validate()
-            if candidate_original_prefix is not None or (
+            if type(candidate_original_prefix) is not CoveredOriginalWriterSources:
+                raise ValueError("source-only original lacks native candidate coverage")
+            candidate_original_prefix.validate(original, candidate)
+        if empty_original or source_only:
+            original.validate()
+            if (empty_original and candidate_original_prefix is not None) or (
                 original.first_block != reader.series.recovery.authority.issued_at_block
                 or identity(original.control_hotkey) != identity(reader.series.control_hotkey)
                 or original.chain_config_sha256 != reader.admission_chain_config_sha256
             ):
                 raise ValueError("empty original history binding differs")
         histories = (
-            (candidate,) if empty_original else (original, candidate, candidate_original_prefix)
+            (candidate,)
+            if empty_original or source_only
+            else (original, candidate, candidate_original_prefix)
         )
         for history in histories:
             validate_control_history(
@@ -244,7 +256,7 @@ async def reconcile_stopped_control_history(
             if history.unresolved_blocks:
                 raise ValueError("writer history has unresolved native effects")
         if candidate.tip != observation.snapshot or (
-            not empty_original
+            not (empty_original or source_only)
             and (
                 candidate_original_prefix.tip != original.tip
                 or candidate.tip.block_number < original.tip.block_number
@@ -293,9 +305,11 @@ async def reconcile_stopped_control_history(
             "schema": "umi-stopped-writer-history-review/1",
             "series_sha256": digest(reader.series),
             "original_through_block": original.first_block - 1
-            if empty_original
+            if empty_original or source_only
             else original.tip.block_number,
             "original_history_empty": empty_original,
+            "original_unverified_sources_preserved": source_only,
+            "original_source_through_block": original.source_tip if source_only else None,
             "candidate_through_block": candidate.tip.block_number,
             "retained_decisions": len(retained),
             "verified_decisions": len(checked),

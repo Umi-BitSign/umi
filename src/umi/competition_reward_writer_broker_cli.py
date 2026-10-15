@@ -37,6 +37,7 @@ def main(argv=None):
     parser.add_argument("--operation", required=True)
     parser.add_argument("--reward-adoptions", type=Path)
     parser.add_argument("--readiness-only", action="store_true")
+    parser.add_argument("--preserve-unverified-original", action="store_true")
     parser.add_argument("--history", choices=("current", "predecessor"), default="current")
     args = parser.parse_args(argv)
     os.umask(0o077)
@@ -49,6 +50,9 @@ def main(argv=None):
         result = asyncio.run(_run(anchor, args))
         print(json.dumps(result, separators=(",", ":")))
     except BaseException as error:
+        from .competition_progress import _failure_details
+
+        logging.error("writer_broker_parent_exit causes=%s", _failure_details(error))
         print(
             json.dumps(
                 {

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import AsyncExitStack
+from functools import partial
 from pathlib import Path
 
 from .competition_chain_resources import CompetitionChainResources
@@ -29,6 +31,11 @@ from .competition_reward_writer_reconciliation import (
     review_stopped_standing_attempt,
 )
 from .competition_reward_writer_review import select_stopped_writer_boot
+from .competition_reward_writer_sources import (
+    SourceOnlyOriginalWriterHistory,
+    cover_source_only_original,
+    review_source_only_original,
+)
 from .competition_supervisor_runtime import hold_successor_startup_lease
 from .competition_work_progress import WorkProgress
 from .concurrency import run_owned_thread
@@ -181,8 +188,20 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         )
                         if original_tip > args.through_block:
                             raise ValueError("candidate would regress original retained history")
+                        preserve_sources = getattr(args, "preserve_unverified_original", False)
                         original = (
-                            await run_owned_thread(review_empty_original, original_reader, journals)
+                            await run_owned_thread(
+                                partial(
+                                    review_source_only_original,
+                                    original_reader,
+                                    journals,
+                                    through_block=args.through_block,
+                                ),
+                            )
+                            if preserve_sources and original_tip < original_reader.first_block
+                            else await run_owned_thread(
+                                review_empty_original, original_reader, journals
+                            )
                             if original_tip < original_reader.first_block
                             else await restore_completed_prefix(
                                 original_reader,
@@ -215,7 +234,9 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         progress.advance()
                         journals.recheck()
                         recheck_inputs()
-                        if original_tip < original_reader.first_block:
+                        if type(original) is SourceOnlyOriginalWriterHistory:
+                            original.validate()
+                        elif original_tip < original_reader.first_block:
                             await run_owned_thread(review_empty_original, original_reader, journals)
                         await channel.send(
                             "original_reviewed",
@@ -240,7 +261,11 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                             owner=owner,
                         )
                         prefix = (
-                            None
+                            await run_owned_thread(
+                                cover_source_only_original, original, candidate_reader, candidate
+                            )
+                            if type(original) is SourceOnlyOriginalWriterHistory
+                            else None
                             if original_tip < original_reader.first_block
                             else await candidate_reader.verified_prefix(original_tip)
                         )
@@ -313,7 +338,12 @@ async def exchange_installed_standing_writer(anchor, args, channel):
                         }
                         await channel.send("complete", result=result)
                         return result
-                except BaseException:
+                except BaseException as error:
+                    from .competition_progress import _failure_details
+
+                    logging.getLogger(__name__).error(
+                        "writer_exchange_failure causes=%s", _failure_details(error)
+                    )
                     # Drain failure inside genuine ownership. Root rollback
                     # completes before any original process/journal lock exits.
                     try:

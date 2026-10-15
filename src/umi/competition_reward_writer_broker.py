@@ -167,6 +167,8 @@ def writer_broker_command(anchor, args, descriptor):
     ]
     if args.readiness_only:
         command.append("--readiness-only")
+    if getattr(args, "preserve_unverified_original", False):
+        command.append("--preserve-unverified-original")
     adoptions = select_writer_adoptions(
         selected.config, args.history, getattr(args, "reward_adoptions", None)
     )

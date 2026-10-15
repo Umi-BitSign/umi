@@ -184,6 +184,12 @@ async def test_retained_work_or_damaged_state_never_becomes_empty(empty_original
     with pytest.raises(HistoryCheckpointRepairRequired):
         review_empty_original(reader, journals)
     assert reader.journal.path.read_bytes() == before
+    if fault != "raw_source":
+        from umi.competition_reward_writer_sources import review_source_only_original
+
+        with pytest.raises((HistoryCheckpointRepairRequired, ValueError)):
+            review_source_only_original(reader, journals, through_block=reader.first_block + 5)
+        assert reader.journal.path.read_bytes() == before
 
 
 @pytest.mark.parametrize("fault", ["missing_index", "orphan_index", "regressed_highest"])
@@ -212,3 +218,54 @@ async def test_empty_capability_cannot_outlive_original_journal_owner(empty_orig
             original.validate()
     finally:
         case.journals._active[0] = True
+
+
+async def test_source_only_review_is_explicit_frozen_and_not_completed(empty_original):
+    from umi.competition_reward_writer_sources import review_source_only_original
+
+    case = empty_original
+    first = case.reader.first_block
+    case.reader.journal.put("control_history_block", str(first), {"retained": "source"})
+    before = case.reader.journal.path.read_bytes()
+    original = review_source_only_original(case.reader, case.journals, through_block=first)
+    original.validate()
+    assert original.source_tip == first
+    assert retained_completed_tip(case.reader) == first - 1
+    assert case.reader.journal.path.read_bytes() == before
+    with pytest.raises(ValueError):
+        replace(original, source_tip=first + 1).validate()
+    with pytest.raises(HistoryCheckpointRepairRequired):
+        review_empty_original(case.reader, case.journals)
+    case.reader.journal.put("control_history_chunk", "ab" * 32, {"late": "mutation"})
+    with pytest.raises(HistoryCheckpointRepairRequired, match="database changed"):
+        original.validate()
+
+
+@pytest.mark.parametrize(
+    "fault", ["gap", "beyond_target", "noncanonical_height", "orphan_identity"]
+)
+async def test_source_only_refuses_unsupported_intervals(empty_original, fault):
+    from umi.competition_reward_writer_sources import review_source_only_original
+
+    case = empty_original
+    first = case.reader.first_block
+    key = (
+        str(first + 1)
+        if fault == "gap"
+        else "0" + str(first)
+        if fault == "noncanonical_height"
+        else str(first)
+    )
+    case.reader.journal.put("control_history_block", key, {"retained": "source"})
+    if fault == "orphan_identity":
+        with case.reader.journal.transaction() as db:
+            db.execute(
+                "INSERT INTO history_source_identity VALUES ('control_history_chunk',?,0,1)",
+                ("ab" * 32,),
+            )
+    with pytest.raises(ValueError):
+        review_source_only_original(
+            case.reader,
+            case.journals,
+            through_block=first - 1 if fault == "beyond_target" else first + 1,
+        )
