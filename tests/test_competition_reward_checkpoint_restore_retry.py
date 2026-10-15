@@ -1,6 +1,7 @@
 """Bounded retained metadata survives ancestry progress, never changed dependencies."""
 
 import asyncio
+import logging
 from collections import Counter
 from types import SimpleNamespace
 
@@ -57,7 +58,7 @@ async def retained(history_case, monkeypatch):
 
 @pytest.mark.parametrize("parallel", [False, True])
 async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
-    history_case, monkeypatch, parallel
+    history_case, monkeypatch, parallel, caplog
 ):
     h, expected, loads = await retained(history_case, monkeypatch)
     if parallel:
@@ -73,12 +74,25 @@ async def test_progress_reuses_one_batch_but_rechecks_final_dependencies(
         return await resolve(ref, encoded)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", progressing)
+    caplog.set_level(logging.INFO, logger="umi.competition_reward_history_progress")
     for _ in range(3):
+        caplog.clear()
         with pytest.raises(HistoricalHeaderRecoveryProgress):
             await h.reader.advance(h.item.provider, through_block=h.end)
         assert loads == list(range(h.old.height, h.end + 1))
         assert h.reader._next == h.old.height
         assert h.reader.progress.latest["stage"] == "owned_historical_ancestry"
+        emitted = [
+            row.args
+            for row in caplog.records
+            if row.name == "umi.competition_reward_history_progress"
+            and row.msg == "reward_history_progress %s"
+        ]
+        # A fast bounded continuation must reach the log before the next pass
+        # replaces the current stage with history_preparation.
+        assert emitted[-1]["stage"] == "owned_historical_ancestry"
+        assert emitted[-1]["ancestry_progress"]["completed_links"] == len(attempts)
+        assert emitted[-1]["stage_eta_seconds"] == 30
     assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
     assert Counter(loads) == dict.fromkeys(range(h.old.height, h.end + 1), 2)
     assert h.reader._pending_checkpoint_restore is None

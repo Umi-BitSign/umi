@@ -455,6 +455,9 @@ and withdraws unsupported estimates. A completed bounded pass remains running,
 while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry
 links as completed block proofs or estimating reward activation.
+The coordinator CLI enables both ancestry and history progress logging. Each
+bounded ancestry continuation emits its current cursor and substage ETA before
+the next pass resets the displayed stage, even within the heartbeat interval.
 While restoration awaits ancestry, its heartbeat follows the active target and
 exact finalized-anchor identity. Advancing links keep the stage running even
 before any history block can apply. Repeated or regressed samples do not refresh
