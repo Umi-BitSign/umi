@@ -219,7 +219,8 @@ capacity, cooperative drainage, restart and current on-chain acceptance before a
 production cutover. The command does not stop/start services, change mounts, load
 signing keys, publish a decision or authorize a transaction.
 Root invocations validate the canonical coordinator configuration before dropping
-to the installed service account, then recheck its exact sealed bytes. This permits
+to the installed service account, then recheck its exact sealed bytes. Account/namespace preparation emits progress
+synchronously; heartbeat threads begin only after the private namespace exists. This permits
 non-signing transfer when the coordinator's physical signer path has a root-only
 ancestor. Keep the selected configuration readable at the same logical path after
 the private view is established. Successful installation-anchor validation is
