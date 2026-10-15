@@ -210,6 +210,29 @@ context. It opens no journal until those ownership checks succeed:
 python -m umi.competition_reward_history_transfer_cli --unit WRITER_UNIT --config /ABSOLUTE/SUPERVISOR.json --standing-boot /ABSOLUTE/STANDING_BOOT.json --coordinator-config /ABSOLUTE/COORDINATOR.json --first-block FIRST --through-block LAST
 ```
 
+For a disk-constrained stopped transfer, select all four explicit physical controls:
+`--maximum-target-database-bytes`, `--maximum-export-file-bytes`,
+`--minimum-free-bytes` and `--allocation-overhead-bytes`. There are no inferred
+defaults. Select the minimum free floor from a separately qualified abort/restart
+plan and filesystem overhead from the actual deployment. These controls apply
+only to this operation; they neither change signed logical allowances nor confer
+capacity credit. A maximum block count alone does not bound physical bytes.
+
+This mode requires existing supported schemas and exact original bindings. The
+source opens read-only without constructors that migrate data. Target transactions
+require DELETE rollback mode, keep spill disabled, enforce an explicit SQLite page
+ceiling, and check headroom for a whole original database's rollback pages plus possible growth
+and sparse allocation before each atomic write. Free-space observations do not reserve
+bytes against unrelated filesystem writers; their load needs separate qualification. Savepoints, attached databases and
+changes to those fences refuse. Compact export checks space before each bounded
+publication and refuses legacy expansion. Unknown formats require explicit migration
+before the transfer starts. The recovery preflight checks the complete one-segment journal geometry, page addresses
+and checksums against the selected ceiling before SQLite can open a writer. Native
+SQLite then recovers a target's bounded interrupted rollback before retry; source recovery and WAL or multi-database recovery refuse.
+Completed native results survive FULL, cooperative stop and repeated execution.
+These controls do not replace actual stopped-owner, filesystem, complete ordered
+restoration or restart-through-promotion qualification.
+
 Provision the installed account's exact logical paths and mount dependencies before
 running this command. On isolated validator roots, both the helper and the later
 ordinary writer need the original provenance seals and original export namespace

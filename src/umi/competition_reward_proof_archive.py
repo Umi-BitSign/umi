@@ -32,6 +32,7 @@ from .competition_evidence_codec import (
     encode_evidence,
     inspect_recipe,
 )
+from .competition_journal_physical_budget import ArchivePhysicalBudget
 from .open_competition import digest, identity
 from .private_files import (
     ensure_private_directory,
@@ -91,7 +92,14 @@ class RewardProofArchive:
     Transport/replication of these files is independent of proof verification.
     """
 
-    def __init__(self, root: Path, *, remote=None):
+    def __init__(
+        self, root: Path, *, remote=None, physical_budget: ArchivePhysicalBudget | None = None
+    ):
+        if physical_budget is not None and (
+            type(physical_budget) is not ArchivePhysicalBudget or remote is not None
+        ):
+            raise ValueError("physical archive budget requires selected local transport")
+        self.physical_budget = physical_budget
         self.root = Path(private_path(str(root)))
         self.remote = remote
         if remote is not None:
@@ -185,8 +193,9 @@ class RewardProofArchive:
                         self._published.popitem(last=False)
         return sha
 
-    @staticmethod
-    def _publish_bytes(path, raw):
+    def _publish_bytes(self, path, raw):
+        if self.physical_budget is not None:
+            self.physical_budget.check(self.root, 2 * len(raw) + len(b'{"hex":""}'))
         # Model validation and publication serialize the same hex object. Reuse
         # those exact canonical bytes within this call only; the current file,
         # publication lock, schema and durability checks still run on every retry.
@@ -325,6 +334,8 @@ class RewardProofArchive:
             schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
         )
         if self.remote is None:
+            if self.physical_budget is not None:
+                self.physical_budget.check(self.root, MAX_FRAME_BYTES)
             publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
         else:
             raw = canonical_json_bytes(frame)
@@ -396,6 +407,8 @@ class RewardProofArchive:
                 retained[sha] = size
             self._retain_bytes(recipe)
         if self.remote is None:
+            if self.physical_budget is not None:
+                self.physical_budget.check(self.root, MAX_FRAME_BYTES)
             publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
         else:
             raw = canonical_json_bytes(frame)

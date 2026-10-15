@@ -11,6 +11,11 @@ import signal
 import threading
 from pathlib import Path
 
+from .competition_journal_physical_budget import (
+    ArchivePhysicalBudget,
+    HistoryTransferPhysicalBudget,
+    JournalPhysicalBudget,
+)
 from .competition_reward_history_transfer_owner import prepare_history_transfer_source
 from .competition_reward_history_transfer_runtime import transfer_installed_history
 from .competition_reward_writer_review_cli import _installed_account
@@ -34,6 +39,7 @@ async def _run(args, anchor):
             through_block=args.through_block,
             maximum_blocks=args.maximum_blocks,
             stop_requested=stop,
+            physical_budget=getattr(args, "physical_budget", None),
         )
     finally:
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -50,7 +56,36 @@ def main(argv=None):
     parser.add_argument("--first-block", type=int, required=True)
     parser.add_argument("--through-block", type=int, required=True)
     parser.add_argument("--maximum-blocks", type=int, default=256)
+    parser.add_argument("--maximum-target-database-bytes", type=int)
+    parser.add_argument("--maximum-export-file-bytes", type=int)
+    parser.add_argument("--minimum-free-bytes", type=int)
+    parser.add_argument("--allocation-overhead-bytes", type=int)
     args = parser.parse_args(argv)
+    sizes = (
+        args.maximum_target_database_bytes,
+        args.maximum_export_file_bytes,
+        args.minimum_free_bytes,
+        args.allocation_overhead_bytes,
+    )
+    if any(value is not None for value in sizes) and not all(value is not None for value in sizes):
+        parser.error("all four explicit physical budget values must be selected together")
+    args.physical_budget = None
+    if all(value is not None for value in sizes):
+        try:
+            args.physical_budget = HistoryTransferPhysicalBudget(
+                JournalPhysicalBudget(
+                    args.maximum_target_database_bytes,
+                    args.minimum_free_bytes,
+                    args.allocation_overhead_bytes,
+                ),
+                ArchivePhysicalBudget(
+                    args.maximum_export_file_bytes,
+                    args.minimum_free_bytes,
+                    args.allocation_overhead_bytes,
+                ),
+            )
+        except ValueError as error:
+            parser.error(str(error))
     if not 0 < args.first_block <= args.through_block or not 1 <= args.maximum_blocks <= 256:
         parser.error("select a positive interval and a work window of 1 to 256 blocks")
     os.umask(0o077)

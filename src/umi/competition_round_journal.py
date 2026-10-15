@@ -17,6 +17,7 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
+from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_round_plan import RoundPlan, RoundProposal
 from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .host_memory_request_bounds import charge_stage_declaration, check_stage_json, stage_limit
@@ -171,6 +172,9 @@ class RoundJournal:
         maximum_record_bytes: int = MAX_BYTES,
         compatible_bindings: Iterable[object] = (),
         repair_record_capacity: bool = False,
+        existing_only: bool = False,
+        read_only: bool = False,
+        physical_budget: JournalPhysicalBudget | None = None,
     ) -> None:
         if (
             type(maximum_rounds) is not int
@@ -179,6 +183,11 @@ class RoundJournal:
             or type(maximum_record_bytes) is not int
             or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
             or type(repair_record_capacity) is not bool
+            or type(existing_only) is not bool
+            or type(read_only) is not bool
+            or (read_only and not existing_only)
+            or (existing_only and repair_record_capacity)
+            or (physical_budget is not None and type(physical_budget) is not JournalPhysicalBudget)
         ):
             raise ValueError("round journal requires bounded capacity")
         self.root, self.maximum_rounds, self.maximum_bytes = root, maximum_rounds, maximum_bytes
@@ -189,10 +198,21 @@ class RoundJournal:
         # connections and must not queue behind unrelated writer work.
         self._transaction_lock = threading.RLock()
         self._capacity_migration = None
+        self.existing_only, self.read_only = existing_only, read_only
+        self.physical_budget = physical_budget
+        if existing_only and (
+            not root.is_dir()
+            or not (root / "rounds.sqlite3").is_file()
+            or not (root / "rounds.lock").is_file()
+        ):
+            raise ValueError("existing journal requires original directory, database and lock")
         _private(root)
         self.path = root / "rounds.sqlite3"
         self.lock_path = root / "rounds.lock"
         self._check_files()
+        if existing_only:
+            self._validate_existing(binding)
+            return
         for path in (self.path, self.lock_path):
             os.close(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
         self._check_files()
@@ -308,6 +328,51 @@ class RoundJournal:
                     (sequence, *expected),
                 )
 
+    def _validate_existing(self, binding):
+        # Never run a schema/binding migration while merely opening the source
+        # of a stopped-owner transfer. Old layouts require their explicit repair.
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(self.path) + suffix)
+            if sidecar.exists() or sidecar.is_symlink():
+                raise ValueError("existing journal has an unrecovered SQLite sidecar")
+        with self.path.open("rb") as stream:
+            header = stream.read(100)
+        if header[:16] != b"SQLite format 3\0" or header[18:20] != b"\x01\x01":
+            raise ValueError("existing journal requires clean rollback format")
+        rollback = Path(str(self.path) + "-journal")
+        if rollback.exists() or rollback.is_symlink():
+            if self.read_only or self.physical_budget is None:
+                raise ValueError(
+                    "existing source journal requires explicit interrupted transaction recovery"
+                )
+            self.physical_budget.recover(self.path)
+        with self.read_transaction() as db:
+            raw = canonical_json_bytes(binding)
+            sizes = db.execute("SELECT LENGTH(body) FROM binding LIMIT 2").fetchall()
+            if sizes != [(len(raw),)]:
+                raise ValueError("existing journal binding requires explicit migration")
+            rows = db.execute("SELECT body FROM binding LIMIT 1").fetchall()
+            if rows != [(raw,)]:
+                raise ValueError("existing journal binding requires explicit migration")
+            for table, columns in {
+                "records": "kind,id,body",
+                "holds": "id",
+                "highwater": "block",
+                "round_index": (
+                    "sequence,suite,proposal,snapshot_block,signing_close,execution_close"
+                ),
+                "plan_index": "suite,opens,closes",
+                "round_settlement_index": "sequence,cutoff,valid_through",
+            }.items():
+                db.execute("SELECT " + columns + " FROM " + table + " LIMIT 0")
+            index = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND name='records_capacity_lengths'"
+            ).fetchone()
+            if index != ("CREATE INDEX records_capacity_lengths ON records(kind,LENGTH(body))",):
+                raise ValueError("existing journal capacity index requires explicit migration")
+            self._record_capacity(db)
+
     def _check_files(self):
         _private(self.root)
         sidecars = tuple(Path(str(self.path) + suffix) for suffix in ("-journal", "-wal", "-shm"))
@@ -367,6 +432,8 @@ class RoundJournal:
 
         Callers must not commit, close or retain the supplied connection.
         """
+        if self.read_only:
+            raise ValueError("existing source journal is read-only")
         with self._transaction_lock:
             self._check_files()
             db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
@@ -378,6 +445,8 @@ class RoundJournal:
                 # physical SQLite pages. Indexes, keys and page fragmentation
                 # need separate disk headroom; deriving another ceiling here
                 # can reject valid work before its logical allowance is used.
+                if self.physical_budget is not None:
+                    self.physical_budget.configure(db, self.path)
                 db.execute("BEGIN IMMEDIATE")
                 version = self._version(db)
                 initial_tables = self._table_names(db)
@@ -435,6 +504,8 @@ class RoundJournal:
         )
         try:
             db.execute("PRAGMA query_only=ON")
+            if self.existing_only or self.physical_budget is not None:
+                db.execute("PRAGMA temp_store=MEMORY")
             db.execute("BEGIN")
             if self._version(db) == 2:
                 self._fence_tables(db)

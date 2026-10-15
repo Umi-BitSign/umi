@@ -129,6 +129,10 @@ class HistoryCheckpoints:
                 ) from error
         if marker_value is not None and marker_value != marker:
             raise HistoryCheckpointRepairRequired("history checkpoint original owner changed")
+        if journal.existing_only:
+            with journal.read_transaction() as db:
+                self.check_schema(db)
+            return
         migration = None
 
         def initialize(db):
