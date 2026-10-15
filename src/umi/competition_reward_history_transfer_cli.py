@@ -55,20 +55,27 @@ def main(argv=None):
         parser.error("select a positive interval and a work window of 1 to 256 blocks")
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO)
+    # Linux refuses mount namespace creation after background threads start.
+    # Account selection constructs that namespace, so these two preparation
+    # checks emit synchronously; transfer stages may start heartbeat threads later.
+    progress = TransferProgress(
+        "history_transfer_account_preparation",
+        2,
+        unit="checks",
+        planning_unit_seconds=(0.01, 120.0),
+    )
+    progress.emit("started")
     try:
-        with TransferProgress(
-            "history_transfer_account_preparation",
-            2,
-            unit="checks",
-            planning_unit_seconds=(0.01, 120.0),
-        ) as progress:
-            if (os.getuid(), os.geteuid()) == (0, 0):
-                args.coordinator_config = prepare_history_transfer_source(args.coordinator_config)
-            progress.advance(1)
-            anchor = _installed_account(args)
-            progress.advance(1)
+        if (os.getuid(), os.geteuid()) == (0, 0):
+            args.coordinator_config = prepare_history_transfer_source(args.coordinator_config)
+        progress.advance(1)
+        anchor = _installed_account(args)
+        progress.advance(1)
+        progress.emit("completed", reason="stage_completed")
         result = asyncio.run(_run(args, anchor))
     except Exception as error:
+        if progress.completed < progress.total:
+            progress.emit("repair_required", reason="account_preparation_failed")
         print(
             json.dumps(
                 {
