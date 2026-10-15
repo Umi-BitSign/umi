@@ -1,5 +1,6 @@
 """Frozen native admissions without intents continue on R2 after adoption."""
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -508,3 +509,84 @@ async def test_worker_independent_review_and_lost_ack_preserve_originals(frozen)
     assert tuple(f.remote.reads) == reads
     raw = (output / "model-reward-preparation" / c.cohort / (digest(f.sub) + ".json")).read_bytes()
     assert json.loads(raw)["acceptance"]["accepted_ordinal"] == 1
+
+
+async def test_owned_remote_retry_reauthenticates_original_and_reads_only_requested_file(frozen):
+    f = frozen
+    request = f.case.requests[0]
+    payloads = f.owner.legacy_payloads
+    await payloads.ensure_owned(request)
+    payloads.require_owned_payload(request)
+    file = request.signed_submission.submission.model_bundle.files[0]
+    raw = f.remote.objects["chunks/sha256/" + file.sha256]
+    f.remote.reads.clear()
+    await payloads.compare_retry(request, file_index=0, offset=0, data=raw)
+    assert f.remote.reads == ["chunks/sha256/" + file.sha256]
+    assert not (f.owner.archive / f.sub.model_revision).exists()
+    # A fresh owner reconstructs its snapshot using persistent file results.
+    restarted, _ = f.create()
+    f.remote.reads.clear()
+    await restarted.legacy_payloads.ensure_owned(request)
+    restarted.legacy_payloads.require_owned_payload(request)
+    assert not f.remote.reads
+
+
+@pytest.mark.parametrize("failure", ["bytes", "generation", "owner_changed", "owner_refused"])
+async def test_owned_remote_retry_failure_revokes_process_capability(frozen, monkeypatch, failure):
+    f = frozen
+    request = f.case.requests[0]
+    payloads = f.owner.legacy_payloads
+    await payloads.ensure_owned(request)
+    file = request.signed_submission.submission.model_bundle.files[0]
+    key = "chunks/sha256/" + file.sha256
+    data = f.remote.objects[key]
+    if failure == "bytes":
+        data = bytes([data[0] ^ 1]) + data[1:]
+    elif failure == "generation":
+        f.remote.etags[key] = "changed-generation"
+    else:
+        original = payloads.owned_original
+        calls = 0
+
+        def changed(request):
+            nonlocal calls
+            calls += 1
+            if failure == "owner_refused":
+                raise ValueError("fixture original no longer authenticated")
+            value = original(request)
+            return value if calls == 1 else ("changed-tip", *value[1:])
+
+        monkeypatch.setattr(payloads, "owned_original", changed)
+    f.remote.reads.clear()
+    with pytest.raises((OSError, ValueError)):
+        await payloads.compare_retry(request, file_index=0, offset=0, data=data)
+    assert digest(request) not in payloads.verified
+    assert not (f.owner.archive / f.sub.model_revision).exists()
+    if failure in {"generation", "owner_refused"}:
+        assert not f.remote.reads
+
+
+@pytest.mark.parametrize("failure", ["changed", "refused", "cancelled"])
+async def test_owned_remote_verification_refuses_history_change_before_publication(
+    frozen, monkeypatch, failure
+):
+    f = frozen
+    request = f.case.requests[0]
+    payloads = f.owner.legacy_payloads
+    original = payloads.owned_original
+    calls = 0
+
+    def changed(request):
+        nonlocal calls
+        calls += 1
+        value = original(request)
+        if calls > 1 and failure == "refused":
+            raise ValueError("fixture post-verification owner refusal")
+        if calls > 1 and failure == "cancelled":
+            raise asyncio.CancelledError("fixture post-verification cancellation")
+        return value if calls == 1 else ("changed-tip", *value[1:])
+
+    monkeypatch.setattr(payloads, "owned_original", changed)
+    with pytest.raises((OSError, ValueError, asyncio.CancelledError)):
+        await payloads.ensure_owned(request)
+    assert digest(request) not in payloads.verified

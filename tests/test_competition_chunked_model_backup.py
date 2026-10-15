@@ -575,3 +575,100 @@ async def test_original_local_completion_is_available_during_remote_outage(backu
     await restore(reader(backup, tmp_path), archive)
     assert not backup.remote.heads and not backup.remote.reads
     assert verify_preserved_bundle(backup.bundle, archive, backup.policy) == digest(backup.bundle)
+
+
+@pytest.mark.asyncio
+async def test_verified_retry_reads_only_two_cross_boundary_chunks(policy, tmp_path):
+    policy = policy.model_copy(update={"maximum_bundle_bytes": 3 * CHUNK_BYTES})
+    weights = b"a" * CHUNK_BYTES + b"b" * CHUNK_BYTES + b"c"
+    case = selected(policy, weights=weights)
+    actual = reader(case, tmp_path)
+    snapshot = await actual.verify()
+    case.remote.reads.clear()
+    case.remote.heads.clear()
+    reports = []
+    index = next(i for i, file in enumerate(case.bundle.files) if file.role == "weights")
+    # A new reader consumes durable verification; no model tree is materialized.
+    value = await reader(case, tmp_path).read_verified_range(
+        snapshot, file_index=index, offset=CHUNK_BYTES - 3, size_bytes=8, report=reports.append
+    )
+    assert value == b"aaa" + b"bbbbb"
+    expected = [
+        "chunks/sha256/" + sha256_hex(raw) for raw in (b"a" * CHUNK_BYTES, b"b" * CHUNK_BYTES)
+    ]
+    assert case.remote.reads == expected
+    assert set(case.remote.heads) == set(expected)
+    assert len(case.remote.heads) == 4  # Generation checks before and after each GET.
+    assert reports[-1]["status"] == "completed"
+    assert reports[-1]["eta_seconds"] == 0
+    assert not (tmp_path / "archive").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["corrupt", "generation", "during_transfer", "receipt"])
+async def test_verified_retry_refuses_changed_source_without_whole_model_restore(
+    backup, tmp_path, change
+):
+    actual = reader(backup, tmp_path)
+    snapshot = await actual.verify()
+    key = "chunks/sha256/" + sha256_hex(b"weights")
+    index = next(i for i, file in enumerate(backup.bundle.files) if file.role == "weights")
+    if change == "corrupt":
+        backup.remote.objects[key] = b"WEIGHTS"
+    elif change == "generation":
+        backup.remote.etags[key] = "replacement-generation"
+    elif change == "during_transfer":
+        backup.remote.change = key
+    else:
+        root = tmp_path / "verification" / digest(backup.bundle) / "remote"
+        (root / (sha256_hex(canonical_json_bytes("weights.txt")) + ".json")).unlink()
+    backup.remote.reads.clear()
+    with pytest.raises((OSError, ValueError)):
+        await actual.read_verified_range(snapshot, file_index=index, offset=1, size_bytes=3)
+    assert backup.remote.reads == ([] if change in {"generation", "receipt"} else [key])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"file_index": -1},
+        {"file_index": True},
+        {"offset": -1},
+        {"offset": True},
+        {"size_bytes": 0},
+        {"size_bytes": CHUNK_BYTES + 1},
+        {"size_bytes": True},
+        {"offset": 7, "size_bytes": 1},
+    ],
+)
+async def test_verified_retry_rejects_invalid_range_before_remote_work(backup, tmp_path, bounds):
+    actual = reader(backup, tmp_path)
+    snapshot = await actual.verify()
+    selected_range = {
+        "file_index": next(
+            i for i, file in enumerate(backup.bundle.files) if file.role == "weights"
+        ),
+        "offset": 0,
+        "size_bytes": 1,
+    }
+    selected_range.update(bounds)
+    backup.remote.reads.clear()
+    backup.remote.heads.clear()
+    with pytest.raises(ValueError):
+        await actual.read_verified_range(snapshot, **selected_range)
+    assert not backup.remote.reads and not backup.remote.heads
+
+
+@pytest.mark.asyncio
+async def test_empty_verified_retry_needs_no_remote_object(policy, tmp_path):
+    case = selected(policy, weights=b"")
+    actual = reader(case, tmp_path)
+    snapshot = await actual.verify()
+    index = next(i for i, file in enumerate(case.bundle.files) if file.role == "weights")
+    case.remote.reads.clear()
+    case.remote.heads.clear()
+    assert (
+        await actual.read_verified_range(snapshot, file_index=index, offset=0, size_bytes=0) == b""
+    )
+    assert not case.remote.reads and not case.remote.heads

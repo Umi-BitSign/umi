@@ -133,7 +133,7 @@ def test_legacy_reservation_holds_native_intake_fence_through_journal_commit(del
     original = h.owner.journal.put_many
     calls = []
 
-    def commit(records):
+    def commit(records, *, index=None):
         fd = os.open(h.intake.directory / "intake.lock", os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError):
@@ -141,7 +141,7 @@ def test_legacy_reservation_holds_native_intake_fence_through_journal_commit(del
             calls.append(True)
         finally:
             os.close(fd)
-        return original(records)
+        return original(records, index=index)
 
     monkeypatch.setattr(h.owner.journal, "put_many", commit)
     assert h.owner.reserve(h.request, capture_at(210)) == digest(h.request)

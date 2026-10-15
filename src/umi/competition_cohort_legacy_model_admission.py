@@ -65,6 +65,7 @@ class LegacyModelAdmissionPayloads:
         self.verified.pop(key, None)
         snapshot = await reader.verify()
         self.verified[key] = snapshot
+        return snapshot
 
     def owned_original(self, request):
         """Reauthenticate an exact retained upload against the native owner."""
@@ -96,11 +97,16 @@ class LegacyModelAdmissionPayloads:
             return state.tip_sha256, digest(record), digest(admission)
 
     async def ensure_owned(self, request):
-        before = await run_owned_thread(self.owned_original, request)
-        await self.ensure(request)
-        if await run_owned_thread(self.owned_original, request) != before:
-            self.verified.pop(digest(request), None)
-            raise OSError("model intake changed during remote retry verification")
+        key = digest(request)
+        self.verified.pop(key, None)
+        try:
+            before = await run_owned_thread(self.owned_original, request)
+            await self.ensure(request)
+            if await run_owned_thread(self.owned_original, request) != before:
+                raise OSError("model intake changed during remote retry verification")
+        except BaseException:
+            self.verified.pop(key, None)
+            raise
 
     def require_owned_payload(self, request):
         self.owned_original(request)
@@ -110,14 +116,15 @@ class LegacyModelAdmissionPayloads:
         key = digest(request)
         try:
             before = await run_owned_thread(self.owned_original, request)
-            if key not in self.verified:
-                await self.ensure(request)
+            snapshot = self.verified.get(key)
+            if snapshot is None:
+                snapshot = await self.ensure(request)
             resolution = self.sources.resolve(
                 request.consent.consent.cohort_sha256, request_sha256=key
             )
             try:
                 expected = await self.sources.reader(resolution).read_verified_range(
-                    self.verified[key],
+                    snapshot,
                     file_index=file_index,
                     offset=offset,
                     size_bytes=len(data),
@@ -126,15 +133,20 @@ class LegacyModelAdmissionPayloads:
                 raise OSError("remote model retry requires storage verification repair") from error
             if await run_owned_thread(self.owned_original, request) != before:
                 raise OSError("model intake changed during remote retry comparison")
-            if data != expected:
-                raise ValueError("retry differs from the completed original file")
+        except ValueError as error:
+            self.verified.pop(key, None)
+            raise OSError("remote model retry requires storage verification repair") from error
         except BaseException:
             self.verified.pop(key, None)
             raise
+        if data != expected:
+            self.verified.pop(key, None)
+            raise ValueError("retry differs from the completed original file")
 
     def require_payload(self, request):
         key = digest(request)
-        if not self.contains(request) or key not in self.verified:
+        snapshot = self.verified.get(key)
+        if not self.contains(request) or snapshot is None:
             raise OSError("legacy admission awaits owned R2 byte verification")
         resolution = self.sources.resolve(request.consent.consent.cohort_sha256, request_sha256=key)
-        self.sources.reader(resolution).require_verified(self.verified[key])
+        self.sources.reader(resolution).require_verified(snapshot)

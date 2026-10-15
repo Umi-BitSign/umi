@@ -442,6 +442,7 @@ def _create_intake_app(
                     service_host.uploads,
                     finality_cache.collect_for_cohort_recovery,
                     capture_timeout_seconds=registration_wait_seconds,
+                    remote_payloads=service_host.legacy_payloads,
                 )
             )
         if service_host.direct_uploads is not None:

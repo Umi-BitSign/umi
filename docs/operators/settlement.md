@@ -2569,14 +2569,27 @@ accounting transitions retain the complete charge through remote qualification,
 release preparation and interrupted deletion. Completion can credit it only
 after the exact bound archive payload, staging payload, interrupted upload files
 and interrupted archive copy are absent and directory changes are synced. A
-prepared or completed release fences status, completion, polling and chunk retry
-before local payload creation; a distinct request cannot inherit a refund.
+prepared or completed release fences local status, completion, polling and chunk
+retry before local payload creation; a distinct request cannot inherit a refund.
 These accounting ports do not prove R2 durability, restoration coverage or
 consumer release. Do not invoke them to reclaim a live installation. The remaining
 deployment gate is an authenticated census and migration of every shared archive
 consumer, including active C5, baseline and incumbent bindings, together with
 supported remote retry service. Neither a config flag nor a supplied list of
 consumers establishes that gate.
+
+The configured HTTP delivery routes can serve an exact released original through
+the authenticated legacy R2 payload owner. POST retry and GET status recheck the
+original participation, admission certificate and committed storage history, then
+reuse durable byte verification for unchanged remote objects. Successful status
+retains the original upload identity and exact legacy response schema; it does
+not issue admission or artifact acceptance. Signed PUT retries authenticate the
+original submitting key and compare only the requested range using at most two
+8 MiB chunks, without recreating staging or archive payloads. Wrong signed bytes
+return 422; unavailable or damaged original ownership, remote data or verification
+returns 503 so the client retains its unchanged request. A missing remote owner or
+an original absent from its authenticated inventory stays fenced. This read-only
+retry support grants no capacity refund or permission to remove local files.
 
 Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model

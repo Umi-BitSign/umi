@@ -6,13 +6,16 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request
 
 from .competition_cohort_model_upload import CHUNK_BYTES, CohortModelUploads, ModelUploadChunk
+from .competition_cohort_model_upload_delivery import ModelUploadDelivery
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_progress import report_admission_failure
 from .concurrency import run_owned_thread
 from .open_competition import Signature
 
 
-def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_seconds=120):
+def model_upload_routes(
+    owner: CohortModelUploads, capture, *, capture_timeout_seconds=120, remote_payloads=None
+):
     if (
         type(capture_timeout_seconds) not in (int, float)
         or not 1 <= capture_timeout_seconds <= 3600
@@ -20,6 +23,7 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
         raise ValueError("model upload capture timeout must be between 1 and 3600 seconds")
     router = APIRouter()
     slots = asyncio.Semaphore(owner.config.maximum_concurrent_uploads)
+    delivery = ModelUploadDelivery(owner, remote_payloads=remote_payloads)
 
     async def lookup(key):
         try:
@@ -59,7 +63,7 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
                 stage = "reserve"
                 key = await run_owned_thread(owner.reserve, signed, current)
             stage = "status"
-            return await run_owned_thread(owner.status, key)
+            return await delivery.status(key)
         except asyncio.TimeoutError as error:
             report_admission_failure("model_delivery", stage, error)
             raise HTTPException(503, "model delivery unavailable; retry unchanged") from error
@@ -74,7 +78,7 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
     async def status(key: str):
         await lookup(key)
         try:
-            return await run_owned_thread(owner.status, key)
+            return await delivery.status(key)
         except (OSError, ValueError, sqlite3.Error) as error:
             raise HTTPException(503, "model delivery state unavailable") from error
 
@@ -127,9 +131,8 @@ def model_upload_routes(owner: CohortModelUploads, capture, *, capture_timeout_s
                 if len(body) + len(part) > size:
                     raise HTTPException(413, "chunk exceeds declared length")
                 body.extend(part)
-            await run_owned_thread(owner.put_chunk, chunk, signature, bytes(body))
             # The recurring service worker verifies full files and publishes the bundle.
-            return await run_owned_thread(owner.status, key)
+            return await delivery.put_chunk(chunk, signature, bytes(body))
         except asyncio.TimeoutError as error:
             raise HTTPException(408, "file transfer idle; retry the same file") from error
         except ValueError as error:

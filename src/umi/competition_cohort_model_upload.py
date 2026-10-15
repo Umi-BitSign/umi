@@ -193,6 +193,30 @@ def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
         yield request, key, sub
 
 
+def validate_model_upload_chunk(
+    request: CohortParticipationRequest,
+    chunk: ModelUploadChunk,
+    signature: Signature,
+    data: bytes,
+) -> ModelUploadChunk:
+    """Authenticate an exact retry before choosing local or remote byte storage."""
+    chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
+    if chunk.upload_sha256 != digest(request):
+        raise ValueError("model chunk differs from its retained request")
+    if identity(signature.hotkey) != identity(request.signed_submission.submission.hotkey):
+        raise ValueError("model chunk signer differs from its submitting hotkey")
+    verify_signature(chunk, signature)
+    if len(data) != chunk.size_bytes or hashlib.sha256(data).hexdigest() != chunk.sha256:
+        raise ValueError("model chunk differs from its signed bytes")
+    bundle = request.signed_submission.submission.model_bundle
+    if chunk.file_index >= len(bundle.files):
+        raise ValueError("file is outside the signed model manifest")
+    record = bundle.files[chunk.file_index]
+    if chunk.offset + len(data) > record.size_bytes or (not data and record.size_bytes):
+        raise ValueError("chunk is outside the declared file")
+    return chunk
+
+
 class CohortModelUploads:
     def __init__(self, config: ModelUploadConfig, intake: CohortIntake, archive: Path):
         self.config = ModelUploadConfig.model_validate_json(canonical_json_bytes(config))
@@ -373,17 +397,9 @@ class CohortModelUploads:
     def put_chunk(self, chunk: ModelUploadChunk, signature: Signature, data: bytes):
         chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
         request = self.retained(chunk.upload_sha256)
-        if identity(signature.hotkey) != identity(request.signed_submission.submission.hotkey):
-            raise ValueError("model chunk signer differs from its submitting hotkey")
-        verify_signature(chunk, signature)
-        if len(data) != chunk.size_bytes or hashlib.sha256(data).hexdigest() != chunk.sha256:
-            raise ValueError("model chunk differs from its signed bytes")
+        chunk = validate_model_upload_chunk(request, chunk, signature, data)
         bundle, staging = self._paths(chunk.upload_sha256)
-        if chunk.file_index >= len(bundle.files):
-            raise ValueError("file is outside the signed model manifest")
         record = bundle.files[chunk.file_index]
-        if chunk.offset + len(data) > record.size_bytes or (not data and record.size_bytes):
-            raise ValueError("chunk is outside the declared file")
         lease = lock_private_file(staging / "upload.lock")
         try:
             self.allocations.require_local(digest(bundle))
