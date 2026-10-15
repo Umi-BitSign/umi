@@ -17,6 +17,7 @@ import pytest
 
 from umi.competition_cohort_reward_allocation import CohortRewardProjection
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
+from umi.competition_reward_transaction_outcome import resolve_standing_transaction
 from umi.competition_reward_transaction_recovery import review_standing_transaction
 from umi.competition_reward_transactions import StandingWeightIntent, StandingWeightJournal
 from umi.open_competition import digest
@@ -265,9 +266,22 @@ async def original(native_encoding, chain_config, policy, tmp_path, request):
             await provider.aclose()
 
 
-async def test_restart_verifies_original_state_and_real_signature_without_historical_rpc(original):
+async def test_restart_verifies_original_state_and_real_signature_without_rpc(
+    original, monkeypatch
+):
     t = original
     before = t.journal.recovery_inputs()
+    transport_attempts = []
+
+    async def unavailable(method, params):
+        transport_attempts.append((method, tuple(params)))
+        raise ValidatorChainError("proof_rpc_rate_limited")
+
+    async def close():
+        pass
+
+    monkeypatch.setattr(t.rpc, "request", unavailable)
+    t.provider._registration_rpc = SimpleNamespace(request=unavailable, aclose=close)
     result = await review_standing_transaction(t.provider, t.journal, control_hotkey=t.hotkey)
     assert result.pending == before.pending
     assert result.query.birth_block == t.old.height
@@ -277,7 +291,13 @@ async def test_restart_verifies_original_state_and_real_signature_without_histor
     assert not result.chain_submission_authorized
     assert t.journal.recovery_inputs() == before
     assert len(t.checked) == 1 + len(json.loads(t.chain.evidence)["storage_batches"])
-    assert {method for method, _ in t.calls} == {"chain_getHeader", "chain_getBlockHash"}
+    assert t.calls == transport_attempts == []
+    # Replaying the original signature and proofs does not replace the separate
+    # current-head check required to settle the attempt's live outcome.
+    with pytest.raises(ValidatorChainError, match="proof_rpc_rate_limited"):
+        await resolve_standing_transaction(t.provider, t.journal, control_hotkey=t.hotkey)
+    assert transport_attempts == [("chain_getHeader", (t.finality.ref.block_hash,))]
+    assert t.journal.recovery_inputs() == before
 
 
 @pytest.mark.parametrize("original", [256], indirect=True)
