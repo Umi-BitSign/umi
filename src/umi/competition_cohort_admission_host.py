@@ -36,6 +36,8 @@ from .competition_cohort_intake_export import IntakeReviewExporter
 from .competition_cohort_intake_review import NativeIntakeProgressSource
 from .competition_cohort_intake_review_http import intake_review_routes
 from .competition_cohort_lifecycle_host import LifecycleHost
+from .competition_cohort_model_delivery_api import model_delivery_adoption_owner_routes
+from .competition_cohort_model_delivery_reservation import model_delivery_reservation_routes
 from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
@@ -252,6 +254,16 @@ async def admission_owner_app(
             if operator_token in (token, *credentials):
                 raise ValueError("request-rule control requires a separate operator credential")
             app.include_router(request_tail_adoption_owner_routes(lifecycle, token=operator_token))
+        if (
+            lifecycle is not None
+            and lifecycle.config.model_delivery_operator_token_file is not None
+        ):
+            model_operator_token = _token(lifecycle.config.model_delivery_operator_token_file)
+            if model_operator_token in (token, *credentials):
+                raise ValueError("model delivery control requires a separate operator credential")
+            app.include_router(
+                model_delivery_adoption_owner_routes(lifecycle, token=model_operator_token)
+            )
         app.include_router(
             admission_history_routes(
                 AdmissionHistoryExporter(queue, c.owner_hotkey, sign),
@@ -269,6 +281,7 @@ async def admission_owner_app(
         app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
         if lifecycle is not None:
             app.include_router(request_tail_reservation_routes(lifecycle, token=token))
+            app.include_router(model_delivery_reservation_routes(lifecycle, token=token))
         app.state.intake_review_exporter = IntakeReviewExporter(
             NativeIntakeProgressSource(
                 intake, maximum_sample_gap_blocks=c.maximum_sample_gap_blocks

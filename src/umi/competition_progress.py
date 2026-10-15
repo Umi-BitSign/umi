@@ -46,6 +46,7 @@ _PHASES = frozenset(
         "cohort_progress_vote",
         "cohort_decision_vote",
         "cohort_request_tail_adoption_vote",
+        "cohort_model_delivery_adoption_vote",
         "cohort_service_vote",
         "service_admission_catalog",
         "service_admission_history",

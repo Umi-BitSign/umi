@@ -232,6 +232,9 @@ class CohortAdmissionQueue:
             certified = self._certificate(db, record)
             if certified is not None:
                 return certified
+            _, pending = store.status(cohort)
+            if pending is not None and pending.operation == "adopt_model_delivery":
+                raise OSError("new admission certificate awaits reserved model delivery adoption")
             check_selected(raw, self._history(db, store, cohort), self.policy, block)
             prior = db.execute(
                 "SELECT substr(body,1,16385) FROM cohort_admission_votes "

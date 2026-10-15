@@ -746,6 +746,9 @@ class CohortModelAcceptances:
         with self.intake._connection() as (db, store):
             if store.published_history(cohort) != history:
                 raise OSError("model intake changed during artifact verification; retry")
+            _, pending = store.status(cohort)
+            if pending is not None and pending.operation == "adopt_model_delivery":
+                raise OSError("new acceptance certificate awaits reserved model delivery adoption")
             self._grandfathered(db, store, record)
             intent = _read(db, "cohort_model_acceptance_intents", cohort, submission)
             if intent != canonical_json_bytes(

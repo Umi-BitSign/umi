@@ -20,6 +20,10 @@ from .competition_cohort_legacy_model_selection import (
     LegacyModelStorageSelections,
     validate_legacy_model_selections,
 )
+from .competition_cohort_model_delivery_candidate import (
+    ModelDeliveryAdoptionCandidates,
+    validate_adoption_candidates,
+)
 from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_model_static_review import verify_standing_review_policy
 from .competition_cohort_model_transport_selection import (
@@ -84,6 +88,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
     legacy_model_storage: LegacyModelStorageSelections = ()
+    model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -114,6 +119,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("model_delivery_adoptions", None)
         if not self.legacy_model_storage:
             value.pop("legacy_model_storage", None)
+        if not self.model_delivery_adoption_candidates:
+            value.pop("model_delivery_adoption_candidates", None)
         return value
 
     @property
@@ -138,6 +145,13 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.promotion_directory,
                 self.proof_import_directory,
                 *(source.directory for source in self.legacy_model_storage),
+                *(
+                    dict.fromkeys(
+                        path
+                        for candidate in self.model_delivery_adoption_candidates
+                        for path in candidate.stores()
+                    )
+                ),
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *((self.service_signing.directory,) if self.service_signing else ()),
                 *((self.admission_signing.directory,) if self.admission_signing else ()),
@@ -176,6 +190,16 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 ),
             )
         )
+
+    @model_validator(mode="after")
+    def selected_adoption_candidates(self):
+        if self.model_delivery_adoption_candidates and self.phase_review_budget is None:
+            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        validate_adoption_candidates(
+            self.model_delivery_adoption_candidates,
+            (digest(plan) for plan in self.series.cohorts if plan.sequence > 5),
+        )
+        return self
 
     @model_validator(mode="after")
     def selection(self):

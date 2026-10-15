@@ -32,6 +32,7 @@ from .competition_cohort_model_acceptance import (
     verify_model_acceptance,
     verify_model_acceptance_body,
 )
+from .competition_cohort_model_transport import prepare_model_delivery_adoption
 from .competition_cohort_model_transport_selection import CommittedModelDeliveryHistory
 from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
@@ -213,6 +214,69 @@ def authenticate_legacy_storage_inventories(
     )
     transition = signed.transition
     original = history.model_copy(update={"transitions": history.transitions[:index]})
+    return _authenticate_inventories(
+        legacy_raw,
+        preservation_raw,
+        original=original,
+        transition=transition,
+        policy=policy,
+        expected_baseline_sha256=expected_baseline_sha256,
+        expected_incumbent_sha256s=expected_incumbent_sha256s,
+    )
+
+
+def authenticate_legacy_storage_proposal(
+    legacy_raw,
+    preservation_raw,
+    *,
+    history,
+    transition,
+    policy,
+    expected_baseline_sha256,
+    expected_incumbent_sha256s=(),
+):
+    """Validate unsigned adoption metadata against a verified original prefix.
+
+    Only the issuance path uses this boundary. It supplies neither a committed
+    history nor authority to ordinary consumers, admission or eviction.
+    """
+    if transition.operation != "adopt_model_delivery":
+        raise ValueError("legacy storage proposal requires model delivery adoption")
+    adoption = transition.model_delivery_adoption
+    expected = prepare_model_delivery_adoption(
+        history,
+        policy,
+        expected_tip_sha256=transition.predecessor_sha256,
+        current_block=transition.observed_at_block,
+        delivery=adoption.delivery,
+        legacy_inventory_sha256=adoption.legacy_inventory_sha256,
+        preservation_inventory_sha256=adoption.preservation_inventory_sha256,
+    )
+    if expected != transition:
+        raise ValueError("legacy storage proposal differs from native original history")
+    return _authenticate_inventories(
+        legacy_raw,
+        preservation_raw,
+        original=history,
+        transition=transition,
+        policy=policy,
+        expected_baseline_sha256=expected_baseline_sha256,
+        expected_incumbent_sha256s=expected_incumbent_sha256s,
+    )
+
+
+def _authenticate_inventories(
+    legacy_raw,
+    preservation_raw,
+    *,
+    original,
+    transition,
+    policy,
+    expected_baseline_sha256,
+    expected_incumbent_sha256s,
+):
+    history = original
+    adoption = transition.model_delivery_adoption
     legacy = _canonical(legacy_raw, LegacyModelStorageInventory, MAX_INVENTORY_BYTES)
     preservation = _canonical(
         preservation_raw, LegacyModelPreservationInventory, MAX_INVENTORY_BYTES

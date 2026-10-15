@@ -21,6 +21,7 @@ from .competition_cohort_coordinator import (
 )
 from .competition_cohort_intake import CohortIntakeBinding
 from .competition_cohort_intake_review import IntakeProgressReviewRecord
+from .competition_cohort_model_delivery_api import require_adoption as require_model_adoption
 from .competition_cohort_preparation_phase import PreparationProgressReviewRecord
 from .competition_cohort_recovery import (
     CohortRecoveryTransition,
@@ -179,6 +180,18 @@ class CohortProgressSigner:
             return await self.reviewer.adoption(transition)
 
         # Ordinary closure and policy adoption cannot both consume this tip.
+        slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
+        return await self._vote("phase_decision", slot, transition, review)
+
+    @log_phase("cohort_model_delivery_adoption_vote")
+    async def certify_model_delivery_adoption(self, transition):
+        transition = require_model_adoption(transition)
+        if transition.cohort_sha256 not in {c.cohort_sha256 for c in self.config.cohorts}:
+            raise ValueError("model delivery vote is outside configured cohorts")
+
+        async def review():
+            return await self.reviewer.model_delivery_adoption(transition)
+
         slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
         return await self._vote("phase_decision", slot, transition, review)
 

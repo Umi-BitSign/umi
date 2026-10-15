@@ -27,6 +27,7 @@ from .competition_cohort_legacy_model_selection import (
     authenticate_legacy_model_sources,
     selected_legacy_model_readers,
 )
+from .competition_cohort_model_delivery_api import model_delivery_adoption_vote_routes
 from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_origin import CohortEndpointFinalityProvider
@@ -192,6 +193,15 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         legacy_readers = None
         app.include_router(
             request_tail_adoption_vote_routes(
+                signer,
+                config.series,
+                token=vote_token,
+                timeout_seconds=config.review_timeout_seconds,
+                budget=config.phase_review_budget,
+            )
+        )
+        app.include_router(
+            model_delivery_adoption_vote_routes(
                 signer,
                 config.series,
                 token=vote_token,

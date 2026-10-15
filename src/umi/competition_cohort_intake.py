@@ -440,6 +440,13 @@ class CohortIntake:
                 store.retain_source(cohort, evidence)
             return state
 
+    def pending_policy_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
+        """Recover either native policy reservation without inventing new bytes."""
+        self._allowed(cohort)
+        with self._connection(prefer_history=True) as (_, store):
+            _, pending = store.status(cohort)
+            return pending if pending is not None and pending.is_policy_adoption else None
+
     def pending_request_tail_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
         """Read authenticated pending bytes for lifecycle reservation recovery."""
         self._allowed(cohort)

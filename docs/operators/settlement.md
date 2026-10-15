@@ -2515,6 +2515,59 @@ signing. Adoption does not itself migrate old archives, release reservations or
 authorize eviction. Keep the original artifacts and consumer bindings until their
 supported storage migration and restore qualification complete.
 
+The normal issuance routes are on the existing private admission and reviewer
+listeners under `/internal/cohorts/model-delivery-adoption`. Enable owner mutations
+with `lifecycle.model_delivery_operator_token_file`, separate from export and vote
+credentials. Select the same cohort-sorted `model_delivery_adoption_candidates` on
+that lifecycle and each independent phase reviewer. Each
+`umi-model-delivery-adoption-candidate/1` contains a `source` with the existing
+legacy source schema, the exact direct-R2 `delivery` profile, `r2_credentials_file`,
+`r2_bucket`, a separate durable `verification_directory`, and optional
+`r2_timeout_seconds`. A selected `phase_review_budget` is required on the owner
+and reviewers. Size its `replay_seconds` for the complete retained R2 model set;
+owner and vote exchanges include that additional work plus fresh finality, rather
+than inheriting a short readiness timeout. Keep the operator client and private
+proxy allowances at least as large as those complete derived exchanges. Candidate
+metadata does not select transport for consumers.
+
+Prepare candidate inventory files and exact original copies in the selected source
+directory using the formats below. Preserve the complete original ledger census,
+including superseded participation, uploads without admission, reserved acceptance
+intents and completed certificates, plus the selected baseline and execution
+incumbents. Do not infer census completeness from an R2 listing or rewrite old
+signed requests to the direct-upload schema.
+
+1. `POST /prepare` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
+   predecessor. The existing owner obtains native finalized height, authenticates
+   both inventory files and verifies their R2 bytes with durable file checkpoints.
+   It compares the complete census against the original intake and upload journals.
+2. `POST /reserve` receives the exact `ModelDeliveryAdoptionProposal`. It repeats
+   the current census under intake then upload-journal locks, reserves the intake
+   fence before releasing those locks, then reserves the same control transition.
+   New uploads, participation, admission certificates, acceptance intents and
+   acceptance certificates wait. Existing exact original retries retain their
+   bytes. A crash between reservations resumes the same intake pending transition.
+3. Each independent reviewer's `POST /vote` replays the native history and owned
+   finality, checks its privately selected metadata and R2 bytes, then obtains a
+   fresh owner-signed `/reservation` challenge proof. That proof requires both
+   exact reservations and rechecks the original census. The existing signer uses
+   the same predecessor slot as closure and request-tail adoption, preventing
+   conflicting votes. Byte verification and census expose progress and substage
+   ETAs; interrupted byte review resumes successful file checkpoints.
+4. Assemble votes with `assemble_model_delivery_adoption`, then `POST /commit`
+   a `ModelDeliveryAdoptionCommit`. It verifies the original quorum and publishes
+   through the ordinary history path. Retry the same bytes after interruption.
+
+An explicit authenticated operator call can initialize the original lifecycle
+owner while automatic progression is held; it does not tick a phase or remove
+that hold. Keep the hold until every selected consumer is upgraded and the
+installed R2, restoration, reservation and restart paths are qualified. After
+commit, replace candidate-only configuration with the committed selections below,
+retaining the original metadata and durable byte-verification directory. Adoption
+alone neither starts the direct upload service nor releases archive bytes.
+These migration routes remain necessary while an admitted legacy-transport cohort
+needs adoption; retain their history decoder while any supported cohort uses it.
+
 To select authenticated storage for those original `/1` models, set
 `legacy_model_storage` on the version-nine intake host, phase reviewer, settlement,
 reward coordinator and standing writer configurations. It is a cohort-sorted list of
@@ -2551,7 +2604,7 @@ This path does not release legacy reservations, delete active archives, or issue
 production adoption; those require their separate census, release and signing gates.
 
 Settlement and series-wide reward consumers select the reader by the original
-certificate's cohort. Thus an adopted C6 can use R2 while C5 retains its existing
+certificate's cohort. An adopted successor can use R2 while an older cohort retains its existing
 archive and clocks. Keep `legacy-model-byte-verification` in private durable
 service state, separate from every disposable cache. This selection does not
 create replacement acceptances or reinterpret old rights approvals.
