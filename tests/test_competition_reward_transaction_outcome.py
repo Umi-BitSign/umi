@@ -301,7 +301,9 @@ async def test_concurrent_signature_during_resolution_requires_another_review(
         nonlocal calls
         ref = await snapshot()
         calls += 1
-        if calls == 2:
+        if calls == 1:
+            # Retained history now uses owned local finality. This collector
+            # call is the separate fresh outcome check after that review.
             t.journal.retain_signed(t.intent, t.encoded)
         return ref
 

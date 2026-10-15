@@ -2,10 +2,12 @@
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from umi.competition_reward_control_evidence import archive_header_hint
+from umi.competition_reward_writer_prefix import restore_completed_prefix
 
 from .test_competition_reward_control_archive import chain as chain
 from .test_competition_reward_control_archive import chain_config as chain_config
@@ -13,21 +15,30 @@ from .test_competition_reward_control_archive import control as control
 from .test_competition_reward_control_archive import historical as historical
 from .test_competition_reward_control_archive import policy as policy
 from .test_competition_reward_control_archive import series_case as series_case
+from .test_competition_reward_history import history_case as history_case
+from .test_competition_reward_history_checkpoints import prohibit_proof_replay
 
 
 async def test_window_shares_one_owned_head_and_later_reads_refresh(historical, monkeypatch):
     h = historical
     provider = h.item.provider
     ref, header = archive_header_hint(h.raw)
-    acquire = provider._proofs.finalized_snapshot
-    heads = []
+    acquire = provider._finality.verified_finalized_snapshot
+    collect = provider._proofs.finalized_snapshot
+    heads, collected_heads = [], []
 
     async def counted():
         head = await acquire()
         heads.append(head)
         return head
 
-    monkeypatch.setattr(provider._proofs, "finalized_snapshot", counted)
+    async def collected():
+        head = await collect()
+        collected_heads.append(head)
+        return head
+
+    monkeypatch.setattr(provider._finality, "verified_finalized_snapshot", counted)
+    monkeypatch.setattr(provider._proofs, "finalized_snapshot", collected)
     async with provider._lock:
         async with provider._control_header_window() as resolve:
             expected = (h.old.timestamp_ms, h.fresh.timestamp_ms)
@@ -46,8 +57,59 @@ async def test_window_shares_one_owned_head_and_later_reads_refresh(historical, 
             advanced.timestamp_ms,
         )
     assert len(heads) == 3
+    assert collected_heads == []
     await provider.collect_control(h.item.hotkey)
-    assert len(heads) == 4  # Current authority never borrows a historical head.
+    assert len(collected_heads) == 1  # Current authority still uses the proof collector.
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+@pytest.mark.parametrize("consumer", ["reader", "writer_prefix"])
+async def test_completed_prefix_restart_needs_neither_transport_nor_payload_replay(
+    history_case, monkeypatch, consumer
+):
+    h = history_case
+    expected = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    owner, inode = h.reader.checkpoints.owner, h.reader.journal.path.stat().st_ino
+    completed = {
+        height: h.reader.checkpoints.load(height)
+        for height in range(h.reader.first_block, h.end + 1)
+    }
+
+    async def unavailable(*_):
+        pytest.fail("completed historical prefix must not contact either RPC transport")
+
+    owner_checks = []
+
+    async def recheck():
+        owner_checks.append(h.reader.checkpoints.owner)
+
+    # Reopen the provider too: this discards process ancestry caches, while the
+    # retained hints and successful block checkpoints remain independently owned.
+    for _ in range(2):
+        h.reader = await h.restart()
+        prohibit_proof_replay(monkeypatch, h.reader)
+        provider = h.item.provider
+        monkeypatch.setattr(provider._proofs, "finalized_snapshot", unavailable)
+        monkeypatch.setattr(provider._proofs._rpc, "request", unavailable)
+        monkeypatch.setattr(provider._registration_rpc, "request", unavailable)
+        if consumer == "reader":
+            actual = (await h.reader.advance(provider, through_block=h.end)).history
+        else:
+            actual = await restore_completed_prefix(
+                h.reader,
+                provider,
+                through_block=h.end,
+                maximum_blocks=2,
+                owner=SimpleNamespace(recheck=recheck),
+            )
+        assert actual == expected
+        assert h.reader.checkpoints.owner == owner
+        assert h.reader.journal.path.stat().st_ino == inode
+        assert h.reader.progress.native_completed == 0
+        assert h.reader.progress.restored_completed == len(completed)
+        assert {height: h.reader.checkpoints.load(height) for height in completed} == completed
+    if consumer == "writer_prefix":
+        assert owner_checks and set(owner_checks) == {owner}
 
 
 @pytest.mark.parametrize("failure", ["header", "state_root", "context"])
