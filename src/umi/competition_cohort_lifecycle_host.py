@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from contextlib import suppress
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import Field, field_validator, model_serializer
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .competition_client import validate_intake_origin
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
@@ -49,7 +50,7 @@ from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .open_competition import digest
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, publish_private_model, read_private_model
-from .protocol import StrictProtocolModel, canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 if TYPE_CHECKING:
     from .competition_cohort_service_host import ServiceAdmissionHost
@@ -70,13 +71,24 @@ class LifecycleHostConfig(StrictProtocolModel):
     sample_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     request_tail_operator_token_file: Directory | None = None
+    automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
         if self.request_tail_operator_token_file is None:
             value.pop("request_tail_operator_token_file", None)
+        if not self.automatic_progression_hold_cohorts:
+            value.pop("automatic_progression_hold_cohorts", None)
         return value
+
+    @model_validator(mode="after")
+    def known_hold_cohorts(self):
+        holds = self.automatic_progression_hold_cohorts
+        allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
+        if len(holds) != len(set(holds)) or not set(holds) <= allowed:
+            raise ValueError("automatic progression holds must name distinct configured cohorts")
+        return self
 
     _origin = field_validator("public_origin")(validate_intake_origin)
 
@@ -433,6 +445,28 @@ class LifecycleHost:
 
     async def run(self, stop):
         async def cohort_loop(cohort):
+            if cohort in self.config.automatic_progression_hold_cohorts:
+                # Do not construct a controller, publish history, sample, seal,
+                # sign or resume a retained intent while this local hold is set.
+                # HTTP admission and other cohorts retain their own workers.
+                started = time.monotonic()
+                while not stop.is_set():
+                    result = {
+                        "status": "automatic_progression_held",
+                        "cohort_sha256": cohort,
+                        "completed": 0,
+                        "total": 1,
+                        "percent": 0.0,
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "eta_seconds": None,
+                        "eta_basis": "awaiting_qualified_release_and_explicit_hold_removal",
+                        "signed_state_changed": False,
+                    }
+                    self.last_reports[cohort] = result
+                    logger.info("cohort_lifecycle_hold %s", canonical_json_bytes(result).decode())
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)
+                return
             while not stop.is_set():
                 try:
                     node = await self.node(cohort)

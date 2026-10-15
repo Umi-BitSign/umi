@@ -652,3 +652,71 @@ async def test_request_readiness_requires_exact_fresh_dispatch_observation(lifec
     ) as client:
         live = LiveRequestPhaseObserver(source, "https://public.example", client=client)
         assert await live._ready(state, capture) is (fault is None)
+
+
+def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_path):
+    config = configured(lifecycle, tmp_path / "host").lifecycle
+    old = canonical_json_bytes(config)
+    assert b"automatic_progression_hold_cohorts" not in old
+    assert canonical_json_bytes(LifecycleHostConfig.model_validate_json(old)) == old
+    cohort = config.sources.intake.cohorts[0].cohort_sha256
+    value = config.model_dump(by_alias=True)
+    value["automatic_progression_hold_cohorts"] = (cohort,)
+    held = LifecycleHostConfig.model_validate(value)
+    assert held.automatic_progression_hold_cohorts == (cohort,)
+    assert LifecycleHostConfig.model_validate_json(canonical_json_bytes(held)) == held
+    for bad in ((cohort, cohort), ("ff" * 32,)):
+        value["automatic_progression_hold_cohorts"] = bad
+        with pytest.raises(ValueError, match="distinct configured cohorts"):
+            LifecycleHostConfig.model_validate(value)
+
+
+@pytest.mark.asyncio
+async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
+    monkeypatch, lifecycle_before_intake
+):
+    import umi.competition_cohort_lifecycle_host as module
+
+    monkeypatch.setattr(module, "digest", lambda value: value)
+    monkeypatch.setattr(module, "requests_stage_policy", lambda: None)
+    held, active = "11" * 32, "22" * 32
+    stop = asyncio.Event()
+    node_started = asyncio.Event()
+    node_stopped = asyncio.Event()
+    calls = []
+
+    class Node:
+        async def run(self, event, **kwargs):
+            node_started.set()
+            try:
+                await event.wait()
+                return {"status": "stopped"}
+            finally:
+                node_stopped.set()
+
+    async def node(cohort):
+        calls.append(cohort)
+        assert cohort == active, "held cohort constructed a native controller"
+        return Node()
+
+    host = SimpleNamespace(
+        config=SimpleNamespace(
+            automatic_progression_hold_cohorts=(held,), poll_seconds=1, sample_seconds=1
+        ),
+        service=SimpleNamespace(
+            config=SimpleNamespace(series=SimpleNamespace(cohorts=(held, active)))
+        ),
+        last_reports={},
+        node=node,
+    )
+    task = asyncio.create_task(module.LifecycleHost.run(host, stop))
+    await asyncio.wait_for(node_started.wait(), timeout=1)
+    assert calls == [active]
+    report = host.last_reports[held]
+    assert report["status"] == "automatic_progression_held"
+    assert report["percent"] == 0 and report["eta_seconds"] is None
+    assert report["signed_state_changed"] is False
+    stop.set()
+    await asyncio.wait_for(task, timeout=1)
+    assert node_stopped.is_set()
+    assert host.last_reports[active] == {"status": "stopped"}
