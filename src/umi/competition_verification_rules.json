@@ -131,7 +131,7 @@
     "competition_cohort_settlement_service.py": "d551b9d8a46d08bbe14f25fb081559bd12135235eb388360f41b7bb4e587e541",
     "competition_cohort_settlement_signing.py": "46d9acc349f23d1c5ed7fc426b4c0a44ee34be5af3637f5fc08d09026a453c34",
     "competition_cohort_window_store.py": "0c17e9c312ff8f178fe9d6d5715dabfe75e93cf82d03a32cfc8dd800f04ba32f",
-    "competition_container.py": "236ad6532c8486e0816a9fc8e6d228b64e8e22194ff0828ae101c7b535b961b1",
+    "competition_container.py": "0d713697c285ab73db9a806ff0c281f5ae1d1145403348fc4a4a28d3e87e31bd",
     "competition_coordinator_namespace.py": "4630d51c571e3f224af1141ca128c2a0c7aab58f77c3fd61a8bcb2137615f79d",
     "competition_delivery.py": "f3272e2d81dc75fd9309bf320882a718de1b208c432c9d42e08d1be106708e5b",
     "competition_delivery_config.py": "1a92efc87c215b3a0582e6fa1096f8a135d76e22d87e9f1d9dd9ebe1468ae675",

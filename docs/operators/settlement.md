@@ -659,6 +659,11 @@ directory descriptor to recheck its physical descendants and public account
 binding. Its logical mounts and exact UID/GID remain checked, supplementary
 groups remain empty, and the private host parent permissions stay unchanged.
 The capability remains tied to the original process and mount namespace.
+Podman commands recheck that view and its exact service account, then use the
+installed logical account home and runtime username. They start from `/` so a
+broker's inaccessible host working directory cannot leak into Podman. Ordinary
+service commands retain their account database identity; environment variables
+cannot override either selection.
 Child failures emit `writer_broker_child_exit` with bounded native cause details,
 including error types, reason codes and source locations, without exception
 messages or request payloads. Diagnostic failure cannot prevent child cleanup.
