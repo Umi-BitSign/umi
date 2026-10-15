@@ -299,13 +299,30 @@ def _bounded_tree(path: Path, owner: int, entries: int, size: int, depth: int) -
 
 
 def _command_environment() -> dict[str, str]:
+    from .competition_coordinator_namespace import active_coordinator_view
+
     # No wallet, cloud, Python, remote Podman, or loader variables are forwarded.
     identity = pwd.getpwuid(os.geteuid())
+    home, user = identity.pw_dir, identity.pw_name
+    view = active_coordinator_view()
+    if view is not None:
+        if (
+            os.geteuid() != view.service_uid
+            or identity.pw_uid != view.service_uid
+            or identity.pw_gid != view.service_gid
+            or identity.pw_name != view.layout.service_user
+        ):
+            raise SuccessorContainerError("Podman account differs from active coordinator view")
+        # The private view retains the host passwd database while exposing the
+        # installed account's logical state roots. Match that exact outer
+        # account, then use its already-checked inner account identity.
+        view.layout.logical_home(identity.pw_dir)
+        home, user = str(view.layout.account_home), view.layout.runtime_user
     return {
         "PATH": "/usr/bin:/bin",
-        "HOME": identity.pw_dir,
-        "USER": identity.pw_name,
-        "LOGNAME": identity.pw_name,
+        "HOME": home,
+        "USER": user,
+        "LOGNAME": user,
         "LANG": "C.UTF-8",
         "XDG_RUNTIME_DIR": f"/run/user/{os.geteuid()}",
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{os.geteuid()}/bus",
@@ -321,6 +338,7 @@ async def _run_command(arguments, *, timeout_seconds, maximum_output_bytes):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=_command_environment(),
+        cwd="/",
     )
 
     async def collect():
