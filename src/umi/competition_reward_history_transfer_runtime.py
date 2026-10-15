@@ -6,6 +6,7 @@ import threading
 from functools import partial
 from pathlib import Path
 
+from .competition_journal_physical_budget import HistoryTransferPhysicalBudget
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_transfer import (
     review_history_materialization,
@@ -18,7 +19,7 @@ from .concurrency import run_owned_thread
 from .open_competition import digest
 
 
-def _open_readers(owner):
+def _open_readers(owner, physical_budget=None):
     with TransferProgress(
         "history_transfer_reader_preparation",
         3,
@@ -38,7 +39,18 @@ def _open_readers(owner):
                     chain_config_sha256=digest(config.chain),
                     first_block=config.series.recovery.authority.issued_at_block,
                     maximum_bytes=config.maximum_history_bytes,
-                    export_archive=RewardProofArchive(Path(config.proof_export_directory))
+                    existing_only=physical_budget is not None,
+                    read_only=physical_budget is not None and not export,
+                    physical_budget=physical_budget.journal
+                    if physical_budget is not None and export
+                    else None,
+                    compact_export_only=physical_budget is not None,
+                    export_archive=RewardProofArchive(
+                        Path(config.proof_export_directory),
+                        physical_budget=physical_budget.archive
+                        if physical_budget is not None
+                        else None,
+                    )
                     if export
                     else None,
                 )
@@ -61,6 +73,7 @@ async def transfer_installed_history(
     maximum_blocks=256,
     held_approval=None,
     stop_requested=None,
+    physical_budget: HistoryTransferPhysicalBudget | None = None,
 ):
     """Preserve completed block work; leave ordinary restore/finality to the writer.
 
@@ -76,6 +89,8 @@ async def transfer_installed_history(
         or not 1 <= maximum_blocks <= 256
     ):
         raise ValueError("history transfer requires a bounded positive block interval")
+    if physical_budget is not None and type(physical_budget) is not HistoryTransferPhysicalBudget:
+        raise ValueError("typed history transfer physical budget required")
     stop = threading.Event() if stop_requested is None else stop_requested
     completed = copied = existing = exported = 0
     async with hold_history_transfer_owner(
@@ -86,7 +101,12 @@ async def transfer_installed_history(
         coordinator_config=coordinator_config,
         held_approval=held_approval,
     ) as owner:
-        source, target = await run_owned_thread(_open_readers, owner)
+        opener = (
+            _open_readers
+            if physical_budget is None
+            else partial(_open_readers, physical_budget=physical_budget)
+        )
+        source, target = await run_owned_thread(opener, owner)
         with TransferProgress(
             "history_transfer_and_export",
             through_block - first_block + 1,

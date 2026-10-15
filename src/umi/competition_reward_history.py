@@ -35,6 +35,7 @@ from .competition_history_source_externalization import (
     JournalSourceExternalizer,
     source_journal_version,
 )
+from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_reward_admission_checkpoint import CompletedAdmissionCheckpoint
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
@@ -224,6 +225,10 @@ class RewardControlHistoryReader:
         repair_record_capacity: bool = False,
         verification_profile: HistoryVerificationProfile | None = None,
         remote_store=None,
+        existing_only: bool = False,
+        read_only: bool = False,
+        physical_budget: JournalPhysicalBudget | None = None,
+        compact_export_only: bool = False,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -232,6 +237,7 @@ class RewardControlHistoryReader:
         self.config_sha256 = checked_digest(chain_config_sha256)
         self.first_block = first_block
         self.verification_profile = verification_profile
+        self.compact_export_only = compact_export_only
         self._field_bounds = _FIELDS
         self.archive = archive
         self.export_archive = export_archive
@@ -252,6 +258,9 @@ class RewardControlHistoryReader:
             maximum_record_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
             repair_record_capacity=repair_record_capacity,
             remote_store=self.remote_store,
+            existing_only=existing_only,
+            read_only=read_only,
+            physical_budget=physical_budget,
         )
         self.checkpoints = HistoryCheckpoints(self.journal, binding)
         self.completed_admission = CompletedAdmissionCheckpoint(self.checkpoints)
@@ -878,6 +887,10 @@ class RewardControlHistoryReader:
             partial(export_completed_checkpoint, self, value, field_limits=_FIELDS)
         )
         if not copied:
+            if self.compact_export_only:
+                raise HistoryCheckpointRepairRequired(
+                    "selected transfer requires compact export; legacy fallback refused"
+                )
             fields = await run_owned_thread(self._load, height)
             if fields is None:
                 raise HistoryCheckpointRepairRequired("verified history lost export source")
