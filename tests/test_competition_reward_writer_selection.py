@@ -335,3 +335,82 @@ def test_uncommitted_native_child_failure_rolls_back_before_context_closes(prepa
             raise RuntimeError("native candidate reconciliation failed")
         lease.recheck()
     assert marker(case.original) == b"original"
+
+
+@pytest.mark.parametrize("side", ["original", "staged"])
+def test_rolled_back_retry_refreezes_metadata_but_keeps_same_journal(prepared, side, caplog):
+    """Old journals need no rewrite; each new attempt still freezes both inputs."""
+    case = prepared
+    caplog.set_level("INFO", logger=selection.__name__)
+    with (
+        case.open() as lease,
+        selection.hold_writer_history_selection(lease, operation="qualified-v1") as current,
+    ):
+        current.exchange()
+        # Candidate replay may persist metadata. Original review may also
+        # persist its own metadata before the next mechanical attempt.
+        (case.original / "rounds.sqlite3").write_bytes(b"candidate-export-acknowledgement")
+    if side == "original":
+        (case.original / "rounds.sqlite3").write_bytes(b"original-review-metadata")
+    retained = journal(case).read_bytes()
+    assert recover(case) == "rolled_back"
+    with (
+        case.open() as lease,
+        selection.hold_writer_history_selection(lease, operation="qualified-v1") as resumed,
+    ):
+        assert journal(case).read_bytes() == retained
+        assert resumed.value["staged_content"] != resumed._attempt_content["staged_content"]
+        resumed.exchange()
+        assert marker(case.original) == b"candidate-export-acknowledgement"
+    assert journal(case).read_bytes() == retained
+    assert "retry_frozen" in caplog.text
+
+
+@pytest.mark.parametrize("side", ["original", "staged"])
+def test_retry_refreeze_does_not_allow_mutation_after_current_attempt_starts(prepared, side):
+    case = prepared
+    with (
+        case.open() as lease,
+        selection.hold_writer_history_selection(lease, operation="qualified-v1") as current,
+    ):
+        current.exchange()
+        (case.original / "rounds.sqlite3").write_bytes(b"candidate-completed-checkpoint")
+    with (
+        case.open() as lease,
+        selection.hold_writer_history_selection(lease, operation="qualified-v1") as resumed,
+    ):
+        root = case.original if side == "original" else case.root / "history"
+        path = root / "rounds.sqlite3"
+        path.write_bytes(b"x" * path.stat().st_size)
+        with pytest.raises(ValueError, match="bytes changed"):
+            resumed.exchange()
+    assert json.loads(journal(case).read_bytes())["phase"] == "rolled_back"
+
+
+@pytest.mark.parametrize("side", ["original", "staged"])
+def test_prepared_attempt_does_not_adopt_changed_metadata(prepared, side):
+    case = prepared
+    with case.open() as lease:
+        selection.WriterHistorySelection(lease, operation="qualified-v1")
+    root = case.original if side == "original" else case.root / "history"
+    (root / "rounds.sqlite3").write_bytes(b"changed-before-authenticated-rollback")
+    retained = journal(case).read_bytes()
+    with case.open() as lease, pytest.raises(ValueError, match="requires recovery"):
+        selection.WriterHistorySelection(lease, operation="qualified-v1")
+    assert journal(case).read_bytes() == retained
+
+
+@pytest.mark.parametrize("binding", ["operation", "anchor", "preparation_scope", "boot"])
+def test_rolled_back_retry_never_relaxes_immutable_bindings(prepared, binding):
+    case = prepared
+    with (
+        case.open() as lease,
+        selection.hold_writer_history_selection(lease, operation="qualified-v1") as current,
+    ):
+        current.exchange()
+        (case.original / "rounds.sqlite3").write_bytes(b"candidate-completed-checkpoint")
+    value = json.loads(journal(case).read_bytes())
+    value[binding] = "changed"
+    selection._write(journal(case), value)
+    with case.open() as lease, pytest.raises(ValueError, match="requires recovery"):
+        selection.WriterHistorySelection(lease, operation="qualified-v1")

@@ -735,6 +735,17 @@ the original native prefix and retained signed controls, then verifies a reopene
 candidate owner before root commits. The original directory remains retained.
 Interruption drains native operations before rollback; repeat execution rolls
 back an uncommitted exchange or recognizes an already committed selection.
+After authenticated rollback, retry the same operation and original journal.
+Native review may have committed export receipts or checkpoint metadata before
+cancellation. Each retry freezes fresh content stamps under its genuine staging
+lease after the stopped child has reviewed the original history; it preserves all
+original journal, inode, approval, adoption and installed-owner bindings. The
+journal's first-attempt stamps remain historical metadata, not native acceptance.
+Both databases must remain unchanged between the new attempt's freeze and
+exchange. Native candidate review still checks every retained completion and its
+source dependencies before commit; refreshing stamps cannot approve damage.
+This directly supports existing rolled-back journals without conversion or edits.
+Progress reports `retry_frozen` for the authenticated retry boundary.
 A committed selection never automatically rolls back or restores weight approval.
 Unexpected process death that leaves SQLite sidecars refuses mechanical recovery:
 preserve both directories and the approval hold, then qualify the required native
