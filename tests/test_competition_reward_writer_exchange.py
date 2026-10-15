@@ -5,6 +5,7 @@ checks do not qualify the installed coordinator namespace or source broker CLI.
 """
 
 import asyncio
+import json
 import os
 import socket
 import struct
@@ -159,7 +160,7 @@ finally:
 """
 
 
-@pytest.mark.parametrize("original_blocks", [0, 2])
+@pytest.mark.parametrize("original_blocks", [0, 2, "raw"])
 @pytest.mark.parametrize(
     "fault,bootstrap",
     [
@@ -288,7 +289,7 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
         control_reader.journal.put(
             "reward_control_decision", "0000000000000000", old_genesis.model_dump(by_alias=True)
         )
-    if original_blocks:
+    if isinstance(original_blocks, int) and original_blocks:
         await original.advance(h.item.provider, through_block=first + original_blocks - 1)
     original_inode = original.journal.path.stat().st_ino
     saved = tmp_path / "original-history"
@@ -298,6 +299,27 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
     target = first + 2 if fault == "partial" else h.end
     await candidate.advance(h.item.provider, through_block=target)
     candidate_inode = candidate.journal.path.stat().st_ino
+    if original_blocks == "raw":
+        from umi.competition_reward_history_checkpoint import SOURCE_KINDS
+
+        with candidate.journal.read_transaction() as db:
+            binding = json.loads(db.execute("SELECT body FROM binding").fetchone()[0])
+            records = [
+                (kind, key, json.loads(body))
+                for kind, key, body in db.execute("SELECT kind,id,body FROM records")
+                if kind in SOURCE_KINDS
+            ]
+        raw_original = type(original.journal)(
+            saved, binding, maximum_bytes=config.maximum_history_bytes
+        )
+        if fault == "source_mismatch":
+            records = [
+                (kind, key, {**body, "changed_source": True})
+                if kind == "control_history_block" and key == str(first)
+                else (kind, key, body)
+                for kind, key, body in records
+            ]
+        raw_original.put_many(records)
     before_requests = list(h.body_requests)
     if fault == "candidate_gap":
         with candidate.journal.transaction() as db:
@@ -361,6 +383,8 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             unit=c.unit,
             config=c.config_path,
             readiness_only=fault == "namespace_readiness",
+            preserve_unverified_original=original_blocks == "raw"
+            and fault != "source_without_selection",
         )
         if fault == "namespace_readiness":
             from umi.competition_supervisor_runtime import hold_successor_startup_lease
@@ -402,6 +426,12 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
             assert result["status"] == "selected"
             assert result["history"]["admission_status"] == "absent_in_verified_interval"
             assert result["history"]["original_history_empty"] is (original_blocks == 0)
+            assert result["history"]["original_unverified_sources_preserved"] is (
+                original_blocks == "raw"
+            )
+            if original_blocks == "raw":
+                assert result["history"]["original_source_through_block"] == target
+                assert result["history"]["original_through_block"] == first - 1
             assert (
                 result["standing_attempt"]["status"]
                 == "standing_journal_absent_requires_native_handoff_review"
@@ -446,4 +476,19 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
         _output, error = peer.communicate()
     assert peer.returncode == (0 if fault in {"none", "partial", "namespace_readiness"} else 2), (
         error.decode()
+    )
+
+
+@pytest.mark.parametrize("fault", ["source_mismatch", "source_without_selection"])
+async def test_native_retained_sources_refuse_mismatch_and_missing_selection(
+    selected_boot, historical, monkeypatch, tmp_path, fault
+):
+    await test_native_empty_and_completed_original_assemble_control_and_absent_pending(
+        selected_boot,
+        historical,
+        monkeypatch,
+        tmp_path,
+        original_blocks="raw",
+        fault=fault,
+        bootstrap=True,
     )

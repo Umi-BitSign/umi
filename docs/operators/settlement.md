@@ -2503,6 +2503,19 @@ references them. Retire their migration guidance only after the last such
 dependency is removed. A retained helper or qualification receipt does not
 require selecting that policy for an aggregate-budget upgrade.
 
+An explicitly selected stopped-writer upgrade can retain an older journal that
+contains only raw block inputs with no completed native results. Select
+`--preserve-unverified-original` on the root writer broker for that layout. It
+keeps the entire original database in its preserved directory, checks the
+contiguous source interval and refuses completed, damaged or unfamiliar state.
+The candidate must restore its own native completed history, cover every retained
+block envelope exactly, and reconcile the unchanged signed control and transaction
+journals. Raw sources never establish acceptance. Inventory and coverage report
+progress and ETA; unchanged successful candidate verification is reused. Resume
+through the same operation and original controls after interruption; never reset
+or manufacture completion records. A mismatch rolls back under the original
+owners. Retain the old directory until its recovery consumers retire.
+
 A containerized writer may have its own `/etc/machine-id`. Preserve that local
 identity and provide a separate read-only bind of the host identity, for example
 `BindReadOnlyPaths=/etc/machine-id:/run/umi-host-machine-id`, then select

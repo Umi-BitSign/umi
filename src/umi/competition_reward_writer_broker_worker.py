@@ -30,6 +30,7 @@ def arguments(argv=None):
     parser.add_argument("--reward-adoptions", type=Path)
     parser.add_argument("--reward-adoptions-sha256")
     parser.add_argument("--readiness-only", action="store_true")
+    parser.add_argument("--preserve-unverified-original", action="store_true")
     args = parser.parse_args(argv)
     if (args.reward_adoptions is None) != (args.reward_adoptions_sha256 is None):
         parser.error("supplemental adoption requires both root-selected path and digest")

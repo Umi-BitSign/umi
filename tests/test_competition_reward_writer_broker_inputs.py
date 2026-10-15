@@ -147,3 +147,12 @@ def test_child_requires_root_digest_and_path_together():
     for extra in (["--reward-adoptions", "/adoption"], ["--reward-adoptions-sha256", "aa" * 32]):
         with pytest.raises(SystemExit):
             arguments(base + extra)
+
+
+def test_explicit_source_preservation_reaches_native_child(launch_case):
+    c = launch_case
+    command, _, _ = writer_broker_command(c.anchor, c.args, 17)
+    assert not arguments(command[command.index("--unit") :]).preserve_unverified_original
+    c.args.preserve_unverified_original = True
+    command, _, _ = writer_broker_command(c.anchor, c.args, 17)
+    assert arguments(command[command.index("--unit") :]).preserve_unverified_original
