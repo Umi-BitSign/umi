@@ -585,6 +585,24 @@ async def test_feed_uses_versioned_cursor_and_missing_page_is_not_an_empty_histo
     assert case.responses.requests == [case.base + "/after/4/8/" + "ab" * 32 + ".json"]
 
 
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+async def test_feed_retryable_http_status_reports_pre_execution_wait(case, status):
+    from umi.competition_supervisor_runtime import SuccessorArtifactFetchWait
+
+    async def unavailable(request):
+        return httpx.Response(status)
+
+    path = case.base + "/after/4/8/" + "ab" * 32 + ".json"
+    case.responses.objects[path] = unavailable
+    fetcher = delivery.HTTPSSuccessorDirectiveFetcher(case.item.config, client=case.args["client"])
+    with pytest.raises(SuccessorArtifactFetchWait) as caught:
+        await fetcher.fetch_directive_page(
+            after_version=4, after_sequence=8, after_directive_sha256="ab" * 32
+        )
+    assert caught.value.reason_code == "https_status_retryable"
+    assert case.responses.requests == [path]
+
+
 async def test_redirect_never_followed(case):
     async def redirect(request):
         return httpx.Response(302, headers={"Location": "https://other.example/private"})

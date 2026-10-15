@@ -170,7 +170,7 @@ def adapter_case(
         async def retire_redundant(self, retained):
             assert result.adapter._stopped
             assert all(
-                item.phase in adapters._TERMINAL for item in result.adapter._attempts().values()
+                item.phase in adapters._TERMINAL for item in read_attempts_for_fixture().values()
             )
             result.retired_records = set(retained)
             return 0
@@ -201,6 +201,9 @@ def adapter_case(
         container=container,
         limits=adapters.SuccessorAdapterLimits(*getattr(request, "param", (20, 4 * 1024**2))),
     )
+    # The fake materializer independently checks the fixture's terminal state.
+    # Keep that assertion outside spies measuring the production recovery reads.
+    read_attempts_for_fixture = result.adapter._attempts
     new_weight_root = Path(config.worker_state_root) / "competition" / "weights"
     new_weight_root.parent.mkdir(parents=True, mode=0o700)
     item.worker.state_root.rename(new_weight_root)
@@ -1342,7 +1345,10 @@ async def test_recovery_fold_still_reverifies_every_retained_head(adapter_case, 
     assert calls == [case.selection.directive_sha256]
 
 
-async def test_recovery_audit_runs_off_loop_and_cancellation_drains(adapter_case, monkeypatch):
+@pytest.mark.parametrize("boundary", ["initial", "final"])
+async def test_recovery_audit_runs_off_loop_and_cancellation_drains(
+    adapter_case, monkeypatch, boundary
+):
     import asyncio
     import threading
 
@@ -1351,11 +1357,27 @@ async def test_recovery_audit_runs_off_loop_and_cancellation_drains(adapter_case
     case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
     await case.adapter.stop_worker()
     observation = await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
-    original = case.adapter._audit_retained_recovery
+    method = "_audit_retained_recovery" if boundary == "initial" else "_attempts"
+    original = getattr(case.adapter, method)
+    if boundary == "final":
+        audit = case.adapter._audit_retained_recovery
+
+        def changed_audit():
+            result = audit()
+            # Explicit snapshot port: model a changed attempt family after the
+            # initial audit, without manufacturing a chain effect or authority.
+            return (*result[:-1], ("different_initial_snapshot",))
+
+        monkeypatch.setattr(case.adapter, "_audit_retained_recovery", changed_audit)
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     loop_thread = threading.get_ident()
+    calls = 0
 
     def blocked():
+        nonlocal calls
+        calls += 1
+        if boundary == "final" and calls == 1:
+            return original()
         assert threading.get_ident() != loop_thread
         started.set()
         assert release.wait(10)
@@ -1363,7 +1385,7 @@ async def test_recovery_audit_runs_off_loop_and_cancellation_drains(adapter_case
         finished.set()
         return result
 
-    monkeypatch.setattr(case.adapter, "_audit_retained_recovery", blocked)
+    monkeypatch.setattr(case.adapter, method, blocked)
     task = asyncio.create_task(case.adapter.recover_stopped_transactions(observation))
     try:
         assert await asyncio.to_thread(started.wait, 5)
@@ -1378,6 +1400,36 @@ async def test_recovery_audit_runs_off_loop_and_cancellation_drains(adapter_case
             await task
     assert finished.is_set()
     assert case.adapter._recovered is None
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_recovery_reuses_attempt_audit_only_for_unchanged_family(
+    adapter_case, monkeypatch, changed
+):
+    import threading
+
+    case = adapter_case
+    original = case.adapter._attempts
+    loop_thread = threading.get_ident()
+    calls = []
+
+    def checked():
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return original()
+
+    monkeypatch.setattr(case.adapter, "_attempts", checked)
+    if changed:
+        audit = case.adapter._audit_retained_recovery
+
+        def changed_audit():
+            result = audit()
+            return (*result[:-1], ("different_initial_snapshot",))
+
+        monkeypatch.setattr(case.adapter, "_audit_retained_recovery", changed_audit)
+    await _stopped(case)
+    assert len(calls) == (2 if changed else 1)
+    assert case.adapter._recovered is not None
 
 
 @pytest.mark.parametrize("corrupt_signature", [False, True])

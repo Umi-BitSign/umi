@@ -67,3 +67,25 @@ async def test_stopped_audit_is_not_reused_after_restart_or_running_container(ad
     )
     assert not await case.adapter.retry_stopped_start()
     assert "launch" not in case.container.events
+
+
+@pytest.mark.parametrize("boundary", ["before_status", "during_status"])
+async def test_stopped_retry_rejects_changed_installation(adapter_case, monkeypatch, boundary):
+    case = adapter_case
+    await _stopped(case)
+    original = case.container.status
+    inspected = []
+
+    async def status():
+        inspected.append(True)
+        result = await original()
+        case.installation.valid = False
+        return result
+
+    monkeypatch.setattr(case.container, "status", status)
+    if boundary == "before_status":
+        case.installation.valid = False
+    with pytest.raises(ValueError, match="fixture installation invalid"):
+        await case.adapter.retry_stopped_start()
+    assert len(inspected) == (1 if boundary == "during_status" else 0)
+    assert "launch" not in case.container.events

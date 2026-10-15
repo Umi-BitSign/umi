@@ -371,6 +371,97 @@ async def test_slow_adapter_work_requires_new_owned_observations(case, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("audit_unchanged", [False, True])
+@pytest.mark.parametrize("boundary", ["stage", "feed"])
+async def test_artifact_wait_reuses_only_completed_unchanged_stopped_audit(
+    case, monkeypatch, audit_unchanged, boundary
+):
+    owner = case.adapter if boundary == "stage" else case.fetcher
+    method = "stage" if boundary == "stage" else "fetch_directive_page"
+    original = getattr(owner, method)
+    waiting = True
+    observations = []
+
+    async def observe():
+        observations.append(case.observation.block)
+        return case.observation
+
+    async def stage(*args, **kwargs):
+        if waiting:
+            raise runtime.SuccessorArtifactFetchWait("https_status_retryable")
+        return await original(*args, **kwargs)
+
+    async def retry():
+        assert case.adapter.alive is None
+        return audit_unchanged
+
+    monkeypatch.setattr(owner, method, stage)
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry, raising=False)
+    async with case.make(observation_reader=SimpleNamespace(observe=observe)) as engine:
+        first = await engine.reconcile()
+        assert first.status == ("waiting" if audit_unchanged else "holding")
+        if audit_unchanged:
+            assert first.reason == "successor_artifact_retry"
+        recoveries = sum(e[0] == "recover" for e in case.adapter.events)
+        reads = len(observations)
+        second = await engine.reconcile()
+        assert second.status == first.status
+        assert len(observations) > reads
+        assert sum(e[0] == "recover" for e in case.adapter.events) == recoveries + (
+            0 if audit_unchanged else 1
+        )
+        assert case.adapter.alive is None and worker_state(engine).phase == "idle"
+        waiting = False
+        assert (await engine.reconcile()).status == "started"
+
+
+@pytest.mark.asyncio
+async def test_artifact_retry_rechecks_audit_before_next_fetch(case, monkeypatch):
+    retries = [True, False, True]
+    recoveries_at_fetch = []
+
+    async def stage(selection):
+        recoveries_at_fetch.append(sum(e[0] == "recover" for e in case.adapter.events))
+        raise runtime.SuccessorArtifactFetchWait("https_timeout")
+
+    async def retry():
+        return retries.pop(0)
+
+    monkeypatch.setattr(case.adapter, "stage", stage)
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry, raising=False)
+    async with case.make() as engine:
+        assert (await engine.reconcile()).status == "waiting"
+        assert (await engine.reconcile()).status == "waiting"
+        assert recoveries_at_fetch == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["launch", "recovery", "integrity", "running"])
+async def test_artifact_wait_never_preserves_ambiguous_or_unfinished_recovery(
+    case, monkeypatch, fault
+):
+    async def fail(*args):
+        if fault == "running":
+            case.adapter.alive = case.source.signed.directive_sha256
+        if fault == "integrity":
+            raise ValueError("invalid artifact")
+        raise runtime.SuccessorArtifactFetchWait("https_status_retryable")
+
+    async def retry():
+        return case.adapter.alive is None
+
+    method = {"launch": "start_replay", "recovery": "recover_stopped_transactions"}.get(
+        fault, "stage"
+    )
+    monkeypatch.setattr(case.adapter, method, fail)
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry, raising=False)
+    async with case.make() as engine:
+        assert (await engine.reconcile()).status == "holding"
+        assert not engine._restart_checked and not engine._artifact_retry_pending
+        assert case.adapter.alive is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["permit", "genesis", "rollback", "expiry"])
 async def test_new_proof_after_preflight_can_veto_start(case, monkeypatch, change):
     original = case.adapter.preflight

@@ -747,6 +747,7 @@ class ProductionSuccessorRuntimeAdapter:
             targets,
             packages,
             recovery_packages,
+            attempts_snapshot,
         )
 
     @log_phase("transaction_recovery")
@@ -766,6 +767,7 @@ class ProductionSuccessorRuntimeAdapter:
             targets,
             packages,
             recovery_packages,
+            audited_attempts_snapshot,
         ) = await run_owned_thread(self._audit_retained_recovery)
         for identity, attempt in attempts.items():
             binding = targets.get(identity)
@@ -816,7 +818,16 @@ class ProductionSuccessorRuntimeAdapter:
         # empty and terminal-only cases. Metadata checks below cannot authorize
         # anything; they bind these completed audits across the asynchronous read.
         attempts_snapshot = _recovery_journal_snapshot(weight_path, allow_absent_root=True)
-        if any(item.phase not in _TERMINAL for item in self._attempts().values()):
+        # The initial audit already checked every attempt and evidence object.
+        # Reuse that result if recovery left the exact journal family unchanged.
+        # A changed family requires another owned read; its evidence scan must
+        # never block the event loop feeding independent history workers.
+        final_attempts = (
+            attempts
+            if attempts_snapshot == audited_attempts_snapshot
+            else await run_owned_thread(self._attempts)
+        )
+        if any(item.phase not in _TERMINAL for item in final_attempts.values()):
             raise SuccessorAdapterError("successor transaction recovery is incomplete")
         if _recovery_journal_snapshot(weight_path, allow_absent_root=True) != attempts_snapshot:
             raise SuccessorAdapterError("stopped weight journal changed during audit")
@@ -862,10 +873,12 @@ class ProductionSuccessorRuntimeAdapter:
         This is an integrity check, not chain authority. The next startup still
         collects a fresh owned proof and repeats every native preflight gate.
         """
+        validate_authenticated_successor_installation(self.installation)
         if not self._stopped or self._recovered is None or not self._stopped_audit_matches():
             return False
         if (await self.container.status()).phase == "running":
             return False
+        validate_authenticated_successor_installation(self.installation)
         return self._stopped_audit_matches()
 
     def _completed_replay(self, prepared):
