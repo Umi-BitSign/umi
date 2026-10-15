@@ -183,6 +183,48 @@ async def test_fetch_never_selects_or_observes_and_reuses_stage(case):
     activation.validate_authenticated_successor_installation(case.installation)
 
 
+@pytest.mark.parametrize(
+    "reason,transient",
+    [
+        ("https_status_retryable", True),
+        ("https_timeout", True),
+        ("https_transport_failed", True),
+        ("https_not_found", False),
+        ("release_sha256_mismatch", False),
+        ("https_status_invalid", False),
+    ],
+)
+async def test_only_pre_stage_transport_failure_becomes_artifact_wait(
+    case, monkeypatch, reason, transient
+):
+    from umi.competition_supervisor_runtime import SuccessorArtifactFetchWait
+    from umi.validator_supervisor_adapters import ValidatorSupervisorAdapterError
+
+    async def fail(selection):
+        raise ValidatorSupervisorAdapterError(reason)
+
+    def no_stage(*args):
+        pytest.fail("failed transport must not stage inputs")
+
+    monkeypatch.setattr(case.value.delivery, "fetch", fail)
+    monkeypatch.setattr(case.value, "_stage", no_stage)
+    expected = SuccessorArtifactFetchWait if transient else ValidatorSupervisorAdapterError
+    with pytest.raises(expected) as caught:
+        await case.value.fetch(case.selection)
+    assert caught.value.reason_code == reason
+
+
+async def test_retryable_error_after_delivery_does_not_become_artifact_wait(case, monkeypatch):
+    from umi.validator_supervisor_adapters import ValidatorSupervisorAdapterError
+
+    def fail(*args):
+        raise ValidatorSupervisorAdapterError("https_status_retryable")
+
+    monkeypatch.setattr(case.value, "_stage", fail)
+    with pytest.raises(ValidatorSupervisorAdapterError):
+        await case.value.fetch(case.selection)
+
+
 @pytest.mark.parametrize("operation", ["fetch", "retire", "activate"])
 async def test_blocking_materialization_drains_before_releasing_owner(case, monkeypatch, operation):
     started, release = threading.Event(), threading.Event()

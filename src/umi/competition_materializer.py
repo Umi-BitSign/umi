@@ -30,10 +30,11 @@ from .competition_materialization_retention import retire_redundant_successor_in
 from .competition_progress import log_phase
 from .competition_supervisor import verify_signed_successor_supervisor_directive
 from .competition_supervisor_adapters import SuccessorArtifactFiles, SuccessorArtifactObserver
-from .competition_supervisor_runtime import SuccessorWorkerSelection
+from .competition_supervisor_runtime import SuccessorArtifactFetchWait, SuccessorWorkerSelection
 from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
+from .validator_supervisor_adapters import ValidatorSupervisorAdapterError
 
 
 class SuccessorMaterializerError(ValueError):
@@ -96,7 +97,18 @@ class AuthenticatedSuccessorArtifactMaterializer:
     async def fetch(self, selection: SuccessorWorkerSelection) -> SuccessorArtifactFiles:
         async with self._mutex:
             await run_owned_thread(self._recheck)
-            files = await self.delivery.fetch(selection)
+            try:
+                files = await self.delivery.fetch(selection)
+            except ValidatorSupervisorAdapterError as error:
+                if error.reason_code not in {
+                    "https_status_retryable",
+                    "https_timeout",
+                    "https_transport_failed",
+                }:
+                    raise
+                # Only transport failure before materialization may preserve a
+                # completed stopped audit. Integrity and activation failures do not.
+                raise SuccessorArtifactFetchWait(error.reason_code) from error
             await run_owned_thread(self._stage, selection, files)
             await run_owned_thread(self._recheck)
             return files

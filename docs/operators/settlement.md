@@ -2197,6 +2197,21 @@ remain unchanged. Every directive and weight authorization is checked separately
 This reuse ends with the audit; the final chain observation is collected afterward
 and retains the usual freshness and finalized-head checks.
 
+A retryable HTTPS status, timeout or transport failure while reading a directive
+page or fetching staging inputs leaves the host in `waiting` with reason
+`successor_artifact_retry` when the worker is confirmed stopped and its completed
+recovery audit still matches. The next attempt checks the stopped inputs again,
+obtains fresh owned observations and repeats current authority and launch gates.
+Changed registry, attempt journals, packages or installation controls require
+ordinary stopped recovery. Integrity failures, ambiguous worker state and launch
+failures never use this shortcut. This completed-audit reuse is process-local;
+a host restart still audits retained run authorities, while the existing durable
+package verification receipts remain reusable. Preserve the original journals.
+Within one recovery, the initial attempt/evidence audit is reused only if the
+exact stopped journal family remains unchanged. If reconciliation changes it,
+the final read runs outside the event loop and drains before cancellation can
+release ownership. Current finality and post-read mutation checks still apply.
+
 <a id="open-competition-round-publisher--current-checks-and-recovery"></a>
 
 ### Current checks and recovery

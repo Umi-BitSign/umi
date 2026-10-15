@@ -45,7 +45,7 @@ from .competition_supervisor import (
     verify_signed_successor_supervisor_directive_history,
 )
 from .competition_supervisor_adapters import SuccessorArtifactFiles
-from .competition_supervisor_runtime import SuccessorWorkerSelection
+from .competition_supervisor_runtime import SuccessorArtifactFetchWait, SuccessorWorkerSelection
 from .competition_worker import _open_directory_without_links
 from .file_identity import delivery_file_identity as _identity
 from .protocol import canonical_json_bytes
@@ -55,7 +55,11 @@ from .validator_supervisor import (
     advance_supervisor_directive_history_state,
     parse_canonical_signed_supervisor_directive,
 )
-from .validator_supervisor_adapters import PinnedHTTPSClient, _canonical_https_url
+from .validator_supervisor_adapters import (
+    PinnedHTTPSClient,
+    ValidatorSupervisorAdapterError,
+    _canonical_https_url,
+)
 
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _OBJECT_NAME = re.compile(r"(?:package|release|controls)-[0-9a-f]{64}")
@@ -104,7 +108,16 @@ class HTTPSSuccessorDirectiveFetcher:
         ):
             raise SuccessorDeliveryError("invalid successor feed cursor")
         url = f"{self.base}/after/{after_version}/{after_sequence}/{after_directive_sha256}.json"
-        return await self.client.fetch_bytes(url, maximum_bytes=MAX_SUCCESSOR_DOCUMENT_BYTES)
+        try:
+            return await self.client.fetch_bytes(url, maximum_bytes=MAX_SUCCESSOR_DOCUMENT_BYTES)
+        except ValidatorSupervisorAdapterError as error:
+            if error.reason_code not in {
+                "https_status_retryable",
+                "https_timeout",
+                "https_transport_failed",
+            }:
+                raise
+            raise SuccessorArtifactFetchWait(error.reason_code) from error
 
     async def fetch_initial_history(
         self,
