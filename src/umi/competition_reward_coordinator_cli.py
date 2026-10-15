@@ -38,6 +38,7 @@ def _logs():
         ),
         "umi.competition.progress",
         "umi.competition_round_journal",
+        "umi.historical_header_progress",
     ):
         logger = logging.getLogger(name)
         selected.append((logger, logger.level, logger.propagate))
