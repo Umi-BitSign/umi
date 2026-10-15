@@ -448,6 +448,15 @@ and recoverability. Durable header hints remain untrusted after restart; the
 native owner still checks them once from its owned anchor. This compatible
 runtime update keeps existing native checkpoint and signed-state identities.
 
+Historical ancestry recovery uses bounded passes of up to 4,096 links by default,
+with the existing encoded-path byte budget still enforced. Each retained or RPC
+link is individually verified and awaits its read and persistence, so cancellation
+still drains the active operation before ownership is released. This reduces
+repeated caller checkpoint and ownership checks during long local walks. Explicit
+smaller batches remain supported; signed clocks, native proof semantics and
+checkpoint formats are unchanged. An ancestry substage ETA excludes later replay
+and reward activation.
+
 ### Retained header hints
 
 The additive `umi.historical_header_hint_import_cli` command can transfer

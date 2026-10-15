@@ -49,7 +49,11 @@ from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES, encode_rpc_header
 from .grandpa_finality import _decode_header
-from .historical_header_recovery import HistoricalHeaderRecovery, HistoricalHeaderRecoveryPending
+from .historical_header_recovery import (
+    DEFAULT_HISTORICAL_HEADER_BATCH_SIZE,
+    HistoricalHeaderRecovery,
+    HistoricalHeaderRecoveryPending,
+)
 from .open_competition import digest
 from .sqlite_contention import is_sqlite_full
 from .validator_chain import StorageReadSpec
@@ -127,7 +131,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         historical_header_directory: Path,
         historical_header_maximum_bytes: int = 256 * 1024**2,
         historical_header_database_maximum_bytes: int = 512 * 1024**2,
-        historical_header_batch_size: int = 256,
+        historical_header_batch_size: int = DEFAULT_HISTORICAL_HEADER_BATCH_SIZE,
         **kwargs: Any,
     ) -> None:
         if (

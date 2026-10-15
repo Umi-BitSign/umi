@@ -20,6 +20,11 @@ from .grandpa_finality import EVIDENCE_CLASS, _decode_header
 from .historical_header_progress import HeaderRecoveryTelemetry
 from .validator_plans import VerifiedFinalizedBlock
 
+# A link awaits its read/persistence individually, so the bounded pass can use
+# the supported maximum without delaying cooperative cancellation. Small passes
+# amplify caller ownership and checkpoint validation during long retained walks.
+DEFAULT_HISTORICAL_HEADER_BATCH_SIZE = 4096
+
 
 class HistoricalHeaderRecoveryPending(FileNotFoundError):
     """Recovery is unfinished; preserve its target and retry after backoff."""
@@ -36,7 +41,13 @@ class RecoveredHistoricalHeader:
 
 
 class HistoricalHeaderRecovery:
-    def __init__(self, connect, *, maximum_bytes=256 * 1024**2, batch_size=256):
+    def __init__(
+        self,
+        connect,
+        *,
+        maximum_bytes=256 * 1024**2,
+        batch_size=DEFAULT_HISTORICAL_HEADER_BATCH_SIZE,
+    ):
         if type(maximum_bytes) is not int or maximum_bytes < 1:
             raise ValueError("historical header capacity must be positive")
         if type(batch_size) is not int or not 1 <= batch_size <= 4096:

@@ -24,7 +24,7 @@ def walk(tmp_path, chain_config, policy, request):
     from types import SimpleNamespace
 
     first = chain_config.minimum_finalized_block + 10
-    distance = 2050 if "gap_beyond" in request.node.name else 40
+    distance = getattr(request, "param", 2050 if "gap_beyond" in request.node.name else 40)
     headers, by_height = make_headers(first, first + distance)
     anchor = make_anchor(chain_config, policy, headers, by_height)
     oldest = headers[by_height[first]]
@@ -429,9 +429,7 @@ async def test_selected_budget_retains_large_interval_without_repeated_walks(
 
     w = walk
     first = w.target.block_number
-    w.headers, w.by_height = make_headers(
-        first, first + 160, digest_item="0x" + "00" * 32768
-    )
+    w.headers, w.by_height = make_headers(first, first + 160, digest_item="0x" + "00" * 32768)
     w.anchor = make_anchor(chain_config, policy, w.headers, w.by_height)
     header = w.headers[w.by_height[first]]
     w.target = FinalizedSnapshotRef(
@@ -464,9 +462,7 @@ async def test_selected_budget_retains_large_interval_without_repeated_walks(
     for height in range(first, w.anchor.height):
         block_hash = w.by_height[height]
         header = w.headers[block_hash]
-        target = FinalizedSnapshotRef(
-            height, block_hash, header["parentHash"], header["stateRoot"]
-        )
+        target = FinalizedSnapshotRef(height, block_hash, header["parentHash"], header["stateRoot"])
         assert (await service.recover(w.anchor, target, request)).snapshot == target
     assert len(loaded) == len(w.calls) == 160
 
@@ -476,3 +472,69 @@ async def test_selected_budget_retains_large_interval_without_repeated_walks(
     monkeypatch.setattr(restarted, "_load", counted)
     assert (await finish(restarted, w)).snapshot == w.target
     assert len(loaded) == 320 and len(w.calls) == 160
+
+
+@pytest.mark.parametrize("walk", [4600], indirect=True)
+async def test_default_large_pass_preserves_boundary_and_retained_restart(walk):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    assert service.batch_size == 4096
+    service._open().close()
+    with w.connect() as db:
+        db.executemany(
+            "INSERT INTO historical_header_hints VALUES (?,?)",
+            [(key, encode_rpc_header(value)) for key, value in w.headers.items()],
+        )
+    loaded, original = [], service._load
+
+    def counted(key):
+        loaded.append(key)
+        return original(key)
+
+    service._load = counted
+    with pytest.raises(HistoricalHeaderRecoveryPending):
+        await service.recover(w.anchor, w.target, w.request)
+    assert len(loaded) == 4096
+    assert (await service.recover(w.anchor, w.target, w.request)).snapshot == w.target
+    assert len(loaded) == 4600 and not w.calls
+    restarted = HistoricalHeaderRecovery(w.connect, batch_size=256)
+    assert (await finish(restarted, w)).snapshot == w.target
+    assert not w.calls
+
+
+@pytest.mark.parametrize("walk", [600], indirect=True)
+async def test_default_pass_cancellation_beyond_old_boundary_drains_read(walk, monkeypatch):
+    w = walk
+    service = HistoricalHeaderRecovery(w.connect)
+    service._open().close()
+    with w.connect() as db:
+        db.executemany(
+            "INSERT INTO historical_header_hints VALUES (?,?)",
+            [(key, encode_rpc_header(value)) for key, value in w.headers.items()],
+        )
+    entered, release = threading.Event(), threading.Event()
+    original = service._load
+    count = 0
+
+    def blocked(key):
+        nonlocal count
+        count += 1
+        if count == 300:
+            entered.set()
+            assert release.wait(10)
+        return original(key)
+
+    monkeypatch.setattr(service, "_load", blocked)
+    task = asyncio.create_task(service.recover(w.anchor, w.target, w.request))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert count == 300 and not w.calls
+    assert (await finish(HistoricalHeaderRecovery(w.connect), w)).snapshot == w.target
+    assert not w.calls
