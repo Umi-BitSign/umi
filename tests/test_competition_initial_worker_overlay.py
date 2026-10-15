@@ -215,6 +215,15 @@ def overlay_case(anchor_case, package_limits, monkeypatch, request):
     _replace_control(case.paths.initial, initial)
     case.controls.chmod(0o700)
     monkeypatch.setattr(maintenance, "_HOST_PARENT", case.host.path.parent)
+    # The sealed fixture retains its historic /var/lib config. Route only its
+    # newly derived owner metadata to the fixture's service-private directory.
+    from umi.competition_materialization_reuse import MaterializationDigestReuse
+
+    monkeypatch.setattr(
+        maintenance,
+        "_host_digest_reuse",
+        lambda config: MaterializationDigestReuse(case.state_root / "host-file-verification"),
+    )
     monkeypatch.setattr(activation, "ACTIVATION_MOUNT_ROOT", case.source_root)
     return SimpleNamespace(
         anchor=case,

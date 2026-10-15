@@ -76,7 +76,11 @@ def artifact(tmp_path, request, monkeypatch):
     source.chmod(0o600)
     value = SimpleNamespace(
         target=target,
-        config=_config(target_platform=request.param, release_root=str(root)),
+        config=_config(
+            target_platform=request.param,
+            release_root=str(root),
+            state_root=str(tmp_path / "release-owner-state"),
+        ),
         stage=stage,
         source=source,
         bundle=bundle,
@@ -189,7 +193,7 @@ def test_changed_staged_archive_rejected(artifact):
     result.archive_path.chmod(0o600)
     result.archive_path.write_bytes(b"x" * len(artifact.archive))
     result.archive_path.chmod(0o400)
-    with pytest.raises(releases.SuccessorReleaseError, match="hash/size mismatch"):
+    with pytest.raises(releases.SuccessorReleaseError, match="stage changed"):
         result.recheck()
 
 
@@ -264,3 +268,137 @@ def test_bounded_directory_listing_rejects_fourth_entry():
         pytest.raises(releases.SuccessorReleaseError, match="exact file set"),
     ):
         releases._stage_entries(10)
+
+
+def test_recheck_and_reopen_reuse_verified_archive_without_payload_reads(artifact, monkeypatch):
+    calls = []
+    original = releases._verify_archive
+
+    def counted(fd, manifest, header, target):
+        calls.append(manifest.oci_archive_size_bytes)
+        return original(fd, manifest, header, target)
+
+    monkeypatch.setattr(releases, "_verify_archive", counted)
+    result = extract(artifact)
+    # One check of the download, one check of the copied final archive.
+    assert calls == [len(artifact.archive)] * 2
+    for _ in range(3):
+        result.recheck()
+        reopened = releases.verify_staged_successor_release(
+            result.path, target=artifact.target, config=artifact.config
+        )
+        reopened.recheck()
+    assert calls == [len(artifact.archive)] * 2
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_completed_archive_metadata_repair_is_visible_and_rechecks_only_archive(
+    artifact, monkeypatch, caplog, damage
+):
+    extract(artifact)
+    receipt = next((Path(artifact.config.state_root) / "release-verification").glob("*.json"))
+    if damage == "missing":
+        receipt.unlink()
+    else:
+        receipt.write_bytes(b"damaged")
+    calls = []
+    original = releases._verify_archive
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(releases, "_verify_archive", counted)
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        releases.verify_staged_successor_release(
+            artifact.stage, target=artifact.target, config=artifact.config
+        )
+    assert calls == [1]
+    assert '"state":"repair_required"' in caplog.text
+    assert (
+        '"stage": "release_archive_verification"' in caplog.text
+        or '"stage":"release_archive_verification"' in caplog.text
+    )
+    releases.verify_staged_successor_release(
+        artifact.stage, target=artifact.target, config=artifact.config
+    )
+    assert calls == [1]
+
+
+def test_archive_receipt_does_not_bypass_current_authority(artifact, monkeypatch):
+    extract(artifact)
+    config = artifact.config.model_copy(update={"release_origins": ["https://other.example"]})
+    monkeypatch.setattr(releases, "_verify_archive", lambda *args: pytest.fail("authority first"))
+    with pytest.raises(releases.SuccessorReleaseError, match="authority or platform"):
+        releases.verify_staged_successor_release(
+            artifact.stage, target=artifact.target, config=config
+        )
+
+
+def test_same_size_archive_write_with_restored_mtime_is_rejected(artifact):
+    result = extract(artifact)
+    before = result.archive_path.stat()
+    result.archive_path.chmod(0o600)
+    result.archive_path.write_bytes(b"x" * len(artifact.archive))
+    os.utime(result.archive_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    result.archive_path.chmod(0o400)
+    with pytest.raises(releases.SuccessorReleaseError, match="stage changed"):
+        result.recheck()
+    with pytest.raises(releases.SuccessorReleaseError, match="hash/size mismatch"):
+        releases.verify_staged_successor_release(
+            artifact.stage, target=artifact.target, config=artifact.config
+        )
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_cached_archive_rejects_link_replacement(artifact, tmp_path, link):
+    result = extract(artifact)
+    artifact.stage.chmod(0o700)
+    retained = tmp_path / "retained-archive"
+    if link == "symlink":
+        result.archive_path.rename(retained)
+        result.archive_path.symlink_to(retained)
+    else:
+        os.link(result.archive_path, retained)
+    artifact.stage.chmod(0o500)
+    with pytest.raises((OSError, ValueError)):
+        result.recheck()
+
+
+def test_archive_failure_does_not_publish_completed_receipt(artifact, monkeypatch):
+    result = extract(artifact)
+    directory = Path(artifact.config.state_root) / "release-verification"
+    for path in directory.iterdir():
+        if path.suffix in {".json", ".complete"}:
+            path.unlink()
+    original = releases._verify_archive
+    monkeypatch.setattr(
+        releases, "_verify_archive", lambda *args: (_ for _ in ()).throw(OSError("interrupted"))
+    )
+    with pytest.raises(OSError, match="interrupted"):
+        releases.verify_staged_successor_release(
+            result.path, target=artifact.target, config=artifact.config
+        )
+    assert not list(directory.glob("*.json"))
+    monkeypatch.setattr(releases, "_verify_archive", original)
+    releases.verify_staged_successor_release(
+        result.path, target=artifact.target, config=artifact.config
+    )
+    assert len(list(directory.glob("*.json"))) == 1
+
+
+def test_recheck_rejects_archive_changed_while_later_file_opens(artifact, monkeypatch):
+    result = extract(artifact)
+    original = releases._open_artifact
+
+    def raced(path, *, readonly):
+        fd = original(path, readonly=readonly)
+        if path.name == "release-signature.bin":
+            result.archive_path.chmod(0o600)
+            result.archive_path.write_bytes(b"x" * len(artifact.archive))
+            result.archive_path.chmod(0o400)
+        return fd
+
+    monkeypatch.setattr(releases, "_open_artifact", raced)
+    with pytest.raises(releases.SuccessorReleaseError, match="changed while verifying"):
+        result.recheck()
