@@ -23,9 +23,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import competition_reward_history_preparation as preparation
+from .competition_coordinator_namespace import active_coordinator_view
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_reward_boot import MAX_BOOT_BYTES, StandingRewardBootConfig
 from .competition_reward_writer_adoption import select_writer_adoptions
+from .competition_upgrade import _open_without_links
 from .open_competition import digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
@@ -213,6 +215,31 @@ def _report(started, phase, *, completed=0, state="running"):
     )
 
 
+def _exchange_parent(original):
+    """Use the same physical mount without changing retained logical bindings."""
+    logical = _open_without_links(original.parent)
+    try:
+        view = active_coordinator_view()
+        if view is None:
+            return os.dup(logical)
+        physical = _open_without_links(view.layout.physical(original.parent))
+        try:
+            # Equal st_dev does not make renameat2 work across a bind mount.
+            # Only the genuine active instance view may resolve its alias, and
+            # both names must still identify the exact same parent and child.
+            identity = preparation._file_identity
+            if identity(os.fstat(logical)) != identity(os.fstat(physical)) or identity(
+                os.stat(original.name, dir_fd=logical, follow_symlinks=False)
+            ) != identity(os.stat(original.name, dir_fd=physical, follow_symlinks=False)):
+                raise ValueError("history exchange physical alias differs from original")
+            view.recheck()
+            return os.dup(physical)
+        finally:
+            os.close(physical)
+    finally:
+        os.close(logical)
+
+
 def _exchange(original, staged):
     function = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
     if function is None:
@@ -225,12 +252,14 @@ def _exchange(original, staged):
         ctypes.c_uint,
     )
     function.restype = ctypes.c_int
-    left = os.open(original.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    left = _exchange_parent(original)
     try:
-        right = os.open(staged.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        right = _open_without_links(staged.parent)
         try:
             if function(left, os.fsencode(original.name), right, os.fsencode(staged.name), 2):
-                raise OSError(ctypes.get_errno(), "atomic history directory exchange failed")
+                error = ctypes.get_errno()
+                _LOG.error("writer_history_exchange_failed errno=%d", error)
+                raise OSError(error, "atomic history directory exchange failed")
             os.fsync(left)
             os.fsync(right)
         finally:

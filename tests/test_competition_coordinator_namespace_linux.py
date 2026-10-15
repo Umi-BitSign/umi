@@ -120,6 +120,7 @@ def _child(uid: int):
         assert not (other.physical(logical) / "new-state").exists()
         assert other.physical(logical).stat().st_ino == other_before.st_ino
         view.recheck()
+        _writer_exchange_in_same_view(view, logical)
         with pytest.raises(HostUpgradeError, match="another validator"):
             coordinator.active_coordinator_view(other.unit_name)
         with pytest.raises(HostUpgradeError):
@@ -130,6 +131,7 @@ def _child(uid: int):
         for mode in (
             "reenter",
             "reenter",
+            "writer-exchange",
             "wrong-target",
             "service-drop",
             "service-wrong-group",
@@ -208,9 +210,12 @@ def _fresh_executable(uid, mode, roots):
         with pytest.raises(HostUpgradeError, match="inherited target differs"):
             coordinator.prepare_coordinator_host_view(unit_name=unit, service_uid=_SERVICE_UID)
         return
-    assert mode == "reenter" or mode.startswith("service-")
+    assert mode in {"reenter", "writer-exchange"} or mode.startswith("service-")
     view = coordinator.prepare_coordinator_host_view(unit_name=unit, service_uid=_SERVICE_UID)
     assert not os.get_inheritable(view._root_descriptor)
+    if mode == "writer-exchange":
+        _writer_exchange_in_same_view(view, logical)
+        return
     if mode.startswith("service-"):
         _dropped_service_check(view, logical, mode)
         return
@@ -224,6 +229,64 @@ def _fresh_executable(uid, mode, roots):
                 (root / "forbidden-child-write").write_bytes(b"denied")
             assert error.value.errno == errno.EROFS
     view.recheck()
+
+
+def _writer_exchange_in_same_view(view, logical):
+    from umi import competition_reward_writer_selection as selection
+
+    # All bytes live on the fixture tmpfs, behind genuine private bind aliases.
+    # The retained journal paths must stay logical across exchange and rollback.
+    parent = logical / "exchange-fixture"
+    parent.mkdir(mode=0o700)
+    original = parent / "history"
+    staged_parent = view.layout.root_directory.parent / "writer-preparation"
+    staged_parent.mkdir(mode=0o700)
+    staged = staged_parent / "history"
+    original.mkdir(mode=0o700)
+    staged.mkdir(mode=0o700)
+    (original / "source").write_bytes(b"retained")
+    (staged / "candidate").write_bytes(b"verified")
+    physical = view.layout.physical(original)
+    before = original.stat().st_ino, staged.stat().st_ino
+    with pytest.raises(OSError) as error:
+        os.rename(original, staged)
+    assert error.value.errno == errno.EXDEV
+    assert (original.stat().st_ino, staged.stat().st_ino) == before
+    for _ in range(2):
+        selection._exchange(original, staged)
+        assert (original.stat().st_ino, staged.stat().st_ino) == before[::-1]
+        assert physical.stat().st_ino == original.stat().st_ino
+        assert (original / "candidate").read_bytes() == b"verified"
+        assert (staged / "source").read_bytes() == b"retained"
+        selection._exchange(original, staged)
+        assert (original.stat().st_ino, staged.stat().st_ino) == before
+    # An unselected nested mount can preserve the top view while redirecting a
+    # descendant. Its differing parent must refuse without moving either tree.
+    shadow = view.layout.root_directory.parent / "writer-shadow"
+    shadow.mkdir(mode=0o700)
+    (shadow / "history").mkdir(mode=0o700)
+    source_fd = os.open(shadow, os.O_RDONLY | os.O_DIRECTORY)
+    target_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        mounts._mount(mounts._fd_path(source_fd), mounts._fd_path(target_fd), None, mounts._MS_BIND)
+    finally:
+        os.close(source_fd)
+        os.close(target_fd)
+    view.recheck()
+    with pytest.raises(ValueError, match="physical alias differs"):
+        selection._exchange(original, staged)
+    assert (physical.stat().st_ino, staged.stat().st_ino) == before
+    # This mount exists only in the current private namespace; leave fixture
+    # names distinct for the fresh-executable repetition below.
+    subprocess.run(["/usr/bin/umount", str(parent)], check=True)
+    (physical / "source").unlink()
+    physical.rmdir()
+    parent.rmdir()
+    (staged / "candidate").unlink()
+    staged.rmdir()
+    staged_parent.rmdir()
+    (shadow / "history").rmdir()
+    shadow.rmdir()
 
 
 def _dropped_service_check(view, logical, mode):

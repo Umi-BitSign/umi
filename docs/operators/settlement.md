@@ -664,6 +664,13 @@ installed logical account home and runtime username. They start from `/` so a
 broker's inaccessible host working directory cannot leak into Podman. Ordinary
 service commands retain their account database identity; environment variables
 cannot override either selection.
+The atomic directory exchange uses the active view's authenticated physical
+parent while retaining every logical path in approvals and selection journals.
+Linux rejects renames across distinct bind mounts even when their device numbers
+match. Both aliases must identify the same parent and original directory before
+exchange, rollback or interrupted-operation recovery; a redirected descendant
+refuses. Keep the original operation and journal when retrying a rolled-back
+selection after this supported path correction.
 Child failures emit `writer_broker_child_exit` with bounded native cause details,
 including error types, reason codes and source locations, without exception
 messages or request payloads. Diagnostic failure cannot prevent child cleanup.
