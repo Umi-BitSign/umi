@@ -384,7 +384,7 @@ async def test_parallel_windows_refresh_once_each_and_restart_checks_fresh_tip(
 ):
     h = parallel_case
     provider = h.item.provider
-    acquire = provider._proofs.finalized_snapshot
+    acquire = provider._finality.verified_finalized_snapshot
     heads = []
 
     async def counted():
@@ -392,7 +392,12 @@ async def test_parallel_windows_refresh_once_each_and_restart_checks_fresh_tip(
         heads.append(head)
         return head
 
-    monkeypatch.setattr(provider._proofs, "finalized_snapshot", counted)
+    monkeypatch.setattr(provider._finality, "verified_finalized_snapshot", counted)
+
+    async def unavailable():
+        pytest.fail("historical windows must not request an RPC head cross-check")
+
+    monkeypatch.setattr(provider._proofs, "finalized_snapshot", unavailable)
     assert await h.reader.advance(provider, through_block=h.end) == h.expected
     window_size = min(
         h.reader.verification_profile.maximum_in_flight,

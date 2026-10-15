@@ -98,5 +98,5 @@ async def test_original_runtime_and_weight_proofs_survive_a_later_runtime(
         assert all(
             row["state_root"] == bytes.fromhex(h.old.state_root[2:]) for row in h.code_checks
         )
-        assert {method for method, _ in h.rpc_calls} == {"chain_getHeader", "chain_getBlockHash"}
+        assert h.rpc_calls == []
     assert store.recovery_inputs() == before

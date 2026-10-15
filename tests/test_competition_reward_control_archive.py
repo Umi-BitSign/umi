@@ -139,10 +139,7 @@ async def test_late_first_admission_uses_original_proof_and_fresh_control(histor
     check(h, original)
     assert original.committed_at_block == 160
     assert original.snapshot.block_number == h.old.height
-    assert item.rpc.calls[before:] == [
-        ("chain_getHeader", (h.fresh.block_hash,)),
-        ("chain_getBlockHash", (h.fresh.height,)),
-    ]
+    assert item.rpc.calls[before:] == []
     with pytest.raises(ValueError):
         validate_owned_reward_control(
             original,
@@ -177,6 +174,72 @@ async def test_old_owned_history_needs_no_wall_clock_renewal(historical):
     # That fact grants no fresh control or transaction preflight.
     with pytest.raises(ValueError, match="stale"):
         await h.item.provider.collect_control(h.item.hotkey)
+
+
+async def test_history_replays_during_rpc_outage_but_current_control_still_requires_rpc(
+    historical, monkeypatch
+):
+    h = historical
+
+    async def unavailable(*args, **kwargs):
+        raise ValidatorChainError("proof_rpc_rate_limited")
+
+    monkeypatch.setattr(h.item.rpc, "request", unavailable)
+    check(h, await h.item.provider.review_control(h.raw, h.metadata))
+    await h.item.provider.aclose()
+    h.item.provider = h.reopen()
+    check(h, await h.item.provider.review_control(h.raw, h.metadata))
+    with pytest.raises(ValidatorChainError, match="proof_rpc_rate_limited"):
+        await h.item.provider.collect_control(h.item.hotkey)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unavailable",
+        "invalid",
+        "missing_block",
+        "hash",
+        "parent",
+        "state_root",
+        "policy",
+        "encoded_header",
+        "height",
+    ],
+)
+async def test_historical_window_rejects_invalid_owned_head(historical, monkeypatch, failure):
+    h = historical
+    finality = h.item.finality
+    if failure == "unavailable":
+
+        async def unavailable():
+            raise RuntimeError("owned observer unavailable")
+
+        monkeypatch.setattr(finality, "verified_finalized_snapshot", unavailable)
+    elif failure == "invalid":
+
+        async def invalid():
+            return None
+
+        monkeypatch.setattr(finality, "verified_finalized_snapshot", invalid)
+    elif failure == "missing_block":
+        del h.blocks[h.fresh.height]
+    elif failure in {"hash", "parent", "state_root"}:
+        field = {"hash": "block_hash", "parent": "parent_hash", "state_root": "state_root"}[failure]
+        finality.ref = replace(finality.ref, **{field: "0x" + "ff" * 32})
+    elif failure == "policy":
+        h.blocks[h.fresh.height] = replace(h.fresh, scoring_policy_hash="ff" * 32)
+    elif failure == "encoded_header":
+        h.blocks[h.fresh.height] = replace(
+            h.fresh,
+            finality_evidence=h.old.finality_evidence,
+            finality_evidence_sha256=h.old.finality_evidence_sha256,
+        )
+    else:
+        finality.ref = replace(finality.ref, block_number=h.old.height - 1)
+        h.blocks[finality.ref.block_number] = replace(h.old, height=finality.ref.block_number)
+    with pytest.raises((ValueError, ValidatorChainError)):
+        await h.item.provider.review_control(h.raw, h.metadata)
 
 
 @pytest.mark.parametrize(

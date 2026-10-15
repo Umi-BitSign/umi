@@ -253,8 +253,13 @@ Each bounded retained-proof window obtains one verified finalized head and reuse
 it only for the historical headers in that window. Every header still requires
 its own exact owned block or authenticated ancestry check. The resolver is local
 to the locked owner task and expires when the window exits, including failure
-and cancellation. Later windows, checkpoint restoration, current control reads
-and transaction preflight obtain fresh state. This scheduling change preserves
+and cancellation. Later windows and checkpoint restoration reread the owned
+finality store and check the complete encoded head identity locally. They do not
+ask an external RPC provider to cross-check that already authenticated head;
+retained history can therefore advance during an RPC outage when its historical
+headers and proofs are present. Missing ancestry hints still require retrieval.
+Current control reads and transaction preflight retain their separate fresh
+state and RPC checks. This scheduling change preserves
 the proof predicates, signed bytes and successful checkpoint ABI; no receipt
 migration or native re-verification is needed for unchanged completed blocks.
 

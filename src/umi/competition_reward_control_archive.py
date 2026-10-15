@@ -56,7 +56,7 @@ from .historical_header_recovery import (
 )
 from .open_competition import digest
 from .sqlite_contention import is_sqlite_full
-from .validator_chain import StorageReadSpec
+from .validator_chain import StorageReadSpec, ValidatorChainError
 from .validator_plans import VerifiedFinalizedBlock
 
 _ISSUER = object()
@@ -275,7 +275,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
 
     async def _resolve_control_header(self, ref, encoded):
         # Single historical reads and checkpoint restoration always acquire a
-        # fresh owned head. Only an explicit bounded worker batch shares it.
+        # current owned head. Only an explicit bounded worker batch shares it.
         async with self._control_header_window() as resolve:
             return await resolve(ref, encoded)
 
@@ -289,13 +289,30 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         stays in that task and scope; it cannot be serialized, supplied as a
         proof, or reused by a later batch/current-control/transaction read.
         Every target still checks its exact header and owned finality/ancestry.
+        The owned verifier already authenticated this head; historical replay
+        does not need an external RPC to repeat that identity check. Current
+        control and transaction reads retain their separate fresh proof checks.
         """
         owner = asyncio.current_task()
         if self._closed or not self._lock.locked():
             raise ValueError("historical header window requires the running locked provider")
-        head = await self._proofs.finalized_snapshot()
+        try:
+            head = await self._finality.verified_finalized_snapshot()
+        except Exception as error:
+            raise ValidatorChainError("owned_finality_unavailable") from error
+        if not isinstance(head, FinalizedSnapshotRef):
+            raise ValidatorChainError("owned_finalized_snapshot_invalid")
         head_block = await self._finality.verified_block_at(head.block_number)
         self._check_finality(head, head_block)
+        encoded_head = json.loads(head_block.finality_evidence)["block"]["scale_header"]
+        decoded_head = _decode_header(encoded_head, maximum_bytes=MAXIMUM_HEADER_BYTES)
+        if (
+            decoded_head["number"],
+            decoded_head["hash"],
+            decoded_head["parent_hash"],
+            decoded_head["state_root"],
+        ) != (head.block_number, head.block_hash, head.parent_hash, head.state_root):
+            raise ValueError("owned historical window head identity mismatch")
         active = True
 
         async def resolve(ref, encoded):

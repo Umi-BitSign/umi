@@ -183,16 +183,15 @@ def check_replay(h, result, *, fresh_executor=False):
     assert result.evidence_sha256 == hashlib.sha256(h.raw).hexdigest()
     assert result.metadata_sha256 == hashlib.sha256(h.metadata).hexdigest()
     assert h.looked_up == [h.fresh.height, h.old.height]
-    assert h.rpc_calls == [
-        ("chain_getHeader", (h.fresh.block_hash,)),
-        ("chain_getBlockHash", (h.fresh.height,)),
-    ]
+    assert h.rpc_calls == []
     assert h.executions == ([h.item.code] if fresh_executor else [])
     assert len(h.code_checks) == 1
     assert h.code_checks[0]["state_root"] == bytes.fromhex(h.old.state_root[2:])
 
 
-async def test_native_executed_archive_replays_old_control_after_restart(runtime_archive):
+async def test_native_executed_archive_replays_old_control_after_restart(
+    runtime_archive, monkeypatch
+):
     h = runtime_archive
     body = json.loads(h.raw)
     assert len(h.raw) < 16 * 1024 and len(h.metadata) < 1024
@@ -206,6 +205,18 @@ async def test_native_executed_archive_replays_old_control_after_restart(runtime
     await h.provider.aclose()
     h.provider = h.reopen()
     checked = len(h.item.verifier.checked)
+    transport_attempts = []
+
+    async def unavailable(method, params):
+        transport_attempts.append((method, tuple(params)))
+        raise ValidatorChainError("proof_rpc_rate_limited")
+
+    async def close():
+        pass
+
+    monkeypatch.setattr(h.item.rpc, "request", unavailable)
+    monkeypatch.setattr(h.provider._runtime_proofs._rpc, "request", unavailable)
+    h.provider._registration_rpc = SimpleNamespace(request=unavailable, aclose=close)
 
     result = await h.provider.review_control(h.raw, h.metadata)
 
@@ -214,6 +225,12 @@ async def test_native_executed_archive_replays_old_control_after_restart(runtime
     proved = h.item.verifier.checked[-1]
     assert proved["state_root"] == bytes.fromhex(h.old.state_root[2:])
     assert len(proved["items"]) == 3
+    assert transport_attempts == []
+    # Successful historical replay cannot authorize a current control read
+    # while the fresh proof collector's transport remains unavailable.
+    with pytest.raises(ValidatorChainError, match="proof_rpc_rate_limited"):
+        await h.provider.collect_control(h.item.hotkey)
+    assert transport_attempts == [("chain_getHeader", (h.fresh.block_hash,))]
 
 
 async def test_changed_live_runtime_needs_no_old_rpc_or_live_metadata(runtime_archive, monkeypatch):
