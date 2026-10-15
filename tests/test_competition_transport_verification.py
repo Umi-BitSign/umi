@@ -218,3 +218,81 @@ def test_counted_migration_planning_scales_with_remaining_work(monkeypatch):
         progress.emit("repair_required", reason="original_missing")
         assert events[-1]["eta_seconds"] is None
         assert events[-1]["planning_eta_seconds"] is None
+
+
+def test_child_counts_keep_parent_active_without_claiming_export_completion(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    with transport.TransferProgress("transfer_export", 512, events.append, unit="blocks") as parent:
+        child = parent.child_report()
+        event = {
+            "stage": "transfer",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 256,
+            "unit": "blocks",
+        }
+        now[0] += 50
+        child(event)
+        now[0] += 50
+        child({**event, "completed_units": 2})
+        parent.emit("running")
+        assert events[-1]["status"] == "running"
+        assert events[-1]["completed_units"] == events[-1]["native_units"] == 0
+        assert events[-1]["percent"] == 0
+        assert events[-1]["active_child"]["completed_units"] == 2
+        now[0] += 61
+        child({**event, "completed_units": 2})  # heartbeat cannot refresh activity
+        parent.emit("running")
+        assert events[-1]["status"] == "stalled"
+        assert events[-1]["eta_seconds"] is None
+        child({**event, "completed_units": 256, "status": "completed"})
+        assert events[-1]["status"] == "running"
+        assert events[-1]["completed_units"] == 0
+        parent.advance(256)
+        assert events[-1]["active_child"] is None
+        following = parent.child_report()
+        now[0] += 61
+        following({**event, "completed_units": 0, "status": "started"})
+        parent.emit("running")
+        assert events[-1]["status"] == "stalled"
+        following(event)  # a new window has its own increasing count
+        assert events[-1]["status"] == "running"
+        assert events[-1]["completed_units"] == 256
+        parent.advance(256)
+    assert events[-1]["status"] == "completed"
+
+
+@pytest.mark.parametrize("state", ["stalled", "retrying", "refused", "repair_required"])
+@pytest.mark.parametrize("failed_count", [1, 5])
+def test_child_failed_progress_withdraws_parent_eta(monkeypatch, state, failed_count):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
+    parent.advance(10)
+    child = parent.child_report()
+    now[0] += 10
+    child(
+        {
+            "stage": "child",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 10,
+            "unit": "blocks",
+        }
+    )
+    assert events[-1]["eta_seconds"] is not None
+    child(
+        {
+            "stage": "child",
+            "status": state,
+            "completed_units": failed_count,
+            "total_units": 10,
+            "unit": "blocks",
+        }
+    )
+    assert events[-1]["status"] == state
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["completed_units"] == 10

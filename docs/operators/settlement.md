@@ -249,6 +249,12 @@ ancestor. Keep the selected configuration readable at the same logical path afte
 the private view is established. Successful installation-anchor validation is
 reused within that process only while its complete sealed inventory and current
 hierarchy remain unchanged; changed metadata requires full validation.
+The owned transfer also uses bounded exact-content canonical JSON serialization,
+with a default limit of 8 MiB and 4,096 entries (an enclosing canonical scope
+retains its own budget). Threaded work shares that operation-local cache;
+shutdown drains the work before releasing it. This avoids repeating serialization
+of unchanged bindings, while every owner, authority, source and file check still
+runs. Mutated content gets new canonical bytes; this grants no reusable verdict.
 
 Transfer preserves existing writer results and compares overlapping native facts.
 It copies compact original source records and records their actual target mutation
@@ -259,7 +265,10 @@ receipts retain their original provenance dependency; transfer metadata does not
 replace it. Per-block native completion is durable before compact export, so an
 interrupted export resumes without repeating proof verification. Transfer and
 export report counted progress, elapsed time, stage ETA/basis and stalled/retry
-status. SIGTERM/SIGINT stops between atomic work units, preserving completed work.
+status. The enclosing stage treats increasing child transfer counts as activity
+without advancing its exported-block count. Repeated heartbeats do not conceal a
+stall, and child retries or refusals withdraw the enclosing ETA. SIGTERM/SIGINT
+stops between atomic work units, preserving completed work.
 After a complete interval, the `materialization` result binds its contiguous native
 checkpoints, source generations, target export receipts and original directory and
 database identities. Interrupted final review produces no completed materialization
