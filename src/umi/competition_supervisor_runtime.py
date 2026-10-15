@@ -63,6 +63,16 @@ class SuccessorRuntimeError(ValueError):
     pass
 
 
+class SuccessorArtifactFetchWait(SuccessorRuntimeError):
+    """A retryable artifact transport failure before staging or execution."""
+
+    def __init__(self, reason_code):
+        if reason_code not in {"https_status_retryable", "https_timeout", "https_transport_failed"}:
+            raise ValueError("artifact wait requires a retryable transport reason")
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 _STARTUP_LEASE_ISSUER = object()
 _MAX_STARTUP_LOCK_BYTES = 64 * 1024
 
@@ -408,6 +418,7 @@ class SuccessorSupervisorRuntime:
         self._startup_lease = startup_lease
         self._mutex = asyncio.Lock()
         self._restart_checked = False
+        self._artifact_retry_pending = False
         self._observation: OwnedCompetitionChainObservation | None = None
         self._state: SuccessorSupervisorDirectiveState | None = None
         self._binding = canonical_json_bytes(
@@ -906,6 +917,7 @@ class SuccessorSupervisorRuntime:
             self._restart_checked = False
 
     async def _hold(self, reason):
+        self._artifact_retry_pending = False
         try:
             _, _, worker = self._load_history()
             if worker.phase != "idle":
@@ -946,6 +958,21 @@ class SuccessorSupervisorRuntime:
                 except Exception:
                     # A changed journal, unknown worker or failed inspection
                     # requires the ordinary stop and complete recovery path.
+                    pass
+                return await self._hold("successor_reconcile_failed")
+            except SuccessorArtifactFetchWait:
+                try:
+                    self._require_lease()
+                    _, _, worker = self._load_history()
+                    if (
+                        self._restart_checked
+                        and worker.phase == "idle"
+                        and await self.adapter.retry_stopped_start()
+                    ):
+                        self._require_lease()
+                        self._artifact_retry_pending = True
+                        return self._result("waiting", "successor_artifact_retry")
+                except Exception:
                     pass
                 return await self._hold("successor_reconcile_failed")
             except Exception:
@@ -1017,6 +1044,12 @@ class SuccessorSupervisorRuntime:
             # must not allow the predecessor to restart after a migration intent.
             return await self._hold("standing_reward_handoff")
         observation = await self._refresh_observation()
+        if self._artifact_retry_pending:
+            # The previous wait grants no fresh authority. Check the retained
+            # stopped audit again across this tick's asynchronous observation.
+            self._artifact_retry_pending = False
+            if worker.phase != "idle" or not await self.adapter.retry_stopped_start():
+                self._restart_checked = False
         if not self._restart_checked:
             observation = await self._stop_and_recover(observation)
             worker = _idle()
