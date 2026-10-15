@@ -54,6 +54,7 @@ from .competition_reward_history_checkpoint import (
     HistoryCheckpointRepairRequired,
     HistoryCheckpoints,
 )
+from .competition_reward_history_export import export_completed_checkpoint
 from .competition_reward_history_parallel import advance_parallel_locked
 from .competition_reward_history_progress import HistoryProgress
 from .competition_reward_history_workers import HistoryVerificationProfile
@@ -832,10 +833,14 @@ class RewardControlHistoryReader:
         prior_stage = self.progress.stage
         self.progress.stage = "checkpoint_export"
         self.progress.report(self, "running", force=True)
-        fields = await run_owned_thread(self._load, height)
-        if fields is None:
-            raise HistoryCheckpointRepairRequired("verified history lost export source")
-        await run_owned_thread(self._export_fields, height, fields, self.export_archive)
+        copied = await run_owned_thread(
+            partial(export_completed_checkpoint, self, value, field_limits=_FIELDS)
+        )
+        if not copied:
+            fields = await run_owned_thread(self._load, height)
+            if fields is None:
+                raise HistoryCheckpointRepairRequired("verified history lost export source")
+            await run_owned_thread(self._export_fields, height, fields, self.export_archive)
         identity = self._export_identity()
         updated = {**value, "exports": [*value["exports"], identity]}
         await run_owned_thread(
