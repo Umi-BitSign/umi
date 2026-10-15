@@ -204,7 +204,7 @@ async def run_standing_reward_service(
         # constructors acquired private cache locks but whose start can fail.
         for value in owners.values():
             resources.push_async_callback(_close_provider, value)
-        limits = StandingRewardServiceLimits.model_validate(limits.model_dump())
+        limits = StandingRewardServiceLimits.model_validate(limits.model_dump(by_alias=True))
         successor = type(plan) is StandingRewardHandoffPlan
         predecessor_inputs = (
             predecessor_series,
