@@ -50,6 +50,7 @@ from .validator_supervisor import (
 ACTIVATION_SOURCE_DIRECTORY_NAME = "activation-source"
 ANCHOR_STAGING_PREFIX = ".anchor-partial-"
 _ANCHOR_TOKEN = object()
+_SNAPSHOT_REUSE_TOKEN = object()
 _RENAME_NOREPLACE = 1
 
 _SOURCE_CONTROLS = (
@@ -116,6 +117,22 @@ class SuccessorAnchorError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class _AnchorSnapshotReuse:
+    """One process-local successful check, never a portable acceptance receipt."""
+
+    pid: int
+    anchor_binding: str
+    metadata: tuple
+    _issuer: object = field(default=None, repr=False)
+    _binding: str = field(default="", repr=False)
+
+    def seal(self):
+        return hashlib.sha256(
+            canonical_json_bytes([str(self.pid), self.anchor_binding, self.metadata])
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class MaterializedSuccessorAnchor:
     """Non-authorizing integrity capability for one installed anchor."""
 
@@ -137,6 +154,7 @@ class MaterializedSuccessorAnchor:
     _anchor_snapshot_sha256: str = field(repr=False, compare=False)
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    _snapshot_reuse: _AnchorSnapshotReuse | None = field(default=None, repr=False, compare=False)
 
     @property
     def anchor_path(self) -> Path:
@@ -174,6 +192,7 @@ class _AnchorSnapshot:
     initial_page: SuccessorSupervisorDirectivePage
     initial_state: SuccessorSupervisorDirectiveState
     recovery: RecoveryCheckpointBody
+    tree_metadata: tuple
 
 
 def successor_activation_source_root(config: ValidatorSupervisorConfig) -> Path:
@@ -444,6 +463,7 @@ def _load_materialized_anchor(
         _issuer=_ANCHOR_TOKEN,
     )
     object.__setattr__(value, "_binding", _anchor_binding(value))
+    _remember_anchor_snapshot(value, snapshot.tree_metadata)
     _validate_anchor_capability(value, allow_parent_repair=allow_parent_repair)
     return value
 
@@ -459,6 +479,30 @@ def _validate_anchor_capability(
         or anchor._binding != _anchor_binding(anchor)
     ):
         raise SuccessorAnchorError("successor anchor capability is absent or altered")
+    source_root, service_uid, parent_identity, root_identity = _validate_source_hierarchy(
+        anchor.config, allow_parent_repair=allow_parent_repair
+    )
+    if (
+        source_root != anchor.source_root
+        or service_uid != anchor.service_uid
+        or parent_identity != anchor._source_parent_identity
+        or root_identity != anchor._source_root_identity
+    ):
+        raise SuccessorAnchorError("materialized successor anchor changed")
+    reused = anchor._snapshot_reuse
+    if reused is not None:
+        if (
+            type(reused) is not _AnchorSnapshotReuse
+            or reused._issuer is not _SNAPSHOT_REUSE_TOKEN
+            or reused.anchor_binding != anchor._binding
+            or reused._binding != reused.seal()
+        ):
+            raise SuccessorAnchorError("successor anchor snapshot reuse is absent or altered")
+        # Forks/restarts require their own full successful snapshot. The complete
+        # current sealed inventory and descriptor identities are checked on every
+        # reuse; rolling current state and the repairable parent stay independent.
+        if reused.pid == os.getpid() and _sealed_anchor_metadata(source_root) == reused.metadata:
+            return
     snapshot = _snapshot_anchor(anchor.config, allow_parent_repair=allow_parent_repair)
     if (
         snapshot.source_parent_identity != anchor._source_parent_identity
@@ -466,6 +510,88 @@ def _validate_anchor_capability(
         or snapshot.snapshot_sha256 != anchor._anchor_snapshot_sha256
     ):
         raise SuccessorAnchorError("materialized successor anchor changed")
+    _remember_anchor_snapshot(anchor, snapshot.tree_metadata)
+
+
+def _remember_anchor_snapshot(anchor, metadata):
+    value = _AnchorSnapshotReuse(os.getpid(), anchor._binding, metadata, _SNAPSHOT_REUSE_TOKEN)
+    object.__setattr__(value, "_binding", value.seal())
+    object.__setattr__(anchor, "_snapshot_reuse", value)
+
+
+def _sealed_anchor_metadata(source_root):
+    """Walk the entire sealed tree without reading any unchanged payload bytes.
+
+    Recovery's supported maximum is 65,536 files. The installed layout has four
+    directories plus the fixed anchor controls. Descriptor-relative opens reject
+    links, special files, unsafe owners/modes and named/held replacement races.
+    No descriptors or payloads survive this bounded check.
+    """
+    root = source_root / activation.ANCHOR_DIRECTORY_NAME
+    pending = [(root, "")]
+    result, directories, files = [], 0, 0
+    while pending:
+        path, relative = pending.pop()
+        directory = _open_directory(path)
+        try:
+            before = _require_directory(directory, owner=_root_owner_uid(), modes={0o555})
+            directories += 1
+            if directories > 4:
+                raise SuccessorAnchorError("successor anchor directory set is invalid")
+            names = _directory_names(directory, maximum=65536 + len(_ANCHOR_ENTRIES))
+            result.append(
+                (relative, tuple(_json_identity(_fingerprint(before))), tuple(sorted(names)))
+            )
+            for name in sorted(names):
+                _safe_name(name)
+                named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                child_relative = relative + "/" + name if relative else name
+                if stat.S_ISDIR(named.st_mode):
+                    child = _open_child_directory(directory, name)
+                    try:
+                        held = _require_directory(child, owner=_root_owner_uid(), modes={0o555})
+                        if _fingerprint(held) != _fingerprint(named):
+                            raise SuccessorAnchorError(
+                                "successor anchor directory changed while opening"
+                            )
+                    finally:
+                        os.close(child)
+                    pending.append((path / name, child_relative))
+                    continue
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    dir_fd=directory,
+                )
+                try:
+                    held = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(held.st_mode)
+                        or held.st_uid != _root_owner_uid()
+                        or held.st_nlink != 1
+                        or stat.S_IMODE(held.st_mode) != 0o444
+                        or _fingerprint(held) != _fingerprint(named)
+                    ):
+                        raise SuccessorAnchorError("successor anchor file is unsafe or changed")
+                    files += 1
+                    if files > 65536 + len(_ANCHOR_ENTRIES):
+                        raise SuccessorAnchorError("successor anchor file set exceeds its bound")
+                    result.append((child_relative, tuple(_json_identity(_fingerprint(held))), None))
+                    if _fingerprint(os.fstat(descriptor)) != _fingerprint(held) or _fingerprint(
+                        os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    ) != _fingerprint(held):
+                        raise SuccessorAnchorError(
+                            "successor anchor file changed during metadata check"
+                        )
+                finally:
+                    os.close(descriptor)
+            if _fingerprint(os.fstat(directory)) != _fingerprint(before):
+                raise SuccessorAnchorError(
+                    "successor anchor directory changed during metadata check"
+                )
+        finally:
+            os.close(directory)
+    return tuple(sorted(result))
 
 
 def _snapshot_anchor(
@@ -476,6 +602,7 @@ def _snapshot_anchor(
     source_root, service_uid, parent_identity, root_identity = _validate_source_hierarchy(
         expected_config, allow_parent_repair=allow_parent_repair
     )
+    metadata = _sealed_anchor_metadata(source_root)
     anchor_path = source_root / activation.ANCHOR_DIRECTORY_NAME
     anchor_fd = _open_directory(anchor_path)
     try:
@@ -549,6 +676,11 @@ def _snapshot_anchor(
         limits=receipt.recovery_limits,
     )
     activation._verify_retained_recovery_body(receipt, recovery)
+    if metadata != _sealed_anchor_metadata(source_root) or (
+        _validate_source_hierarchy(expected_config, allow_parent_repair=allow_parent_repair)
+        != (source_root, service_uid, parent_identity, root_identity)
+    ):
+        raise SuccessorAnchorError("successor anchor changed during full snapshot verification")
     values = {
         "schema": "umi-materialized-successor-anchor-snapshot/1",
         "anchor_identity": _json_identity(_fingerprint(anchor_info)),
@@ -578,6 +710,7 @@ def _snapshot_anchor(
         initial_page,
         initial_state,
         recovery,
+        metadata,
     )
 
 

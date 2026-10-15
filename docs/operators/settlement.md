@@ -199,6 +199,58 @@ boundaries or a different existing destination encoding use the original
 decode/encode path and its immutable conflict checks. Transport frames still carry
 no native verification authority, locally or in R2.
 
+For two matching local coordinator/writer installations under the same service
+account, a stopped-owner transfer can reuse successful block facts without copying
+SQLite files or changing either journal's original binding. The guarded command
+requires both owners drained, the existing writer startup lease and process locks,
+and equal chain, series, policy, authority, adoption, eligibility and verifier
+context. It opens no journal until those ownership checks succeed:
+
+```sh
+python -m umi.competition_reward_history_transfer_cli --unit WRITER_UNIT --config /ABSOLUTE/SUPERVISOR.json --standing-boot /ABSOLUTE/STANDING_BOOT.json --coordinator-config /ABSOLUTE/COORDINATOR.json --first-block FIRST --through-block LAST
+```
+
+Provision the installed account's exact logical paths and mount dependencies before
+running this command. On isolated validator roots, both the helper and the later
+ordinary writer need the original provenance seals and original export namespace
+at their retained logical paths and inode identities. A helper's successful host
+view does not prove the writer can restore those results. Qualify this access and
+capacity, cooperative drainage, restart and current on-chain acceptance before a
+production cutover. The command does not stop/start services, change mounts, load
+signing keys, publish a decision or authorize a transaction.
+Root invocations validate the canonical coordinator configuration before dropping
+to the installed service account, then recheck its exact sealed bytes. This permits
+non-signing transfer when the coordinator's physical signer path has a root-only
+ancestor. Keep the selected configuration readable at the same logical path after
+the private view is established. Successful installation-anchor validation is
+reused within that process only while its complete sealed inventory and current
+hierarchy remain unchanged; changed metadata requires full validation.
+
+Transfer preserves existing writer results and compares overlapping native facts.
+It copies compact original source records and records their actual target mutation
+tokens. Persistent source mappings let repeated shared objects survive interruption
+and restart without another payload read. Conflicts, damaged mappings, changed
+origins and incompatible semantics require explicit repair. Original-export-origin
+receipts retain their original provenance dependency; transfer metadata does not
+replace it. Per-block native completion is durable before compact export, so an
+interrupted export resumes without repeating proof verification. Transfer and
+export report counted progress, elapsed time, stage ETA/basis and stalled/retry
+status. SIGTERM/SIGINT stops between atomic work units, preserving completed work.
+After a complete interval, the `materialization` result binds its contiguous native
+checkpoints, source generations, target export receipts and original directory and
+database identities. Interrupted final review produces no completed materialization
+result. This can support a separately qualified disk-capacity review; it does not
+report the imported prefix as applied history or establish chain authority.
+
+This local compatibility operation refuses remote source aliases, predecessor
+series and intervals covered only by aggregate admission. R2 transport objects
+remain untrusted inputs until their selected native owner verifies them; this
+command is not a portable remote-verdict format. The ordinary writer still restores
+all block effects in order, checks ancestry and fresh finalized tip, and applies
+its existing reward/eligibility rules. Retain the transfer command and original
+provenance dependencies while installed local owners need them; retire them only
+after those consumers have a separately qualified migration and release.
+
 Historical capture reuses the original owned finalized header when it is retained,
 avoiding another target hash/header RPC. An archived target header can also supply
 the final link of a historical ancestry walk; it remains an untrusted hint until
