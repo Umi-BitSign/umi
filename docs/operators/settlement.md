@@ -263,6 +263,14 @@ state and RPC checks. This scheduling change preserves
 the proof predicates, signed bytes and successful checkpoint ABI; no receipt
 migration or native re-verification is needed for unchanged completed blocks.
 
+Within each selected window, the owner submits a retained frame as soon as its
+header is authenticated, then loads the next frame while earlier native work runs.
+The count, byte limit and conservative memory reservation still cover the entire
+window; loading does not allocate an extra prefetch window. If a later load fails
+or shutdown begins, the owner drains both that load and all started native work
+before releasing its provider and journal ownership. Completed checks remain
+checkpointed, and ordered application and missing-frame fallback are unchanged.
+
 Spawned workers receive only immutable evidence and the selected native verifier
 context. They share the serial archive parser, runtime/slot proof checks and
 complete body/event scanner, including parent-runtime changes. Each successful
