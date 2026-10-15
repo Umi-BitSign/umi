@@ -68,6 +68,24 @@ report `repair_required` before the bounded native hash repair; completed files
 remain reusable after interruption. These digests do not replace signed control,
 package, authorization or chain verification.
 
+Successor release and host checks retain their own private metadata beneath the
+supervisor's `state_root`: `release-verification` for authenticated staged OCI
+archives and `host-file-verification` for signed host file hashes. These records
+live outside the evictable artifact trees. Startup still authenticates the
+current target, release authority, signed header and exact host manifest. Reuse
+requires the actual opened file identities, sizes, modes, ownership and unchanged
+directory contents; replacement, writes or links invalidate that identity.
+Approved worker overlays recheck an issued tree capability before every mount,
+without rehashing the unchanged host. A cold process resumes completed per-file
+host checks, and a repeated staged-archive check reuses its completed verdict.
+Older installations seed these records on their first checked use, preserving
+all signed artifacts and original installation bindings. Missing or damaged
+completed metadata reports repair before rechecking the affected inputs;
+`host_tree_verification` counts files and `release_archive_verification` counts
+MiB chunks with elapsed time and a measured substage ETA once samples exist.
+An interrupted archive pass remains unverified; completed host-file checks
+survive interruption. These checks grant no additional activation authority.
+
 Supervisor recovery audits, replay preparation, staging, selection and redundant
 cache retirement run in owned disk workers. Cancellation drains that work before
 releasing the materializer mutex or supervisor lease. Fresh finalized observations

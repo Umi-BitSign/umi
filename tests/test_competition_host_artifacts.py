@@ -36,7 +36,7 @@ def sign(manifest, wallets=None, signature_digest=None):
 
 @pytest.fixture(params=["linux/amd64", "linux/arm64"])
 def staged(tmp_path, monkeypatch, request):
-    config = _config(target_platform=request.param)
+    config = _config(target_platform=request.param, state_root=str(tmp_path / "state"))
     revision = "42" * 20
     parent = tmp_path / "host-stages"
     parent.mkdir(mode=0o755)

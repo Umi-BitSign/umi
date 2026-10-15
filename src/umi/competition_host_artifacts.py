@@ -20,7 +20,9 @@ from pydantic import Field, field_validator, model_validator
 from typing_extensions import Self
 
 from .competition_host_upgrade import HostUpgradeError, _require_root_linux
+from .competition_materialization_reuse import MaterializationDigestReuse
 from .competition_upgrade import _fingerprint, _open_without_links
+from .competition_work_progress import WorkProgress
 from .crypto import verify_response_signature
 from .encoding import account_id32
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -229,7 +231,12 @@ def _ancestor_identity(path: Path) -> tuple[int, ...]:
         os.close(descriptor)
 
 
-def _read_tree(root: Path, manifest: SuccessorHostArtifactManifest):
+def _read_tree(root: Path, manifest: SuccessorHostArtifactManifest, *, digests=None):
+    with WorkProgress("host_tree_verification", len(manifest.files), unit="files") as progress:
+        return _read_tree_files(root, manifest, digests=digests, progress=progress)
+
+
+def _read_tree_files(root, manifest, *, digests, progress):
     files = {item.path: item for item in manifest.files}
     directories = {""}
     for name in files:
@@ -272,12 +279,25 @@ def _read_tree(root: Path, manifest: SuccessorHostArtifactManifest):
                         identity = os.fstat(descriptor)
                         if _fingerprint(identity) != _fingerprint(info):
                             raise HostUpgradeError("staged host file changed while opening")
-                        if _file_hash(descriptor, target.size_bytes) != target.sha256:
+
+                        if identity.st_size != target.size_bytes:
+                            raise HostUpgradeError("staged host file differs from signed size")
+
+                        def read(descriptor=descriptor, size=target.size_bytes):
+                            return _file_hash(descriptor, size)
+
+                        file_digest = (
+                            read()
+                            if digests is None
+                            else digests.digest(path / entry.name, _fingerprint(identity), read)
+                        )
+                        if file_digest != target.sha256:
                             raise HostUpgradeError("staged host file hash mismatch")
                         if _fingerprint(os.fstat(descriptor)) != _fingerprint(identity):
                             raise HostUpgradeError("staged host file changed while hashing")
                         fingerprints[path / entry.name] = _fingerprint(identity)
                         observed_files.add(key)
+                        progress.advance()
                     finally:
                         os.close(descriptor)
             if _fingerprint(os.fstat(directory)) != _fingerprint(before):
@@ -387,8 +407,19 @@ def verify_staged_host_tree(
         other = Path(protected)
         if stage_root == other or stage_root in other.parents or other in stage_root.parents:
             raise HostUpgradeError("host stage overlaps an installed state or wallet tree")
+    return _verified_host_tree(stage_root, signed)
+
+
+def _host_digest_reuse(config):
+    # Metadata is owner state, outside the evictable host/release trees. Existing
+    # installations lazily seed one receipt per successfully checked file.
+    return MaterializationDigestReuse(Path(config.state_root) / "host-file-verification")
+
+
+def _verified_host_tree(stage_root, signed, *, digests=None):
+    """Issue a descriptor-bound tree after the caller authenticates its authority."""
     ancestors = {path: _ancestor_identity(path) for path in _ancestor_paths(stage_root)}
-    fingerprints, entries = _read_tree(stage_root, signed.manifest)
+    fingerprints, entries = _read_tree(stage_root, signed.manifest, digests=digests)
     tree = VerifiedHostTree(
         stage_root,
         signed.manifest_sha256,
