@@ -17,11 +17,12 @@ from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
+from .competition_cohort_participation_status import participation_status
 from .competition_cohort_readiness import intake_readiness
 from .competition_execution import ExecutionBoundary
 from .competition_store import AdmissionCapacityError
 from .concurrency import run_owned_thread
-from .open_competition import digest
+from .open_competition import Hotkey, Track, digest
 
 
 class CohortModelPayloads(Protocol):
@@ -144,6 +145,35 @@ def cohort_routes(
             status="pending_attestation" if certificate is None else "admission_certified",
             certificate=certificate,
         ).model_dump(mode="json", by_alias=True)
+
+    @router.get("/v1/competition/cohorts/{cohort}/participation-status/{hotkey}")
+    async def retained_participation(
+        cohort: str,
+        hotkey: Hotkey,
+        track: Track,
+        nonce: str = Query(pattern=r"^[0-9a-f]{32}$"),
+        consent: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+    ):
+        allowed(cohort)
+        try:
+            current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
+            value = await run_owned_thread(
+                partial(
+                    participation_status,
+                    queue,
+                    cohort,
+                    hotkey,
+                    track,
+                    current,
+                    nonce=nonce,
+                    consent=consent,
+                )
+            )
+        except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
+            raise HTTPException(
+                503, "cohort participation status unavailable; retry later"
+            ) from error
+        return value.model_dump(mode="json", by_alias=True)
 
     async def preserve(signed, receipt):
         # Production supplies its owned archive provider. Generic rehearsal

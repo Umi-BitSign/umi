@@ -5,9 +5,11 @@
 The competition uses a recoverable cohort runtime: phase blocks are operating targets, and
 coordinator or validator downtime delays unfinished work instead of expiring the
 cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
-[readiness](https://api.umi.vision/v1/competition/readiness) for the current
-phase and admission state before signing or diagnosing a submission. Send a new
-submission only when `admission_accepting_new` is true.
+the target cohort’s `/v1/competition/cohorts/{cohort_sha256}/readiness` route
+with a fresh 32-character lowercase hexadecimal `nonce` before signing or
+diagnosing a submission. The global `admission_accepting_new` flag does not
+establish that a particular cohort is open. A cohort readiness response is an
+operational observation, not a reservation or admission certificate.
 
 The [request-window recovery contract](../competition/transport-cadence.md)
 explains retained attempts and the new linked-deadline extension. That extension
@@ -30,6 +32,64 @@ produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance
 receipt for the active policy. Registration, acceptance, selection, scoring and
 reward activation are separate events.
+
+## Change an endpoint model revision
+
+A cohort that still allows the endpoint track can retain a replacement while its
+intake remains unsealed. The new signed submission needs a higher sequence for
+the same hotkey and track, a new `model_revision` for changed inference artifacts,
+and the policy’s minimum submission interval since the previous retained
+observation. Sign separate participation consent for each target cohort. Retry an
+unchanged request using its original signed bytes; do not generate another
+revision or sequence to recover a lost acknowledgement.
+
+The intake seal selects the highest retained sequence even if its admission
+certificate is still pending. Preparation waits for that selected certificate;
+it does not fall back to an older certified entry. The selected replacement can
+still receive its certificate after intake seals. Neither global nor cohort
+readiness promises enough time for certification before the seal. Check the
+exact replacement after submission:
+
+```sh
+umi-competition --policy policy.json query-cohort-admission \
+  --origin https://api.umi.vision --request replacement-participation.json
+```
+
+The read-only participation-status route exposes the latest retained sequence
+and its certificate together:
+
+```text
+GET /v1/competition/cohorts/{cohort_sha256}/participation-status/{hotkey}?track=endpoint&nonce={fresh_32_hex}&consent={consent_sha256}
+```
+
+`consent` is optional. With it, `requested_consent_status` distinguishes `latest`,
+`superseded` and `not_retained`; `latest.admission.status` describes the newest
+entry even while an older one remains certified. `minimum_next_sequence` and
+`submission_not_before_block` are lower bounds, not permission to submit:
+registration, track eligibility, readiness, capacity and the seal still apply.
+A `null` minimum sequence means the sequence range is exhausted. Check `phase`
+as well as `intake_fenced`; a closed phase blocks new participation even without
+a fence at its current tip. This advisory response does not verify the seal’s
+selected roster (`sealed_selection_verified: false`) or authorize a runtime
+migration (`runtime_migration_authorized: false`). Older servers may not yet
+provide the route; HTTP 404 is not evidence that no participation exists.
+
+An `admission_certified` response authenticates that participation; it does not
+prove it remains the newest entry or authorize changing the running model. The
+current updater is a runtime upgrade, not a model-revision rollover. It preserves
+the installed revision, complete cohort roster, authority, service account and
+state paths. The grant journal binds the revision and roster, so editing either,
+removing a closed cohort, or substituting an empty grant directory is not a
+supported in-place upgrade. Preserve the original configuration, grants, requests,
+responses and retirement receipts. Qualify an explicit transition for the actual
+installed startup layout and any remaining old-revision obligations before
+switching the endpoint; cohort closure alone does not release retained state.
+
+Endpoint participation does not require the unmodified baseline. A fine-tuned
+model must declare its own revision and meet the applicable provenance, license,
+resource and execution rules. See [model revision](model.md#model-revision) for
+which artifacts define a revision. Public-model admission does not replace
+endpoint admission or paid-work checks.
 
 ## Upgrade an existing miner
 
