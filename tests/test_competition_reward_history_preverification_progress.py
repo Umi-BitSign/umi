@@ -154,7 +154,9 @@ async def test_owned_header_wait_is_visible_before_any_worker_submission(
     monkeypatch.setattr(parallel, "archive_header_hint", hint)
     monkeypatch.setattr(parallel, "_cache_usage", lambda *args: None)
     monkeypatch.setattr(parallel, "_persist", persist)
-    task = asyncio.create_task(parallel._window(reader, provider, pool, [(10, fields, True)], stop))
+    task = asyncio.create_task(
+        parallel._window(reader, provider, pool, [(10, fields, True)], stop, last_height=10)
+    )
     await asyncio.wait_for(waiting.wait(), timeout=2)
     reader.progress.report(reader, "running", force=True)
     assert reader.progress.latest["native_completed"] == 0
