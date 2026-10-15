@@ -19,6 +19,7 @@ import sys
 import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -34,6 +35,7 @@ from .competition_host_activation import (
     _validate_worker_execution_bindings,
 )
 from .competition_package import _limit_for
+from .competition_package_reuse import current_package_reuse
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
     SuccessorSupervisorDirectivePage,
@@ -45,6 +47,7 @@ from .competition_supervisor import (
     verify_signed_successor_supervisor_directive_history,
 )
 from .competition_supervisor_runtime import SuccessorWorkerSelection
+from .competition_work_progress import WorkProgress
 from .competition_worker import _open_directory_without_links
 from .protocol import StrictProtocolModel, canonical_json_bytes
 from .validator_supervisor import ValidatorSupervisorConfig
@@ -133,6 +136,32 @@ def _read_at(directory_fd, name, maximum, *, expected_sha256=None):
         os.close(fd)
 
 
+def _hash_tree_file(stream, before):
+    identity = _identity(before)
+    digest, observed = hashlib.sha256(), 0
+    with WorkProgress(
+        "materialization_file_hash",
+        (before.st_size + _CHUNK - 1) // _CHUNK,
+        unit="chunks",
+    ) as progress:
+        while True:
+            part = os.read(stream, min(_CHUNK, before.st_size + 1 - observed))
+            if not part:
+                break
+            observed += len(part)
+            if observed > before.st_size:
+                raise SuccessorMaterializationError("cached input grew")
+            digest.update(part)
+            complete = observed // _CHUNK + int(
+                observed == before.st_size and observed % _CHUNK != 0
+            )
+            while progress.completed < complete:
+                progress.advance()
+        if observed != before.st_size or identity != _identity(os.fstat(stream)):
+            raise SuccessorMaterializationError("cached input changed")
+    return digest.hexdigest()
+
+
 def _tree(
     path, limits, *, sealed: bool, allow_owner_writable_root: bool = False, hash_files: bool = True
 ):
@@ -143,6 +172,7 @@ def _tree(
     if allow_owner_writable_root:
         root_modes.add(0o755)
     root = _directory(path, modes=root_modes)
+    reuse = current_package_reuse() if sealed and hash_files else None
 
     def walk(fd, prefix, depth):
         nonlocal entries, total
@@ -189,22 +219,25 @@ def _tree(
                         child.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd
                     )
                     try:
-                        digest, observed = hashlib.sha256(), 0
-                        while True:
-                            part = os.read(stream, min(_CHUNK, before.st_size + 1 - observed))
-                            if not part:
-                                break
-                            observed += len(part)
-                            if observed > before.st_size:
-                                raise SuccessorMaterializationError("cached input grew")
-                            digest.update(part)
-                        if observed != before.st_size or _identity(before) != _identity(
-                            os.fstat(stream)
+                        identity = _identity(before)
+                        if identity != _identity(os.fstat(stream)):
+                            raise SuccessorMaterializationError("cached input changed")
+
+                        read = partial(_hash_tree_file, stream, before)
+                        checksum = (
+                            read()
+                            if reuse is None
+                            else reuse.materialization.digest(
+                                Path(path) / name.lstrip("/"), identity, read
+                            )
+                        )
+                        if identity != _identity(os.fstat(stream)) or identity != _identity(
+                            os.stat(child.name, dir_fd=fd, follow_symlinks=False)
                         ):
                             raise SuccessorMaterializationError("cached input changed")
                     finally:
                         os.close(stream)
-                    records[name] = (_identity(before), digest.hexdigest())
+                    records[name] = (_identity(before), checksum)
                 else:
                     raise SuccessorMaterializationError("cache contains a link or special file")
         if _identity(info) != _identity(os.fstat(fd)):

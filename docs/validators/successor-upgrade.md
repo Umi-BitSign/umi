@@ -50,6 +50,25 @@ Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
 
+The same session retains per-file SHA-256 results for sealed materialization
+trees under `successor-package-verification/sealed-file-digests`. These small,
+atomic receipts use the existing private verification store and survive restart;
+they contain no evidence payload. Every lookup still walks the complete tree,
+enforces the current quotas, ownership, link count and modes, and checks exact
+file identities before and after use. Replaced files, changed contents (including
+same-size edits with restored modification time), or changed digest semantics
+require new hashes only for affected files. Missing completed or damaged records
+report `repair_required` before the bounded native hash repair; completed files
+remain reusable after interruption. These digests do not replace signed control,
+package, authorization or chain verification.
+
+Supervisor recovery audits, replay preparation, staging, selection and redundant
+cache retirement run in owned disk workers. Cancellation drains that work before
+releasing the materializer mutex or supervisor lease. Fresh finalized observations
+are still captured after slow preparation. `supervisor_recovery_runs` counts
+audited retained runs, and `materialization_file_hash` counts verified chunks with
+elapsed time, rate-based substage ETA, completion and interruption status.
+
 Renewed controls do not require hashing every older staged package during cache
 lookup. The supervisor checks sealed metadata and compares the small control
 files first, then verifies the complete matching stage before reuse. All retained

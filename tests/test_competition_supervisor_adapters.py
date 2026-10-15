@@ -1342,6 +1342,44 @@ async def test_recovery_fold_still_reverifies_every_retained_head(adapter_case, 
     assert calls == [case.selection.directive_sha256]
 
 
+async def test_recovery_audit_runs_off_loop_and_cancellation_drains(adapter_case, monkeypatch):
+    import asyncio
+    import threading
+
+    case = adapter_case
+    await case.adapter.stage(case.selection)
+    case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
+    await case.adapter.stop_worker()
+    observation = await case.item.provider.collect_weights(case.item.hotkey, case.item.recipients)
+    original = case.adapter._audit_retained_recovery
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+
+    def blocked():
+        assert threading.get_ident() != loop_thread
+        started.set()
+        assert release.wait(10)
+        result = original()
+        finished.set()
+        return result
+
+    monkeypatch.setattr(case.adapter, "_audit_retained_recovery", blocked)
+    task = asyncio.create_task(case.adapter.recover_stopped_transactions(observation))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert case.adapter._recovered is None
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert finished.is_set()
+    assert case.adapter._recovered is None
+
+
 @pytest.mark.parametrize("corrupt_signature", [False, True])
 async def test_shared_recovery_audits_each_run_without_expanding_nested_schemas(
     adapter_case, monkeypatch, corrupt_signature

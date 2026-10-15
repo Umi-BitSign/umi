@@ -71,6 +71,7 @@ from .competition_weights import (
     competition_weight_authorization_digest,
     validate_weight_preflight,
 )
+from .competition_work_progress import WorkProgress
 from .competition_worker import (
     CompetitionReplayWorker,
     _open_directory_without_links,
@@ -80,6 +81,7 @@ from .competition_worker import (
     _verify_sqlite_family,
 )
 from .competition_worker_cli import SuccessorWorkerExecutionConfig
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import digest
 from .protocol import canonical_json_bytes
@@ -560,10 +562,12 @@ class ProductionSuccessorRuntimeAdapter:
         files = await self.materializer.fetch(selection)
         if type(files) is not SuccessorArtifactFiles:
             raise TypeError("materializer must return bounded artifact files")
-        prepared = self._verify(selection, files)
-        self._replay(prepared)
-        release = self.container.stage_release(
-            files.release_bundle_path, selection.signed.directive.release
+        prepared = await run_owned_thread(self._verify, selection, files)
+        await run_owned_thread(self._replay, prepared)
+        release = await run_owned_thread(
+            self.container.stage_release,
+            files.release_bundle_path,
+            selection.signed.directive.release,
         )
         prepared = _Prepared(
             selection, files, prepared.execution, prepared.package, prepared.authorization, release
@@ -616,8 +620,8 @@ class ProductionSuccessorRuntimeAdapter:
             # Runtime re-entry may retain a worker while this process's cache is empty.
             await self.stage(selection)
             prepared = self._staged[selection.directive_sha256]
-        checked = self._verify(selection, prepared.files)
-        self._replay(checked)
+        checked = await run_owned_thread(self._verify, selection, prepared.files)
+        await run_owned_thread(self._replay, checked)
         current = await self._observe_at_floor(checked, floor)
         verify_signed_successor_supervisor_directive(
             selection.signed,
@@ -696,15 +700,7 @@ class ProductionSuccessorRuntimeAdapter:
                 result[identity] = attempt
             return result
 
-    @log_phase("transaction_recovery")
-    async def recover_stopped_transactions(self, observation):
-        self._stopped_audit = None
-        self._recovered = None
-        self._recovered_floor = None
-        floor = self._observation_floor(observation)
-        genesis_hash = observation.genesis_hash
-        if not self._stopped or (await self.container.status()).phase == "running":
-            raise SuccessorAdapterError("recovery requires confirmed stopped worker")
+    def _audit_retained_recovery(self):
         validate_authenticated_successor_installation(self.installation)
         registry_snapshot = _recovery_journal_snapshot(self.path)
         weight_path = selected_weight_state_root(self.installation) / "competition-weights.sqlite3"
@@ -716,26 +712,61 @@ class ProductionSuccessorRuntimeAdapter:
         targets = {}
         packages = {}
         recovery_packages = RecoveryPackageReplay()
-        for selection, files, restored in records.recovery_values():
-            snapshot = _recovery_package_snapshot(files.package_path)
-            prepared = self._verify(
-                selection, files, recovery_packages=recovery_packages, recovery_history=restored
-            )
-            if _recovery_package_snapshot(files.package_path) != snapshot:
-                raise SuccessorAdapterError("retained recovery package changed during verification")
-            packages[files.package_path] = snapshot
-            if prepared.authorization is not None:
-                identity = prepared.authorization.authorization.authorization_id
-                if identity in targets:
-                    raise SuccessorAdapterError("retained runs reuse a weight authorization")
-                # Keep only bounded identities between audits. Reconstruct the
-                # full continuation for the one unsettled attempt being handled.
-                targets[identity] = (
-                    selection.directive_sha256,
-                    competition_weight_authorization_digest(prepared.authorization.authorization),
-                    digest(prepared.execution.weights.chain),
+        with WorkProgress("supervisor_recovery_runs", len(records), unit="runs") as progress:
+            for selection, files, restored in records.recovery_values():
+                snapshot = _recovery_package_snapshot(files.package_path)
+                prepared = self._verify(
+                    selection, files, recovery_packages=recovery_packages, recovery_history=restored
                 )
-            del prepared  # Let the one-package cache release a previous round before the next load.
+                if _recovery_package_snapshot(files.package_path) != snapshot:
+                    raise SuccessorAdapterError(
+                        "retained recovery package changed during verification"
+                    )
+                packages[files.package_path] = snapshot
+                if prepared.authorization is not None:
+                    identity = prepared.authorization.authorization.authorization_id
+                    if identity in targets:
+                        raise SuccessorAdapterError("retained runs reuse a weight authorization")
+                    # Keep only bounded identities between audits. Reconstruct the
+                    # full continuation for the one unsettled attempt being handled.
+                    targets[identity] = (
+                        selection.directive_sha256,
+                        competition_weight_authorization_digest(
+                            prepared.authorization.authorization
+                        ),
+                        digest(prepared.execution.weights.chain),
+                    )
+                # Release the previous round before the one-package cache loads another.
+                del prepared
+                progress.advance()
+        return (
+            registry_snapshot,
+            weight_path,
+            records,
+            attempts,
+            targets,
+            packages,
+            recovery_packages,
+        )
+
+    @log_phase("transaction_recovery")
+    async def recover_stopped_transactions(self, observation):
+        self._stopped_audit = None
+        self._recovered = None
+        self._recovered_floor = None
+        floor = self._observation_floor(observation)
+        genesis_hash = observation.genesis_hash
+        if not self._stopped or (await self.container.status()).phase == "running":
+            raise SuccessorAdapterError("recovery requires confirmed stopped worker")
+        (
+            registry_snapshot,
+            weight_path,
+            records,
+            attempts,
+            targets,
+            packages,
+            recovery_packages,
+        ) = await run_owned_thread(self._audit_retained_recovery)
         for identity, attempt in attempts.items():
             binding = targets.get(identity)
             if (
@@ -747,7 +778,9 @@ class ProductionSuccessorRuntimeAdapter:
                 raise SuccessorAdapterError("weight attempt lacks its retained signed authority")
             if attempt.phase in _TERMINAL:
                 continue
-            prepared = self._verify(*records[binding[0]], recovery_packages=recovery_packages)
+            prepared = await run_owned_thread(
+                partial(self._verify, *records[binding[0]], recovery_packages=recovery_packages)
+            )
             execution = prepared.execution.weights
             replay = CompetitionReplayWorker(
                 self.root / "preflight-replay",
@@ -884,11 +917,11 @@ class ProductionSuccessorRuntimeAdapter:
         prepared = self._staged.get(selection.directive_sha256)
         if prepared is None:
             return False
-        prepared = self._verify(selection, prepared.files)
+        prepared = await run_owned_thread(self._verify, selection, prepared.files)
         if prepared.authorization is None and status.phase != "completed":
             return False
-        self._completed_replay(prepared)
-        self._replay(prepared)
+        await run_owned_thread(self._completed_replay, prepared)
+        await run_owned_thread(self._replay, prepared)
         if prepared.authorization is not None:
             attempt = self._attempts().get(prepared.authorization.authorization.authorization_id)
             if attempt is None or attempt.phase not in {"applied", "recovered_effect"}:
@@ -944,7 +977,7 @@ class ProductionSuccessorRuntimeAdapter:
         floor = self._recovered_floor
         await self.container.prepare_image(prepared.release)
         # Complete immutable package verification before the launch proof.
-        prepared = self._verify(selection, prepared.files)
+        prepared = await run_owned_thread(self._verify, selection, prepared.files)
         await self._preflight_at_floor(selection, floor)
         observation = self._preflight[selection.directive_sha256]
         if prepared.authorization is not None:
