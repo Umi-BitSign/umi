@@ -316,12 +316,23 @@ class DurableGrandpaFinalityPort:
         startup_timeout_seconds: int = 600,
         accepted_predecessor_policy_digests: tuple[str, ...] = (),
         limits: GrandpaFinalitySupervisorLimits | None = None,
+        storage_limits: GrandpaFinalitySupervisorLimits | None = None,
         busy_timeout_ms: int = 5_000,
     ) -> None:
         if not isinstance(observer, GrandpaFinalityObserver):
             raise TypeError("observer must be a GrandpaFinalityObserver")
         self._observer = observer
         self._limits = limits or GrandpaFinalitySupervisorLimits()
+        # A shared cache's available space can shrink between opens without
+        # changing this store's immutable verification/transcript binding.
+        # Operational byte ceilings may only tighten the original limits.
+        self._storage_limits = self._limits if storage_limits is None else storage_limits
+        if not isinstance(self._storage_limits, GrandpaFinalitySupervisorLimits):
+            raise TypeError("storage limits must be GrandpaFinalitySupervisorLimits")
+        for name in self._limits.__dataclass_fields__:
+            selected, original = getattr(self._storage_limits, name), getattr(self._limits, name)
+            if selected > original or (not name.endswith("_bytes") and selected != original):
+                raise ValueError("storage limits may only tighten original byte ceilings")
         self._scoring_policy_digest = _sha256(scoring_policy_digest, "scoring policy digest")
         # Deal-preserving predecessors of the scoring policy: a store bound under one of
         # these carries the same verified chain evidence and is rebound on initialize.
@@ -647,7 +658,7 @@ class DurableGrandpaFinalityPort:
             raise TypeError("binding must be an ObserverRunBinding")
         if not isinstance(attestation, FinalityAttestation):
             raise TypeError("attestation must be a FinalityAttestation")
-        if len(attestation.canonical_bytes) > self._limits.maximum_evidence_bytes:
+        if len(attestation.canonical_bytes) > self._storage_limits.maximum_evidence_bytes:
             raise GrandpaFinalitySupervisorError("evidence_size_limit")
         return self._commit(binding, attestation)
 
@@ -1041,7 +1052,7 @@ class DurableGrandpaFinalityPort:
                     raise GrandpaFinalitySupervisorError("header_count_limit")
                 if (
                     total_evidence + len(attestation.canonical_bytes)
-                    > self._limits.maximum_total_evidence_bytes
+                    > self._storage_limits.maximum_total_evidence_bytes
                 ):
                     raise GrandpaFinalitySupervisorError("total_evidence_limit")
                 last = connection.execute(
@@ -1177,7 +1188,7 @@ class DurableGrandpaFinalityPort:
                 )
                 page_size = connection.execute("PRAGMA page_size").fetchone()[0]
                 page_count = connection.execute("PRAGMA page_count").fetchone()[0]
-                if page_size * page_count > self._limits.maximum_database_bytes:
+                if page_size * page_count > self._storage_limits.maximum_database_bytes:
                     raise GrandpaFinalitySupervisorError("database_size_limit")
         except AccountingError as error:
             raise GrandpaFinalityStoreCorruption("evidence_accounting_corrupt") from error
@@ -1466,7 +1477,7 @@ class DurableGrandpaFinalityPort:
                 if candidate.is_symlink() or not candidate.is_file():
                     raise GrandpaFinalityStoreCorruption("unsafe_database_path")
                 total += candidate.stat().st_size
-        if total > self._limits.maximum_database_bytes:
+        if total > self._storage_limits.maximum_database_bytes:
             raise GrandpaFinalityStoreCorruption("database_size_limit")
 
 

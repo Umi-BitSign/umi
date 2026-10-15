@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import copy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -268,6 +269,7 @@ def _port(
     *,
     state_name: str = "finality.sqlite3",
     limits: GrandpaFinalitySupervisorLimits | None = None,
+    storage_limits: GrandpaFinalitySupervisorLimits | None = None,
     scoring_digest: str = _POLICY_DIGEST,
     predecessor_digests: tuple[str, ...] = (),
 ) -> DurableGrandpaFinalityPort:
@@ -281,6 +283,7 @@ def _port(
         initial_minimum_finalized_block=10,
         startup_timeout_seconds=1,
         limits=limits or GrandpaFinalitySupervisorLimits(maximum_records_per_process=2),
+        storage_limits=storage_limits,
     )
 
 
@@ -738,6 +741,71 @@ def test_audit_scalar_limits_at_and_above_capacity(tmp_path, observer, chain_obs
         reason = "header_count_limit" if exceeded == "headers" else "total_evidence_limit"
         with pytest.raises(GrandpaFinalityStoreCorruption, match=reason):
             port.audit()
+
+
+def test_operational_storage_budget_preserves_retained_binding_and_limits_new_work(
+    tmp_path, observer, chain_observation
+):
+    limits = GrandpaFinalitySupervisorLimits(
+        maximum_evidence_bytes=100_000,
+        maximum_total_evidence_bytes=1_000_000,
+        maximum_database_bytes=4_000_000,
+        maximum_records_per_process=2,
+    )
+    original = _port(tmp_path, observer, chain_observation, limits=limits)
+    binding = original.next_run_binding()
+    block = _header(10, parent_hash="0x" + "11" * 32, seed=20)
+    first = _attestation(observer, binding, block=block, sequence=0, previous=None)
+    second = _attestation(
+        observer,
+        binding,
+        block=_header(11, parent_hash=str(block["hash"]), seed=21),
+        sequence=1,
+        previous=first,
+    )
+    original.accept_attestation(binding, first)
+    config = original._config_bytes()
+    tightened = replace(
+        limits,
+        maximum_evidence_bytes=max(len(first.canonical_bytes), len(second.canonical_bytes)),
+        maximum_total_evidence_bytes=len(first.canonical_bytes) + len(second.canonical_bytes) - 1,
+        maximum_database_bytes=2_000_000,
+    )
+    reopened = _port(tmp_path, observer, chain_observation, limits=limits, storage_limits=tightened)
+    assert reopened._config_bytes() == config
+    reopened.audit()
+    with pytest.raises(GrandpaFinalitySupervisorError, match="total_evidence_limit"):
+        reopened.accept_attestation(binding, second)
+    assert reopened.persisted_head().height == 10
+    assert (
+        _port(tmp_path, observer, chain_observation, limits=limits)
+        .accept_attestation(binding, second)
+        .height
+        == 11
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"maximum_database_bytes": 9 * 1024**3},
+        {"maximum_headers": 999_999},
+        {"maximum_records_per_process": 1},
+    ],
+)
+def test_operational_storage_budget_cannot_relax_or_change_transcript_limits(
+    tmp_path, observer, chain_observation, change
+):
+    limits = GrandpaFinalitySupervisorLimits(maximum_records_per_process=2)
+    with pytest.raises(ValueError, match="only tighten original byte ceilings"):
+        _port(
+            tmp_path,
+            observer,
+            chain_observation,
+            limits=limits,
+            storage_limits=replace(limits, **change),
+        )
+    assert not (tmp_path / "finality.sqlite3").exists()
 
 
 def test_failed_streaming_audit_releases_its_snapshot(

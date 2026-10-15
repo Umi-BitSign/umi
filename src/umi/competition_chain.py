@@ -577,6 +577,7 @@ class FinalizedRegistrationProvider:
                 initial_minimum_finalized_block=config.minimum_finalized_block,
                 startup_timeout_seconds=segment_startup_timeout,
                 limits=self._finality_storage_limits(),
+                storage_limits=self._finality_operational_limits(),
             )
             head = finality.persisted_head()
             self._startup_floor = (
@@ -746,6 +747,9 @@ class FinalizedRegistrationProvider:
         return frozenset(accepted)
 
     def _finality_storage_limits(self):
+        return None
+
+    def _finality_operational_limits(self):
         return None
 
     def _connect(self) -> sqlite3.Connection:

@@ -1804,3 +1804,102 @@ async def test_weight_provider_uses_pooled_transport_and_keeps_proof_checks(
     await item.provider.aclose()
     assert all(socket.closed for socket in connections)
     assert not item.encoded
+
+
+async def test_weight_observation_floor_waits_without_collecting_old_weights(
+    weight_case, monkeypatch
+):
+    item = weight_case
+    floor = item.finality.ref.block_number
+    current = item.provider.current_finalized_block
+    collect = item.provider.collect_weights
+    heads = captures = 0
+
+    async def head():
+        nonlocal heads
+        heads += 1
+        if heads == 2:
+            _advance(item, floor + 1)
+        return await current()
+
+    async def capture(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return await collect(*args, **kwargs)
+
+    monkeypatch.setattr(item.provider, "current_finalized_block", head)
+    monkeypatch.setattr(item.provider, "collect_weights", capture)
+    result = await item.provider.wait_weights_ready(item.hotkey, item.recipients, after_block=floor)
+    validate_owned_weight_observation(result)
+    assert heads == 2 and captures == 1 and result.block == floor + 1
+    assert not item.encoded
+
+
+@pytest.mark.parametrize("floor", [True, -1, 1.0, "1"])
+async def test_weight_observation_rejects_invalid_floor(weight_case, floor):
+    item = weight_case
+    with pytest.raises(ValueError, match="floor"):
+        await item.provider.wait_weights_ready(item.hotkey, item.recipients, after_block=floor)
+    assert not item.encoded
+
+
+async def test_weight_observation_floor_rechecks_returned_owned_block(weight_case, monkeypatch):
+    item = weight_case
+    floor = item.finality.ref.block_number
+
+    async def newer_head():
+        return floor + 1
+
+    monkeypatch.setattr(item.provider, "current_finalized_block", newer_head)
+    with pytest.raises(ValueError, match="did not advance"):
+        await item.provider.wait_weights_ready(item.hotkey, item.recipients, after_block=floor)
+    assert not item.encoded
+
+
+def test_observation_floor_requires_live_owned_provider(weight_case, monkeypatch):
+    item = weight_case
+    with pytest.raises(ValueError, match="running owned"):
+        item.provider.observation_floor()
+    monkeypatch.setattr(item.provider, "_owned", True)
+    with pytest.raises(RuntimeError, match="stopped"):
+        item.provider.observation_floor()
+    monkeypatch.setattr(item.provider, "ensure_observer_running", lambda: None)
+    monkeypatch.setattr(item.provider, "_startup_floor", 100, raising=False)
+    monkeypatch.setattr(
+        item.finality, "persisted_head", lambda: SimpleNamespace(height=105), raising=False
+    )
+    assert item.provider.observation_floor() == 105
+    monkeypatch.setattr(item.finality, "persisted_head", lambda: None)
+    assert item.provider.observation_floor() == 100
+    monkeypatch.setattr(item.provider, "_closed", True)
+    with pytest.raises(ValueError, match="running owned"):
+        item.provider.observation_floor()
+
+
+@pytest.mark.parametrize("reason", ["no_verified_finalized_head", "store_conflict"])
+async def test_weight_floor_retries_only_native_missing_head(weight_case, monkeypatch, reason):
+    from umi.grandpa_finality_supervisor import GrandpaFinalitySupervisorError
+
+    item = weight_case
+    current = item.provider.current_finalized_block
+    attempts = 0
+
+    async def first_head():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise GrandpaFinalitySupervisorError(reason)
+        return await current()
+
+    monkeypatch.setattr(item.provider, "current_finalized_block", first_head)
+    if reason == "no_verified_finalized_head":
+        result = await item.provider.wait_weights_ready(
+            item.hotkey, item.recipients, after_block=item.finality.ref.block_number - 1
+        )
+        validate_owned_weight_observation(result)
+        assert attempts == 2
+    else:
+        with pytest.raises(GrandpaFinalitySupervisorError, match=reason):
+            await item.provider.wait_weights_ready(item.hotkey, item.recipients, after_block=0)
+        assert attempts == 1
+    assert not item.encoded
