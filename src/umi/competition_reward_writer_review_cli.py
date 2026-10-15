@@ -57,6 +57,8 @@ async def _run(args, anchor):
                 history=args.history,
                 held_approval=args.held_approval,
                 reward_adoptions=args.reward_adoptions,
+                resource_launch=args.launch,
+                preparation_approval=args.preparation_approval,
             ),
             stop,
         )
@@ -72,9 +74,13 @@ def main(argv=None):
     parser.add_argument("--standing-boot", type=Path, required=True)
     parser.add_argument("--held-approval", type=Path)
     parser.add_argument("--reward-adoptions", type=Path)
+    parser.add_argument("--launch", type=Path)
+    parser.add_argument("--preparation-approval", type=Path)
     parser.add_argument("--history", choices=("current", "predecessor"), default="current")
     parser.add_argument("--through-block", type=int, required=True)
     args = parser.parse_args(argv)
+    if (args.launch is None) != (args.preparation_approval is None):
+        parser.error("native resource selection requires launch and preparation approval")
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO)
     try:

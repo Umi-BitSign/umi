@@ -186,6 +186,23 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
 ):
     from umi import competition_reward_history_preparation as preparation
 
+    async def synthetic_resource_preflight(config, resources):
+        # These assembly fixtures use explicitly synthetic finality/proof ports.
+        # Artifact staging and early-failure ordering have separate real-file tests.
+        assert resources.state_directory == config.state_directory
+        return {"native_artifacts_checked": 4, "chain_submission_authorized": False}
+
+    monkeypatch.setattr(exchange, "preflight_chain_resources", synthetic_resource_preflight)
+    real_selection = exchange.select_writer_resources
+
+    def relocated_selection(*args, **kwargs):
+        value = real_selection(*args, **kwargs)
+        return replace(
+            value,
+            resources=value.resources.model_copy(update={"proof_binary": "/selected/proof"}),
+        )
+
+    monkeypatch.setattr(exchange, "select_writer_resources", relocated_selection)
     monkeypatch.setattr(preparation, "_root_owner_uid", os.getuid)
     c, item = selected_boot
     h = historical
@@ -342,8 +359,14 @@ async def test_native_empty_and_completed_original_assemble_control_and_absent_p
         monkeypatch.setattr(exchange, "RewardControlHistoryReader", selected_reader)
     (root / "history").rename(staged)
     saved.rename(root / "history")
+
+    def provider_with_selected_resources(*args, **kwargs):
+        assert kwargs["resources"].proof_binary == "/selected/proof"
+        assert kwargs["resources"].state_directory == config.chain.state_directory
+        return h.item.provider
+
     monkeypatch.setattr(
-        exchange, "HistoricalRewardControlProvider", lambda *a, **kw: h.item.provider
+        exchange, "HistoricalRewardControlProvider", provider_with_selected_resources
     )
     monkeypatch.setattr(h.item.provider._finality, "run", lambda stop: stop.wait(), raising=False)
     h.item.provider._startup_floor = -1

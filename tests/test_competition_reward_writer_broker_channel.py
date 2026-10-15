@@ -140,7 +140,10 @@ try:
     worker.main(['--unit','fixture.service','--config','/fixture-config',
       '--standing-boot','/fixture-boot','--held-approval','/fixture-held',
       '--history','current','--through-block','1','--socket-fd',str(right.detach()),
-      '--parent-pid',str(os.getppid()),'--readiness-only'])
+      '--parent-pid',str(os.getppid()),'--readiness-only',
+      '--launch','/fixture-launch','--launch-sha256','aa'*32,
+      '--preparation-approval','/fixture-preparation',
+      '--preparation-approval-sha256','bb'*32])
 finally:
     left.close()
 """

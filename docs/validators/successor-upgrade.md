@@ -407,6 +407,31 @@ staging must preserve that selected history allowance. The native reader restore
 the original completed verification results without replaying unchanged proof
 bodies. Verify that actual restore and resumed progress before declaring readiness.
 
+The writer-selection broker carries the exact root-selected launch and preparation
+approval into its final service account and coordinator view. The child rechecks
+both controls and uses the launch's native artifact locations; its finality state
+always remains at the original boot's `chain.state_directory`. Preparation's
+scratch finality directory is never adopted by the installed writer. Native hashes,
+chain pins and verification mode still come from that unchanged boot. This also
+supports hosts whose logical executable paths are service-only mount placeholders.
+
+Writer exchange, readiness and isolated preparation check every selected native
+artifact before opening a history journal or provider. Runtime-metadata readiness
+also executes the pinned helper with empty input and requires the native parser's
+normal rejection. This probe grants no chain-verification or publishing authority.
+`native_resource_preflight` reports artifact counts, elapsed time and a local-read
+planning ETA; stalled work withdraws that estimate. A failed check leaves history
+untouched and must be repaired before replay resumes.
+
+For a standalone `python -m umi.competition_reward_writer_review_cli` review outside
+the installed service's artifact mounts, pass `--launch` and
+`--preparation-approval` together to select the same authenticated locations. Without
+that pair it uses the original configured paths and performs the same early checks.
+Retain these launch controls and their artifact files throughout review and retry.
+Do not move the held writer approval or change signed boot bytes to repair an I/O
+path. Qualify actual service-account access, readiness, interrupted retry and final
+review on the selected host before cutover; source tests alone do not establish it.
+
 While first-activation replay is pending, predecessor reconciliation publishes
 the same `umi-successor-host-status/1` reports as the ordinary supervisor.
 Monitoring uses the current service invocation's native result: a held writer
