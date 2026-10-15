@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_writer_journals import StoppedWriterJournals
+from .concurrency import await_owned_task
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
 
@@ -133,6 +135,10 @@ async def restore_completed_prefix(reader, provider, *, through_block, maximum_b
         raise TypeError("completed prefix requires native bounded reader")
     reader._validate_advance(provider, through_block, maximum_blocks)
     reader.progress.start(through_block, reader._next, repair=False)
+    reader.progress.report(reader, "running", force=True)
+    stop = asyncio.Event()
+    monitor = asyncio.create_task(reader.progress.monitor(reader, stop))
+    failed = False
     try:
         async with reader._advance_lock, reader._lock:
             with reader.journal.locked():
@@ -140,7 +146,12 @@ async def restore_completed_prefix(reader, provider, *, through_block, maximum_b
                     try:
                         await reader._restore_completed_admission(provider, through_block)
                         break
-                    except HistoricalHeaderRecoveryProgress:
+                    except HistoricalHeaderRecoveryProgress as error:
+                        reader.progress.report(
+                            reader,
+                            "running",
+                            ancestry_progress=getattr(error, "ancestry_progress", None),
+                        )
                         await owner.recheck()
                         await asyncio.sleep(0)
                 while reader._next <= through_block:
@@ -148,7 +159,12 @@ async def restore_completed_prefix(reader, provider, *, through_block, maximum_b
                     last = min(through_block, reader._next + maximum_blocks - 1)
                     try:
                         await reader._restore_prefix(provider, last)
-                    except HistoricalHeaderRecoveryProgress:
+                    except HistoricalHeaderRecoveryProgress as error:
+                        reader.progress.report(
+                            reader,
+                            "running",
+                            ancestry_progress=getattr(error, "ancestry_progress", None),
+                        )
                         await owner.recheck()
                         await asyncio.sleep(0)
                         continue
@@ -156,6 +172,24 @@ async def restore_completed_prefix(reader, provider, *, through_block, maximum_b
                         raise HistoryCheckpointRepairRequired(
                             "selected completed prefix has a gap; finish preparation before cutover"
                         )
-                return reader._prefix(through_block)
+                result = reader._prefix(through_block)
+                reader.progress.report(reader, "completed", force=True)
+                return result
+    except BaseException as error:
+        failed = True
+        reader.progress.report(
+            reader,
+            "repair_required" if isinstance(error, HistoryCheckpointRepairRequired) else "retrying",
+            error_type=type(error).__name__,
+        )
+        raise
     finally:
+        reader._pending_checkpoint_restore = None
+        stop.set()
         reader.progress.finish()
+        if failed:
+            with suppress(Exception, asyncio.CancelledError):
+                await await_owned_task(monitor)
+        else:
+            with suppress(Exception):
+                await await_owned_task(monitor)

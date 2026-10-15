@@ -122,6 +122,7 @@ class HeaderRecoveryTelemetry:
             "stage": "owned_historical_ancestry",
             "operation": self.operation,
             "state": state,
+            "anchor_evidence_sha256": self.key[0],
             "anchor_block": self.anchor,
             "target_block": self.target,
             "current_block": self.current,

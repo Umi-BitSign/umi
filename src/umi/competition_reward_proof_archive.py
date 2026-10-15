@@ -30,6 +30,7 @@ from .competition_evidence_codec import (
     checked_size,
     decode_evidence,
     encode_evidence,
+    inspect_recipe,
 )
 from .open_competition import digest, identity
 from .private_files import (
@@ -331,6 +332,76 @@ class RewardProofArchive:
             # The original /1 frame and codec recipes form the immutable object
             # index. Publish the frame only after every referenced byte object.
             self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+
+    def copy_encoded_transport(self, kind: Kind, key: str, *, context, fields, resolve) -> bool:
+        """Transfer existing recipes without issuing any proof acceptance.
+
+        Native reuse consumers must authenticate their original checkpoint and
+        exact source revisions separately. Recipes retain their original expanded
+        digests; a receiving proof consumer still runs ordinary codec and native
+        checks. Different existing frame encodings require the caller's legacy
+        decode/encode path, including its immutable conflict checks.
+        """
+        path = self._path(kind, key)
+        if not fields or len(fields) > 4:
+            raise ValueError("reward archive field count exceeds its bound")
+        refs = {}
+        recipes = []
+        for name, parts in fields.items():
+            if (
+                type(parts) is not tuple
+                or not 0
+                < len(parts)
+                <= (MAX_FIELD_BYTES + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
+            ):
+                raise ValueError("reward archive encoded part count exceeds its bound")
+            total = 0
+            refs[name] = []
+            for number, (sha, size, recipe) in enumerate(parts):
+                checked_digest(sha)
+                if number < len(parts) - 1 and size != MAX_EVIDENCE_BYTES:
+                    raise ValueError("encoded transport requires ordinary archive chunk boundaries")
+                segments = inspect_recipe(recipe, expanded_bytes=size, kind="proof")
+                total += size
+                checked_size(total, MAX_FIELD_BYTES)
+                refs[name].append(
+                    _Part(
+                        sha256=sha,
+                        expanded_bytes=size,
+                        recipe_sha256=hashlib.sha256(recipe).hexdigest(),
+                    )
+                )
+                recipes.append((recipe, segments))
+            refs[name] = tuple(refs[name])
+        frame = _Frame(
+            schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
+        )
+        with suppress(FileNotFoundError):
+            if self._frame(kind, key) != frame:
+                return False
+        # Publish no frame until every bounded referenced object is durable.
+        # Repeated objects within this transfer need only one resolver read.
+        retained = {}
+        for recipe, segments in recipes:
+            for _, sha, size in segments:
+                if sha in retained:
+                    if retained[sha] != size:
+                        raise ValueError("encoded transport object length differs")
+                    continue
+                raw = resolve(sha, size)
+                if type(raw) is not bytes or len(raw) != size:
+                    raise ValueError("encoded transport object size differs")
+                if self._retain_bytes(raw) != sha:
+                    raise ValueError("encoded transport object digest differs")
+                retained[sha] = size
+            self._retain_bytes(recipe)
+        if self.remote is None:
+            publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+        else:
+            raw = canonical_json_bytes(frame)
+            checked_size(len(raw), MAX_FRAME_BYTES)
+            self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+        return True
 
     def _frame(self, kind: Kind, key: str) -> _Frame:
         path = self._path(kind, key)
