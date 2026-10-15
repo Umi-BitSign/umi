@@ -56,6 +56,30 @@ def test_cold_restore_and_native_rates_are_separate(clock):
     assert progress.latest["eta_basis"] == "measured_ordered_native_blocks_per_wall_second"
 
 
+def test_checkpoint_export_preserves_enclosing_restore_progress_and_eta(clock):
+    progress = module.HistoryProgress(100)
+    reader = SimpleNamespace(_next=100)
+    progress.start(199, 100)
+    progress.restore_start(100, 50)
+    clock[0] = 10
+    reader._next = 125
+    progress.stage = "checkpoint_export"
+    progress.report(reader, "running")
+    assert progress.latest["stage"] == "checkpoint_export"
+    assert progress.latest["active_block"] == 125
+    assert progress.latest["stage_completed_blocks"] == 25
+    assert progress.latest["stage_total_blocks"] == 50
+    assert progress.latest["stage_eta_seconds"] == 10
+    assert progress.latest["stage_eta_scope"] == "current_checkpoint_restore_batch_only"
+    assert progress.latest["eta_seconds"] is None
+    assert progress.latest["native_completed"] == 0
+    clock[0] = 71
+    progress.report(reader, "running")
+    assert progress.latest["state"] == "stalled"
+    assert progress.latest["stage_eta_seconds"] is None
+    assert progress.latest["stage_eta_basis"] == "withdrawn_stalled_retrying_or_stopped"
+
+
 @pytest.mark.parametrize("parallel", [False, True])
 def test_retry_cooldown_and_chunk_gaps_are_in_wall_eta(clock, parallel):
     progress = module.HistoryProgress(100)
@@ -174,6 +198,77 @@ def test_short_same_target_passes_do_not_hide_no_progress_stall(clock):
     advance(progress, reader, 5)
     assert progress.latest["state"] == "running"
     assert progress.latest["eta_seconds"] == 95
+
+
+def test_advancing_exact_ancestry_avoids_false_stall_but_stale_samples_withdraw_eta(clock):
+    progress = module.HistoryProgress(100)
+    reader = SimpleNamespace(_next=100)
+    progress.start(199, 100)
+    progress.restore_start(100, 50)
+    sample = {
+        "anchor_evidence_sha256": "ab" * 32,
+        "target_block": 149,
+        "state": "running",
+        "completed_links": 10,
+        "elapsed_seconds": 50,
+        "eta_seconds": 100,
+        "eta_scope": "current_owned_ancestry_only_excludes_block_proofs_and_rewards",
+    }
+    for now, completed in ((50, 10), (100, 20)):
+        clock[0] = now
+        progress.report(
+            reader, "running", ancestry_progress={**sample, "completed_links": completed}
+        )
+        assert progress.latest["state"] == "running"
+        assert progress.latest["stage_eta_seconds"] == 100
+        assert progress.latest["eta_seconds"] is None
+        assert progress.latest["native_completed"] == progress.latest["applied_blocks"] == 0
+    for now, completed in ((161, 20), (170, 19), (180, 20)):
+        clock[0] = now
+        progress.report(
+            reader, "running", ancestry_progress={**sample, "completed_links": completed}
+        )
+        assert progress.latest["state"] == "stalled"
+        assert progress.latest["stage_eta_seconds"] is None
+    clock[0] = 190
+    progress.report(reader, "running", ancestry_progress={**sample, "completed_links": 21})
+    assert progress.latest["state"] == "running"
+    assert progress.latest["stage_eta_seconds"] == 100
+    progress.restore_start(100, 50)
+    progress.report(reader, "running")
+    assert progress.latest["stage"] == "checkpoint_restore"
+    assert progress.latest["ancestry_progress"] is None
+
+
+def test_live_ancestry_watch_only_observes_active_selected_target(clock):
+    progress = module.HistoryProgress(100)
+    reader = SimpleNamespace(_next=100)
+    progress.start(199, 100)
+    telemetry = SimpleNamespace(
+        active=True,
+        latest={
+            "anchor_evidence_sha256": "ab" * 32,
+            "target_block": 150,
+            "state": "running",
+            "completed_links": 50,
+        },
+    )
+    with progress.watch_ancestry(telemetry, 149):
+        clock[0] = 61
+        progress.report(reader, "running")
+        assert progress.latest["state"] == "stalled"
+        telemetry.latest["target_block"] = 149
+        progress.report(reader, "running")
+        assert progress.latest["state"] == "running"
+        telemetry.active = False
+        telemetry.latest["completed_links"] = 100
+        clock[0] = 122
+        progress.report(reader, "running")
+        assert progress.latest["state"] == "stalled"
+    telemetry.active = True
+    telemetry.latest["completed_links"] = 150
+    progress.report(reader, "running")
+    assert progress.latest["state"] == "stalled"
 
 
 def test_target_change_and_explicit_cursor_reset_start_fresh_timing(clock):

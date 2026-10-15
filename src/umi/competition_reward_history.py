@@ -192,6 +192,16 @@ class _HistoryPreparation:
     task: asyncio.Task | None = None
 
 
+@dataclass(slots=True)
+class _CheckpointRestoreBatch:
+    first: int
+    last: int
+    provider: HistoricalRewardControlProvider
+    checkpoints: HistoryCheckpoints
+    repair_id: str | None
+    values: list[dict]
+
+
 class RewardControlHistoryReader:
     """One private owner captures or replays a bounded amount of work per call.
 
@@ -259,6 +269,7 @@ class RewardControlHistoryReader:
         self.progress.remote_export_selected = getattr(export_archive, "remote", None) is not None
         self._repair_reason = None
         self._repair_id = None
+        self._pending_checkpoint_restore: _CheckpointRestoreBatch | None = None
         self._advance_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._next = first_block
@@ -713,6 +724,7 @@ class RewardControlHistoryReader:
         self.progress.restore_start(self._next, boundary - self._next + 1, admission=True)
         self.progress.report(self, "running", force=True)
         await self._validate_checkpoint_tip(provider, value)
+        self.progress.restore_start(self._next, boundary - self._next + 1, admission=True)
         if await run_owned_thread(self.completed_admission.load) != value:
             raise HistoryCheckpointRepairRequired("completed admission changed during finality")
         snapshot = FinalizedSnapshotRef(**value["snapshot"])
@@ -771,29 +783,51 @@ class RewardControlHistoryReader:
         async with provider._lock:
             if provider._closed or not provider._owned:
                 raise ValueError("checkpoint restore requires the running owned provider")
-            await provider._resolve_control_header(
-                FinalizedSnapshotRef(**value["snapshot"]), value["header"]
-            )
+            snapshot = FinalizedSnapshotRef(**value["snapshot"])
+            with self.progress.watch_ancestry(
+                provider._historical_headers.telemetry, snapshot.block_number
+            ):
+                await provider._resolve_control_header(snapshot, value["header"])
 
     async def _restore_prefix(self, provider, last):
         self.progress.native_stop()
-        values = []
-        for height in range(self._next, last + 1):
-            try:
-                value = await run_owned_thread(self.checkpoints.load, height)
-            except HistoryCheckpointRepairRequired:
-                self.progress.invalidate(height)
-                if not self._repair_reason:
-                    raise
-                break
-            if value is None:
-                break
-            values.append(value)
+        batch, self._pending_checkpoint_restore = self._pending_checkpoint_restore, None
+        if (
+            batch is not None
+            and (batch.first, batch.last, batch.repair_id) == (self._next, last, self._repair_id)
+            and batch.provider is provider
+            and batch.checkpoints is self.checkpoints
+        ):
+            values = batch.values
+        else:
+            values = []
+            for height in range(self._next, last + 1):
+                try:
+                    value = await run_owned_thread(self.checkpoints.load, height)
+                except HistoryCheckpointRepairRequired:
+                    self.progress.invalidate(height)
+                    if not self._repair_reason:
+                        raise
+                    break
+                if value is None:
+                    break
+                values.append(value)
         if not values:
             return
         self.progress.restore_start(self._next, len(values))
-        self.progress.report(self, "restoring_checkpoint")
-        await self._validate_checkpoint_tip(provider, values[-1])
+        self.progress.report(self, "running")
+        try:
+            await self._validate_checkpoint_tip(provider, values[-1])
+        except HistoricalHeaderRecoveryProgress:
+            # Keep one already bounded metadata batch while its exact tip's
+            # ancestry advances. This is not an acceptance cache: every retry
+            # still obtains owned finality, and all dependencies are reread below
+            # before any history effects apply. Failure/cancellation drops it.
+            self._pending_checkpoint_restore = _CheckpointRestoreBatch(
+                self._next, last, provider, self.checkpoints, self._repair_id, values
+            )
+            raise
+        self.progress.restore_start(self._next, len(values))
         # Recheck source identities after asynchronous finality, before issuing
         # any prefix. Unchanged proof payloads are never read or hashed here.
         for value in values:
@@ -935,6 +969,8 @@ class RewardControlHistoryReader:
             return result
         except BaseException as error:
             failed = True
+            if not isinstance(error, HistoricalHeaderRecoveryProgress):
+                self._pending_checkpoint_restore = None
             self.progress.report(
                 self,
                 "repair_required"
@@ -983,6 +1019,7 @@ class RewardControlHistoryReader:
                     self._evidence_sha256 = self._initial_evidence_sha256
                 self._repair_reason = reason
                 self._repair_id = secrets.token_hex(16)
+                self._pending_checkpoint_restore = None
             elif self._repair_reason != reason:
                 raise ValueError("history checkpoint repair already has a different reason")
             result = await self._observed_advance(

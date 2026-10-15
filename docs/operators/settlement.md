@@ -181,6 +181,15 @@ rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
 require a fresh owned finalized-chain check. A raw archive frame or a progress
 log is not a successful-verification receipt.
 
+When a bounded ancestry pass advances without reaching the restored tip, the
+reader retains one compact checkpoint batch for that exact interval and provider.
+Retries continue the fresh owned-finality check without repeatedly loading the
+same batch. Before applying any history effects, the reader reloads every result
+and checks its current source and owner identities. Cancellation, other failures,
+changed intervals or explicit repairs discard the pending batch; durable successful
+checkpoints remain available on restart. Serial readers, parallel readers and the
+stopped-writer restoration path use the same bounded restoration logic.
+
 Historical capture reuses the original owned finalized header when it is retained,
 avoiding another target hash/header RPC. An archived target header can also supply
 the final link of a historical ancestry walk; it remains an untrusted hint until
@@ -437,6 +446,13 @@ and withdraws unsupported estimates. A completed bounded pass remains running,
 while actual retry, repair or cancellation states withdraw its ETA. History logs
 include this separate ancestry substage and its ETA without counting ancestry
 links as completed block proofs or estimating reward activation.
+While restoration awaits ancestry, its heartbeat follows the active target and
+exact finalized-anchor identity. Advancing links keep the stage running even
+before any history block can apply. Repeated or regressed samples do not refresh
+activity, and a stalled walk withdraws the ancestry ETA. Stopped-writer restore
+uses the same telemetry and drains its heartbeat task before returning.
+Exporting a restored checkpoint keeps the enclosing restoration batch's counts
+and ETA visible; that estimate covers the batch, not overall reward activation.
 
 Verified ancestry and pending recovery cursors each use the selected header-byte
 budget (the provider's `maximum_header_bytes`, 256 MiB by default), rather than

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 
 from .concurrency import run_owned_thread
 
@@ -52,6 +52,8 @@ class HistoryProgress:
         self.preparation = None
         self.restoration = None
         self.ancestry_progress = None
+        self._ancestry_watch = None
+        self._ancestry_sample = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -69,6 +71,7 @@ class HistoryProgress:
             self.wall_started, self.wall_finished = now, None
             self.native_wall_started = self.native_stage = self.retry_next = None
             self.restoration = None
+            self._ancestry_sample = None
         if reset or next_block != self.last_next:
             self.changed = now
         self.started = now
@@ -162,6 +165,7 @@ class HistoryProgress:
         }
 
     def restore_start(self, first, total, *, admission=False):
+        self.ancestry_progress = None
         stage = "completed_admission_restore" if admission else "checkpoint_restore"
         if self.restoration is not None and (
             self.restoration["stage"],
@@ -211,13 +215,39 @@ class HistoryProgress:
             self.elapsed += time.monotonic() - self.started
             self.active = False
 
+    @contextmanager
+    def watch_ancestry(self, telemetry, target):
+        """Observe only this awaited native substage; never issue proof facts."""
+        prior, self._ancestry_watch = self._ancestry_watch, (telemetry, target)
+        try:
+            yield
+        finally:
+            self._ancestry_watch = prior
+
+    def _ancestry_activity(self, ancestry, now):
+        key = ancestry.get("anchor_evidence_sha256"), ancestry.get("target_block")
+        completed = ancestry.get("completed_links")
+        if not isinstance(key[0], str) or type(key[1]) is not int or type(completed) is not int:
+            return
+        previous = self._ancestry_sample
+        highest = previous[1] if previous is not None and previous[0] == key else 0
+        self._ancestry_sample = (key, max(highest, completed))
+        if completed > highest and ancestry.get("state") == "running":
+            self.changed = now
+            self.retry_next = None
+
     def report(self, reader, state, *, error_type=None, force=False, ancestry_progress=None):
         # A broken diagnostics sink must never change a native result or error.
         try:
             now = time.monotonic()
+            if ancestry_progress is None and self._ancestry_watch is not None:
+                telemetry, target = self._ancestry_watch
+                if telemetry.active and telemetry.latest.get("target_block") == target:
+                    ancestry_progress = telemetry.latest
             if ancestry_progress is not None:
                 self.ancestry_progress = dict(ancestry_progress)
                 self.stage = "owned_historical_ancestry"
+                self._ancestry_activity(self.ancestry_progress, now)
             if reader._next != self.last_next:
                 self.changed, self.last_next = now, reader._next
             if self.retry_next is not None and reader._next != self.retry_next:
@@ -253,7 +283,16 @@ class HistoryProgress:
             # completion; restored checkpoints never enter this numerator.
             sampled = self.native_applied
             preparation = self.preparation
-            if preparation is not None and preparation["stage"] != self.stage:
+            restoring_export = (
+                self.stage == "checkpoint_export"
+                and preparation is not None
+                and preparation["stage"] == "checkpoint_restore"
+            )
+            if (
+                preparation is not None
+                and preparation["stage"] != self.stage
+                and not restoring_export
+            ):
                 preparation = None
             preparation_elapsed = (
                 (now if preparation["finished"] is None else preparation["finished"])
@@ -331,7 +370,11 @@ class HistoryProgress:
                 "stage": self.stage,
                 "ancestry_progress": self.ancestry_progress,
                 "stage_reason": None if preparation is None else preparation["reason"],
-                "active_block": None if preparation is None else preparation["height"],
+                "active_block": reader._next
+                if restoring_export
+                else None
+                if preparation is None
+                else preparation["height"],
                 "stage_elapsed_seconds": preparation_elapsed,
                 "stage_completed_blocks": preparation_done,
                 "stage_total_blocks": preparation_total,
@@ -387,12 +430,17 @@ class HistoryProgress:
             }
             if self.ancestry_progress is not None:
                 ancestry = self.ancestry_progress
+                unavailable = stalled or state in {"retrying", "repair_required"} or not self.active
                 self.latest.update(
                     active_block=ancestry.get("target_block"),
                     stage_elapsed_seconds=ancestry.get("elapsed_seconds"),
-                    stage_eta_seconds=ancestry.get("eta_seconds"),
-                    stage_planning_eta_seconds=ancestry.get("planning_eta_seconds"),
-                    stage_eta_basis=ancestry.get("eta_basis"),
+                    stage_eta_seconds=None if unavailable else ancestry.get("eta_seconds"),
+                    stage_planning_eta_seconds=None
+                    if unavailable
+                    else ancestry.get("planning_eta_seconds"),
+                    stage_eta_basis="withdrawn_stalled_retrying_or_stopped"
+                    if unavailable
+                    else ancestry.get("eta_basis"),
                     stage_eta_scope=ancestry.get("eta_scope"),
                 )
             if force or state != "running" or now - self.last_emitted >= self.heartbeat_seconds:
