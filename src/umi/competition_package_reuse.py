@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
+from .competition_materialization_reuse import MaterializationDigestReuse
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -64,6 +65,9 @@ class PackageVerificationReuse:
         self._lock = RLock()
         self._key: tuple | None = None
         self._value: VerifiedCompetitionPackage | None = None
+        self.materialization = MaterializationDigestReuse(
+            None if directory is None else directory / "sealed-file-digests"
+        )
 
     def lookup(self, key: tuple) -> VerifiedCompetitionPackage | None:
         # A forked process must start with its own verification; do not take a
@@ -115,6 +119,7 @@ class PackageVerificationReuse:
             return
         with self._lock:
             self._key, self._value = None, None
+            self.materialization.clear()
 
 
 _REUSE: ContextVar[PackageVerificationReuse | None] = ContextVar(

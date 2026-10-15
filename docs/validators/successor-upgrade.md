@@ -50,6 +50,25 @@ Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
 
+The same session retains per-file SHA-256 results for sealed materialization
+trees under `successor-package-verification/sealed-file-digests`. These small,
+atomic receipts use the existing private verification store and survive restart;
+they contain no evidence payload. Every lookup still walks the complete tree,
+enforces the current quotas, ownership, link count and modes, and checks exact
+file identities before and after use. Replaced files, changed contents (including
+same-size edits with restored modification time), or changed digest semantics
+require new hashes only for affected files. Missing completed or damaged records
+report `repair_required` before the bounded native hash repair; completed files
+remain reusable after interruption. These digests do not replace signed control,
+package, authorization or chain verification.
+
+Supervisor recovery audits, replay preparation, staging, selection and redundant
+cache retirement run in owned disk workers. Cancellation drains that work before
+releasing the materializer mutex or supervisor lease. Fresh finalized observations
+are still captured after slow preparation. `supervisor_recovery_runs` counts
+audited retained runs, and `materialization_file_hash` counts verified chunks with
+elapsed time, rate-based substage ETA, completion and interruption status.
+
 Renewed controls do not require hashing every older staged package during cache
 lookup. The supervisor checks sealed metadata and compares the small control
 files first, then verifies the complete matching stage before reuse. All retained
@@ -1734,6 +1753,21 @@ both host CLI entrypoints as an unprivileged user on the supported platforms
 before signing. Use a self-contained interpreter and verify it on both Ubuntu
 and Debian for each supported architecture. Packaging checks do not authorize
 installation or replace the signed host transition.
+
+Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
+It clones the selected signed dependency tree, checks the pinned source and
+unchanged dependency locks, and migrates both lifecycle launchers before sealing
+the new manifest. `competition_host_entrypoints` renders isolated launchers with
+`if __name__ == "__main__"` so spawned history workers do not enter the supervisor
+or acquire its startup lease. The builder accepts the original unguarded wrapper
+and the guarded successor; an unknown wrapper requires a separately qualified
+migration. Keep this compatibility while any installed host uses the original
+wrapper. Never repair an already signed tree in place.
+
+Qualify actual spawned history workers through the candidate launcher and installed
+interpreter before selecting it. A CLI help check does not exercise multiprocessing.
+Preserve the current signed controls, service account, journals and approval during
+the ordinary host transition.
 
 `competition_host_bundle` stages those bytes without executing them. Its bounded
 format is a fixed magic header followed by each signed manifest file in order;

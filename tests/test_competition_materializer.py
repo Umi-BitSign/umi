@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ from umi import competition_host_activation as activation
 from umi import competition_host_anchor as anchor_module
 from umi import competition_materialization as material
 from umi import competition_materializer as adapter
+from umi.competition_package_reuse import package_verification_session
 from umi.competition_supervisor_adapters import SuccessorArtifactFiles
 from umi.competition_supervisor_runtime import SuccessorWorkerSelection
 from umi.protocol import canonical_json_bytes
@@ -180,6 +183,44 @@ async def test_fetch_never_selects_or_observes_and_reuses_stage(case):
     activation.validate_authenticated_successor_installation(case.installation)
 
 
+@pytest.mark.parametrize("operation", ["fetch", "retire", "activate"])
+async def test_blocking_materialization_drains_before_releasing_owner(case, monkeypatch, operation):
+    started, release = threading.Event(), threading.Event()
+    target = "_retire_redundant" if operation == "retire" else "_stage"
+    original = getattr(case.value, target)
+    loop_thread = threading.get_ident()
+
+    def blocked(*args):
+        assert threading.get_ident() != loop_thread
+        started.set()
+        assert release.wait(10)
+        return original(*args)
+
+    monkeypatch.setattr(case.value, target, blocked)
+    if operation == "fetch":
+        work = case.value.fetch(case.selection)
+    elif operation == "retire":
+        work = case.value.retire_redundant(
+            {case.selection.directive_sha256: (case.selection, case.files)}
+        )
+    else:
+        work = case.value.activate(case.selection, case.files, owned_observation=case.mint())
+    task = asyncio.create_task(work)
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        assert case.value._mutex.locked()
+        task.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert case.value._mutex.locked()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not case.value._mutex.locked()
+
+
 async def test_retired_current_copies_stay_bounded_across_signed_rounds(case):
     from umi.competition_supervisor import successor_continuation_bytes
 
@@ -212,6 +253,29 @@ async def test_retired_current_copies_stay_bounded_across_signed_rounds(case):
     # Every original registry history and recovery package remains available.
     assert len(retained) == 9 and case.files.package_path.exists()
     case.anchor.recheck()
+
+
+async def test_retirement_restart_keeps_native_checks_without_rehashing_current(
+    case, monkeypatch, tmp_path
+):
+    retained = {case.selection.directive_sha256: (case.selection, case.files)}
+    directory = tmp_path / "package-verification"
+    with package_verification_session(directory=directory):
+        assert await case.value.retire_redundant(retained) == 1
+
+    def no_rehash(*args):
+        pytest.fail("unchanged retained current tree was rehashed")
+
+    monkeypatch.setattr(material, "_hash_tree_file", no_rehash)
+    with package_verification_session(directory=directory):
+        assert await case.value.retire_redundant(retained) == 0
+        assert await case.value.retire_redundant(retained) == 0
+        # Digest receipts convey no control authority: the native selected
+        # history, sealed tree and genuine anchor still reject a changed file.
+        control = case.item.source_root / "current" / material.WORKER_EXECUTION_FILENAME
+        control.chmod(0o600)
+        with pytest.raises(material.SuccessorMaterializationError, match="mode"):
+            await case.value.retire_redundant(retained)
 
 
 async def test_activate_returns_real_capability_after_selection_and_fresh_reload(case, monkeypatch):
