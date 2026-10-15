@@ -161,13 +161,12 @@ def _host_bundle(run, config, *, startup_probe=None):
     # venv creates lib64 as a convenience symlink; the signed tree never needs it.
     if (environment / "lib64").is_symlink():
         (environment / "lib64").unlink()
-    for executable, module in (
-        ("umi-competition-supervisor", "umi.competition_supervisor_cli"),
-        ("umi-competition-supervisor-cleanup", "umi.competition_supervisor_cleanup"),
-    ):
+    from umi.competition_host_entrypoints import HOST_ENTRYPOINTS, render_host_entrypoint
+
+    for executable, module in HOST_ENTRYPOINTS.items():
         _write(
             environment / "bin" / executable,
-            f"#!{final}/.venv/bin/python -I\nfrom {module} import main\nmain()\n",
+            render_host_entrypoint(final / ".venv/bin/python", module).decode(),
             0o555,
         )
     if startup_probe is not None:

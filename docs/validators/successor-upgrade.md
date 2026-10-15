@@ -1754,6 +1754,21 @@ before signing. Use a self-contained interpreter and verify it on both Ubuntu
 and Debian for each supported architecture. Packaging checks do not authorize
 installation or replace the signed host transition.
 
+Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
+It clones the selected signed dependency tree, checks the pinned source and
+unchanged dependency locks, and migrates both lifecycle launchers before sealing
+the new manifest. `competition_host_entrypoints` renders isolated launchers with
+`if __name__ == "__main__"` so spawned history workers do not enter the supervisor
+or acquire its startup lease. The builder accepts the original unguarded wrapper
+and the guarded successor; an unknown wrapper requires a separately qualified
+migration. Keep this compatibility while any installed host uses the original
+wrapper. Never repair an already signed tree in place.
+
+Qualify actual spawned history workers through the candidate launcher and installed
+interpreter before selecting it. A CLI help check does not exercise multiprocessing.
+Preserve the current signed controls, service account, journals and approval during
+the ordinary host transition.
+
 `competition_host_bundle` stages those bytes without executing them. Its bounded
 format is a fixed magic header followed by each signed manifest file in order;
 the signed manifest supplies every path, length, hash and mode. The stager
