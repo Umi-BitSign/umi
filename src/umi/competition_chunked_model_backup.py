@@ -469,6 +469,59 @@ class ChunkedModelBackupReader:
                     raise OSError("owned model byte verification requires repair")
                 progress.advance(1, restored=True)
 
+    async def read_verified_range(
+        self,
+        snapshot: ChunkedModelVerification,
+        *,
+        file_index: int,
+        offset: int,
+        size_bytes: int,
+        report: Callable[[dict], None] | None = None,
+    ) -> bytes:
+        """Compare a signed retry using at most two retained 8 MiB chunks.
+
+        Durable whole-file verification remains bound to its original object
+        generations. Only the selected chunks are fetched and generation-checked;
+        this never restores a model tree or repeats its whole-file hash pass.
+        """
+        if (
+            type(file_index) is not int
+            or not 0 <= file_index < len(self.selection.bundle.files)
+            or type(offset) is not int
+            or offset < 0
+            or type(size_bytes) is not int
+            or not 0 <= size_bytes <= CHUNK_BYTES
+        ):
+            raise ValueError("model retry range exceeds its bound")
+        record = self.selection.bundle.files[file_index]
+        if offset + size_bytes > record.size_bytes or (size_bytes == 0 and record.size_bytes):
+            raise ValueError("model retry range is outside its signed file")
+        async with self.serial:
+            self.require_verified(snapshot)
+            heads = {value.sha256: value for value in snapshot.objects}
+            item = self.selection.package.files[file_index]
+            selected = []
+            position = 0
+            for chunk in item.chunks:
+                end = position + chunk.size_bytes
+                if position < offset + size_bytes and offset < end:
+                    selected.append((position, chunk))
+                position = end
+            await self._heads(report, {c.sha256: c for _, c in selected}, expected=heads)
+            content = bytearray()
+            with TransferProgress("chunked_model_retry_range", size_bytes, report) as progress:
+                for position, chunk in selected:
+                    raw = await self._chunk(chunk, heads)
+                    start, end = (
+                        max(0, offset - position),
+                        min(chunk.size_bytes, offset + size_bytes - position),
+                    )
+                    content.extend(raw[start:end])
+                    progress.advance(end - start)
+            if len(content) != size_bytes:
+                raise ValueError("model retry range coverage differs")
+            return bytes(content)
+
     async def materialize(
         self,
         archive: Path,

@@ -2538,8 +2538,10 @@ model late.
 service admission host and independent model-review peers. Configure a private
 `directory` disjoint from intake and the model archive, and an explicit
 `maximum_reserved_bytes`. Reservations account for two copies of each declared
-bundle, covering delivery staging and the verified archive. Increase capacity
-without changing accepted manifests or clearing journals. Other bounds are
+bundle, covering delivery staging and the verified archive. The durable model
+allocation ledger migrates the existing journal atomically without changing its
+binding, signed requests, original bundles or ordinals. Repeated startup retains
+each allocation once. Other bounds are
 `maximum_models`, `maximum_metadata_bytes`, `maximum_concurrent_uploads` and
 `idle_timeout_seconds`.
 
@@ -2552,6 +2554,29 @@ worker removes the redundant completed staging tree under its upload lock. It
 keeps incomplete prefixes and the durable archive. This disk reclamation does
 not expand the conservative logical reservation. Accepted original bytes remain
 unchanged. An unfinished model delivery is not admitted to the cohort roster.
+
+The host reports `storage_allocations` with active reserved bytes, released bytes
+and model counts in each lifecycle state. Allocation migration and explicit index
+repair report counted progress, elapsed time and their ETA basis. Missing or
+damaged accounting fails closed. `repair_model_allocation_index` can reconstruct
+the derived index from intact immutable allocation and transition records; it
+refuses to downgrade a state that references a lost transition. Restore that
+exact record from its owned backup first. Preserve the ledger when upgrading;
+mixed old and new upload writers are not a supported migration.
+
+Full archive release remains unavailable in the configured host. Internal
+accounting transitions retain the complete charge through remote qualification,
+release preparation and interrupted deletion. Completion can credit it only
+after the exact bound archive payload, staging payload, interrupted upload files
+and interrupted archive copy are absent and directory changes are synced. A
+prepared or completed release fences status, completion, polling and chunk retry
+before local payload creation; a distinct request cannot inherit a refund.
+These accounting ports do not prove R2 durability, restoration coverage or
+consumer release. Do not invoke them to reclaim a live installation. The remaining
+deployment gate is an authenticated census and migration of every shared archive
+consumer, including active C5, baseline and incumbent bindings, together with
+supported remote retry service. Neither a config flag nor a supplied list of
+consumers establishes that gate.
 
 Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model

@@ -5,8 +5,11 @@ native owner checks its actual history and certified original at each boundary;
 only payload verification is streamed and durably reused from R2.
 """
 
+from .competition_cohort_intake_records import read_participation
 from .competition_cohort_legacy_model_storage import authenticate_legacy_storage_inventories
 from .competition_cohort_model_transport_selection import committed_model_delivery_selection
+from .competition_cohort_participation import AttestedCohortParticipantAdmission
+from .concurrency import run_owned_thread
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 
@@ -62,6 +65,72 @@ class LegacyModelAdmissionPayloads:
         self.verified.pop(key, None)
         snapshot = await reader.verify()
         self.verified[key] = snapshot
+
+    def owned_original(self, request):
+        """Reauthenticate an exact retained upload against the native owner."""
+        if not self.contains(request):
+            raise ValueError("remote retry is not a frozen certified original")
+        cohort, consent = request.consent.consent.cohort_sha256, digest(request.consent.consent)
+        with self.intake._connection() as (db, store):
+            row = db.execute(
+                "SELECT substr(body,1,4194305) FROM cohort_consents WHERE cohort=? AND consent=?",
+                (cohort, consent),
+            ).fetchone()
+            if row is None or len(row[0]) > 4 * 1024**2:
+                raise OSError("remote retry requires its retained original participation")
+            record = read_participation(row[0])
+            if record.request != request or canonical_json_bytes(record) != row[0]:
+                raise ValueError("remote retry changed its original participation")
+            row = db.execute(
+                "SELECT substr(body,1,131073) FROM cohort_admission_certificates WHERE consent=?",
+                (consent,),
+            ).fetchone()
+            if row is None or len(row[0]) > 128 * 1024:
+                raise OSError("remote retry requires its original admission certificate")
+            admission = AttestedCohortParticipantAdmission.model_validate_json(row[0])
+            if canonical_json_bytes(admission) != row[0]:
+                raise ValueError("remote retry changed its canonical admission")
+            if not self.qualify(store, record=record, admission=admission):
+                raise ValueError("remote retry lost its authenticated storage selection")
+            state, _ = store.status(cohort)
+            return state.tip_sha256, digest(record), digest(admission)
+
+    async def ensure_owned(self, request):
+        before = await run_owned_thread(self.owned_original, request)
+        await self.ensure(request)
+        if await run_owned_thread(self.owned_original, request) != before:
+            self.verified.pop(digest(request), None)
+            raise OSError("model intake changed during remote retry verification")
+
+    def require_owned_payload(self, request):
+        self.owned_original(request)
+        self.require_payload(request)
+
+    async def compare_retry(self, request, *, file_index, offset, data):
+        key = digest(request)
+        try:
+            before = await run_owned_thread(self.owned_original, request)
+            if key not in self.verified:
+                await self.ensure(request)
+            resolution = self.sources.resolve(
+                request.consent.consent.cohort_sha256, request_sha256=key
+            )
+            try:
+                expected = await self.sources.reader(resolution).read_verified_range(
+                    self.verified[key],
+                    file_index=file_index,
+                    offset=offset,
+                    size_bytes=len(data),
+                )
+            except ValueError as error:
+                raise OSError("remote model retry requires storage verification repair") from error
+            if await run_owned_thread(self.owned_original, request) != before:
+                raise OSError("model intake changed during remote retry comparison")
+            if data != expected:
+                raise ValueError("retry differs from the completed original file")
+        except BaseException:
+            self.verified.pop(key, None)
+            raise
 
     def require_payload(self, request):
         key = digest(request)

@@ -31,6 +31,7 @@ from .competition_artifacts import (
 from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from .competition_cohort_model_reservations import ModelReservationLedger
 from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
@@ -227,6 +228,7 @@ class CohortModelUploads:
         )
         ensure_private_directory(self.root / "files")
         self._retained_reuse = AssignmentVerificationReuse()
+        self.allocations = ModelReservationLedger(self.journal)
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -247,27 +249,25 @@ class CohortModelUploads:
                     raise ValueError("model delivery retry changes its signed request")
                 return key
             models = self.journal.keys("bundle")
+            allocation = self.allocations.snapshot()
             if sub.model_revision not in models:
-                reserved = sum(
-                    2
-                    * sum(
-                        f.size_bytes
-                        for f in ModelBundle.model_validate_json(
-                            canonical_json_bytes(self.journal.get("bundle", model))
-                        ).files
-                    )
-                    for model in models
-                )
+                reserved = allocation["active_reserved_bytes"]
                 if len(models) >= self.config.maximum_models or (
                     reserved + 2 * sum(f.size_bytes for f in sub.model_bundle.files)
                     > self.config.maximum_reserved_bytes
                 ):
                     raise OSError("model delivery needs additional durable capacity")
+            else:
+                # A distinct request never inherits a historical refund. It
+                # needs a separately qualified remote path or a new allocation.
+                self.allocations.require_local(sub.model_revision)
             self.journal.put_many(
                 (
                     ("bundle", sub.model_revision, sub.model_bundle),
                     ("upload", key, request),
-                )
+                    self.allocations.reservation_record(sub.model_bundle),
+                ),
+                index=lambda db: self.allocations.index_reserved(db, sub.model_bundle),
             )
         return key
 
@@ -304,6 +304,7 @@ class CohortModelUploads:
     def _paths(self, key):
         request = self.retained(key)
         bundle = request.signed_submission.submission.model_bundle
+        self.allocations.require_local(digest(bundle))
         staging = self.root / "files" / digest(bundle)
         ensure_private_directory(staging)
         ensure_private_directory(staging / "model")
@@ -385,6 +386,7 @@ class CohortModelUploads:
             raise ValueError("chunk is outside the declared file")
         lease = lock_private_file(staging / "upload.lock")
         try:
+            self.allocations.require_local(digest(bundle))
             for root in (self.archive / digest(bundle) / "model", staging / "model"):
                 if (root / record.path).exists() or (root / record.path).is_symlink():
                     with _directory(root) as descriptor, _artifact(descriptor, record) as (f, _):
@@ -428,6 +430,7 @@ class CohortModelUploads:
         bundle, staging = self._paths(key)
         lease = lock_private_file(staging / "upload.lock")
         try:
+            self.allocations.require_local(digest(bundle))
             if (self.archive / digest(bundle)).exists():
                 self._release_preserved_staging(bundle, staging)
                 return True
@@ -538,6 +541,7 @@ class CohortModelUploads:
             "last_review_hold_reason": review_hold_reason,
             "last_error_type": error_type,
             "artifact_review_certified": False,
+            "storage_allocations": self.allocations.snapshot(),
         }
 
     def _ensure_review(self, bundle: ModelBundle) -> tuple[str, str]:

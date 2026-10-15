@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,6 +16,10 @@ from umi.competition_artifacts import verify_preserved_bundle
 from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_intake import CohortIntake, CohortIntakeBinding, CohortIntakeConfig
 from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from umi.competition_cohort_model_reservations import (
+    ModelAllocationRepairRequired,
+    repair_model_allocation_index,
+)
 from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_model_upload import (
     CohortModelUploads,
@@ -661,3 +666,240 @@ def test_retained_upload_decode_eviction_preserves_native_result(retained_decode
     assert h.owner.retained(key) == h.request
     assert h.owner.retained(key) == h.request
     assert len(calls) == 2
+
+
+def test_original_journal_allocation_migration_is_atomic_and_preserves_signed_bytes(delivery):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    originals = {
+        kind: {key: owner.journal.get_raw(kind, key) for key in owner.journal.keys(kind)}
+        for kind in ("upload", "bundle")
+    }
+    # Reconstruct the supported pre-ledger layout, leaving original bytes exact.
+    with owner.journal.transaction() as db:
+        db.execute("DROP TABLE model_allocation_state")
+        db.execute("DROP TABLE model_allocation_identity")
+        db.execute("DELETE FROM records WHERE kind='model_allocation'")
+    for _ in range(2):
+        owner = CohortModelUploads(owner.config, h.intake, owner.archive)
+        expected = 2 * sum(
+            f.size_bytes for f in h.request.signed_submission.submission.model_bundle.files
+        )
+        assert owner.allocations.snapshot()["active_reserved_bytes"] == expected
+        assert owner.reserve(h.request, capture_at(210)) == key
+        for kind, entries in originals.items():
+            assert {
+                key: owner.journal.get_raw(kind, key) for key in owner.journal.keys(kind)
+            } == entries
+
+
+@pytest.mark.parametrize("damage", ["allocation", "index", "schema", "version"])
+def test_missing_model_allocation_requires_explicit_repair(delivery, damage):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    with owner.journal.transaction() as db:
+        if damage == "allocation":
+            db.execute("DELETE FROM records WHERE kind='model_allocation'")
+        elif damage == "index":
+            db.execute("DELETE FROM model_allocation_state")
+        elif damage == "schema":
+            db.execute("DROP TABLE model_allocation_state")
+        else:
+            db.execute("UPDATE model_allocation_identity SET schema='unsupported'")
+    with pytest.raises(ModelAllocationRepairRequired):
+        owner.status(key)
+    with pytest.raises(ModelAllocationRepairRequired):
+        CohortModelUploads(owner.config, h.intake, owner.archive)
+
+
+def _prepare_accounting_release(owner, model):
+    # Exercise private accounting ports only. This is not remote verification or
+    # consumer-release authority; no configured production caller issues these.
+    with owner.journal.locked():
+        owner.allocations._transition(model, "remote_qualified", evidence={"fixture": "qualified"})
+        owner.allocations._transition(model, "release_prepared", evidence={"fixture": "released"})
+
+
+def test_reservation_refund_requires_full_unlink_and_survives_restart(delivery):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    upload_all(h, owner, key)
+    model = h.request.signed_submission.submission.model_revision
+    expected = owner.allocations.snapshot()["active_reserved_bytes"]
+    stage, archive = owner.root / "files" / model, owner.archive / model
+    originals = {
+        kind: owner.journal.get_raw(kind, key if kind == "upload" else model)
+        for kind in ("upload", "bundle", "preserved")
+    }
+    _prepare_accounting_release(owner, model)
+    assert owner.allocations.snapshot()["active_reserved_bytes"] == expected
+    with pytest.raises(OSError, match="local payloads"):
+        owner.allocations._complete_release(model)
+    shutil.rmtree(archive / "model")
+    restarted = CohortModelUploads(owner.config, h.intake, owner.archive)
+    assert restarted.allocations.snapshot()["active_reserved_bytes"] == expected
+    with pytest.raises(OSError, match="local payloads"):
+        restarted.allocations._complete_release(model)
+    shutil.rmtree(stage / "model")
+    (stage / "partial-0").write_bytes(b"interrupted")
+    with pytest.raises(OSError, match="interrupted upload"):
+        restarted.allocations._complete_release(model)
+    assert restarted.allocations.snapshot()["active_reserved_bytes"] == expected
+    (stage / "partial-0").unlink()
+    pending = owner.archive / (".pending-" + model)
+    pending.mkdir(mode=0o700)
+    (pending / "uncommitted").write_bytes(b"copied before process death")
+    with pytest.raises(OSError, match="interrupted archive"):
+        restarted.allocations._complete_release(model)
+    assert restarted.allocations.snapshot()["active_reserved_bytes"] == expected
+    shutil.rmtree(pending)
+    with restarted.journal.locked():
+        restarted.allocations._complete_release(model)
+        restarted.allocations._complete_release(model)
+    reopened = CohortModelUploads(owner.config, h.intake, owner.archive)
+    assert reopened.allocations.snapshot()["active_reserved_bytes"] == 0
+    assert reopened.allocations.snapshot()["released_reserved_bytes"] == expected
+    assert (archive / "manifest.json").exists()
+    for kind, raw in originals.items():
+        assert reopened.journal.get_raw(kind, key if kind == "upload" else model) == raw
+
+
+@pytest.mark.parametrize("phase", ["release_prepared", "released"])
+def test_every_stale_retry_is_fenced_before_local_payload_recreation(delivery, phase):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    upload_all(h, owner, key)
+    bundle = h.request.signed_submission.submission.model_bundle
+    model = digest(bundle)
+    stage = owner.root / "files" / model
+    _prepare_accounting_release(owner, model)
+    shutil.rmtree(owner.archive / model / "model")
+    shutil.rmtree(stage / "model")
+    if phase == "released":
+        with owner.journal.locked():
+            owner.allocations._complete_release(model)
+    restarted = CohortModelUploads(owner.config, h.intake, owner.archive)
+    assert restarted.reserve(h.request, None) == key
+    assert restarted.retry(h.request) == key
+    for _ in range(2):
+        with pytest.raises(OSError, match="fenced"):
+            restarted.status(key)
+        with pytest.raises(OSError, match="fenced"):
+            restarted.complete(key)
+        with pytest.raises(OSError, match="fenced"):
+            put(restarted, key, 0, (h.source / bundle.files[0].path).read_bytes())
+        assert restarted.poll_once()["models_pending"] == 1
+        assert not (stage / "model").exists()
+        assert not (owner.archive / model / "model").exists()
+        assert not list(stage.glob("partial-*"))
+
+
+@pytest.mark.parametrize("failure", ["commit", "archive_fsync"])
+def test_refund_failure_before_commit_keeps_charge_and_can_resume(delivery, monkeypatch, failure):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    upload_all(h, owner, key)
+    model = h.request.signed_submission.submission.model_revision
+    _prepare_accounting_release(owner, model)
+    charged = owner.allocations.snapshot()["active_reserved_bytes"]
+    shutil.rmtree(owner.archive / model / "model")
+    shutil.rmtree(owner.root / "files" / model / "model")
+    original = owner.journal.put_many
+
+    def fail_before_commit(records, *, index=None):
+        def interrupted(db):
+            index(db)
+            raise OSError("interrupted before accounting commit")
+
+        return original(records, index=interrupted)
+
+    with monkeypatch.context() as patch:
+        if failure == "commit":
+            patch.setattr(owner.journal, "put_many", fail_before_commit)
+        else:
+            original_sync = os.fsync
+            archive_info = owner.archive.stat()
+
+            def interrupted_archive_sync(descriptor):
+                info = os.fstat(descriptor)
+                if (info.st_dev, info.st_ino) == (archive_info.st_dev, archive_info.st_ino):
+                    raise OSError("interrupted archive directory fsync")
+                return original_sync(descriptor)
+
+            patch.setattr(os, "fsync", interrupted_archive_sync)
+        with pytest.raises(OSError, match="interrupted"):
+            owner.allocations._complete_release(model)
+    assert owner.allocations.snapshot()["active_reserved_bytes"] == charged
+    assert owner.allocations.state(model) == "release_prepared"
+    assert owner.journal.get("model_release_completed", model) is None
+    owner.allocations._complete_release(model)
+    assert owner.allocations.snapshot()["active_reserved_bytes"] == 0
+
+
+@pytest.mark.parametrize("missing", ["row", "table"])
+def test_allocation_index_repair_preserves_release_fence_and_reports_progress(delivery, missing):
+    h, owner = delivery, delivery.owner
+    key = owner.reserve(h.request, capture_at(210))
+    model = h.request.signed_submission.submission.model_revision
+    _prepare_accounting_release(owner, model)
+    expected = owner.allocations.snapshot()
+    with owner.journal.transaction() as db:
+        db.execute(
+            "DELETE FROM model_allocation_state"
+            if missing == "row"
+            else "DROP TABLE model_allocation_state"
+        )
+    reports = []
+    repair_model_allocation_index(owner.journal, report=reports.append)
+    assert owner.allocations.snapshot() == expected
+    repair_model_allocation_index(owner.journal, report=reports.append)
+    assert owner.allocations.snapshot() == expected
+    with pytest.raises(OSError, match="fenced"):
+        owner.status(key)
+    assert reports[-1]["status"] == "completed"
+    assert reports[-1]["eta_seconds"] == 0
+    assert any(report["planning_eta_seconds"] is not None for report in reports)
+
+
+def test_allocation_repair_never_downgrades_a_lost_release_transition(delivery):
+    h, owner = delivery, delivery.owner
+    owner.reserve(h.request, capture_at(210))
+    model = h.request.signed_submission.submission.model_revision
+    _prepare_accounting_release(owner, model)
+    with owner.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='model_release_prepared'")
+    with pytest.raises(ModelAllocationRepairRequired, match="lost allocation transition"):
+        repair_model_allocation_index(owner.journal)
+    with pytest.raises(ModelAllocationRepairRequired):
+        owner.allocations.snapshot()
+
+
+def test_distinct_signed_requests_share_one_charge_and_cannot_inherit_a_refund(delivery):
+    h, owner = delivery, delivery.owner
+    original_key = owner.reserve(h.request, capture_at(210))
+    original_charge = owner.allocations.snapshot()["active_reserved_bytes"]
+
+    def request_at(block):
+        consent = h.request.consent.consent.model_copy(update={"signed_at_block": block})
+        return h.request.model_copy(
+            update={
+                "consent": h.request.consent.model_copy(
+                    update={
+                        "consent": consent,
+                        "signature": sign_object(consent, wallet("Alice")),
+                    }
+                )
+            }
+        )
+
+    second = request_at(211)
+    second_key = owner.reserve(second, capture_at(211))
+    assert second_key != original_key
+    assert owner.allocations.snapshot()["active_reserved_bytes"] == original_charge
+    assert owner.allocations.snapshot()["models"] == 1
+    assert owner.retained(original_key) == h.request
+    assert owner.retained(second_key) == second
+    _prepare_accounting_release(owner, h.request.signed_submission.submission.model_revision)
+    with pytest.raises(OSError, match="fenced"):
+        owner.reserve(request_at(212), capture_at(212))
+    assert owner.journal.keys("upload") == sorted([original_key, second_key])
