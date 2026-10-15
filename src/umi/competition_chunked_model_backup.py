@@ -284,6 +284,18 @@ class ChunkedModelBackupReader:
             "namespace": self._namespace(),
         }
 
+    def _remote_context(self):
+        # Byte validity depends on the immutable package, its policy and actual
+        # remote namespace, not which cohort independently authenticated it.
+        # Keep selection-specific admission/authority in the returned snapshot
+        # and in every caller's existing authenticated selection boundary.
+        return {
+            "semantics": [BYTE_ABI, verifier_semantics()],
+            "package": self.selection.association.package_sha256,
+            "policy": self.selection.binding.policy_sha256,
+            "namespace": self._namespace(),
+        }
+
     async def _heads(self, report, chunks=None, *, expected=None):
         chunks = self.chunks if chunks is None else chunks
         values = {}
@@ -345,9 +357,94 @@ class ChunkedModelBackupReader:
         await self._heads(report, {key: self.chunks[key] for key in heads}, expected=heads)
 
     def _store(self, progress):
+        context = self._remote_context()
         return ByteCheckpoints(
-            self.root / self.selection.binding.model_sha256 / "remote", self._context(), progress
+            self.root / self.selection.binding.model_sha256 / "remote-bytes-v2" / digest(context),
+            context,
+            progress,
         )
+
+    def _migrate_remote_receipts(self, saved, heads, *, report=None):
+        """Copy exact old successful facts; preserve their original receipt bytes.
+
+        Older receipts include the entire authenticated selection. Only that
+        selection may migrate them. Checkpoint each migrated file before moving
+        on, so a mixed old store can be completed by its original selections
+        without overwriting another cohort's facts or rereading model payloads.
+        """
+        legacy_root = self.root / self.selection.binding.model_sha256 / "remote"
+        private_path(str(legacy_root))
+        if not legacy_root.exists():
+            return
+        pending = [
+            (record, item)
+            for record, item in zip(
+                self.selection.bundle.files, self.selection.package.files, strict=True
+            )
+            if saved.load(record.path, self._source(item, heads)) != record.sha256
+        ]
+        if not pending:
+            return
+        foreign = False
+        with (
+            TransferProgress(
+                "chunked_model_receipt_migration", len(pending), report, unit="files"
+            ) as progress,
+            ByteCheckpoints(legacy_root, self._context(), progress) as legacy,
+        ):
+            for record, item in pending:
+                # A foreign context is retained successful work, not an ordinary
+                # cache miss. Do not overwrite it or repeat its byte check.
+                try:
+                    raw = legacy._read(legacy.path(record.path))
+                except FileNotFoundError:
+                    raw = None
+                try:
+                    retained = None if raw is None else legacy._validated_record(raw)
+                except (TypeError, ValueError, UnicodeError):
+                    retained = None
+                if isinstance(retained, dict) and retained.get("context") != legacy.context:
+                    foreign = True
+                    progress.emit("waiting", reason="chunked_model_legacy_selection_required")
+                    continue
+                source = self._source(item, heads)
+                if legacy.load(record.path, source, repair_completion=False) == record.sha256:
+                    saved.remember(record.path, source, record.sha256)
+                    progress.advance(1, restored=True)
+                else:
+                    progress.advance(1)
+            if foreign:
+                progress.emit("repair_required", reason="chunked_model_legacy_selection_required")
+                raise OSError(
+                    "legacy model byte receipts require their original authenticated "
+                    "selection for migration"
+                )
+
+    def _migrate_remote_document(self, saved, record, maximum, report):
+        """Recover a requested bounded document independently of receipt migration."""
+        legacy_root = self.root / self.selection.binding.model_sha256 / "remote"
+        private_path(str(legacy_root))
+        if not legacy_root.exists():
+            return None
+        name = sha256_hex(record.path.encode()) + ".document"
+        with (
+            TransferProgress(
+                "chunked_model_document_migration", record.size_bytes, report
+            ) as progress,
+            ByteCheckpoints(legacy_root, self._context(), progress) as legacy,
+        ):
+            try:
+                raw = _document(legacy.root / name, maximum)
+            except FileNotFoundError:
+                raw = None
+            if raw is None or len(raw) != record.size_bytes or sha256_hex(raw) != record.sha256:
+                progress.emit("repair_required", reason="chunked_model_legacy_document_unavailable")
+                return None
+            # This bounded native digest check authenticates the document itself;
+            # it borrows no foreign selection's receipt or admission authority.
+            saved._write(saved.root / name, raw)
+            progress.advance(len(raw))
+            return raw
 
     async def verify(
         self,
@@ -378,6 +475,7 @@ class ChunkedModelBackupReader:
                 ) as progress,
                 self._store(progress) as saved,
             ):
+                self._migrate_remote_receipts(saved, heads, report=report)
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
                     source = self._source(item, heads)
                     prior = saved.load(record.path, source)
@@ -397,7 +495,9 @@ class ChunkedModelBackupReader:
                                 "repair_required",
                                 reason="chunked_model_document_missing_or_damaged",
                             )
-                            document = None
+                            document = self._migrate_remote_document(
+                                saved, record, maximum_document_bytes, report
+                            )
                     if prior == record.sha256 and (
                         record.path not in names or document is not None
                     ):

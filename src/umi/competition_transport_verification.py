@@ -281,7 +281,32 @@ class ByteCheckpoints:
         self.repairs.add(_sha(slot))
         self.progress.emit("repair_required", reason=reason)
 
-    def load(self, slot, identity):
+    @staticmethod
+    def _validated_record(raw):
+        """Decode intact private metadata; this alone does not authorize reuse."""
+        value = json.loads(raw)
+        if not isinstance(value, dict) or set(value) != {
+            "schema",
+            "context",
+            "identity",
+            "result",
+            "checksum",
+        }:
+            raise ValueError("byte receipt fields differ")
+        checksum = value.pop("checksum")
+        if checksum != _sha(value) or value["schema"] != "umi-private-byte-verification/1":
+            raise ValueError("byte receipt checksum differs")
+        for field in ("context", "result"):
+            if (
+                not isinstance(value[field], str)
+                or len(value[field]) != 64
+                or any(c not in "0123456789abcdef" for c in value[field])
+            ):
+                raise ValueError("byte receipt identity differs")
+        return value
+
+    def load(self, slot, identity, *, repair_completion=True):
+        """Read a validated fact; migration can leave legacy markers untouched."""
         path = self.path(slot)
         marker = path.with_suffix(".complete")
         try:
@@ -299,27 +324,10 @@ class ByteCheckpoints:
             self.progress.emit("refused", reason="byte_checkpoint_unsafe_or_unstable")
             raise
         try:
-            value = json.loads(raw)
-            if not isinstance(value, dict) or set(value) != {
-                "schema",
-                "context",
-                "identity",
-                "result",
-                "checksum",
-            }:
-                raise ValueError("byte receipt fields differ")
-            checksum = value.pop("checksum")
-            if checksum != _sha(value) or value["schema"] != "umi-private-byte-verification/1":
-                raise ValueError("byte receipt checksum differs")
+            value = self._validated_record(raw)
             if value["context"] != self.context or value["identity"] != identity:
                 self._repair(slot, "byte_verification_dependencies_changed")
                 return None
-            if (
-                not isinstance(value["result"], str)
-                or len(value["result"]) != 64
-                or any(c not in "0123456789abcdef" for c in value["result"])
-            ):
-                raise ValueError("byte receipt result differs")
         except (TypeError, ValueError, UnicodeError):
             self._repair(slot, "byte_receipt_damaged")
             return None
@@ -327,10 +335,11 @@ class ByteCheckpoints:
             self.progress.emit(
                 "repair_required", reason="byte_completion_marker_missing_or_damaged"
             )
-            self._write(marker, path.stem.encode())
-            self.progress.emit(
-                "repair_completed", reason="byte_completion_marker_restored_from_receipt"
-            )
+            if repair_completion:
+                self._write(marker, path.stem.encode())
+                self.progress.emit(
+                    "repair_completed", reason="byte_completion_marker_restored_from_receipt"
+                )
         return value["result"]
 
     def _write(self, path, raw):

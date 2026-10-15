@@ -276,8 +276,8 @@ async def test_changed_original_metadata_refuses_before_remote_read(frozen, fiel
 async def test_damaged_owned_receipt_is_explicit_repair_not_a_supplied_digest(frozen, caplog):
     f, c = frozen, frozen.case
     await f.owner.ensure_payload(c.cohort, digest(f.sub))
-    root = Path(f.sources.verification_root) / f.sub.model_revision / "remote"
-    receipt = next(root.glob("*.json"))
+    root = Path(f.sources.verification_root) / f.sub.model_revision / "remote-bytes-v2"
+    receipt = next(root.glob("*/*.json"))
     receipt.write_text("{}")
     with pytest.raises(OSError, match="requires repair"):
         f.owner.prepare(c.cohort, digest(f.sub), f.inputs, capture_at(230))

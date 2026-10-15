@@ -7,6 +7,9 @@ import copy
 import json
 import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +22,7 @@ from umi.competition_chunked_model_backup import (
     ChunkedModelBackupReader,
     validate_chunked_backup,
 )
+from umi.competition_transport_verification import ByteCheckpoints
 from umi.open_competition import BundleFile, ModelBundle, digest
 from umi.protocol import canonical_json_bytes, sha256_hex
 from umi.r2_multipart import R2ObjectHead
@@ -156,6 +160,10 @@ def reader(case, tmp_path, **changes):
     )
 
 
+def remote_receipt_root(case, tmp_path):
+    return reader(case, tmp_path)._store(None).root
+
+
 @pytest.fixture
 def backup(policy):
     return selected(policy)
@@ -231,6 +239,308 @@ async def test_restart_reuses_completed_remote_files_and_documents_without_gets(
     assert len(first.objects) == 7
 
 
+def other_cohort(case):
+    other = copy.copy(case)
+    other.binding = case.binding.model_copy(update={"provenance_sha256": "34" * 32})
+    return other
+
+
+async def legacy_receipts(case, tmp_path):
+    """Exercise the exact previous receipt context/layout using native byte checks."""
+    actual = reader(case, tmp_path)
+    actual._store = lambda progress: ByteCheckpoints(
+        actual.root / digest(case.bundle) / "remote", actual._context(), progress
+    )
+    actual._migrate_remote_receipts = lambda *args, **kwargs: None
+    await actual.verify(document_paths=("license.txt",))
+    return actual.root / digest(case.bundle) / "remote"
+
+
+def retained_files(root):
+    return {
+        p.name: (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+        for p in root.iterdir()
+        if p.suffix in {".json", ".complete", ".document"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_two_cohort_selections_share_byte_facts_without_sharing_authority(backup, tmp_path):
+    other = other_cohort(backup)
+    first = await reader(backup, tmp_path).verify(document_paths=("license.txt",))
+    original_reads = tuple(backup.remote.reads)
+    second = await reader(other, tmp_path).verify(document_paths=("license.txt",))
+    assert first.selection_sha256 != second.selection_sha256
+    assert first.documents == second.documents
+    for case, snapshot in ((backup, first), (other, second), (backup, first)):
+        restarted = reader(case, tmp_path)
+        assert await restarted.verify(document_paths=("license.txt",)) == snapshot
+        restarted.require_verified(snapshot)
+    assert tuple(backup.remote.reads) == original_reads
+    with pytest.raises(ValueError, match="selected source"):
+        reader(other, tmp_path).require_verified(first)
+    with pytest.raises(ValueError, match="selected source"):
+        reader(backup, tmp_path).require_verified(second)
+
+    # A real new interpreter reopens both selections and completed receipts.
+    script = """
+import asyncio, json, sys
+from pathlib import Path
+from umi.open_competition import CompetitionPolicy
+from tests.test_competition_chunked_model_backup import selected, other_cohort, reader
+async def main():
+    case = selected(CompetitionPolicy.model_validate_json(sys.argv[2]))
+    for current in (other_cohort(case), case, other_cohort(case)):
+        actual = reader(current, Path(sys.argv[1]))
+        result = await actual.verify(document_paths=('license.txt',))
+        actual.require_verified(result)
+    print(json.dumps({'reads': len(case.remote.reads)}))
+asyncio.run(main())
+"""
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            script,
+            str(tmp_path),
+            canonical_json_bytes(backup.policy).decode(),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr
+    assert json.loads(process.stdout) == {"reads": 0}
+
+
+@pytest.mark.asyncio
+async def test_legacy_migration_preserves_originals_documents_and_completed_bytes(backup, tmp_path):
+    legacy = await legacy_receipts(backup, tmp_path)
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    events = []
+    migrated = await reader(backup, tmp_path).verify(
+        document_paths=("license.txt",), report=events.append
+    )
+    shared = await reader(other_cohort(backup), tmp_path).verify(document_paths=("license.txt",))
+    assert migrated.documents == shared.documents == {"license.txt": b"license".hex()}
+    assert backup.remote.reads == []
+    assert retained_files(legacy) == originals
+    migration = [e for e in events if e["stage"] == "chunked_model_receipt_migration"]
+    assert migration[0]["planning_eta_seconds"] is not None
+    assert migration[-1]["completed_units"] == migration[-1]["total_units"] == 7
+    assert migration[-1]["status"] == "completed"
+    assert migration[-1]["eta_seconds"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker_state", ["missing", "damaged"])
+async def test_legacy_migration_preserves_incomplete_original_markers(
+    backup, tmp_path, marker_state
+):
+    legacy = await legacy_receipts(backup, tmp_path)
+    name = sha256_hex(canonical_json_bytes("weights.txt"))
+    marker = legacy / (name + ".complete")
+    if marker_state == "missing":
+        marker.unlink()
+    else:
+        marker.write_bytes(b"damaged original marker")
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    snapshot = await reader(backup, tmp_path).verify()
+    assert retained_files(legacy) == originals
+    assert backup.remote.reads == []
+    new_marker = remote_receipt_root(backup, tmp_path) / marker.name
+    assert new_marker.read_bytes() == name.encode()
+    reader(backup, tmp_path).require_verified(snapshot)
+    assert await reader(other_cohort(backup), tmp_path).verify()
+    assert retained_files(legacy) == originals
+    assert backup.remote.reads == []
+
+
+@pytest.mark.asyncio
+async def test_interrupted_legacy_migration_reuses_each_committed_file(
+    backup, tmp_path, monkeypatch
+):
+    legacy = await legacy_receipts(backup, tmp_path)
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    remember = ByteCheckpoints.remember
+    migrated = []
+
+    def interrupted(saved, slot, identity, result):
+        remember(saved, slot, identity, result)
+        if saved.root.parent.name == "remote-bytes-v2":
+            migrated.append(slot)
+            if len(migrated) == 3:
+                raise OSError("interrupted receipt migration")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ByteCheckpoints, "remember", interrupted)
+        with pytest.raises(OSError, match="interrupted receipt"):
+            await reader(backup, tmp_path).verify(document_paths=("license.txt",))
+    shared_root = remote_receipt_root(backup, tmp_path)
+    completed = retained_files(shared_root)
+    await reader(backup, tmp_path).verify(document_paths=("license.txt",))
+    current = retained_files(shared_root)
+    assert all(current[key] == value for key, value in completed.items())
+    assert retained_files(legacy) == originals
+    assert backup.remote.reads == []
+
+
+@pytest.mark.asyncio
+async def test_foreign_legacy_selection_requires_preserving_migration_not_reverification(
+    backup, tmp_path
+):
+    legacy = await legacy_receipts(backup, tmp_path)
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    events = []
+    with pytest.raises(OSError, match="original authenticated selection"):
+        await reader(other_cohort(backup), tmp_path).verify(report=events.append)
+    assert backup.remote.reads == []
+    assert retained_files(legacy) == originals
+    assert any(e["reason_code"] == "chunked_model_legacy_selection_required" for e in events)
+    await reader(backup, tmp_path).verify()
+    await reader(other_cohort(backup), tmp_path).verify()
+    assert backup.remote.reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_cross_cohort_changed_generation_invalidates_only_affected_byte_fact(
+    backup, tmp_path, corrupt
+):
+    first = await reader(backup, tmp_path).verify()
+    key = "chunks/sha256/" + sha256_hex(b"weights")
+    backup.remote.etags[key] = "replacement-generation"
+    backup.remote.reads.clear()
+    if corrupt:
+        backup.remote.objects[key] = b"WEIGHTS"
+        with pytest.raises(ValueError, match="chunk bytes differ"):
+            await reader(other_cohort(backup), tmp_path).verify()
+    else:
+        await reader(other_cohort(backup), tmp_path).verify()
+        await reader(backup, tmp_path).verify()
+        with pytest.raises(OSError, match="requires repair"):
+            reader(backup, tmp_path).require_verified(first)
+    assert backup.remote.reads == [key]
+
+
+@pytest.mark.asyncio
+async def test_distinct_byte_contexts_do_not_replace_each_others_completed_receipts(
+    backup, tmp_path
+):
+    changed_policy = backup.policy.model_copy(update={"maximum_bundle_bytes": 20000})
+    other = selected(changed_policy)
+    assert digest(other.bundle) == digest(backup.bundle)
+    assert remote_receipt_root(other, tmp_path) != remote_receipt_root(backup, tmp_path)
+    for case in (backup, other):
+        await reader(case, tmp_path).verify()
+    original = retained_files(remote_receipt_root(backup, tmp_path))
+    separate = retained_files(remote_receipt_root(other, tmp_path))
+    backup.remote.reads.clear()
+    other.remote.reads.clear()
+    for case in (backup, other, backup):
+        await reader(case, tmp_path).verify()
+    assert backup.remote.reads == other.remote.reads == []
+    assert retained_files(remote_receipt_root(backup, tmp_path)) == original
+    assert retained_files(remote_receipt_root(other, tmp_path)) == separate
+
+
+@pytest.mark.asyncio
+async def test_commit_cannot_restore_old_generations_from_legacy_receipts(backup, tmp_path):
+    await legacy_receipts(backup, tmp_path)
+    old = await reader(backup, tmp_path).verify()
+    key = "chunks/sha256/" + sha256_hex(b"weights")
+    backup.remote.etags[key] = "replacement-generation"
+    current = await reader(backup, tmp_path).verify()
+    before = retained_files(remote_receipt_root(backup, tmp_path))
+    backup.remote.reads.clear()
+    with pytest.raises(OSError, match="requires repair"):
+        reader(backup, tmp_path).require_verified(old)
+    assert retained_files(remote_receipt_root(backup, tmp_path)) == before
+    reader(backup, tmp_path).require_verified(current)
+    assert backup.remote.reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["empty", "context", "missing"])
+async def test_damaged_legacy_receipt_repairs_only_affected_file(backup, tmp_path, damage):
+    legacy = await legacy_receipts(backup, tmp_path)
+    receipt = legacy / (sha256_hex(canonical_json_bytes("weights.txt")) + ".json")
+    if damage == "missing":
+        receipt.unlink()
+    elif damage == "empty":
+        receipt.write_text("{}")
+    else:
+        damaged = json.loads(receipt.read_bytes())
+        damaged["context"] = "45" * 32  # Checksum deliberately remains stale.
+        receipt.write_text(json.dumps(damaged))
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    events = []
+    await reader(backup, tmp_path).verify(report=events.append)
+    assert backup.remote.reads == ["chunks/sha256/" + sha256_hex(b"weights")]
+    assert retained_files(legacy) == originals
+    assert any(e["status"] == "repair_required" for e in events)
+    assert not any(e["reason_code"] == "chunked_model_legacy_selection_required" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_document_requested_after_receipt_migration_uses_retained_original(backup, tmp_path):
+    legacy = await legacy_receipts(backup, tmp_path)
+    originals = retained_files(legacy)
+    await reader(backup, tmp_path).verify()
+    backup.remote.reads.clear()
+    result = await reader(other_cohort(backup), tmp_path).verify(document_paths=("license.txt",))
+    assert result.documents == {"license.txt": b"license".hex()}
+    assert backup.remote.reads == []
+    assert retained_files(legacy) == originals
+
+
+@pytest.mark.asyncio
+async def test_mixed_legacy_store_migrates_each_matching_original_without_payload_reads(
+    backup, tmp_path
+):
+    other = other_cohort(backup)
+    legacy = await legacy_receipts(backup, tmp_path)
+    alternate = await legacy_receipts(other, tmp_path / "other-original")
+    name = sha256_hex(canonical_json_bytes("weights.txt"))
+    for suffix in (".json", ".complete"):
+        (legacy / (name + suffix)).write_bytes((alternate / (name + suffix)).read_bytes())
+    originals = retained_files(legacy)
+    backup.remote.reads.clear()
+    with pytest.raises(OSError, match="original authenticated selection"):
+        await reader(backup, tmp_path).verify()
+    # The six matching facts completed before the foreign seventh was refused.
+    assert len(list(remote_receipt_root(backup, tmp_path).glob("*.json"))) == 6
+    await reader(other, tmp_path).verify()
+    await reader(backup, tmp_path).verify()
+    assert retained_files(legacy) == originals
+    assert backup.remote.reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe", ["symlink", "hardlink"])
+async def test_legacy_receipt_migration_refuses_unsafe_files(backup, tmp_path, unsafe):
+    legacy = await legacy_receipts(backup, tmp_path)
+    receipt = legacy / (sha256_hex(canonical_json_bytes("weights.txt")) + ".json")
+    other = tmp_path / "unrelated"
+    if unsafe == "symlink":
+        other.write_bytes(receipt.read_bytes())
+        receipt.unlink()
+        receipt.symlink_to(other)
+    else:
+        os.link(receipt, other)
+    backup.remote.reads.clear()
+    with pytest.raises(ValueError, match=r"symlink|private regular"):
+        await reader(backup, tmp_path).verify()
+    assert backup.remote.reads == []
+
+
 @pytest.mark.asyncio
 async def test_interrupted_first_verification_reuses_completed_files(backup, tmp_path):
     failed_key = "chunks/sha256/" + sha256_hex(b"processor")
@@ -275,7 +585,7 @@ async def test_remote_replacement_or_wrong_bytes_refuses(backup, tmp_path, chang
 async def test_missing_completed_receipt_repairs_only_affected_file(backup, tmp_path):
     actual = reader(backup, tmp_path)
     await actual.verify()
-    root = tmp_path / "verification" / digest(backup.bundle) / "remote"
+    root = remote_receipt_root(backup, tmp_path)
     # ByteCheckpoints uses SHA256 of canonical JSON slot names.
     (root / (sha256_hex(canonical_json_bytes("weights.txt")) + ".json")).unlink()
     backup.remote.reads.clear()
@@ -288,7 +598,7 @@ async def test_missing_completed_receipt_repairs_only_affected_file(backup, tmp_
 @pytest.mark.asyncio
 async def test_document_repair_is_bounded_and_unsafe_metadata_is_refused(backup, tmp_path):
     await reader(backup, tmp_path).verify(document_paths=("license.txt",))
-    root = tmp_path / "verification" / digest(backup.bundle) / "remote"
+    root = remote_receipt_root(backup, tmp_path)
     document = root / (sha256_hex(b"license.txt") + ".document")
     document.unlink()
     backup.remote.reads.clear()
@@ -620,7 +930,7 @@ async def test_verified_retry_refuses_changed_source_without_whole_model_restore
     elif change == "during_transfer":
         backup.remote.change = key
     else:
-        root = tmp_path / "verification" / digest(backup.bundle) / "remote"
+        root = remote_receipt_root(backup, tmp_path)
         (root / (sha256_hex(canonical_json_bytes("weights.txt")) + ".json")).unlink()
     backup.remote.reads.clear()
     with pytest.raises((OSError, ValueError)):

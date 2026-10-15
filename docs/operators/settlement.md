@@ -2463,6 +2463,30 @@ archive and clocks. Keep `legacy-model-byte-verification` in private durable
 service state, separate from every disposable cache. This selection does not
 create replacement acceptances or reinterpret old rights approvals.
 
+Remote byte receipts under each model's `remote-bytes-v2/<context-sha256>` directory bind the
+immutable preserved package, policy, R2 namespace and verifier semantics. Each
+file additionally binds the exact remote object generations. Independently
+authenticated cohorts sharing those same inputs reuse the byte result; their
+selection-bound verification snapshots and admission checks remain separate.
+Changing a remote generation repairs only the affected files. These private
+receipts never confer admission, eviction or reservation-release authority.
+
+Supported older installations may retain selection-bound receipts under the
+model's `remote` directory. Keep that directory while any deployed reader or
+recovery consumer uses the older layout. The current reader migrates successful
+receipts and retained requested documents without fetching model payloads, using
+the exact original authenticated selection. Originals remain unchanged; each
+completed file migration survives interruption and restart. Migration checks
+current R2 generations first; synchronous commit checks cannot resurrect an old
+generation from legacy receipts. A receipt belonging
+to another selection reports `chunked_model_legacy_selection_required` and waits
+for that original selection to run its migration, instead of rechecking or
+overwriting its completed bytes. For a mixed older store, invoke each retained
+authenticated selection; completed migrations are shared and retained between
+attempts. Missing or damaged receipts retain the existing explicit scoped repair
+path. Remove the older directory only after supported consumers and recovery
+dependencies have migrated and released it; never remove it to clear a wait.
+
 For original `/1` requests, the phase reviewer still requires its independent
 private rights and reconstruction approval before checking the selected remote
 bytes. It retains the original request, intent, vote and journal bindings; a
