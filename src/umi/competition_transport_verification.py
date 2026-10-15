@@ -103,6 +103,7 @@ class TransferProgress:
         self.reason = None
         self.lock, self.stop = RLock(), Event()
         self.thread = None
+        self.child = None
 
     def __enter__(self):
         self.token = _CURRENT.set(self)
@@ -134,6 +135,7 @@ class TransferProgress:
             if not restored:
                 self.native += count
             if count:
+                self.child = None
                 self.changed = time.monotonic()
             if (
                 self.completed == count
@@ -143,6 +145,43 @@ class TransferProgress:
                 self.emit(
                     "running", reason="restored_checkpoint" if restored else "native_progress"
                 )
+
+    def child_report(self):
+        """Observe one child scope without claiming its work as parent completion.
+
+        Only increasing completed counts refresh activity; heartbeat, retries and
+        a new child's zero count cannot conceal a stalled operation. Each bounded
+        child gets a separate reporter so later windows can start from zero.
+        """
+        previous = 0
+        with self.lock:
+            self.child = None
+
+        def report(event):
+            nonlocal previous
+            with self.lock, suppress(Exception):
+                # Keep the child's own stage, rate and terminal visible.
+                if self.report is None:
+                    _LOG.info(json.dumps(event, separators=(",", ":")))
+                else:
+                    self.report(event)
+                count, total = event.get("completed_units"), event.get("total_units")
+                if type(count) is not int or type(total) is not int or not 0 <= count <= total:
+                    return
+                self.child = {
+                    key: event.get(key)
+                    for key in ("stage", "status", "completed_units", "total_units", "unit")
+                }
+                state = event.get("status")
+                if state in {"stalled", "retrying", "refused", "repair_required", "waiting"}:
+                    previous = max(previous, count)
+                    self.emit(state, reason="child_" + state)
+                elif count > previous and state in {"running", "started", "completed"}:
+                    previous = count
+                    self.changed = time.monotonic()
+                    self.emit("running", reason="child_progress")
+
+        return report
 
     def set_completed(self, count, *, restored=False):
         with self.lock:
@@ -163,7 +202,9 @@ class TransferProgress:
             if reason is not None:
                 self.reason = reason
             elapsed = now - self.started
-            stalled = state in {"running", "waiting"} and now - self.changed >= self.stalled_seconds
+            stalled = state == "stalled" or (
+                state in {"running", "waiting"} and now - self.changed >= self.stalled_seconds
+            )
             remaining = max(0, self.total - self.completed)
             measured_elapsed = now - self.rate_started
             rate = self.native / measured_elapsed if measured_elapsed >= 1 and self.native else None
@@ -216,6 +257,7 @@ class TransferProgress:
                 else None,
                 "reason_code": self.reason,
                 "certification_authority": False,
+                "active_child": self.child,
             }
             if self.unit == "bytes":
                 event.update(

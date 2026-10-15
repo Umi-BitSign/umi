@@ -6,6 +6,7 @@ import threading
 from functools import partial
 from pathlib import Path
 
+from .canonical_reuse import canonical_json_reuse
 from .competition_journal_physical_budget import HistoryTransferPhysicalBudget
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_transfer import (
@@ -93,96 +94,102 @@ async def transfer_installed_history(
         raise ValueError("typed history transfer physical budget required")
     stop = threading.Event() if stop_requested is None else stop_requested
     completed = copied = existing = exported = 0
-    async with hold_history_transfer_owner(
-        anchor,
-        unit=unit,
-        config_path=config_path,
-        standing_boot=standing_boot,
-        coordinator_config=coordinator_config,
-        held_approval=held_approval,
-    ) as owner:
-        opener = (
-            _open_readers
-            if physical_budget is None
-            else partial(_open_readers, physical_budget=physical_budget)
-        )
-        source, target = await run_owned_thread(opener, owner)
-        with TransferProgress(
-            "history_transfer_and_export",
-            through_block - first_block + 1,
-            unit="blocks",
-            planning_unit_seconds=(0.01, 3.0),
-        ) as progress:
-            next_block = first_block
-            while next_block <= through_block and not stop.is_set():
-                end = min(through_block, next_block + maximum_blocks - 1)
-                result = await run_owned_thread(
-                    partial(
-                        transfer_history_checkpoints,
-                        source,
-                        target,
-                        owner=owner,
-                        first_block=next_block,
-                        through_block=end,
-                        maximum_blocks=maximum_blocks,
-                        stop_requested=stop,
-                    ),
-                    on_cancel=stop.set,
-                )
-                # Native facts are durable before export. Cancellation or a
-                # delivery failure leaves them usable by an unchanged retry.
-                for height in range(next_block, end + 1):
-                    if stop.is_set():
-                        break
-                    await run_owned_thread(owner.recheck, source, target)
-                    value = await run_owned_thread(target.checkpoints.load, height)
-                    if value is None:
-                        raise ValueError("history transfer did not retain selected block")
-                    identity = target._export_identity()
-                    with target.journal.locked():
-                        updated = await target._ensure_checkpoint_export(value)
-                    exported += int(identity not in value["exports"] and bool(updated["exports"]))
-                    completed += 1
-                    progress.advance(1)
-                # Counts describe this execution; the original source and target
-                # checkpoint inventories remain the durable completion evidence.
-                copied += result["transferred_blocks"]
-                existing += result["existing_blocks"]
-                next_block = end + 1
-            await run_owned_thread(owner.recheck, source, target)
-        materialization = None
-        if completed == through_block - first_block + 1 and not stop.is_set():
-            try:
-                materialization = await run_owned_thread(
-                    partial(
-                        review_history_materialization,
-                        source,
-                        target,
-                        owner=owner,
-                        first_block=first_block,
-                        through_block=through_block,
-                        stop_requested=stop,
-                    ),
-                    on_cancel=stop.set,
-                )
-            except InterruptedError:
-                if not stop.is_set():
-                    raise
-        result = {
-            "status": "complete" if materialization is not None else "interrupted",
-            "first_block": first_block,
-            "through_block": through_block,
-            "completed_blocks": completed,
-            "transferred_blocks": copied,
-            "existing_blocks": existing,
-            "new_export_receipts": exported,
-            "source_owner": source.checkpoints.owner,
-            "target_owner": target.checkpoints.owner,
-            "context_sha256": owner.context_sha256,
-            "ordered_restore_and_fresh_finality_required": True,
-            "directory_exchange_performed": False,
-            "chain_submission_authorized": False,
-        }
-        if materialization is not None:
-            result["materialization"] = materialization
-        return result
+    # Exact JSON content only: owner, file, source and authority checks still run.
+    # Owned threads inherit this bounded cache and drain before its scope closes.
+    with canonical_json_reuse():
+        async with hold_history_transfer_owner(
+            anchor,
+            unit=unit,
+            config_path=config_path,
+            standing_boot=standing_boot,
+            coordinator_config=coordinator_config,
+            held_approval=held_approval,
+        ) as owner:
+            opener = (
+                _open_readers
+                if physical_budget is None
+                else partial(_open_readers, physical_budget=physical_budget)
+            )
+            source, target = await run_owned_thread(opener, owner)
+            with TransferProgress(
+                "history_transfer_and_export",
+                through_block - first_block + 1,
+                unit="blocks",
+                planning_unit_seconds=(0.01, 3.0),
+            ) as progress:
+                next_block = first_block
+                while next_block <= through_block and not stop.is_set():
+                    end = min(through_block, next_block + maximum_blocks - 1)
+                    result = await run_owned_thread(
+                        partial(
+                            transfer_history_checkpoints,
+                            source,
+                            target,
+                            owner=owner,
+                            first_block=next_block,
+                            through_block=end,
+                            maximum_blocks=maximum_blocks,
+                            stop_requested=stop,
+                            progress=progress.child_report(),
+                        ),
+                        on_cancel=stop.set,
+                    )
+                    # Native facts are durable before export. Cancellation or a
+                    # delivery failure leaves them usable by an unchanged retry.
+                    for height in range(next_block, end + 1):
+                        if stop.is_set():
+                            break
+                        await run_owned_thread(owner.recheck, source, target)
+                        value = await run_owned_thread(target.checkpoints.load, height)
+                        if value is None:
+                            raise ValueError("history transfer did not retain selected block")
+                        identity = target._export_identity()
+                        with target.journal.locked():
+                            updated = await target._ensure_checkpoint_export(value)
+                        exported += int(
+                            identity not in value["exports"] and bool(updated["exports"])
+                        )
+                        completed += 1
+                        progress.advance(1)
+                    # Counts describe this execution; the original source and target
+                    # checkpoint inventories remain the durable completion evidence.
+                    copied += result["transferred_blocks"]
+                    existing += result["existing_blocks"]
+                    next_block = end + 1
+                await run_owned_thread(owner.recheck, source, target)
+            materialization = None
+            if completed == through_block - first_block + 1 and not stop.is_set():
+                try:
+                    materialization = await run_owned_thread(
+                        partial(
+                            review_history_materialization,
+                            source,
+                            target,
+                            owner=owner,
+                            first_block=first_block,
+                            through_block=through_block,
+                            stop_requested=stop,
+                        ),
+                        on_cancel=stop.set,
+                    )
+                except InterruptedError:
+                    if not stop.is_set():
+                        raise
+            result = {
+                "status": "complete" if materialization is not None else "interrupted",
+                "first_block": first_block,
+                "through_block": through_block,
+                "completed_blocks": completed,
+                "transferred_blocks": copied,
+                "existing_blocks": existing,
+                "new_export_receipts": exported,
+                "source_owner": source.checkpoints.owner,
+                "target_owner": target.checkpoints.owner,
+                "context_sha256": owner.context_sha256,
+                "ordered_restore_and_fresh_finality_required": True,
+                "directory_exchange_performed": False,
+                "chain_submission_authorized": False,
+            }
+            if materialization is not None:
+                result["materialization"] = materialization
+            return result

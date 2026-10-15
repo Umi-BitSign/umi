@@ -170,11 +170,18 @@ async def test_runtime_task_cancellation_drains_before_releasing_owner(runtime_c
     h = runtime_case
     started, release = threading.Event(), threading.Event()
     transfer = h.runtime.transfer_history_checkpoints
+    from umi.canonical_reuse import _ACTIVE
+
+    caches = []
 
     def slow(*args, **kwargs):
         assert h.owner.active
+        cache = _ACTIVE.get()
+        assert cache is not None and not cache.closed
+        caches.append(cache)
         started.set()
         assert release.wait(10), "test did not release bounded transfer"
+        assert not cache.closed
         assert h.owner.active
         result = transfer(*args, **kwargs)
         h.events.append("worker_drained")
@@ -194,6 +201,7 @@ async def test_runtime_task_cancellation_drains_before_releasing_owner(runtime_c
         release.set()
         await asyncio.gather(task, return_exceptions=True)
     assert h.events.index("worker_drained") < h.events.index("released")
+    assert caches and all(cache.closed and not cache.entries for cache in caches)
     assert not h.owner.active
     retry = await h.execute(through_block=h.source.first_block, maximum_blocks=1)
     assert retry["status"] == "complete"
@@ -259,3 +267,81 @@ async def test_runtime_cancellation_drains_materialization_before_owner_release(
         await asyncio.gather(task, return_exceptions=True)
     assert h.events.index("materialization_drained") < h.events.index("released")
     assert not h.owner.active
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+async def test_runtime_exact_json_reuse_reaches_owned_threads_and_expires(
+    runtime_case, monkeypatch
+):
+    from umi import canonical_reuse as reuse
+    from umi.protocol import canonical_json_bytes
+
+    h = runtime_case
+    check = h.owner.recheck
+    calls, caches = [], []
+    original = reuse.rfc8785.dumps
+    selected = {"transfer_fixture_binding": ["owner", "unchanged"]}
+
+    def counted(value):
+        if value == selected:
+            calls.append(value)
+        return original(value)
+
+    def recheck(*args):
+        check(*args)
+        cache = reuse._ACTIVE.get()
+        assert cache is not None and not cache.closed
+        caches.append(cache)
+        probe = {"nested": ["before"]}
+        assert canonical_json_bytes(probe) == b'{"nested":["before"]}'
+        probe["nested"][0] = "after"
+        assert canonical_json_bytes(probe) == b'{"nested":["after"]}'
+        assert (
+            canonical_json_bytes(selected) == b'{"transfer_fixture_binding":["owner","unchanged"]}'
+        )
+
+    monkeypatch.setattr(reuse.rfc8785, "dumps", counted)
+    monkeypatch.setattr(h.owner, "recheck", recheck)
+    first = await h.execute(maximum_blocks=1)
+    assert len(calls) == 1 and len(caches) > 1
+    first_cache = caches[0]
+    assert all(cache is first_cache for cache in caches)
+    assert first_cache.closed and first_cache.size == 0
+    assert reuse._ACTIVE.get() is None
+    h.target = h.reopen_target()
+    caches.clear()
+    second = await h.execute(maximum_blocks=1)
+    assert len(calls) == 2
+    assert all(cache is not first_cache and cache.closed for cache in caches)
+    assert first["materialization"] == second["materialization"]
+    assert second["transferred_blocks"] == second["new_export_receipts"] == 0
+
+
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+async def test_runtime_parent_tracks_actual_native_child_without_export_credit(
+    runtime_case, monkeypatch, caplog
+):
+    h = runtime_case
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    # Native transfer events must reach the parent before the first export.
+    export = h.target._ensure_checkpoint_export
+
+    async def checked_export(value):
+        rows = [
+            json.loads(r.getMessage())
+            for r in caplog.records
+            if r.name == "umi.competition.progress"
+        ]
+        parents = [r for r in rows if r.get("stage") == "history_transfer_and_export"]
+        assert any(
+            r.get("active_child", {}).get("completed_units", 0) > 0
+            for r in parents
+            if r.get("active_child")
+        )
+        assert all(r["completed_units"] == 0 for r in parents)
+        assert all(r["percent"] == 0 for r in parents)
+        return await export(value)
+
+    monkeypatch.setattr(h.target, "_ensure_checkpoint_export", checked_export)
+    result = await h.execute(through_block=h.source.first_block)
+    assert result["status"] == "complete"
