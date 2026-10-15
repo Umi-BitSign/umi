@@ -105,7 +105,7 @@ async def _persist(reader, pool, future, fields, retained):
     return value
 
 
-async def _window(reader, provider, pool, entries, stop):
+async def _window(reader, provider, pool, entries, stop, *, last_height):
     tasks = []
     error = None
     reader.progress.preparation_start(
@@ -167,6 +167,15 @@ async def _window(reader, provider, pool, entries, stop):
                                 ),
                             )
                         )
+                        # Start this native check before loading the next frame.
+                        # The list grows only within the original bounded window;
+                        # no extra raw frame, worker slot or byte budget is added.
+                        if height < last_height and not stop.is_set():
+                            completed, following, following_retained = await _load_input(
+                                reader, height + 1
+                            )
+                            if completed is None and following is not None:
+                                entries.append((height + 1, following, following_retained))
             # Checkpoint coroutines run as each worker finishes; gathering here
             # never imposes block order on durable completion.
             results = await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
@@ -197,11 +206,10 @@ async def _run(reader, provider, last, stop):
                 if reader._next > last:
                     break
                 entries = []
-                for height in range(reader._next, min(last + 1, reader._next + count)):
-                    completed, fields, retained = await _load_input(reader, height)
-                    if completed is not None or fields is None:
-                        break
-                    entries.append((height, fields, retained))
+                window_last = min(last, reader._next + count - 1)
+                completed, fields, retained = await _load_input(reader, reader._next)
+                if completed is None and fields is not None:
+                    entries.append((reader._next, fields, retained))
                 if not entries:
                     # No retained frame: use the existing online capture owner,
                     # outside its lock. The shared journal remains owned here.
@@ -214,7 +222,9 @@ async def _run(reader, provider, last, stop):
                     pool = HistoryWorkers(
                         profile, HistoryWorkerSelection.from_provider(provider, reader.hotkey)
                     )
-                values = await _window(reader, provider, pool, entries, stop)
+                values = await _window(
+                    reader, provider, pool, entries, stop, last_height=window_last
+                )
                 # Recheck cheap source revisions before publication/application;
                 # no repeated hashing or native verification of unchanged bytes.
                 for value, (height, fields, _) in zip(values, entries, strict=False):

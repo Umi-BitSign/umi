@@ -4,6 +4,7 @@ import asyncio
 import json
 import multiprocessing
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from umi.competition_reward_history_workers import (
     HistoryWorkers,
     HistoryWorkerSelection,
 )
-from umi.competition_reward_proof_archive import RewardProofArchive
+from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.competition_verification_rules import runtime_identity
 from umi.encoding import account_id32
 from umi.historical_header_recovery import HistoricalHeaderRecoveryPending
@@ -440,3 +441,155 @@ async def test_failed_later_header_drains_and_retains_started_worker(parallel_ca
     h.reader = h.open_parallel()
     assert await h.reader.advance(provider, through_block=h.end) == h.expected
     assert h.reader.progress.native_completed == len(h.frames) - 1
+
+
+async def test_loading_next_frame_overlaps_started_native_work(parallel_case, monkeypatch):
+    h = parallel_case
+    first = h.reader.first_block
+    submitted = []
+    submit, load = HistoryWorkers.submit, h.reader._load
+
+    def started(pool, **kw):
+        result = submit(pool, **kw)
+        submitted.append(kw["snapshot"].block_number)
+        return result
+
+    def checked(height):
+        if height == first + 1:
+            assert first in submitted, "the first native worker waited for the whole input batch"
+        return load(height)
+
+    monkeypatch.setattr(HistoryWorkers, "submit", started)
+    monkeypatch.setattr(h.reader, "_load", checked)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert submitted == list(h.frames)
+
+
+async def test_later_load_failure_drains_and_retains_started_native_result(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    first = h.reader.first_block
+    load = h.reader._load
+
+    def failed(height):
+        if height == first + 1:
+            raise OSError("retained frame unavailable")
+        return load(height)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(h.reader, "_load", failed)
+        with pytest.raises(OSError, match="retained frame unavailable"):
+            await h.reader.advance(h.item.provider, through_block=h.end)
+    assert h.reader.checkpoints.load(first) is not None
+    assert h.reader.checkpoints.load(first + 1) is None
+    assert not h.item.provider._lock.locked()
+    assert not multiprocessing.active_children()
+    h.reader = h.open_parallel()
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert h.reader.progress.native_completed == len(h.frames) - 1
+
+
+async def test_cancel_during_next_frame_load_drains_loader_and_native_worker(
+    parallel_case, monkeypatch
+):
+    h = parallel_case
+    first = h.reader.first_block
+    loop = asyncio.get_running_loop()
+    loading, release = asyncio.Event(), threading.Event()
+    load = h.reader._load
+
+    def blocked(height):
+        if height == first + 1:
+            loop.call_soon_threadsafe(loading.set)
+            if not release.wait(timeout=15):
+                raise TimeoutError("test did not release retained frame loader")
+        return load(height)
+
+    monkeypatch.setattr(h.reader, "_load", blocked)
+    task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
+    close = None
+    try:
+        await asyncio.wait_for(loading.wait(), timeout=15)
+        close = asyncio.create_task(h.item.provider.aclose())
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        assert not task.done()
+        assert not close.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if close is not None:
+        await close
+    assert h.reader.checkpoints.load(first) is not None
+    assert h.reader.checkpoints.load(first + 1) is None
+    assert not multiprocessing.active_children()
+
+
+async def test_streamed_import_persists_exports_and_restarts_without_payload_reads(
+    parallel_case, tmp_path, monkeypatch
+):
+    h = parallel_case
+    original = h.reader
+    imported, exported = (
+        RewardProofArchive(tmp_path / "import"),
+        RewardProofArchive(tmp_path / "export"),
+    )
+    for height, fields in h.frames.items():
+        imported.write(
+            "history",
+            history_archive_key(original.config_sha256, original.hotkey, height),
+            context=original._archive_context(height),
+            fields=fields,
+        )
+
+    def open_reader():
+        return RewardControlHistoryReader(
+            tmp_path / "import-consumer",
+            control_hotkey=original.hotkey,
+            chain_config_sha256=original.config_sha256,
+            first_block=original.first_block,
+            maximum_bytes=original.journal.maximum_bytes,
+            archive=imported,
+            export_archive=exported,
+            verification_profile=profile(),
+        )
+
+    h.reader = open_reader()
+    submitted = set()
+    submit, read = HistoryWorkers.submit, imported.read
+
+    def started(pool, **kw):
+        result = submit(pool, **kw)
+        submitted.add(kw["snapshot"].block_number)
+        return result
+
+    second_key = history_archive_key(
+        original.config_sha256, original.hotkey, original.first_block + 1
+    )
+
+    def checked(kind, key, **kw):
+        if key == second_key:
+            assert original.first_block in submitted
+        return read(kind, key, **kw)
+
+    monkeypatch.setattr(HistoryWorkers, "submit", started)
+    monkeypatch.setattr(imported, "read", checked)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert h.reader.progress.latest["exported_blocks"] == len(h.frames)
+    for height, fields in h.frames.items():
+        key = history_archive_key(original.config_sha256, original.hotkey, height)
+        context, retained = exported.read("history", key, bounds=h.reader._field_bounds)
+        assert context == original._archive_context(height)
+        assert retained == fields
+    h.reader = open_reader()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("completed imported/exported proof bytes were reread after restart")
+
+    monkeypatch.setattr(imported, "read", forbidden)
+    monkeypatch.setattr(h.reader, "_load", forbidden)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert h.reader.progress.native_completed == 0
