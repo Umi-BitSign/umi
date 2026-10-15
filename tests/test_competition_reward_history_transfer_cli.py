@@ -10,6 +10,16 @@ def test_root_prepares_source_before_account_drop(monkeypatch, capsys):
     from umi import competition_reward_history_transfer_cli as cli
 
     events, source, anchor = [], object(), object()
+    progress_reports = []
+    progress_type = cli.TransferProgress
+    progress_instances = []
+
+    def synchronous_progress(*args, **kwargs):
+        progress = progress_type(*args, report=progress_reports.append, **kwargs)
+        progress_instances.append(progress)
+        return progress
+
+    monkeypatch.setattr(cli, "TransferProgress", synchronous_progress)
     monkeypatch.setattr(
         cli, "os", SimpleNamespace(getuid=lambda: 0, geteuid=lambda: 0, umask=lambda value: None)
     )
@@ -20,6 +30,10 @@ def test_root_prepares_source_before_account_drop(monkeypatch, capsys):
         return source
 
     def account(args):
+        # Actual namespace setup refuses the heartbeat thread created by
+        # TransferProgress.__enter__; this must still be synchronous here.
+        assert len(progress_instances) == 1
+        assert progress_instances[0].thread is None
         assert args.coordinator_config is source
         events.append("dropped")
         return anchor
@@ -49,6 +63,10 @@ def test_root_prepares_source_before_account_drop(monkeypatch, capsys):
         ]
     )
     assert events == ["prepared", "dropped", "run"]
+    assert progress_reports[0]["status"] == "started"
+    assert progress_reports[-1]["status"] == "completed"
+    assert progress_reports[-1]["completed_units"] == progress_reports[-1]["total_units"] == 2
+    assert progress_reports[-1]["eta_seconds"] == 0
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
 
 
