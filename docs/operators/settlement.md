@@ -2559,3 +2559,24 @@ configured concurrent consumers and downstream owner work. A policy fitting only
 the sum of isolated peaks can block its own dependencies. Verify startup, steady
 state, replica restart and recovery under the actual account/mount/cgroup limits
 before cutover; do not infer these bounds from aggregate file sizes alone.
+
+
+### Holding automatic cohort progression during a release
+
+The admission host accepts `recoverable_service.lifecycle.automatic_progression_hold_cohorts`
+as a list of configured cohort digests. An empty or omitted list preserves historical
+configuration bytes and behavior. With a cohort selected, its automatic lifecycle
+worker reports `automatic_progression_held` and constructs no phase controller:
+it cannot publish history, sample availability, seal intake, request votes or resume
+a retained phase intent. Admission HTTP workers, upload processing and unselected
+cohorts remain configured normally. Explicit operator recovery/signing interfaces
+remain separate; do not use them to close a held cohort.
+
+Drain the owning service cooperatively before selecting this configuration, preserve
+its state directories and signed history, then restart and verify the hold report
+and admission health. The setting does not undo a seal or decision already retained;
+inspect the actual phase and pending intent before deployment. Remove the selected
+digest only after the intended release is qualified, through the same supported
+service transition. No signed clocks are reset; native availability recovery accounts
+for unsampled intervals when progression resumes. The reported ETA is unknown while
+waiting for explicit release, rather than a deadline that automatically lifts the hold.
