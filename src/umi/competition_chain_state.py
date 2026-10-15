@@ -482,10 +482,10 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
                 # lease, other namespaces cannot grow; only the remaining
                 # aggregate capacity may be used by this open instance.
                 other = sum(size for name, size in usage.items() if name != namespace)
-                self._namespace_budget = min(
+                self._namespace_available = min(
                     self._namespace_budget, config.maximum_cache_bytes - other
                 )
-                if self._namespace_budget <= 2 * _CACHE_RESERVE_BYTES:
+                if self._namespace_available <= 2 * _CACHE_RESERVE_BYTES:
                     raise ValueError("retained weight namespaces exhaust aggregate capacity")
                 for name in ("registrations.sqlite3", "finality.sqlite3"):
                     CompetitionReplayWorker._prepare_state_file(child, name)
@@ -500,7 +500,14 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
             os.close(root_fd)
 
     def _finality_storage_limits(self):
-        maximum = self._namespace_budget - _CACHE_RESERVE_BYTES
+        return self._limits_for_namespace(self._namespace_budget)
+
+    def _finality_operational_limits(self):
+        return self._limits_for_namespace(self._namespace_available)
+
+    @staticmethod
+    def _limits_for_namespace(budget):
+        maximum = budget - _CACHE_RESERVE_BYTES
         return GrandpaFinalitySupervisorLimits(
             maximum_evidence_bytes=min(4 * 1024**2, maximum // 2),
             maximum_total_evidence_bytes=maximum // 2,
@@ -654,27 +661,55 @@ class FinalizedCompetitionWeightProvider(FinalizedRegistrationProvider):
     async def collect(self):
         raise ValueError("weight collection needs an explicit validator and recipients")
 
+    def observation_floor(self) -> int:
+        """Retain the fresh-start boundary without restarting the owned observer.
+
+        This height grants no proof or transaction authority. A subsequent
+        capture must still verify a newer finalized root, freshness and weights.
+        """
+        if self._closed or not self._owned:
+            raise ValueError("observation floor requires a running owned provider")
+        self.ensure_observer_running()
+        head = self._finality.persisted_head()
+        return self._startup_floor if head is None else max(self._startup_floor, head.height)
+
     async def wait_weights_ready(
         self,
         validator_hotkey: str,
         recipients: tuple[Registration, ...],
         *,
         manifest_anchor_sha256: str | None = None,
+        after_block: int | None = None,
     ) -> OwnedCompetitionChainObservation:
         """Retry only initial observer warm-up, not proof or transport failures."""
+        if after_block is not None and (type(after_block) is not int or after_block < 0):
+            raise ValueError("weight observation floor must be a nonnegative block")
 
         async def capture():
             while True:
                 if self._owned and self._task is not None and self._task.done():
                     self._task.result()
                 try:
-                    return await self.collect_weights(
+                    if (
+                        after_block is not None
+                        and await self.current_finalized_block() <= after_block
+                    ):
+                        raise _AwaitingFinality("awaiting a newer owned observation")
+                    observation = await self.collect_weights(
                         validator_hotkey,
                         recipients,
                         manifest_anchor_sha256=manifest_anchor_sha256,
                     )
+                    if after_block is not None and observation.block <= after_block:
+                        raise ValueError("weight observation did not advance its selected floor")
+                    return observation
                 except _AwaitingFinality:
                     pass
+                except GrandpaFinalitySupervisorError as error:
+                    # The owned height port exposes this directly; proof
+                    # collection wraps the same initial condition below.
+                    if error.reason_code != "no_verified_finalized_head":
+                        raise
                 except ValidatorChainError as error:
                     if not (
                         error.reason_code == "owned_finality_unavailable"
