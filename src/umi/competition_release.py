@@ -25,6 +25,8 @@ from .competition_supervisor import (
     _release_url_origin,
 )
 from .competition_upgrade import _fingerprint, _open_without_links
+from .competition_verification_reuse import VerificationReuse, _event
+from .competition_work_progress import WorkProgress
 from .competition_worker import _open_directory_without_links, _verify_private_directory
 from .crypto import verify_response_signature
 from .encoding import account_id32
@@ -202,21 +204,30 @@ def _read_exact(descriptor: int, size: int) -> bytes:
 def _verify_archive(descriptor: int, manifest, header: bytes, target) -> None:
     archive_hash, bundle_hash = hashlib.sha256(), hashlib.sha256(header)
     total = 0
-    while chunk := os.read(
-        descriptor, min(1024 * 1024, manifest.oci_archive_size_bytes + 1 - total)
-    ):
-        total += len(chunk)
-        if total > manifest.oci_archive_size_bytes:
-            raise SuccessorReleaseError("OCI archive exceeds signed size")
-        archive_hash.update(chunk)
-        bundle_hash.update(chunk)
-    if (
-        total != manifest.oci_archive_size_bytes
-        or archive_hash.hexdigest() != manifest.oci_archive_sha256
-        or total + len(header) != target.release_bundle_size_bytes
-        or bundle_hash.hexdigest() != target.release_bundle_sha256
-    ):
-        raise SuccessorReleaseError("OCI archive or release bundle hash/size mismatch")
+    with WorkProgress(
+        "release_archive_verification",
+        (manifest.oci_archive_size_bytes + 1024**2 - 1) // 1024**2,
+        unit="mib_chunks",
+    ) as progress:
+        while chunk := os.read(
+            descriptor, min(1024 * 1024, manifest.oci_archive_size_bytes + 1 - total)
+        ):
+            total += len(chunk)
+            if total > manifest.oci_archive_size_bytes:
+                raise SuccessorReleaseError("OCI archive exceeds signed size")
+            archive_hash.update(chunk)
+            bundle_hash.update(chunk)
+            while progress.completed < total // 1024**2:
+                progress.advance()
+        if (
+            total != manifest.oci_archive_size_bytes
+            or archive_hash.hexdigest() != manifest.oci_archive_sha256
+            or total + len(header) != target.release_bundle_size_bytes
+            or bundle_hash.hexdigest() != target.release_bundle_sha256
+        ):
+            raise SuccessorReleaseError("OCI archive or release bundle hash/size mismatch")
+        if total % 1024**2:
+            progress.advance()
 
 
 def _read_bundle(descriptor: int, target):
@@ -276,7 +287,7 @@ def _archive_chunks(descriptor: int, expected_size: int):
         raise SuccessorReleaseError("source archive shrank while staging")
 
 
-def _staged_snapshot(path: Path, target):
+def _staged_snapshot(path: Path, target, *, reuse=None, metadata_only=False):
     directory = _private_stage_descriptor(path, mode=0o500)
     opened = []
     try:
@@ -289,6 +300,17 @@ def _staged_snapshot(path: Path, target):
             opened.append(descriptor)
             descriptors[name] = descriptor
             identities[path / name] = _fingerprint(os.fstat(descriptor))
+
+        def check_identities():
+            for name, descriptor in descriptors.items():
+                if _fingerprint(os.fstat(descriptor)) != identities[path / name]:
+                    raise SuccessorReleaseError("staged artifact changed while verifying")
+            if _fingerprint(os.fstat(directory)) != identities[path]:
+                raise SuccessorReleaseError("staged directory changed while verifying")
+
+        if metadata_only:
+            check_identities()
+            return identities
         manifest_fd, signature_fd = (
             descriptors["release-manifest.json"],
             descriptors["release-signature.bin"],
@@ -304,12 +326,38 @@ def _staged_snapshot(path: Path, target):
         archive = descriptors["image.oci.tar"]
         if os.fstat(archive).st_size != manifest.oci_archive_size_bytes:
             raise SuccessorReleaseError("staged OCI archive size mismatch")
-        _verify_archive(archive, manifest, _header(payload, signature), target)
-        for name, descriptor in descriptors.items():
-            if _fingerprint(os.fstat(descriptor)) != identities[path / name]:
-                raise SuccessorReleaseError("staged artifact changed while verifying")
-        if _fingerprint(os.fstat(directory)) != identities[path]:
-            raise SuccessorReleaseError("staged directory changed while verifying")
+
+        def verify_archive():
+            _verify_archive(archive, manifest, _header(payload, signature), target)
+
+        if reuse is None:
+            verify_archive()
+        else:
+            # The header is freshly authenticated above. Receipts bind the entire
+            # target and actual opened file identities, never a supplied digest.
+            key = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "semantics": "umi-successor-staged-archive-verification/1",
+                        "target": target.model_dump(mode="json", by_alias=True),
+                        "files": {str(p): [str(n) for n in v] for p, v in identities.items()},
+                    }
+                )
+            ).hexdigest()
+            with reuse.exclusive():
+                receipt = reuse.load(key)
+                if receipt is None:
+                    _event("successor_oci_archive", "miss")
+                    verify_archive()
+                    # A raced verification must not leave a completed verdict.
+                    check_identities()
+                    reuse.remember(key, (), "true")
+                    _event("successor_oci_archive", "retained")
+                elif receipt.dependencies or receipt.result_json != "true":
+                    raise SuccessorReleaseError("staged OCI verification receipt needs repair")
+                else:
+                    _event("successor_oci_archive", "hit")
+        check_identities()
         return identities
     finally:
         for descriptor in opened:
@@ -342,7 +390,7 @@ class VerifiedSuccessorOCI:
         for path, expected in self._ancestors.items():
             if _ancestor_identity(path) != expected:
                 raise SuccessorReleaseError("OCI ancestor changed")
-        if _staged_snapshot(self.path, self.target) != self._identities:
+        if _staged_snapshot(self.path, self.target, metadata_only=True) != self._identities:
             raise SuccessorReleaseError("verified OCI stage changed")
 
 
@@ -374,7 +422,16 @@ def verify_staged_successor_release(
     target, config = _validated_target(target, config)
     _validate_stage_location(path, target, config)
     ancestors = {parent: _ancestor_identity(parent) for parent in _ancestor_paths(path)}
-    identities = _staged_snapshot(path, target)
+    reuse = VerificationReuse(
+        Path(config.state_root) / "release-verification",
+        owner=(
+            "umi-successor-staged-archive-verification/1",
+            config.state_root,
+            config.validator_hotkey,
+            config.channel_id,
+        ),
+    )
+    identities = _staged_snapshot(path, target, reuse=reuse)
     result = VerifiedSuccessorOCI(path, target, identities, ancestors, _ISSUER)
     object.__setattr__(result, "_binding", _binding(result))
     result.recheck()

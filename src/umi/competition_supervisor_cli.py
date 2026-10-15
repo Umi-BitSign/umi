@@ -34,6 +34,7 @@ from .competition_host_artifacts import (
     MAX_HOST_MANIFEST_BYTES,
     _ancestor_identity,
     _ancestor_paths,
+    _host_digest_reuse,
     _read_tree,
     parse_signed_host_artifact,
     verify_host_artifact_authority,
@@ -160,7 +161,7 @@ def _verify_running_host_values(config, receipt, host_manifest_sha256):
     source_identity = _stable_file_identity(source)
     interpreter_identity = _running_executable_identity(interpreter)
     ancestors = {path: _ancestor_identity(path) for path in _ancestor_paths(root)}
-    fingerprints, _ = _read_tree(root, signed.manifest)
+    fingerprints, _ = _read_tree(root, signed.manifest, digests=_host_digest_reuse(config))
     if (
         fingerprints.get(source) != source_identity
         or fingerprints.get(interpreter) != interpreter_identity

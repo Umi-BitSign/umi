@@ -1,7 +1,7 @@
 """Apply root-approved, signed source maintenance to one historical worker image."""
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .competition_host_activation import (
@@ -10,7 +10,9 @@ from .competition_host_activation import (
 )
 from .competition_host_artifacts import (
     SignedSuccessorHostArtifact,
-    _read_tree,
+    VerifiedHostTree,
+    _host_digest_reuse,
+    _verified_host_tree,
     verify_host_artifact_authority,
 )
 from .competition_host_maintenance import SupervisorHostMaintenanceApproval, verify_host_maintenance
@@ -19,9 +21,10 @@ from .open_competition import digest
 from .protocol import canonical_json_bytes
 
 _HOST_PARENT = Path("/opt/umi-validator-supervisor-hosts")
+_ISSUER = object()
 
 
-def _source_for(activation, *, scope, signed_host, root):
+def _source_for(activation, *, scope, signed_host, root, tree):
     authorization = activation._inputs.authorization
     continuation = authorization.authorization.continuation if authorization else None
     if (
@@ -34,25 +37,73 @@ def _source_for(activation, *, scope, signed_host, root):
         not in {scope.recipient_amendment_sha256, scope.successor_recipient_amendment_sha256}
     ):
         raise ValueError("worker source maintenance differs from approved package or amendment")
-    _read_tree(root, signed_host.manifest)
+    if (
+        type(tree) is not VerifiedHostTree
+        or tree.path != root
+        or tree.manifest_sha256 != signed_host.manifest_sha256
+    ):
+        raise ValueError("worker source tree capability differs from approved host")
+    try:
+        tree.recheck()
+    except OSError as error:
+        raise ValueError("worker source tree changed or became unavailable") from error
     return root / "src/umi"
+
+
+def _overlay_binding(overlay):
+    values = (
+        {"approval": overlay.approval}
+        if type(overlay) is ApprovedWorkerSourceOverlay
+        else {"signed_host": overlay.signed_host, "scope": overlay.scope}
+    )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "root": str(overlay.root),
+                **{
+                    key: value.model_dump(mode="json", by_alias=True)
+                    for key, value in values.items()
+                },
+            }
+        )
+    ).hexdigest()
+
+
+def _issue(overlay):
+    object.__setattr__(overlay, "_issuer", _ISSUER)
+    object.__setattr__(overlay, "_binding", _overlay_binding(overlay))
+    return overlay
+
+
+def _recheck(overlay):
+    if (
+        type(overlay) not in {ApprovedWorkerSourceOverlay, ApprovedInitialWorkerSourceOverlay}
+        or overlay._issuer is not _ISSUER
+        or overlay._binding != _overlay_binding(overlay)
+    ):
+        raise ValueError("worker source approval capability is absent or altered")
 
 
 @dataclass(frozen=True)
 class ApprovedWorkerSourceOverlay:
     approval: SupervisorHostMaintenanceApproval
     root: Path
+    _tree: VerifiedHostTree | None = field(default=None, repr=False)
+    _issuer: object = field(default=None, repr=False)
+    _binding: str = field(default="", repr=False)
 
     @property
     def host_manifest_sha256(self):
         return self.approval.signed_host.manifest_sha256
 
     def source_for(self, activation):
+        _recheck(self)
         return _source_for(
             activation,
             scope=self.approval.worker_overlay,
             signed_host=self.approval.signed_host,
             root=self.root,
+            tree=self._tree,
         )
 
 
@@ -61,17 +112,22 @@ class ApprovedInitialWorkerSourceOverlay:
     signed_host: SignedSuccessorHostArtifact
     scope: WorkerSourceOverlayScope
     root: Path
+    _tree: VerifiedHostTree | None = field(default=None, repr=False)
+    _issuer: object = field(default=None, repr=False)
+    _binding: str = field(default="", repr=False)
 
     @property
     def host_manifest_sha256(self):
         return self.signed_host.manifest_sha256
 
     def source_for(self, activation):
+        _recheck(self)
         return _source_for(
             activation,
             scope=self.scope,
             signed_host=self.signed_host,
             root=self.root,
+            tree=self._tree,
         )
 
 
@@ -100,8 +156,8 @@ def approved_initial_worker_source_overlay(
         expected_manifest_sha256=installation.operator_consent.approved_host_manifest_sha256,
     )
     root = _HOST_PARENT / signed_host.manifest.umi_git_revision
-    _read_tree(root, signed_host.manifest)
-    return ApprovedInitialWorkerSourceOverlay(signed_host, scope, root)
+    tree = _verified_host_tree(root, signed_host, digests=_host_digest_reuse(installation.config))
+    return _issue(ApprovedInitialWorkerSourceOverlay(signed_host, scope, root, tree))
 
 
 def approved_worker_source_overlay(payload, *, installation, running_root):
@@ -114,5 +170,5 @@ def approved_worker_source_overlay(payload, *, installation, running_root):
     root = _HOST_PARENT / signed.manifest.umi_git_revision
     if running_root != root:
         raise ValueError("worker source maintenance must use the running signed host")
-    _read_tree(root, signed.manifest)
-    return ApprovedWorkerSourceOverlay(approval, root)
+    tree = _verified_host_tree(root, signed, digests=_host_digest_reuse(installation.config))
+    return _issue(ApprovedWorkerSourceOverlay(approval, root, tree))
