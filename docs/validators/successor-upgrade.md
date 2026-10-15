@@ -44,8 +44,14 @@ The supervisor verifies each sealed package once and retains a small private
 verification receipt under its state root. The worker retains its receipt under
 the existing replay state root. Reuse binds the exact directory and file
 identities, policy, release and capacity bounds. Within a process, unchanged
-packages use the parsed object. After restart, the worker reconstructs the object
-from its sealed files without repeating payload hashes or publication replay.
+packages use the parsed object. When switching between stored copies of the same
+package, each copy must already have its own valid receipt for its exact current
+file identities. Matching package, policy, release, limits and manifest then permit
+reuse of the parsed content without rereading it. A fresh copy still receives its
+own verification. Returned models remain isolated, and metadata is checked again
+after copying the parsed object. Only one parsed package is retained within the
+existing memory budget. After restart, the worker reconstructs the object once
+from a qualified copy without repeating payload hashes or publication replay.
 Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.

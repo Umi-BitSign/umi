@@ -443,9 +443,17 @@ def load_competition_package(
         return _load_competition_package(package_path, **arguments)
     key, input_bytes = _package_reuse_key(package_path, **arguments)
     cached = reuse.lookup(key)
+    manifest_sha256 = None
+    if cached is None:
+        manifest_sha256 = reuse.verified_manifest(key)
+        if manifest_sha256 is not None:
+            cached = reuse.lookup(key, verified_manifest_sha256=manifest_sha256)
     if cached is not None:
+        # Deep-copying a large parsed package is not an atomic metadata read.
+        # Recheck the selected copy before returning any cached projection.
+        if _package_reuse_key(package_path, **arguments) != (key, input_bytes):
+            raise ValueError("package changed during verified copy reuse")
         return cached
-    manifest_sha256 = reuse.verified_manifest(key)
     verified = _load_competition_package(
         package_path, **arguments, _verified_manifest_sha256=manifest_sha256
     )
