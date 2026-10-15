@@ -75,6 +75,21 @@ are still captured after slow preparation. `supervisor_recovery_runs` counts
 audited retained runs, and `materialization_file_hash` counts verified chunks with
 elapsed time, rate-based substage ETA, completion and interruption status.
 
+The read-only host observer keeps one running finality provider for the exact
+chain configuration and policy. Repeated observations reuse its completed startup
+audit while collecting new proofs; each request requires a finalized head newer
+than the provider's current persisted head. The initial startup floor, wall-clock
+freshness, rollback guards, installed authority and exact validator binding remain
+mandatory. A different configuration or policy drains the previous provider before
+opening its replacement. Capture failure and shutdown drain the provider, including
+repeated cancellation during construction or close. The fixed cache root and
+existing durable state stay in place; no signed format or state migration changes.
+The namespace's original byte budget remains its finality-store binding. Space
+used by other namespaces only tightens the running provider's local byte limits;
+switching configurations and reopening an earlier namespace preserves its stored
+proofs and binding without resetting or rewriting them. Aggregate cache checks
+and the root-exclusive lease still apply.
+
 Renewed controls do not require hashing every older staged package during cache
 lookup. The supervisor checks sealed metadata and compares the small control
 files first, then verifies the complete matching stage before reuse. All retained

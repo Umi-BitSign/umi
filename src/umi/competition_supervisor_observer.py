@@ -49,6 +49,7 @@ from .competition_worker_cli import (
     WORKER_RUNTIME_METADATA_BINARY,
     SuccessorWorkerExecutionConfig,
 )
+from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .open_competition import CompetitionPolicy, Registration, digest
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -122,6 +123,8 @@ class OwnedSuccessorHostObserver:
             raise ValueError("initial observer platform differs from installed host")
         self._lock = asyncio.Lock()
         self._closed = False
+        self._provider = None
+        self._provider_key = None
 
     def _initial(self):
         validate_authenticated_successor_installation(self.installation)
@@ -133,14 +136,26 @@ class OwnedSuccessorHostObserver:
         async with self._lock:
             if self._closed:
                 raise ValueError("host observer is closed")
-            self._initial()
-            # One provider owns the fixed cache root at a time. Its existing
-            # namespaced cache retains exact per-configuration proof history.
-            provider = FinalizedCompetitionWeightProvider(config, policy)
             try:
-                await provider.start()
+                self._initial()
+                key = (digest(config), digest(policy))
+                if self._provider_key != key:
+                    await self._close_provider()
+
+                    def construct():
+                        # Retain ownership even if cancellation arrives while
+                        # the finite constructor audits the durable store.
+                        self._provider = FinalizedCompetitionWeightProvider(config, policy)
+                        self._provider_key = key
+
+                    await run_owned_thread(construct)
+                    await self._provider.start()
+                provider = self._provider
+                # Each request still requires a head newer than the currently
+                # persisted one, just as a newly constructed provider did.
+                floor = provider.observation_floor()
                 observation = await provider.wait_weights_ready(
-                    self.installation.config.validator_hotkey, recipients
+                    self.installation.config.validator_hotkey, recipients, after_block=floor
                 )
                 validate_owned_weight_observation(observation)
                 if (
@@ -148,12 +163,22 @@ class OwnedSuccessorHostObserver:
                     or account_id32(observation.validator_hotkey)
                     != account_id32(self.installation.config.validator_hotkey)
                     or observation.block < self.installation.checkpoint_finalized_block
+                    or observation.block <= floor
                 ):
                     raise ValueError("owned host observation differs from its installed inputs")
                 self._initial()
                 return observation
+            except BaseException:
+                await self._close_provider()
+                raise
+
+    async def _close_provider(self):
+        if self._provider is not None:
+            try:
+                await await_owned_task(asyncio.create_task(self._provider.aclose()))
             finally:
-                await provider.aclose()
+                self._provider = None
+                self._provider_key = None
 
     async def observe(self) -> OwnedCompetitionChainObservation:
         initial = self._initial()
@@ -225,3 +250,4 @@ class OwnedSuccessorHostObserver:
     async def aclose(self):
         async with self._lock:
             self._closed = True
+            await self._close_provider()

@@ -56,7 +56,8 @@ def observer_case(adapter_case, monkeypatch):
     monkeypatch.setattr(
         observer_module, "validate_authenticated_successor_installation", validate_installation
     )
-    case.events, case.providers = [], []
+    case.events, case.providers, case.floors = [], [], []
+    case.floor = 0
     case.fail_start = case.fail_capture = False
     case.capture_entered = case.capture_release = None
 
@@ -74,7 +75,11 @@ def observer_case(adapter_case, monkeypatch):
             if case.fail_start:
                 raise ValueError("fixture startup failed")
 
-        async def wait_weights_ready(self, hotkey, recipients):
+        def observation_floor(self):
+            return case.floor
+
+        async def wait_weights_ready(self, hotkey, recipients, *, after_block=None):
+            case.floors.append(after_block)
             case.events.append(("capture", hotkey, recipients))
             if case.capture_entered is not None:
                 case.capture_entered.set()
@@ -101,6 +106,8 @@ async def test_initial_runtime_observation_needs_no_target_fetch(observer_case):
     validate_owned_weight_observation(observation)
     assert observation.validator_uid == 54 and observation.validator_permit
     assert observation.chain_config_sha256 == digest(case.installation.observer_config.chain)
+    assert not case.providers[0].closed
+    await case.observer.aclose()
     assert [event[0] for event in case.events] == ["construct", "start", "capture", "close"]
     assert case.events[2][2] == ()
     assert case.materializations == 0 and case.container.events == []
@@ -126,6 +133,8 @@ async def test_long_retained_history_keeps_owned_observation_bound_to_runtime(
         observation = await case.observer.observe_for(selection, files)
         validate_owned_weight_observation(observation)
         assert observation.validator_permit
+        assert not case.providers[-1].closed
+        await case.observer.aclose()
         assert case.providers[-1].closed
     assert not case.materializations and not case.container.events
 
@@ -159,6 +168,8 @@ async def test_later_target_policy_does_not_require_initial_policy_equality(obse
     assert second.chain_config_sha256 == digest(target_config)
     assert first.chain_config_sha256 != second.chain_config_sha256
     assert case.events[6][2] == case.item.recipients
+    assert not case.providers[-1].closed
+    await observer.aclose()
     assert all(provider.closed for provider in case.providers)
 
 
@@ -252,3 +263,101 @@ async def test_closed_observer_cannot_create_a_new_provider(observer_case):
 def test_caller_json_is_not_an_installed_capability(observer_case):
     with pytest.raises(ValueError, match="capability rejected"):
         OwnedSuccessorHostObserver(installation=SimpleNamespace(**vars(observer_case.installation)))
+
+
+async def test_repeated_observation_reuses_provider_but_advances_fresh_floor(observer_case):
+    from .test_competition_weights import _advance
+
+    case = observer_case
+    first = await case.observer.observe()
+    case.floor = first.block
+    _advance(case.item, first.block + 1)
+    second = await case.observer.observe()
+    validate_owned_weight_observation(second)
+    assert second.block > first.block
+    assert len(case.providers) == 1
+    assert case.floors == [0, first.block]
+    assert [event[0] for event in case.events] == ["construct", "start", "capture", "capture"]
+    await case.observer.aclose()
+    assert case.providers[0].closed
+
+
+async def test_reused_provider_failure_drains_and_next_call_reconstructs(observer_case):
+    case = observer_case
+    await case.observer.observe()
+    case.fail_capture = True
+    with pytest.raises(ValueError, match="capture failed"):
+        await case.observer.observe()
+    assert case.providers[0].closed
+    case.fail_capture = False
+    await case.observer.observe()
+    assert len(case.providers) == 2 and not case.providers[1].closed
+    await case.observer.aclose()
+
+
+async def test_capture_cannot_return_same_floor_even_with_valid_owned_proof(observer_case):
+    case = observer_case
+    first = await case.observer.observe()
+    case.floor = first.block
+    with pytest.raises(ValueError, match="installed inputs"):
+        await case.observer.observe()
+    assert case.providers[0].closed and case.observer._provider is None
+
+
+async def test_constructor_cancellation_keeps_owner_until_constructed_provider_closes(
+    observer_case, monkeypatch
+):
+    import threading
+
+    case = observer_case
+    entered, release = threading.Event(), threading.Event()
+    original = observer_module.FinalizedCompetitionWeightProvider
+
+    def construct(*args):
+        entered.set()
+        assert release.wait(5)
+        return original(*args)
+
+    monkeypatch.setattr(observer_module, "FinalizedCompetitionWeightProvider", construct)
+    task = asyncio.create_task(case.observer.observe())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and case.observer._lock.locked()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(case.providers) == 1 and case.providers[0].closed
+    assert case.observer._provider is None and not case.observer._lock.locked()
+
+
+async def test_repeated_close_cancellation_waits_for_native_drain(observer_case):
+    case = observer_case
+    await case.observer.observe()
+    provider = case.providers[0]
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = provider.aclose
+
+    async def close():
+        entered.set()
+        await release.wait()
+        await original()
+
+    provider.aclose = close
+    task = asyncio.create_task(case.observer.aclose())
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done() and case.observer._lock.locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert provider.closed and case.observer._provider is None
+    with pytest.raises(ValueError, match="closed"):
+        await case.observer.observe()
