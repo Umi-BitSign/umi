@@ -711,3 +711,19 @@ async def test_retained_admission_is_reproved_after_restart(historical):
     h.c.reader = h.c.reopen()
     with pytest.raises(ValidatorChainError):
         await h.c.reader.replay_admission(h.item.provider)
+
+
+async def test_default_batch_restores_long_native_control_without_outer_retry(
+    historical, monkeypatch
+):
+    h = historical
+    selected_batch = h.item.provider._historical_headers.batch_size
+    w = await _linked_history(h, monkeypatch, 2050)
+    h.item.provider._historical_headers.batch_size = selected_batch
+    proof = await h.item.provider.review_control(w.raw, w.metadata)
+    check(h, proof)
+    assert proof.snapshot.block_number == w.original.height
+    assert len(w.calls) == len(set(w.calls)) == 2049
+    assert w.original.block_hash not in w.calls
+    assert await h.item.provider.review_control(w.raw, w.metadata) == proof
+    assert len(w.calls) == 2049
