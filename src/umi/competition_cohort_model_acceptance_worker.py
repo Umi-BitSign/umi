@@ -80,6 +80,7 @@ class ModelAcceptanceWorker:
             approved = await run_owned_thread(self.owner.retained, cohort, key)
         except PendingModelArtifacts:
             retained = False
+            await self.owner.ensure_payload(cohort, key)
             intent = await run_owned_thread(self.owner.intent, cohort, key)
             if intent is None:
                 selected = await run_owned_thread(

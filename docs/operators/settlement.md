@@ -2400,8 +2400,8 @@ authorize eviction. Keep the original artifacts and consumer bindings until thei
 supported storage migration and restore qualification complete.
 
 To select authenticated storage for those original `/1` models, set
-`legacy_model_storage` on the phase reviewer, settlement, reward coordinator and
-standing writer configurations. It is a cohort-sorted list of
+`legacy_model_storage` on the version-nine intake host, phase reviewer, settlement,
+reward coordinator and standing writer configurations. It is a cohort-sorted list of
 `umi-legacy-model-storage-source/1` entries with `cohort_sha256`, `directory`,
 `baseline_model_sha256` and sorted `incumbent_model_sha256s`. Obtain the baseline
 and incumbent pins from the actual selected rounds and migration census. Each
@@ -2412,6 +2412,27 @@ these inventories and original metadata before opening its service state or
 signing keys, then binds the source to the actual R2 credential namespace.
 Missing or damaged metadata requires repair. Empty older configurations retain
 their native archive behavior; they do not establish an R2 storage migration.
+
+On the intake host, also set `legacy_model_verification_directory` to private
+durable state outside the upload journals, archive, metadata sources and disposable
+caches. The host derives adoption selections from its own committed native history
+before opening new storage or signing keys; it does not accept a supplied history
+as owner authority. The configured direct-upload R2 namespace also supplies the
+originals reader. The acceptance worker streams required byte checks with counted
+progress and ETA, checkpoints each completed file, and reuses those checks after
+restart through object-generation metadata. It keeps no additional full model copy.
+
+Only an exact preserved original with both frozen participation and certified
+admission can finish a new `/1` acceptance after adoption, including an original
+that had no acceptance intent at the fence. The owner checks the actual retained
+admission and committed history before verification and at reservation/publication
+boundaries. An existing intent retains its original ordinal, clock, documents and
+signatures; a new intent reserves its first ordinal only after complete byte checks.
+Independent reviewers still approve the original rights and reconstruction inputs.
+Upload-only entries, incomplete payloads, unknown requests and changed originals do
+not receive this exception. New submissions continue through direct multipart R2.
+This path does not release legacy reservations, delete active archives, or issue the
+production adoption; those require their separate census, release and signing gates.
 
 Settlement and series-wide reward consumers select the reader by the original
 certificate's cohort. Thus an adopted C6 can use R2 while C5 retains its existing

@@ -59,12 +59,14 @@ from .competition_model_transport_qualification import (
     REPAIR as TRANSPORT_REPAIR,
 )
 from .competition_store import AdmissionCapacityError
+from .concurrency import run_owned_thread
 from .open_competition import digest, identity, model_content_digest
 from .private_files import publish_private_model
 from .protocol import canonical_json_bytes
 
 if TYPE_CHECKING:
     from .competition_cohort_intake import CohortIntake
+    from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
 
 MAX_PUBLICATION_BYTES = 33 * 1024**2
 
@@ -177,6 +179,7 @@ class CohortModelAcceptances:
         review_artifact: (
             Callable[[CohortParticipationRequest], SignedDirectModelUploadReservation | None] | None
         ) = None,
+        legacy_payloads: LegacyModelAdmissionPayloads | None = None,
     ):
         self.intake, self.archive = intake, archive
         if verify_request is not None and not callable(verify_request):
@@ -185,6 +188,9 @@ class CohortModelAcceptances:
         if review_artifact is not None and not callable(review_artifact):
             raise ValueError("model acceptance review artifact source is not callable")
         self.review_artifact = review_artifact
+        self.legacy_payloads = legacy_payloads
+        if legacy_payloads is not None and legacy_payloads.intake is not intake:
+            raise ValueError("legacy model payload source differs from acceptance owner")
         with intake._connection() as (db, _):
             acceptance_tables(db)
 
@@ -218,6 +224,9 @@ class CohortModelAcceptances:
         )
 
     def _verify_artifacts(self, record) -> None:
+        if self.legacy_payloads is not None and self.legacy_payloads.contains(record.request):
+            self.legacy_payloads.require_payload(record.request)
+            return
         if self.verify_request is not None:
             self.verify_request(record.request)
             return
@@ -226,6 +235,49 @@ class CohortModelAcceptances:
             self.archive,
             self.intake.policy,
         )
+
+    def _grandfathered(self, db, store, record):
+        if self.legacy_payloads is None or not self.legacy_payloads.contains(record.request):
+            return False
+        row = db.execute(
+            "SELECT substr(body,1,4194305) FROM cohort_consents WHERE cohort=? AND consent=?",
+            (
+                record.request.consent.consent.cohort_sha256,
+                record.proposed_admission.consent_sha256,
+            ),
+        ).fetchone()
+        if row is None or row[0] != canonical_json_bytes(record):
+            raise ValueError("frozen model admission changed its original participation")
+        row = db.execute(
+            "SELECT body FROM cohort_admission_certificates WHERE consent=?",
+            (record.proposed_admission.consent_sha256,),
+        ).fetchone()
+        if row is None:
+            raise PendingModelArtifacts("frozen model admission requires its original certificate")
+        admission = AttestedCohortParticipantAdmission.model_validate_json(row[0])
+        if canonical_json_bytes(admission) != row[0]:
+            raise ValueError("frozen model admission changed its canonical bytes")
+        return self.legacy_payloads.qualify(store, record=record, admission=admission)
+
+    def _legacy_snapshot(self, cohort, submission):
+        with self.intake._connection() as (db, store):
+            history = store.published_history(cohort)
+            record = self._record(db, history, submission)
+            if not self._grandfathered(db, store, record):
+                return None
+            return history, record
+
+    async def ensure_payload(self, cohort, submission):
+        """Stream frozen original bytes before a new acceptance or publication."""
+        if self.legacy_payloads is None:
+            return
+        before = await run_owned_thread(self._legacy_snapshot, cohort, submission)
+        if before is None:
+            return
+        _, record = before
+        await self.legacy_payloads.ensure(record.request)
+        if await run_owned_thread(self._legacy_snapshot, cohort, submission) != before:
+            raise OSError("model intake changed during remote verification; retry")
 
     def repair_transport_qualification(self, cohort, submission, *, reason: str, report=None):
         """Repair supplemental metadata for this original owned acceptance only.
@@ -527,11 +579,14 @@ class CohortModelAcceptances:
             with self.intake._connection() as (db, store):
                 self._qualify_transport(db, store, body)
             return body
-        with self.intake._connection(prefer_history=True) as (_, store):
+        with self.intake._connection(prefer_history=True) as (db, store):
             _, pending = store.status(cohort)
             if pending is not None and pending.is_policy_adoption:
                 raise OSError("new model acceptance awaits its reserved policy adoption")
+            grandfathered = self._grandfathered(db, store, record)
         artifact = None if self.review_artifact is None else self.review_artifact(record.request)
+        if grandfathered and artifact is not None:
+            raise ValueError("frozen legacy admission cannot replace its original transport")
         observation = execution_boundary(capture)
         if artifact is not None:
             verify_direct_model_transport(
@@ -541,7 +596,7 @@ class CohortModelAcceptances:
                 accepted_at_block=observation.block,
                 current_block=observation.block,
             )
-        elif (
+        elif not grandfathered and (
             authenticated_model_delivery(
                 history,
                 self.intake.policy,
@@ -597,7 +652,10 @@ class CohortModelAcceptances:
                 expected_tip_sha256=state.tip_sha256,
                 current_block=observation.block,
             )
-            if (delivery.mechanism == "direct_r2_multipart_v1") != (artifact is not None):
+            grandfathered = self._grandfathered(db, store, record)
+            if (delivery.mechanism == "direct_r2_multipart_v1") != (
+                artifact is not None or grandfathered
+            ):
                 raise ValueError("new model acceptance differs from authenticated transport")
             if (
                 not isinstance(current.authority.authority, ModelRewardCohortAuthority)
@@ -672,6 +730,8 @@ class CohortModelAcceptances:
             with self.intake._connection() as (db, store):
                 self._qualify_transport(db, store, a)
             return publication
+        with self.intake._connection() as (db, store):
+            self._grandfathered(db, store, record)
         self._verify_artifacts(record)
         block = execution_boundary(capture).block
         tip = digest(history.transitions[-1].transition if history.transitions else history.genesis)
@@ -686,6 +746,7 @@ class CohortModelAcceptances:
         with self.intake._connection() as (db, store):
             if store.published_history(cohort) != history:
                 raise OSError("model intake changed during artifact verification; retry")
+            self._grandfathered(db, store, record)
             intent = _read(db, "cohort_model_acceptance_intents", cohort, submission)
             if intent != canonical_json_bytes(
                 ModelAcceptanceIntent(acceptance=a, inputs=publication.inputs)

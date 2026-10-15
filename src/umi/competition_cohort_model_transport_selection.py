@@ -6,6 +6,7 @@ transport amendment. Preparing a selection requires the owner's native snapshot;
 an unsigned or signed-but-pending intent is not a committed publication.
 """
 
+from contextlib import nullcontext
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -35,7 +36,9 @@ def committed_model_delivery_selection(store, cohort, policy):
     Keep this result only in the root-controlled deployment selection. A remote
     caller cannot use this record to replace the authoritative intake history.
     """
-    with store.read_snapshot():
+    # Intake's prefer_history connection already owns the immutable snapshot.
+    # Reuse that scope; never start a second snapshot or release the outer one.
+    with nullcontext() if store._snapshot_reading else store.read_snapshot():
         state, pending = store.status(cohort)
         history = store.published_history(cohort)
     if pending is not None:

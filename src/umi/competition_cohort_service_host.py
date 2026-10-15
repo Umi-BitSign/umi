@@ -31,11 +31,18 @@ from .competition_cohort_direct_model_owner import (
 )
 from .competition_cohort_dispatch_host import ServiceDispatchConfig
 from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
+from .competition_cohort_legacy_model_selection import (
+    LegacyModelStorageSelections,
+    authenticate_legacy_model_sources,
+    selected_legacy_model_readers,
+)
 from .competition_cohort_lifecycle_host import LifecycleHostConfig
 from .competition_cohort_model_acceptance_store import CohortModelAcceptances
 from .competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 from .competition_cohort_model_review_http import ModelReviewPeer, ModelReviewPeerConfig
 from .competition_cohort_model_static_review import StandingModelReviewPolicy
+from .competition_cohort_model_transport_selection import committed_model_delivery_selection
 from .competition_cohort_model_upload import (
     CohortModelUploads,
     ModelUploadConfig,
@@ -55,6 +62,7 @@ from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueue
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
+from .competition_model_cache_space import disjoint
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
 from .competition_reward_service import _stop_task
@@ -130,9 +138,19 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
 class CohortModelPayloadRouter:
     """Route current delivery from owned history; preserve reserved acceptances."""
 
-    def __init__(self, plans, *, legacy=None, direct=None, intake=None, acceptances=None):
+    def __init__(
+        self,
+        plans,
+        *,
+        legacy=None,
+        direct=None,
+        intake=None,
+        acceptances=None,
+        legacy_payloads=None,
+    ):
         self.legacy, self.direct = legacy, direct
         self.intake, self.acceptances = intake, acceptances
+        self.legacy_payloads = legacy_payloads
         self.mechanisms = {}
         for plan in plans:
             if plan.eligible_tracks is not None and "model" not in plan.eligible_tracks:
@@ -190,6 +208,8 @@ class CohortModelPayloadRouter:
                     if body.direct_artifact is None
                     else "direct_r2_multipart_v1"
                 )
+        if self.legacy_payloads is not None and self.legacy_payloads.contains(request):
+            return "coordinator_chunked_v1"
         return self._current_mechanism(cohort)
 
     def _current_mechanism(self, cohort):
@@ -208,6 +228,9 @@ class CohortModelPayloadRouter:
         return selected
 
     def require_payload(self, request):
+        if self.legacy_payloads is not None and self.legacy_payloads.contains(request):
+            self.legacy_payloads.require_payload(request)
+            return
         mechanism = self._mechanism(request)
         self._payload_owner(mechanism, request.consent.consent.cohort_sha256).require_payload(
             request
@@ -286,6 +309,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     model_review_peers: Annotated[tuple[ModelReviewPeerConfig, ...], Field(max_length=64)] = ()
     model_uploads: ModelUploadConfig | None = None
     direct_model_uploads: DirectModelUploadHostConfig | None = None
+    legacy_model_storage: LegacyModelStorageSelections = ()
+    legacy_model_verification_directory: Directory | None = None
     admission_owner: AdmissionOwnerConfig | None = None
     lifecycle: LifecycleHostConfig | None = None
     dispatch: ServiceDispatchConfig | None = None
@@ -304,6 +329,10 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("model_uploads", None)
         if self.direct_model_uploads is None:
             value.pop("direct_model_uploads", None)
+        if not self.legacy_model_storage:
+            value.pop("legacy_model_storage", None)
+        if self.legacy_model_verification_directory is None:
+            value.pop("legacy_model_verification_directory", None)
         if self.admission_owner is None:
             value.pop("admission_owner", None)
         if self.lifecycle is None:
@@ -316,6 +345,12 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def peers(self):
+        if bool(self.legacy_model_storage) != (
+            self.legacy_model_verification_directory is not None
+        ):
+            raise ValueError("legacy model sources require durable verification storage")
+        if self.legacy_model_storage and self.direct_model_uploads is None:
+            raise ValueError("legacy model R2 sources require the configured direct namespace")
         if self.schema_ not in {
             "umi-cohort-service-admission-host/4",
             "umi-cohort-service-admission-host/5",
@@ -427,6 +462,18 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             self.model_review_peers
         ):
             raise ValueError("model reviewer configuration repeats a signer")
+        protected = tuple(Path(source.directory) for source in self.legacy_model_storage)
+        if self.legacy_model_verification_directory is not None:
+            protected += (Path(self.legacy_model_verification_directory),)
+        paths = self.model_copy(
+            update={"legacy_model_storage": (), "legacy_model_verification_directory": None}
+        ).stores()
+        if any(not disjoint(path, other) for path in protected for other in paths) or any(
+            not disjoint(path, other)
+            for index, path in enumerate(protected)
+            for other in protected[index + 1 :]
+        ):
+            raise ValueError("legacy model metadata and verification storage must be disjoint")
         return self
 
     def stores(self):
@@ -445,6 +492,12 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
         values = (
             Path(self.queue_directory),
             Path(self.inputs_directory),
+            *(Path(source.directory) for source in self.legacy_model_storage),
+            *(
+                (Path(self.legacy_model_verification_directory),)
+                if self.legacy_model_verification_directory is not None
+                else ()
+            ),
             *tokens,
             *(self.lifecycle.stores() if self.lifecycle else ()),
             *(self.dispatch.stores() if self.dispatch else ()),
@@ -507,9 +560,32 @@ class ServiceAdmissionHost:
             c.admission_owner.check_policy(policy)
             if provider is None or provider.policy != policy:
                 raise ValueError("automatic admission requires the owned finality provider")
-        self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
+        prepared_legacy = None
+        if c.legacy_model_storage:
+            protected = (
+                *(Path(source.directory) for source in c.legacy_model_storage),
+                Path(c.legacy_model_verification_directory),
+            )
+            if any(
+                not disjoint(path, root)
+                for path in protected
+                for root in (Path(intake.config.directory), promotion.directory)
+            ):
+                raise ValueError("legacy model storage overlaps owned intake or archive state")
+            with intake._connection(prefer_history=True) as (_, store):
+                selections = tuple(
+                    committed_model_delivery_selection(store, source.cohort_sha256, policy)
+                    for source in c.legacy_model_storage
+                )
+            prepared_legacy = authenticate_legacy_model_sources(
+                c.legacy_model_storage,
+                series=c.series,
+                policy=policy,
+                model_delivery_adoptions=selections,
+            )
         self.payloads = None
         self.direct_uploads = None
+        self.legacy_payloads = None
         model_authority = isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
         if (c.model_uploads or c.direct_model_uploads) and not model_authority:
             raise ValueError("model delivery requires model reward authority")
@@ -532,6 +608,15 @@ class ServiceAdmissionHost:
             loaded = load_r2_credentials(Path(direct.r2_credentials_file))
             signer = R2SigV4(loaded.endpoint, direct.r2_bucket, loaded.credentials)
             multipart = R2MultipartClient(signer, timeout_seconds=direct.r2_timeout_seconds)
+            legacy_readers = selected_legacy_model_readers(
+                prepared_legacy,
+                multipart=multipart,
+                verification_root=Path(c.legacy_model_verification_directory)
+                if prepared_legacy is not None
+                else None,
+            )
+            if legacy_readers is not None:
+                self.legacy_payloads = LegacyModelAdmissionPayloads(intake, legacy_readers)
             direct_signer_key = load_named_hotkey(Path(direct.owner_key_file), direct.owner_hotkey)
 
             async def authorize(request):
@@ -582,6 +667,7 @@ class ServiceAdmissionHost:
                     policy=policy,
                 )
             self.direct_uploads = DirectModelUploadOwners(owners)
+        self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
         self.models = (
             ModelAcceptanceWorker(
                 CohortModelAcceptances(
@@ -597,6 +683,7 @@ class ServiceAdmissionHost:
                         if self.direct_uploads is None
                         else lambda request: self.payloads.review_artifact(request)
                     ),
+                    legacy_payloads=self.legacy_payloads,
                 ),
                 capture,
                 Path(c.inputs_directory),
@@ -618,6 +705,7 @@ class ServiceAdmissionHost:
                 direct=self.direct_uploads,
                 intake=intake,
                 acceptances=self.models.owner,
+                legacy_payloads=self.legacy_payloads,
             )
         if c.model_review_peers:
             groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}

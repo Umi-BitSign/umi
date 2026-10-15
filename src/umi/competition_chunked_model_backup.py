@@ -435,6 +435,40 @@ class ChunkedModelBackupReader:
                 documents=documents,
             )
 
+    def require_verified(self, snapshot: ChunkedModelVerification):
+        """Consume owned byte checkpoints, never a supplied digest as byte proof.
+
+        The asynchronous verifier first confirms remote generations. Synchronous
+        owner commit boundaries can then check every durable receipt without
+        rereading payloads. Restart reconstructs the snapshot through verify().
+        """
+        snapshot = ChunkedModelVerification.model_validate_json(canonical_json_bytes(snapshot))
+        heads = {value.sha256: value for value in snapshot.objects}
+        if (
+            snapshot.selection_sha256 != digest(self.selection)
+            or snapshot.namespace_sha256 != digest(self._namespace())
+            or len(heads) != len(snapshot.objects)
+            or set(heads) != set(self.chunks)
+            or any(
+                (heads[key].key, heads[key].size_bytes) != (chunk.key, chunk.size_bytes)
+                for key, chunk in self.chunks.items()
+            )
+        ):
+            raise ValueError("chunked model verification differs from selected source")
+        with (
+            TransferProgress(
+                "chunked_model_verification_commit", len(self.selection.bundle.files), unit="files"
+            ) as progress,
+            self._store(progress) as saved,
+        ):
+            for record, item in zip(
+                self.selection.bundle.files, self.selection.package.files, strict=True
+            ):
+                if saved.load(record.path, self._source(item, heads)) != record.sha256:
+                    progress.emit("repair_required", reason="chunked_model_file_receipt_missing")
+                    raise OSError("owned model byte verification requires repair")
+                progress.advance(1, restored=True)
+
     async def materialize(
         self,
         archive: Path,

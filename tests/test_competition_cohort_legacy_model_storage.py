@@ -166,13 +166,13 @@ def case(prepared, tmp_path):
     )
 
 
-def adoption(case, legacy=None, preservation=None):
+def adoption(case, legacy=None, preservation=None, *, block=221):
     legacy, preservation = legacy or case.legacy, preservation or case.preservation
     proposal = prepare_model_delivery_adoption(
         case.history,
         case.policy,
         expected_tip_sha256=history_tip(case.history),
-        current_block=221,
+        current_block=block,
         delivery=ModelDeliveryProfile(
             schema="umi-model-delivery-profile/1",
             mechanism="direct_r2_multipart_v1",
@@ -188,12 +188,12 @@ def adoption(case, legacy=None, preservation=None):
     )
     # Native publication establishes the commit, rather than merely presenting
     # signatures. Preparing a pending history is tested independently below.
-    case.owner.intake.publish(history, capture_at(221))
+    case.owner.intake.publish(history, capture_at(block))
     return CommittedModelDeliveryHistory(
         schema="umi-committed-model-delivery-history/1",
         history=history,
         committed_tip_sha256=history_tip(history),
-        observed_at_block=221,
+        observed_at_block=block,
     )
 
 

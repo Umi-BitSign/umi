@@ -50,6 +50,18 @@ class LegacyModelStorageReaders:
             incumbent_sha256=incumbent_sha256,
         )
 
+    def admitted(self, cohort, *, record, admission):
+        """Resolve only the exact frozen, certified, preserved original."""
+        resolution = self.resolve(cohort, request_sha256=digest(record.request))
+        original = resolution.originals
+        for value, pin in (
+            (record, original.participation_raw_sha256),
+            (admission, original.admission_raw_sha256),
+        ):
+            if pin is None or sha256_hex(canonical_json_bytes(value)) != pin:
+                raise ValueError("legacy model source changes its original admitted participant")
+        return resolution
+
     def accepted(self, cohort, *, record, admission, acceptance):
         """Bind an accepted /1 body to preserved originals; grant no quorum.
 
@@ -60,14 +72,8 @@ class LegacyModelStorageReaders:
         acceptance = ModelArtifactAcceptance.model_validate_json(canonical_json_bytes(acceptance))
         if acceptance.schema_ != "umi-cohort-model-artifact-acceptance/1":
             raise ValueError("legacy model source requires the unchanged /1 acceptance")
-        resolution = self.resolve(cohort, request_sha256=digest(record.request))
+        resolution = self.admitted(cohort, record=record, admission=admission)
         original, authenticated = resolution.originals, self.authenticated[cohort]
-        for value, pin in (
-            (record, original.participation_raw_sha256),
-            (admission, original.admission_raw_sha256),
-        ):
-            if pin is None or sha256_hex(canonical_json_bytes(value)) != pin:
-                raise ValueError("legacy model source changes its original admitted participant")
         if original.intent_raw_sha256 is not None:
             try:
                 raw = self.load_original(original.intent_raw_sha256)
