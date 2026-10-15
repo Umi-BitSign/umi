@@ -493,6 +493,13 @@ class RewardControlHistoryReader:
                 else:
                     parts.append(decoded.raw)
                     prepared[name].append(decoded)
+            if self.export_archive is not None and any(
+                len(part.raw) != MAX_EVIDENCE_BYTES for part in prepared[name][:-1]
+            ):
+                # Supported legacy frames can use decoder-valid shorter parts.
+                # The archive writer must rechunk those fields at its ordinary
+                # boundaries; unaffected fields keep their exact prepared bytes.
+                del prepared[name]
             result[name] = b"".join(parts)
         self._source_tokens[height] = self.checkpoints.sources(source_keys, db)
         if self.export_archive is not None:

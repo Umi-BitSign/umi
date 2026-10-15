@@ -357,8 +357,10 @@ class RewardProofArchive:
                 raise ValueError("reward archive encoded part count exceeds its bound")
             total = 0
             refs[name] = []
-            for sha, size, recipe in parts:
+            for number, (sha, size, recipe) in enumerate(parts):
                 checked_digest(sha)
+                if number < len(parts) - 1 and size != MAX_EVIDENCE_BYTES:
+                    raise ValueError("encoded transport requires ordinary archive chunk boundaries")
                 segments = inspect_recipe(recipe, expanded_bytes=size, kind="proof")
                 total += size
                 checked_size(total, MAX_FIELD_BYTES)

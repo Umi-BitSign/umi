@@ -190,6 +190,15 @@ changed intervals or explicit repairs discard the pending batch; durable success
 checkpoints remain available on restart. Serial readers, parallel readers and the
 stopped-writer restoration path use the same bounded restoration logic.
 
+When a verified checkpoint needs another export destination, the owner copies its
+compact recipes and referenced objects without expanding the original proof bytes.
+The complete native checkpoint and exact source-revision coverage are checked
+before copying and again before recording completion. Interrupted copies resume;
+an already committed export is reused after restart. Older nonstandard chunk
+boundaries or a different existing destination encoding use the original
+decode/encode path and its immutable conflict checks. Transport frames still carry
+no native verification authority, locally or in R2.
+
 Historical capture reuses the original owned finalized header when it is retained,
 avoiding another target hash/header RPC. An archived target header can also supply
 the final link of a historical ancestry walk; it remains an untrusted hint until

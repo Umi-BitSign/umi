@@ -18,7 +18,7 @@ from .competition_reward_proof_archive import history_archive_key
 
 
 def export_completed_checkpoint(reader, value, *, field_limits):
-    """Return false only for an existing incompatible destination representation.
+    """Return false when legacy rechunking or destination encoding needs fallback.
 
     The caller then uses its original decode/encode/conflict path. A missing or
     changed native source never falls back to treating new bytes as verified.
@@ -33,6 +33,7 @@ def export_completed_checkpoint(reader, value, *, field_limits):
         if type(frame) is not dict or set(frame) != set(field_limits):
             raise HistoryCheckpointRepairRequired("verified history lost compact export source")
         fields = {}
+        requires_rechunking = False
         for name, maximum in field_limits.items():
             refs = frame[name]
             if (
@@ -63,10 +64,15 @@ def export_completed_checkpoint(reader, value, *, field_limits):
                     keys.add(("control_history_object", object_sha))
                 parts.append((sha, length, raw))
             fields[name] = tuple(parts)
+            requires_rechunking |= any(part[1] != MAX_EVIDENCE_BYTES for part in parts[:-1])
         # The result must cover exactly this frame, every recipe and all its
         # objects. This is a retained native success, never a hash-only claim.
         if reader.checkpoints.sources(keys, db) != value["sources"]:
             raise HistoryCheckpointRepairRequired("compact export source coverage changed")
+        if requires_rechunking:
+            # Older decoder-valid source frames may split at another boundary.
+            # Preserve the archive writer's ordinary canonical chunk boundaries.
+            return False
         copied = reader.export_archive.copy_encoded_transport(
             "history",
             history_archive_key(reader.config_sha256, reader.hotkey, height),

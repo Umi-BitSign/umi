@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from umi.competition_evidence_codec import encode_evidence
+from umi.competition_evidence_codec import MAX_EVIDENCE_BYTES, encode_evidence
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.protocol import canonical_json_bytes
@@ -222,6 +222,90 @@ async def test_lost_compact_export_acknowledgement_reuses_durable_completion(
     assert (await h.reader.advance(h.item.provider, through_block=h.old.height)).history is not None
 
 
+@pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+@pytest.mark.parametrize("existing_destination", [False, True])
+async def test_completed_legacy_boundaries_rechunk_only_affected_field_and_restart(
+    history_case, tmp_path, monkeypatch, existing_destination
+):
+    from umi import competition_reward_history as module
+
+    h = history_case
+    height = h.old.height
+    expected = await h.reader.advance(h.item.provider, through_block=height)
+    fields = h.reader._load(height)
+    journal = h.reader.journal
+    with journal.read_transaction() as db:
+        frame = journal.get("control_history_block", str(height), db=db)
+    raw = fields["evidence"]
+    midpoint = len(raw) // 2
+    assert 0 < midpoint < len(raw) < MAX_EVIDENCE_BYTES
+    chunks = [encode_evidence(part, kind="proof") for part in (raw[:midpoint], raw[midpoint:])]
+    records = []
+    for chunk in chunks:
+        records.append(
+            (
+                "control_history_chunk",
+                chunk.sha256,
+                {"length": chunk.expanded_bytes, "recipe_hex": chunk.recipe.hex()},
+            )
+        )
+        records.extend(
+            ("control_history_object", sha, {"hex": value.hex()})
+            for sha, value in chunk.objects.items()
+        )
+    journal.put_many(records)
+    frame["evidence"] = [chunk.sha256 for chunk in chunks]
+    with journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='control_history_block' AND id=?",
+            (canonical_json_bytes(frame), str(height)),
+        )
+    # Obtain a genuine native checkpoint for this supported historical layout.
+    # Its source identities must name the changed frame and both original parts.
+    h.reader = await h.restart()
+    assert (
+        await h.reader.repair_checkpoints(
+            h.item.provider, through_block=height, reason="qualify retained legacy chunk layout"
+        )
+        == expected
+    )
+    checkpoint = h.reader.checkpoints.load(height)
+    assert all(
+        ["control_history_chunk", chunk.sha256] in [source[:2] for source in checkpoint["sources"]]
+        for chunk in chunks
+    )
+    h.reader = await h.restart()
+    archive = RewardProofArchive(tmp_path / "legacy-export")
+    h.reader.export_archive = archive
+    key = history_archive_key(h.reader.config_sha256, h.reader.hotkey, height)
+    if existing_destination:
+        archive.write("history", key, context=h.reader._archive_context(height), fields=fields)
+    write, prepared_fields = archive.write, []
+
+    def observed_write(*args, **kwargs):
+        prepared_fields.append(set(kwargs["prepared_encodings"]))
+        return write(*args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("completed legacy checkpoint repeated native verification")
+
+    monkeypatch.setattr(archive, "write", observed_write)
+    monkeypatch.setattr(module, "review_control_writes", forbidden)
+    monkeypatch.setattr(module, "capture_control_writes", forbidden)
+    assert await h.reader.advance(h.item.provider, through_block=height) == expected
+    assert prepared_fields == [{"slot_evidence", "slot_metadata"}]
+    assert archive.read("history", key, bounds=module._FIELDS)[1] == fields
+    assert len(archive._frame("history", key).fields["evidence"]) == 1
+    assert h.reader.checkpoints.load(height)["sources"] == checkpoint["sources"]
+    with journal.read_transaction() as db:
+        assert journal.get("control_history_block", str(height), db=db) == frame
+    h.reader = await h.restart()
+    h.reader.export_archive = archive
+    monkeypatch.setattr(h.reader, "_load", forbidden)
+    monkeypatch.setattr(archive, "copy_encoded_transport", forbidden)
+    assert await h.reader.advance(h.item.provider, through_block=height) == expected
+
+
 def test_remote_compact_transport_multiple_parts(tmp_path):
     class Store:
         def __init__(self):
@@ -242,7 +326,7 @@ def test_remote_compact_transport_multiple_parts(tmp_path):
         def read_object(self, sha, *, maximum):
             return self.read_path("objects/" + sha, maximum=maximum)
 
-    values = [b"first part", b"second part"]
+    values = [b"a" * MAX_EVIDENCE_BYTES, b"second part"]
     parts, objects = [], {}
     for raw in values:
         part, found = encoded(raw)
@@ -256,6 +340,6 @@ def test_remote_compact_transport_multiple_parts(tmp_path):
         fields={"evidence": tuple(parts)},
         resolve=lambda sha, size: objects[sha],
     )
-    assert archive.read("history", "a" * 64, bounds={"evidence": 1024})[1]["evidence"] == b"".join(
-        values
-    )
+    assert archive.read("history", "a" * 64, bounds={"evidence": MAX_EVIDENCE_BYTES + 1024})[1][
+        "evidence"
+    ] == b"".join(values)
