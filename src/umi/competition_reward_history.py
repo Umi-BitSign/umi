@@ -987,6 +987,9 @@ class RewardControlHistoryReader:
                 else "retrying",
                 error_type=type(error).__name__,
                 ancestry_progress=getattr(error, "ancestry_progress", None),
+                # The next bounded pass resets the stage. Publish this retained
+                # ancestry cursor before that reset, even within a heartbeat.
+                force=isinstance(error, HistoricalHeaderRecoveryProgress),
             )
             raise
         finally:

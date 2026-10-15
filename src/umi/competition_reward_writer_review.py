@@ -16,7 +16,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .competition_chain_resources import CompetitionChainResources
+from .competition_chain_resource_preflight import preflight_chain_resources
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
@@ -39,6 +39,7 @@ from .competition_reward_writer_reconciliation import (
     reconcile_stopped_control_history,
     review_stopped_standing_attempt,
 )
+from .competition_reward_writer_resources import select_writer_resources
 from .competition_supervisor_runtime import hold_successor_startup_lease
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
@@ -207,6 +208,8 @@ async def review_installed_standing_writer(
     held_approval: Path | None = None,
     history: str = "current",
     reward_adoptions: Path | None = None,
+    resource_launch: Path | None = None,
+    preparation_approval: Path | None = None,
 ):
     """Review original history and exact standing attempt without authorizing a switch."""
     started, phase, native_history = time.monotonic(), 0, None
@@ -254,6 +257,17 @@ async def review_installed_standing_writer(
             series.recovery.authority.issued_at_block <= through_block < 2**53
         ):
             raise ValueError("writer review requires a finite selected history interval")
+        native = select_writer_resources(
+            anchor,
+            selected,
+            history,
+            launch_path=resource_launch,
+            preparation_approval=preparation_approval,
+            through_block=through_block,
+        )
+        await preflight_chain_resources(config.chain, native.resources)
+        selected.recheck()
+        native.recheck()
         with hold_successor_startup_lease(anchor) as startup:
             async with hold_stopped_standing_writer(
                 startup, unit=unit, config_path=config_path
@@ -308,7 +322,7 @@ async def review_installed_standing_writer(
                     provider = HistoricalRewardControlProvider(
                         config.chain,
                         config.policy,
-                        resources=CompetitionChainResources.from_config(config.chain),
+                        resources=native.resources,
                         runtime_proof_reads=config.runtime_proof_reads,
                         historical_header_directory=root / "headers" / digest(config.chain),
                         historical_header_maximum_bytes=config.maximum_header_bytes,
@@ -392,6 +406,7 @@ async def review_installed_standing_writer(
                     await owner.recheck()
                     selected.recheck()
                     adoptions.recheck()
+                    native.recheck()
                     phase = 5
                     report("completed")
                     return {

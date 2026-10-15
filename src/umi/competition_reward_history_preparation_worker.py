@@ -19,6 +19,7 @@ import time
 from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 
+from .competition_chain_resource_preflight import preflight_chain_resources
 from .competition_proof_archive_selection import selected_proof_archive
 from .competition_remote_proof_store import RemoteProofStore
 from .competition_reward_boot import StandingRewardBootConfig
@@ -30,7 +31,6 @@ from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_service import _close_provider
 from .competition_verification_rules import runtime_identity
 from .concurrency import run_owned_thread
-from .grandpa_finality import GrandpaFinalityObserver
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .host_memory_runtime import memory_runtime
 from .open_competition import digest
@@ -101,12 +101,7 @@ async def run(
     # Check the real signed-policy build and selected native artifact bytes
     # before opening any journal. Construction does not spawn an observer or
     # initialize finality state; replay later uses the ordinary owned provider.
-    GrandpaFinalityObserver.from_policy_pin(
-        config.chain.finality_pin,
-        target_triple=config.chain.target_triple,
-        binary_path=launch.resources.finality_binary,
-        chain_spec_path=launch.resources.chain_spec,
-    )
+    preflight = await preflight_chain_resources(config.chain, launch.resources)
     if action == "readiness":
         print(
             json.dumps(
@@ -125,6 +120,7 @@ async def run(
                     "native_history_opened": False,
                     "provider_constructed": False,
                     "finality_policy_and_artifacts_checked": True,
+                    **preflight,
                     "elapsed_seconds": time.monotonic() - started,
                     "percent": 100,
                     "eta_seconds": 0,

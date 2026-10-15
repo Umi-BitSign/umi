@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
+from .competition_materialization_reuse import MaterializationDigestReuse
 from .private_files import ensure_private_directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -64,14 +65,31 @@ class PackageVerificationReuse:
         self._lock = RLock()
         self._key: tuple | None = None
         self._value: VerifiedCompetitionPackage | None = None
+        self.materialization = MaterializationDigestReuse(
+            None if directory is None else directory / "sealed-file-digests"
+        )
 
-    def lookup(self, key: tuple) -> VerifiedCompetitionPackage | None:
+    def lookup(
+        self, key: tuple, *, verified_manifest_sha256: str | None = None
+    ) -> VerifiedCompetitionPackage | None:
         # A forked process must start with its own verification; do not take a
         # potentially inherited lock before rejecting that process identity.
         if os.getpid() != self._pid:
             return None
         with self._lock:
-            return deepcopy(self._value) if key == self._key else None
+            if self._key is None or self._value is None:
+                return None
+            same_copy = key == self._key
+            # A different stored copy must already have its own durable verdict
+            # for its current exact file identities. Only the parsed content is
+            # shared; expected package/policy/release and caller limits must match.
+            verified_copy = (
+                verified_manifest_sha256 is not None
+                and verified_manifest_sha256 == self._value.manifest_sha256
+                and len(key) == len(self._key) == 7
+                and key[:4] == self._key[:4]
+            )
+            return deepcopy(self._value) if same_copy or verified_copy else None
 
     def remember(self, key: tuple, value: VerifiedCompetitionPackage, input_bytes: int) -> None:
         if os.getpid() != self._pid:
@@ -115,6 +133,7 @@ class PackageVerificationReuse:
             return
         with self._lock:
             self._key, self._value = None, None
+            self.materialization.clear()
 
 
 _REUSE: ContextVar[PackageVerificationReuse | None] = ContextVar(

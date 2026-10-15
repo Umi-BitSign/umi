@@ -32,6 +32,35 @@ def test_existing_serial_service_config_preserves_canonical_bytes():
     assert canonical_json_bytes(old) == canonical_json_bytes(body)
 
 
+@pytest.mark.parametrize("workers", [None, 1, 2, 4])
+def test_service_limit_roundtrip_preserves_selected_profile_and_canonical_bytes(workers):
+    body = {
+        "maximum_journal_bytes": 16 * 1024**3,
+        "mortality_period": 128,
+        "maximum_history_blocks": 1024,
+        "submission_timeout_seconds": 600,
+        "poll_seconds": 12,
+    }
+    if workers is not None:
+        body["history_verification"] = {
+            "schema": "umi-history-verification-profile/1",
+            "workers": workers,
+            "maximum_in_flight": workers,
+            "maximum_in_flight_bytes": 1275068416,
+        }
+    raw = canonical_json_bytes(body)
+    selected = StandingRewardServiceLimits.model_validate_json(raw)
+    restored = StandingRewardServiceLimits.model_validate(selected.model_dump(by_alias=True))
+    assert restored == selected
+    assert canonical_json_bytes(restored) == raw
+    assert b'"schema_"' not in canonical_json_bytes(restored)
+    if workers is None:
+        assert restored.history_verification is None
+        assert b'"history_verification"' not in canonical_json_bytes(restored)
+    else:
+        assert restored.history_verification.workers == workers
+
+
 @pytest.mark.parametrize(
     "change",
     [

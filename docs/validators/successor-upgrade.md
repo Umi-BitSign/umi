@@ -44,11 +44,36 @@ The supervisor verifies each sealed package once and retains a small private
 verification receipt under its state root. The worker retains its receipt under
 the existing replay state root. Reuse binds the exact directory and file
 identities, policy, release and capacity bounds. Within a process, unchanged
-packages use the parsed object. After restart, the worker reconstructs the object
-from its sealed files without repeating payload hashes or publication replay.
+packages use the parsed object. When switching between stored copies of the same
+package, each copy must already have its own valid receipt for its exact current
+file identities. Matching package, policy, release, limits and manifest then permit
+reuse of the parsed content without rereading it. A fresh copy still receives its
+own verification. Returned models remain isolated, and metadata is checked again
+after copying the parsed object. Only one parsed package is retained within the
+existing memory budget. After restart, the worker reconstructs the object once
+from a qualified copy without repeating payload hashes or publication replay.
 Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
+
+The same session retains per-file SHA-256 results for sealed materialization
+trees under `successor-package-verification/sealed-file-digests`. These small,
+atomic receipts use the existing private verification store and survive restart;
+they contain no evidence payload. Every lookup still walks the complete tree,
+enforces the current quotas, ownership, link count and modes, and checks exact
+file identities before and after use. Replaced files, changed contents (including
+same-size edits with restored modification time), or changed digest semantics
+require new hashes only for affected files. Missing completed or damaged records
+report `repair_required` before the bounded native hash repair; completed files
+remain reusable after interruption. These digests do not replace signed control,
+package, authorization or chain verification.
+
+Supervisor recovery audits, replay preparation, staging, selection and redundant
+cache retirement run in owned disk workers. Cancellation drains that work before
+releasing the materializer mutex or supervisor lease. Fresh finalized observations
+are still captured after slow preparation. `supervisor_recovery_runs` counts
+audited retained runs, and `materialization_file_hash` counts verified chunks with
+elapsed time, rate-based substage ETA, completion and interruption status.
 
 Renewed controls do not require hashing every older staged package during cache
 lookup. The supervisor checks sealed metadata and compares the small control
@@ -406,6 +431,31 @@ preparation resume and on final writer cutover. Any later signed reward-adoption
 staging must preserve that selected history allowance. The native reader restores
 the original completed verification results without replaying unchanged proof
 bodies. Verify that actual restore and resumed progress before declaring readiness.
+
+The writer-selection broker carries the exact root-selected launch and preparation
+approval into its final service account and coordinator view. The child rechecks
+both controls and uses the launch's native artifact locations; its finality state
+always remains at the original boot's `chain.state_directory`. Preparation's
+scratch finality directory is never adopted by the installed writer. Native hashes,
+chain pins and verification mode still come from that unchanged boot. This also
+supports hosts whose logical executable paths are service-only mount placeholders.
+
+Writer exchange, readiness and isolated preparation check every selected native
+artifact before opening a history journal or provider. Runtime-metadata readiness
+also executes the pinned helper with empty input and requires the native parser's
+normal rejection. This probe grants no chain-verification or publishing authority.
+`native_resource_preflight` reports artifact counts, elapsed time and a local-read
+planning ETA; stalled work withdraws that estimate. A failed check leaves history
+untouched and must be repaired before replay resumes.
+
+For a standalone `python -m umi.competition_reward_writer_review_cli` review outside
+the installed service's artifact mounts, pass `--launch` and
+`--preparation-approval` together to select the same authenticated locations. Without
+that pair it uses the original configured paths and performs the same early checks.
+Retain these launch controls and their artifact files throughout review and retry.
+Do not move the held writer approval or change signed boot bytes to repair an I/O
+path. Qualify actual service-account access, readiness, interrupted retry and final
+review on the selected host before cutover; source tests alone do not establish it.
 
 While first-activation replay is pending, predecessor reconciliation publishes
 the same `umi-successor-host-status/1` reports as the ordinary supervisor.
@@ -1709,6 +1759,21 @@ both host CLI entrypoints as an unprivileged user on the supported platforms
 before signing. Use a self-contained interpreter and verify it on both Ubuntu
 and Debian for each supported architecture. Packaging checks do not authorize
 installation or replace the signed host transition.
+
+Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
+It clones the selected signed dependency tree, checks the pinned source and
+unchanged dependency locks, and migrates both lifecycle launchers before sealing
+the new manifest. `competition_host_entrypoints` renders isolated launchers with
+`if __name__ == "__main__"` so spawned history workers do not enter the supervisor
+or acquire its startup lease. The builder accepts the original unguarded wrapper
+and the guarded successor; an unknown wrapper requires a separately qualified
+migration. Keep this compatibility while any installed host uses the original
+wrapper. Never repair an already signed tree in place.
+
+Qualify actual spawned history workers through the candidate launcher and installed
+interpreter before selecting it. A CLI help check does not exercise multiprocessing.
+Preserve the current signed controls, service account, journals and approval during
+the ordinary host transition.
 
 `competition_host_bundle` stages those bytes without executing them. Its bounded
 format is a fixed magic header followed by each signed manifest file in order;

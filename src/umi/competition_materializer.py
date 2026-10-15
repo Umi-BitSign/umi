@@ -9,6 +9,7 @@ genuine activation capability; it never starts a worker or submits a weight.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from pathlib import Path
 
 from .competition_chain_state import validate_owned_weight_observation
@@ -30,6 +31,7 @@ from .competition_progress import log_phase
 from .competition_supervisor import verify_signed_successor_supervisor_directive
 from .competition_supervisor_adapters import SuccessorArtifactFiles, SuccessorArtifactObserver
 from .competition_supervisor_runtime import SuccessorWorkerSelection
+from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
 
@@ -93,20 +95,23 @@ class AuthenticatedSuccessorArtifactMaterializer:
 
     async def fetch(self, selection: SuccessorWorkerSelection) -> SuccessorArtifactFiles:
         async with self._mutex:
-            self._recheck()
+            await run_owned_thread(self._recheck)
             files = await self.delivery.fetch(selection)
-            self._stage(selection, files)
-            self._recheck()
+            await run_owned_thread(self._stage, selection, files)
+            await run_owned_thread(self._recheck)
             return files
 
     async def retire_redundant(self, retained):
         async with self._mutex:
-            self._recheck()
-            count = retire_redundant_successor_inputs(
-                anchor=self._anchor, limits=self.limits, retained=retained
-            )
-            self._recheck()
-            return count
+            return await run_owned_thread(self._retire_redundant, retained)
+
+    def _retire_redundant(self, retained):
+        self._recheck()
+        count = retire_redundant_successor_inputs(
+            anchor=self._anchor, limits=self.limits, retained=retained
+        )
+        self._recheck()
+        return count
 
     def _floor(self, observation, selection):
         validate_owned_weight_observation(observation)
@@ -125,7 +130,7 @@ class AuthenticatedSuccessorArtifactMaterializer:
         # Root source/archive authentication may be expensive. Complete it
         # before capturing finality; afterward the verified RO inode snapshot
         # detects changes without re-reading/replaying the same evidence.
-        self._recheck()
+        await run_owned_thread(self._recheck)
         observation = await self.observer.observe_for(selection, files)
         if worker_inputs is None:
             validate_authenticated_successor_installation(self.installation)
@@ -156,13 +161,16 @@ class AuthenticatedSuccessorArtifactMaterializer:
         async with self._mutex:
             # This immutable floor is not current authority after slow work.
             floor = self._floor(owned_observation, selection)
-            self._recheck()
-            staged = self._stage(selection, artifacts)
+            await run_owned_thread(self._recheck)
+            staged = await run_owned_thread(self._stage, selection, artifacts)
             current = await self._fresh(selection, artifacts, floor)
             floor = (current.block, current.block_hash)
-            select_staged_successor_current(staged, anchor=self._anchor)
-            self._recheck()
-            inputs = load_successor_worker_inputs()  # Only the fixed read-only mount.
+            await run_owned_thread(
+                partial(select_staged_successor_current, staged, anchor=self._anchor)
+            )
+            await run_owned_thread(self._recheck)
+            # Only the fixed read-only mount, with owned loading before recapturing finality.
+            inputs = await run_owned_thread(load_successor_worker_inputs)
             if (
                 inputs.receipt_sha256 != self.installation.receipt_sha256
                 or inputs.config != self.config
