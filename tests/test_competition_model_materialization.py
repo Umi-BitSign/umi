@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from types import SimpleNamespace
 
 import pytest
 
 from umi import competition_model_materialization as materialization
 from umi.competition_cohort_direct_model_upload import DirectModelPayload
+from umi.competition_model_cache_space import BootDiskModelCache, BootDiskModelCacheConfig
 from umi.competition_transport_verification import TransferProgress
 from umi.open_competition import BundleFile, ModelBundle, digest
 
@@ -67,13 +69,13 @@ def transfer(tmp_path, monkeypatch):
         "etag": "first-generation",
         "size_bytes": len(body),
     }
-    archive, verification = tmp_path / "cache", tmp_path / "durable-verification"
+    archive, verification = tmp_path / "cache-root" / "cache", tmp_path / "durable-verification"
     multipart = Ranges()
     events = []
     reserve = 64
     monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", 16)
 
-    async def run(*, available=None, selected_source=None):
+    async def run(*, available=None, selected_source=None, check_write=None):
         with TransferProgress("model_materialization", len(body), events.append) as progress:
             return await materialization.materialize_model_files(
                 archive=archive,
@@ -92,6 +94,7 @@ def transfer(tmp_path, monkeypatch):
                 progress=progress,
                 available_bytes=(lambda: 1024**3) if available is None else available,
                 reserve_bytes=reserve,
+                check_write=check_write,
             )
 
     model = archive / digest(bundle) / "model"
@@ -222,3 +225,66 @@ async def test_complete_file_without_receipt_repairs_locally_with_only_remaining
     assert all(offset >= first.size_bytes for offset, _ in transfer.multipart.reads)
     assert transfer.bounded_free() == transfer.reserve
     assert any(event["status"] == "repair_required" for event in transfer.events)
+
+
+async def test_boot_cache_restarts_partial_transfer_evicts_and_restores_without_losing_receipts(
+    transfer,
+):
+    config = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(transfer.archive.parent),
+        maximum_allocated_bytes=2 * 1024**2,
+    )
+
+    async def restore():
+        # New allocator instances model a process restart; only filesystem
+        # identities and durable per-file receipts survive between executions.
+        budget = BootDiskModelCache(config, reserve_bytes=transfer.reserve)
+        with budget.allocation_lease():
+            budget.prepare(transfer.bundle)
+            return await transfer.run(
+                available=budget.available_bytes, check_write=budget.check_write
+            )
+
+    first = transfer.bundle.files[0]
+    transfer.multipart.fail_at_offset = first.size_bytes + 16
+    with pytest.raises(OSError, match="injected transfer interruption"):
+        await restore()
+    assert (transfer.model / first.path).read_bytes() == transfer.contents[first.path]
+    transfer.multipart.reads.clear()
+    transfer.multipart.fail_at_offset = None
+    await restore()
+    assert all(offset >= first.size_bytes for offset, _ in transfer.multipart.reads)
+    receipts = {
+        p.relative_to(transfer.verification): p.read_bytes()
+        for p in transfer.verification.rglob("*.json")
+    }
+    # The consumer releases only its cache after all invocation leases return.
+    # Durable verification/checkpoint state remains outside that disposable tree.
+    shutil.rmtree(transfer.archive)
+    assert all((transfer.verification / p).read_bytes() == raw for p, raw in receipts.items())
+    transfer.multipart.reads.clear()
+    await restore()
+    assert sum(size for _, size in transfer.multipart.reads) == transfer.payload.total_bytes
+    assert all(
+        (transfer.model / name).read_bytes() == expected
+        for name, expected in transfer.contents.items()
+    )
+
+
+async def test_boot_reserve_exhaustion_retains_checkpoint_and_resumes_only_affected_file(transfer):
+    first = transfer.bundle.files[0]
+    interrupted = False
+
+    def guard(size):
+        nonlocal interrupted
+        if (transfer.model / first.path).stat().st_size == first.size_bytes:
+            interrupted = True
+            raise OSError("boot filesystem reserve consumed by another service")
+
+    with pytest.raises(OSError, match="reserve consumed"):
+        await transfer.run(check_write=guard)
+    assert interrupted
+    transfer.multipart.reads.clear()
+    await transfer.run()
+    assert all(offset >= first.size_bytes for offset, _ in transfer.multipart.reads)

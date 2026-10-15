@@ -21,6 +21,7 @@ from umi.competition_reward_signing import RewardDecisionJournal
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
+from .logging_helpers import progress_payloads
 from .test_competition_reward_coordinator_boot import chain as chain
 from .test_competition_reward_coordinator_boot import chain_config as chain_config
 from .test_competition_reward_coordinator_boot import config_case as config_case
@@ -482,7 +483,7 @@ def test_cli_selects_capacity_control_without_replacing_original_config(monkeypa
 
 
 async def test_initial_finality_retries_only_missing_head_and_keeps_selected_budget(
-    monkeypatch, caplog
+    monkeypatch, caplog, http_log_redaction
 ):
     caplog.set_level(logging.INFO, logger=runtime.__name__)
     config = SimpleNamespace(minimum_finalized_block=5, startup_timeout_seconds=1800)
@@ -505,7 +506,9 @@ async def test_initial_finality_retries_only_missing_head_and_keeps_selected_bud
     )
     assert await runtime._await_initial_finality(provider) == 5
     assert len(calls) == 2
-    events = [r.args for r in caplog.records if r.msg == "reward_cutover_initial_finality %s"]
+    events = progress_payloads(
+        caplog.records, logger=runtime.__name__, event="reward_cutover_initial_finality"
+    )
     assert [v["state"] for v in events] == ["pending", "completed"]
     assert events[-1]["eta_seconds"] == 0 and events[-1]["percent"] == 100
 

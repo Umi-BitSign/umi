@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -36,6 +37,7 @@ from .competition_cohort_model_static_review import (
     build_standing_model_review,
     verify_standing_review_policy,
 )
+from .competition_cohort_model_transport import authenticated_model_delivery
 from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
@@ -122,8 +124,38 @@ def authorize_model_delivery(
     intake: CohortIntake,
     request: CohortParticipationRequest,
     capture,
+    *,
+    mechanism: str | None = None,
 ) -> tuple[CohortParticipationRequest, str, Submission]:
-    """Authorize one model request without selecting a payload transport."""
+    """Authorize new delivery against owned history and its pending adoption fence."""
+
+    with _authorized_model_delivery(intake, request, capture, mechanism=mechanism) as value:
+        return value
+
+
+def owned_model_delivery(intake, cohort, *, allow_pending=False):
+    """Resolve a route from the owner's authenticated, monotonic publication.
+
+    This reads persisted finality for discovery, not a fresh admission proof.
+    New reservations independently require fresh owned finality in
+    ``authorize_model_delivery``. No request can select a different prefix.
+    """
+    intake._allowed(cohort)
+    with intake._connection(prefer_history=True) as (_, store):
+        state, pending = store.status(cohort)
+        if not allow_pending and pending is not None and pending.is_policy_adoption:
+            raise OSError("model delivery awaits its reserved policy adoption")
+        return authenticated_model_delivery(
+            store.published_history(cohort),
+            intake.policy,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=state.observed_at_block,
+        )
+
+
+@contextmanager
+def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
+    """Keep the intake fence held through a new legacy reservation's commit."""
 
     request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
     key, sub = digest(request), request.signed_submission.submission
@@ -135,6 +167,17 @@ def authorize_model_delivery(
     # Validation alone: do not add an incomplete model to the roster.
     with intake._connection() as (db, store):
         history = store.published_history(cohort)
+        state, pending = store.status(cohort)
+        if pending is not None and pending.is_policy_adoption:
+            raise OSError("model delivery awaits its reserved policy adoption")
+        delivery = authenticated_model_delivery(
+            history,
+            intake.policy,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=execution_boundary(capture).block,
+        )
+        if mechanism is not None and delivery.mechanism != mechanism:
+            raise ValueError("model delivery route differs from authenticated transport")
         if intake._seal(db, history, history_tip(history)) is not None:
             raise ValueError("model delivery cannot start after intake is sealed")
         admit_recovery_participant(
@@ -146,7 +189,7 @@ def authorize_model_delivery(
             expected_tip_sha256=history_tip(history),
             current_block=execution_boundary(capture).block,
         )
-    return request, key, sub
+        yield request, key, sub
 
 
 class CohortModelUploads:
@@ -186,8 +229,18 @@ class CohortModelUploads:
         self._retained_reuse = AssignmentVerificationReuse()
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
-        request, key, sub = authorize_model_delivery(self.intake, request, capture)
-        with self.journal.locked():
+        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
+        # Existing reservations retain their original request and file bindings
+        # even while adoption is pending, after adoption, or without fresh RPC.
+        prior = self.retry(request)
+        if prior is not None:
+            return prior
+        with (
+            _authorized_model_delivery(
+                self.intake, request, capture, mechanism="coordinator_chunked_v1"
+            ) as (request, key, sub),
+            self.journal.locked(),
+        ):
             prior = self.journal.get("upload", key)
             if prior is not None:
                 if prior != request.model_dump(mode="json", by_alias=True):

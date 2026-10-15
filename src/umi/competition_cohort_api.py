@@ -68,7 +68,12 @@ def cohort_routes(
                 route = getattr(models, "delivery_route", None)
                 owners = getattr(models, "owners", None)
                 if callable(route):
-                    model_route = route(cohort)
+                    try:
+                        model_route = await run_owned_thread(route, cohort)
+                    except (ValueError, OSError, sqlite3.Error) as error:
+                        raise HTTPException(
+                            503, "cohort model delivery unavailable; retry later"
+                        ) from error
                 elif owners is not None and cohort in owners:
                     model_route = {
                         "direct_model_upload_url": (

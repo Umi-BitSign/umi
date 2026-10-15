@@ -21,7 +21,17 @@ from .competition_cohort_direct_model_review import (
     DirectModelReviewSourceConfig,
     DirectModelSettlementVerifier,
 )
-from .competition_cohort_recovery import cohort_model_delivery
+from .competition_cohort_legacy_model_selection import (
+    LegacyModelStorageSelections,
+    authenticate_legacy_model_sources,
+    selected_legacy_model_readers,
+    validate_legacy_model_selections,
+)
+from .competition_cohort_model_transport_selection import (
+    ModelDeliveryAdoptionSelections,
+    requires_direct_model_review,
+    selected_direct_model_review,
+)
 from .competition_host_activation import _read_root_control_path
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
@@ -104,6 +114,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     maximum_header_database_bytes: Capacity
     runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
+    model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
+    legacy_model_storage: LegacyModelStorageSelections = ()
     predecessor_series: StandingRewardSeries | None = None
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
@@ -131,15 +143,35 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 value.pop(name, None)
         if not self.runtime_proof_reads:
             value.pop("runtime_proof_reads", None)
+        if not self.model_delivery_adoptions:
+            value.pop("model_delivery_adoptions", None)
+        if not self.legacy_model_storage:
+            value.pop("legacy_model_storage", None)
         return value
 
     @model_validator(mode="after")
     def bindings(self):
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
-        direct_selected = any(
-            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
-            for plan in self.series.cohorts
-            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        validate_legacy_model_selections(
+            self.legacy_model_storage,
+            series=self.series,
+            policy=self.policy,
+            model_delivery_adoptions=self.model_delivery_adoptions,
+        )
+        direct = self.direct_model_review
+        if (
+            self.legacy_model_storage
+            and direct is not None
+            and direct.materialization_boot_disk_cache is not None
+        ):
+            _disjoint(
+                (
+                    Path(direct.materialization_boot_disk_cache.directory),
+                    *(Path(source.directory) for source in self.legacy_model_storage),
+                )
+            )
+        direct_selected = requires_direct_model_review(
+            self.series, self.policy, self.model_delivery_adoptions
         )
         evaluators = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
         signer, proposer = identity(self.signer_hotkey), identity(self.proposer_hotkey)
@@ -233,6 +265,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                     if self.direct_model_review
                     else ()
                 ),
+                *(source.directory for source in self.legacy_model_storage),
             )
             if value is not None
         )
@@ -248,6 +281,14 @@ def load_reward_coordinator_config(path: Path) -> RewardCoordinatorConfig:
 
 async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.Event) -> None:
     config = RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
+    legacy_sources = await run_owned_thread(
+        lambda: authenticate_legacy_model_sources(
+            config.legacy_model_storage,
+            series=config.series,
+            policy=config.policy,
+            model_delivery_adoptions=config.model_delivery_adoptions,
+        )
+    )
     async with AsyncExitStack() as resources:
         root = resources.enter_context(owned_reward_state(config))
         resources.enter_context(
@@ -288,18 +329,28 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             export_archive=exported,
         )
         store = CompetitionStore(Path(config.promotion_directory), config.policy)
+        direct_artifacts = (
+            None
+            if selected_direct_model_review(config) is None
+            else DirectModelArtifactReviewer(
+                config.direct_model_review,
+                config.policy,
+                None,
+                verification_root=root / "direct-model-byte-verification",
+            )
+        )
         model_artifacts = (
             None
-            if config.direct_model_review is None
+            if direct_artifacts is None
             else DirectModelSettlementVerifier(
-                DirectModelArtifactReviewer(
-                    config.direct_model_review,
-                    config.policy,
-                    None,
-                    verification_root=root / "direct-model-byte-verification",
-                ),
+                direct_artifacts,
                 store.directory / "model-reward-artifacts",
                 root / "direct-model-reward-receipts",
+                legacy_readers=selected_legacy_model_readers(
+                    legacy_sources,
+                    multipart=direct_artifacts.multipart,
+                    verification_root=root / "legacy-model-byte-verification",
+                ),
             )
         )
         preparation = StandingRewardPreparation(

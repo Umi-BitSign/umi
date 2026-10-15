@@ -40,6 +40,7 @@ from .competition_cohort_model_upload import (
     CohortModelUploads,
     ModelUploadConfig,
     authorize_model_delivery,
+    owned_model_delivery,
 )
 from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
@@ -127,10 +128,11 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
 
 
 class CohortModelPayloadRouter:
-    """Route each immutable cohort to its signed payload mechanism."""
+    """Route current delivery from owned history; preserve reserved acceptances."""
 
-    def __init__(self, plans, *, legacy=None, direct=None):
+    def __init__(self, plans, *, legacy=None, direct=None, intake=None, acceptances=None):
         self.legacy, self.direct = legacy, direct
+        self.intake, self.acceptances = intake, acceptances
         self.mechanisms = {}
         for plan in plans:
             if plan.eligible_tracks is not None and "model" not in plan.eligible_tracks:
@@ -139,6 +141,15 @@ class CohortModelPayloadRouter:
         if not self.mechanisms:
             raise ValueError("model payload routing requires a model-enabled cohort")
         required = set(self.mechanisms.values())
+        if intake is not None:
+            # Legacy stores remain bound for original uploads and signed /1
+            # acceptances. Current delivery can additionally require R2 after
+            # an authenticated amendment over the unchanged legacy plan.
+            required.update(
+                _startup_model_delivery(intake, plan).mechanism
+                for plan in plans
+                if digest(plan) in self.mechanisms
+            )
         if ("coordinator_chunked_v1" in required) != (legacy is not None):
             raise ValueError("legacy model payload routing differs from the signed series")
         if ("direct_r2_multipart_v1" in required) != (direct is not None):
@@ -154,22 +165,65 @@ class CohortModelPayloadRouter:
     def _mechanism(self, request):
         cohort = request.consent.consent.cohort_sha256
         try:
-            return self.mechanisms[cohort]
+            original = self.mechanisms[cohort]
         except KeyError as error:
             raise ValueError("model payload request is outside the signed series") from error
+        if self.intake is None:
+            return original
+        if self.acceptances is not None:
+            sub = request.signed_submission.submission
+            intent = self.acceptances.intent(cohort, digest(sub))
+            if intent is not None:
+                body = intent.acceptance
+                if (
+                    body.cohort_sha256 != cohort
+                    or body.submission_sha256 != digest(sub)
+                    or body.model_sha256 != sub.model_revision
+                    or identity(body.recipient_hotkey) != identity(sub.hotkey)
+                ):
+                    raise ValueError("retained model acceptance differs from its request")
+                # The existing immutable intent owns its payload provenance.
+                # A later transport amendment cannot replace its signed /1
+                # source with a newly supplied direct reservation.
+                return (
+                    "coordinator_chunked_v1"
+                    if body.direct_artifact is None
+                    else "direct_r2_multipart_v1"
+                )
+        return self._current_mechanism(cohort)
+
+    def _current_mechanism(self, cohort):
+        delivery = owned_model_delivery(self.intake, cohort)
+        selected = self._payload_owner(delivery.mechanism, cohort)
+        owners = getattr(selected, "owners", None)
+        if owners is not None and owners[cohort].config.delivery != delivery:
+            raise OSError("authenticated model transport differs from its deployed owner")
+        return delivery.mechanism
+
+    def _payload_owner(self, mechanism, cohort=None):
+        selected = self.direct if mechanism == "direct_r2_multipart_v1" else self.legacy
+        owners = getattr(selected, "owners", None)
+        if selected is None or (owners is not None and cohort not in owners):
+            raise OSError("authenticated model transport awaits its supported host deployment")
+        return selected
 
     def require_payload(self, request):
         mechanism = self._mechanism(request)
-        selected = self.direct if mechanism == "direct_r2_multipart_v1" else self.legacy
-        selected.require_payload(request)
+        self._payload_owner(mechanism, request.consent.consent.cohort_sha256).require_payload(
+            request
+        )
 
     def review_artifact(self, request):
         if self._mechanism(request) != "direct_r2_multipart_v1":
             return None
-        return self.direct.review_artifact(request)
+        return self._payload_owner(
+            "direct_r2_multipart_v1", request.consent.consent.cohort_sha256
+        ).review_artifact(request)
 
     def delivery_route(self, cohort: str) -> dict[str, str]:
         mechanism = self.mechanisms.get(cohort)
+        if mechanism is not None and self.intake is not None:
+            mechanism = self._current_mechanism(cohort)
         if mechanism == "direct_r2_multipart_v1":
             return {
                 "direct_model_upload_url": (
@@ -179,6 +233,34 @@ class CohortModelPayloadRouter:
         if mechanism == "coordinator_chunked_v1":
             return {"model_upload_url": f"/v1/competition/cohorts/{cohort}/model-uploads"}
         return {}
+
+
+def _startup_model_delivery(intake, plan):
+    """Select authenticated transport before opening an owner journal.
+
+    A configured future cohort without any native admission still uses its
+    original signed profile for startup only. Missing published genesis for an
+    existing admission is damaged state, never permission to revert transport.
+    """
+    cohort = digest(plan)
+    intake._allowed(cohort)
+    with intake._connection(prefer_history=True) as (db, store):
+        admitted = db.execute(
+            "SELECT 1 FROM cohort_recovery_bindings WHERE cohort=?", (cohort,)
+        ).fetchone()
+        if admitted is None and (
+            store.has_published_history(cohort)
+            or db.execute(
+                "SELECT 1 FROM cohort_recovery_decisions WHERE cohort=? LIMIT 1", (cohort,)
+            ).fetchone()
+            or db.execute(
+                "SELECT 1 FROM cohort_consents WHERE cohort=? LIMIT 1", (cohort,)
+            ).fetchone()
+        ):
+            raise ValueError("retained cohort history is missing its recovery admission")
+    if admitted is None:
+        return cohort_model_delivery(plan)
+    return owned_model_delivery(intake, cohort, allow_pending=True)
 
 
 class ServiceAdmissionHostConfig(StrictProtocolModel):
@@ -329,7 +411,15 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 for plan in self.series.cohorts
                 if plan.eligible_tracks is None or "model" in plan.eligible_tracks
             }
-            if "direct_r2_multipart_v1" not in mechanisms or (
+            adoptable = any(
+                plan.sequence > 5
+                and (plan.eligible_tracks is None or "model" in plan.eligible_tracks)
+                and cohort_model_delivery(plan).mechanism == "coordinator_chunked_v1"
+                for plan in self.series.cohorts
+            )
+            # Config cannot authorize an amendment. Startup checks the owner's
+            # authenticated history before creating any direct issuer.
+            if ("direct_r2_multipart_v1" not in mechanisms and not adoptable) or (
                 "coordinator_chunked_v1" in mechanisms
             ) != (self.model_uploads is not None):
                 raise ValueError("configured model delivery differs from the signed series")
@@ -423,6 +513,20 @@ class ServiceAdmissionHost:
         model_authority = isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
         if (c.model_uploads or c.direct_model_uploads) and not model_authority:
             raise ValueError("model delivery requires model reward authority")
+        deliveries = (
+            {
+                digest(plan): _startup_model_delivery(intake, plan)
+                for plan in c.series.cohorts
+                if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+            }
+            if c.model_uploads or c.direct_model_uploads
+            else {}
+        )
+        needs_direct = any(
+            delivery.mechanism == "direct_r2_multipart_v1" for delivery in deliveries.values()
+        )
+        if needs_direct != (c.direct_model_uploads is not None):
+            raise ValueError("model upload host differs from owned authenticated transport")
         if c.direct_model_uploads is not None:
             direct = c.direct_model_uploads
             loaded = load_r2_credentials(Path(direct.r2_credentials_file))
@@ -432,7 +536,15 @@ class ServiceAdmissionHost:
 
             async def authorize(request):
                 observed = await capture()
-                await run_owned_thread(authorize_model_delivery, intake, request, observed)
+                await run_owned_thread(
+                    partial(
+                        authorize_model_delivery,
+                        intake,
+                        request,
+                        observed,
+                        mechanism="direct_r2_multipart_v1",
+                    )
+                )
 
             async def sign(body):
                 return await run_owned_thread(sign_object, body, direct_signer_key)
@@ -441,7 +553,7 @@ class ServiceAdmissionHost:
             for plan in c.series.cohorts:
                 if plan.eligible_tracks is not None and "model" not in plan.eligible_tracks:
                     continue
-                delivery = cohort_model_delivery(plan)
+                delivery = deliveries[digest(plan)]
                 if delivery.mechanism != "direct_r2_multipart_v1":
                     continue
                 cohort = digest(plan)
@@ -501,7 +613,11 @@ class ServiceAdmissionHost:
         )
         if self.uploads is not None or self.direct_uploads is not None:
             self.payloads = CohortModelPayloadRouter(
-                c.series.cohorts, legacy=self.uploads, direct=self.direct_uploads
+                c.series.cohorts,
+                legacy=self.uploads,
+                direct=self.direct_uploads,
+                intake=intake,
+                acceptances=self.models.owner,
             )
         if c.model_review_peers:
             groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}

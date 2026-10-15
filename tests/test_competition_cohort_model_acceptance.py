@@ -18,6 +18,7 @@ from umi.competition_cohort_direct_model_upload import (
     SignedDirectModelUploadReservation,
     direct_model_object_key,
 )
+from umi.competition_cohort_history import verify_cohort_history
 from umi.competition_cohort_intake import (
     CohortIntake,
     CohortIntakeBinding,
@@ -32,12 +33,15 @@ from umi.competition_cohort_model_acceptance import (
     ModelAcceptancePublication,
     ModelArtifactReviewInputs,
     ModelReviewRequest,
+    verify_model_acceptance,
 )
 from umi.competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
 from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
+from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
+from umi.competition_cohort_recovery import ModelDeliveryProfile, propose_recovery_transition
 from umi.competition_cohort_settlement_preparation import SettlementArtifactPreparation
 from umi.open_competition import digest, identity, sign_object
 from umi.private_files import publish_private_model, read_private_model
@@ -51,7 +55,7 @@ from .test_competition_cohort_model_award import policy as policy
 from .test_competition_cohort_model_award import receipt_scenario as receipt_scenario
 from .test_competition_cohort_model_award import recovery as recovery
 from .test_competition_cohort_model_award import runtime as runtime
-from .test_competition_cohort_recovery import signatures
+from .test_competition_cohort_recovery import signatures, signed_transition
 from .test_competition_cohort_roster import retained
 from .test_open_competition import wallet
 
@@ -94,6 +98,31 @@ def prepared(tmp_path, receipt_scenario, runtime):
         reconstruction_evidence={"fixture": "independent offline reconstruction"},
     )
     return owner, digest(h.plan), tuple(subs), inputs
+
+
+def adopt_direct_transport(intake, cohort, *, block=211, part_size_bytes=5 * 1024**2):
+    """Synthetic signed amendment; production dual-fence/inventory is separate."""
+    history = intake.history(cohort)
+    proposal = prepare_model_delivery_adoption(
+        history,
+        intake.policy,
+        expected_tip_sha256=history_tip(history),
+        current_block=block,
+        delivery=ModelDeliveryProfile(
+            schema="umi-model-delivery-profile/1",
+            mechanism="direct_r2_multipart_v1",
+            part_size_bytes=part_size_bytes,
+            maximum_concurrent_parts=4,
+            capability_ttl_seconds=3600,
+        ),
+        legacy_inventory_sha256="31" * 32,
+        preservation_inventory_sha256="32" * 32,
+    )
+    amended = history.model_copy(
+        update={"transitions": (*history.transitions, signed_transition(proposal))}
+    )
+    intake.publish(amended, capture_at(block))
+    return amended
 
 
 def certify(owner, cohort, sub, inputs, *, block=220, names=("Charlie", "Dave")):
@@ -410,10 +439,22 @@ def test_missing_payload_cannot_reserve_a_model_position(prepared):
     assert owner.intent(cohort, digest(subs[0])) is None
 
 
+@pytest.mark.parametrize("recovery", ["legacy6"], indirect=True)
+@pytest.mark.parametrize("transport", ["adopted", "unadopted", "wrong_profile"])
 def test_direct_acceptance_retains_exact_owner_reservation_without_local_archive(
-    prepared, tmp_path
+    prepared, tmp_path, transport
 ):
     owner, cohort, subs, inputs = prepared
+    original_plan = canonical_json_bytes(owner.intake.history(cohort).plan)
+    legacy = certify(owner, cohort, subs[1], inputs, block=210)
+    owner.publish(legacy, capture_at(210))
+    legacy_bytes = canonical_json_bytes(legacy)
+    if transport != "unadopted":
+        adopt_direct_transport(
+            owner.intake,
+            cohort,
+            part_size_bytes=(6 if transport == "wrong_profile" else 5) * 1024**2,
+        )
     retained = {}
     verified = []
 
@@ -459,6 +500,12 @@ def test_direct_acceptance_retains_exact_owner_reservation_without_local_archive
         verify_request=lambda request: verified.append(digest(request)),
         review_artifact=artifact,
     )
+    if transport != "adopted":
+        with pytest.raises(ValueError, match="authenticated transport profile"):
+            certify(direct, cohort, subs[0], inputs)
+        assert direct.intent(cohort, digest(subs[0])) is None
+        assert not verified  # No remote payload work for an unauthorized transport.
+        return
     publication = certify(direct, cohort, subs[0], inputs)
     acceptance = publication.certificate.acceptance
     assert acceptance.schema_ == "umi-cohort-model-artifact-acceptance/2"
@@ -483,6 +530,34 @@ def test_direct_acceptance_retains_exact_owner_reservation_without_local_archive
         == acceptance.direct_artifact
     )
     assert resumed.export(cohort, digest(subs[0]), tmp_path / "resumed-export") == publication
+
+    # Later authenticated phases must not be mistaken for an acceptance deadline.
+    history = owner.intake.history(cohort)
+    state = verify_cohort_history(
+        history, owner.intake.policy, expected_tip_sha256=history_tip(history), current_block=220
+    ).state
+    closing = signed_transition(
+        propose_recovery_transition(
+            state,
+            history.authority.authority,
+            operation="close_phase",
+            observed_at_block=300,
+            evidence_sha256="35" * 32,
+        )
+    )
+    later = history.model_copy(update={"transitions": (*history.transitions, closing)})
+    for accepted in (publication, legacy):
+        body = accepted.certificate.acceptance
+        record = owner.review_request(cohort, body.submission_sha256).record
+        verify_model_acceptance(
+            accepted.certificate,
+            record,
+            later,
+            owner.intake.policy,
+            maximum_block=body.accepted_at_block,
+        )
+    assert canonical_json_bytes(legacy) == legacy_bytes
+    assert canonical_json_bytes(later.plan) == original_plan
 
 
 def test_concurrent_identical_proposals_keep_one_position(prepared, monkeypatch):

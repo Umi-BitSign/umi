@@ -21,6 +21,10 @@ from .competition_cohort_direct_model_review import (
     DirectModelSettlementVerifier,
 )
 from .competition_cohort_direct_model_upload import preserved_model_object_key
+from .competition_cohort_legacy_model_settlement import (
+    LegacyModelSettlementVerification,
+    check_legacy_settlement_metadata,
+)
 from .competition_reward_coverage_model_ledger import (
     ModelDependencyQualification,
     QualificationLedger,
@@ -34,6 +38,7 @@ from .private_files import private_path, publish_private_model, read_private_mod
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 
 ABI = "umi-coverage-model-dependencies/1"
+REMOTE_ABI = "umi-coverage-model-dependencies/2"
 
 
 class CoverageModelDependencyRepairRequired(ValueError):
@@ -75,17 +80,38 @@ class CoverageModelDependency(StrictProtocolModel):
         return self
 
 
+class LegacyCoverageModelDependency(StrictProtocolModel):
+    cohort_sha256: Hex32
+    submission_sha256: Hex32
+    authority_sha256: Hex32
+    receipt: LegacyModelSettlementVerification
+
+    @model_validator(mode="after")
+    def original_participant(self):
+        if (self.cohort_sha256, self.submission_sha256) != (
+            self.receipt.cohort_sha256,
+            self.receipt.submission_sha256,
+        ):
+            raise ValueError("coverage legacy dependency changes its original participant")
+        return self
+
+
 class CoverageModelDependencies(StrictProtocolModel):
-    schema_: Literal["umi-coverage-model-dependencies/1"] = Field(alias="schema")
-    mode: Literal["not_selected", "empty", "native_required", "direct"]
+    schema_: Literal["umi-coverage-model-dependencies/1", "umi-coverage-model-dependencies/2"] = (
+        Field(alias="schema")
+    )
+    mode: Literal["not_selected", "empty", "native_required", "direct", "remote"]
     context: ModelDependencyContext | None
-    items: tuple[CoverageModelDependency, ...] = ()
+    items: tuple[CoverageModelDependency | LegacyCoverageModelDependency, ...] = ()
 
     @model_validator(mode="after")
     def selected_shape(self):
         if (
             (self.mode == "not_selected") != (self.context is None)
-            or (self.mode == "direct") != bool(self.items)
+            or (self.mode in {"direct", "remote"}) != bool(self.items)
+            or (self.schema_ == REMOTE_ABI) != (self.mode == "remote")
+            or (self.mode == "remote")
+            != any(isinstance(v, LegacyCoverageModelDependency) for v in self.items)
             or len({(v.cohort_sha256, v.submission_sha256) for v in self.items}) != len(self.items)
         ):
             raise ValueError("coverage model dependency selection differs")
@@ -254,7 +280,7 @@ def check_coverage_model_metadata(value: CoverageModelDependencies):
     check. Private original metadata and durable observed-damage holds remain
     dependencies when a caller later credits an already issued endpoint.
     """
-    if value.mode != "direct":
+    if value.mode not in {"direct", "remote"}:
         return
     owner = value.context
     try:
@@ -279,12 +305,14 @@ def check_coverage_model_metadata(value: CoverageModelDependencies):
             if (
                 read_private_model(
                     _receipt_path(owner, item),
-                    DirectModelSettlementVerification,
+                    type(item.receipt),
                     maximum_bytes=64 * 1024,
                 )
                 != item.receipt
             ):
                 raise ValueError("coverage model receipt changed")
+            if isinstance(item, LegacyCoverageModelDependency):
+                check_legacy_settlement_metadata(owner.receipts, item.receipt)
             _qualification(owner, owner, item, required=True)
         except CoverageModelDependencyRepairRequired:
             raise
@@ -310,22 +338,30 @@ async def _check_item(verifier, item, *, context=None, repairing=False):
         retained = await run_owned_thread(
             partial(read_private_model, maximum_bytes=64 * 1024),
             _receipt_path(verifier, item),
-            DirectModelSettlementVerification,
+            type(item.receipt),
         )
         if retained != item.receipt:
             raise ValueError("coverage model receipt changed")
-        head = await verifier.artifacts.multipart.head(item.object_key)
-        if head is None or (head.size_bytes, head.etag) != (
-            item.receipt.total_bytes,
-            item.receipt.provider_etag,
-        ):
-            raise ValueError("coverage model object generation changed")
+        if isinstance(item, LegacyCoverageModelDependency):
+            legacy = verifier.legacy_for(item.cohort_sha256)
+            if legacy is None:
+                raise ValueError("coverage legacy R2 selection is missing")
+            if legacy.authenticated.legacy.authority_sha256 != item.authority_sha256:
+                raise ValueError("coverage legacy authority changed")
+            await legacy.check_receipt(verifier.receipts, item.receipt)
+        else:
+            head = await verifier.artifacts.multipart.head(item.object_key)
+            if head is None or (head.size_bytes, head.etag) != (
+                item.receipt.total_bytes,
+                item.receipt.provider_etag,
+            ):
+                raise ValueError("coverage model object generation changed")
         # Observe mutation during the HEAD await before issuing a restored fact.
         if (
             await run_owned_thread(
                 partial(read_private_model, maximum_bytes=64 * 1024),
                 _receipt_path(verifier, item),
-                DirectModelSettlementVerification,
+                type(item.receipt),
             )
             != retained
         ):
@@ -358,6 +394,21 @@ async def _qualify_item(verifier, context, item, participant, certificate, *, re
         raise CoverageModelDependencyRepairRequired(
             "coverage model qualification requires original metadata repair"
         ) from error
+    if isinstance(item, LegacyCoverageModelDependency):
+        # The new receipt already binds authenticated legacy provenance and the
+        # independent full-byte result. It needs no historical /2 qualification
+        # migration or reinterpretation under today's standing-review policy.
+        legacy = verifier.legacy_for(item.cohort_sha256)
+        if legacy is None:
+            raise CoverageModelDependencyRepairRequired("coverage legacy R2 selection is missing")
+        await legacy.check_receipt(verifier.receipts, item.receipt)
+        value = ModelDependencyQualification(
+            schema="umi-coverage-model-qualification/1",
+            context_sha256=digest(context),
+            dependency_sha256=digest(item),
+        )
+        await run_owned_thread(_publish_qualification, verifier, context, item, value)
+        return
     request = verifier._request(participant, certificate)
     with TransferProgress(
         "coverage_model_qualification_migration", item.receipt.total_bytes, unit="bytes"
@@ -408,6 +459,17 @@ def _selected_participants(package, certificates):
 
 
 def _snapshot_item(verifier, participant, certificate):
+    if certificate.acceptance.direct_artifact is None:
+        legacy = verifier.legacy_for(certificate.acceptance.cohort_sha256)
+        if legacy is None:
+            raise CoverageModelDependencyRepairRequired("legacy R2 storage is not selected")
+        receipt = legacy.verify_candidate(participant, certificate, verifier.receipts)
+        return LegacyCoverageModelDependency(
+            cohort_sha256=certificate.acceptance.cohort_sha256,
+            submission_sha256=certificate.acceptance.submission_sha256,
+            authority_sha256=certificate.acceptance.authority_sha256,
+            receipt=receipt,
+        )
     request = verifier._request(participant, certificate)
     _, _, key = verifier.artifacts._source(request, preserved=True)
     receipt = read_private_model(
@@ -452,14 +514,25 @@ async def capture_coverage_model_dependencies(
     certificates = () if award is None else award.acceptances
     if not certificates:
         mode, items = "empty", []
-    elif type(package) is RetainedCoveragePackage or any(
-        c.acceptance.direct_artifact is None for c in certificates
+    elif type(package) is RetainedCoveragePackage or (
+        any(
+            c.acceptance.direct_artifact is None
+            and verifier.legacy_for(c.acceptance.cohort_sha256) is None
+            for c in certificates
+        )
     ):
         # Older preserved directory bundles still execute their original native
         # model path on each replay. Never reinterpret them as remotely verified.
         mode, items = "native_required", []
     else:
-        mode, items = "direct", []
+        mode, items = (
+            (
+                "remote"
+                if any(c.acceptance.direct_artifact is None for c in certificates)
+                else "direct"
+            ),
+            [],
+        )
         participants = _selected_participants(package, certificates)
         async with verifier.serial:
             with TransferProgress(
@@ -488,7 +561,12 @@ async def capture_coverage_model_dependencies(
                     progress.advance(1, restored=True)
     if await run_owned_thread(_context, verifier) != context:
         raise CoverageModelDependencyRepairRequired("coverage model owner changed during capture")
-    value = CoverageModelDependencies(schema=ABI, mode=mode, context=context, items=tuple(items))
+    value = CoverageModelDependencies(
+        schema=REMOTE_ABI if mode == "remote" else ABI,
+        mode=mode,
+        context=context,
+        items=tuple(items),
+    )
     return value.model_dump(mode="json", by_alias=True)
 
 

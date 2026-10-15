@@ -13,6 +13,11 @@ from .competition_cohort_direct_model_review import (
     DirectModelSettlementVerifier,
 )
 from .competition_cohort_execution_journal import CohortExecutionJournal
+from .competition_cohort_legacy_model_selection import (
+    authenticate_legacy_model_sources,
+    selected_legacy_model_readers,
+)
+from .competition_cohort_model_transport_selection import selected_direct_model_review
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
@@ -96,6 +101,14 @@ def settlement_store(root: Path, maximum_bytes: int):
 
 async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.Event):
     config = SettlementServiceConfig.model_validate_json(canonical_json_bytes(config))
+    legacy_sources = await run_owned_thread(
+        lambda: authenticate_legacy_model_sources(
+            config.legacy_model_storage,
+            series=config.series,
+            policy=config.policy,
+            model_delivery_adoptions=config.model_delivery_adoptions,
+        )
+    )
     root = Path(config.state_directory) / digest(config.series)
     ensure_private_directory(root)
     descriptor = lock_private_file(root / "service.lock")
@@ -134,12 +147,21 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         promotion = CompetitionStore(Path(config.promotion_directory), config.policy)
         direct_artifacts = (
             None
-            if config.direct_model_review is None
+            if selected_direct_model_review(config) is None
             else DirectModelArtifactReviewer(
                 config.direct_model_review,
                 config.policy,
                 config.proposer_hotkey,
                 verification_root=root / "direct-model-byte-verification",
+            )
+        )
+        legacy_readers = (
+            None
+            if direct_artifacts is None
+            else selected_legacy_model_readers(
+                legacy_sources,
+                multipart=direct_artifacts.multipart,
+                verification_root=root / "legacy-model-byte-verification",
             )
         )
         nodes = []
@@ -155,6 +177,7 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                     direct_artifacts,
                     promotion.directory / "model-reward-artifacts",
                     root / digest(plan) / "direct-model-settlement-receipts",
+                    legacy_readers=legacy_readers,
                 )
             )
             if model_artifacts is not None:

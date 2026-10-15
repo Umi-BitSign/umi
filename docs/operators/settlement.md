@@ -1281,9 +1281,16 @@ private verification record. Later completion passes and restarted uploaders
 reuse it while other files are still arriving. These temporary records are
 removed with the upload staging tree after the complete archive is preserved.
 
-For a cohort whose signed model-delivery profile selects direct R2 multipart
+For a cohort whose authenticated history selects direct R2 multipart
 delivery, acceptance version 2 also carries the owner's signed immutable R2
-reservation. Before publishing acceptance, the owner uses server-side multipart
+reservation. Direct acceptance checks the authenticated transport profile at the
+original acceptance block, including its multipart geometry. A later transport
+amendment cannot retroactively authorize an earlier direct acceptance. Reviewers
+check this before fetching remote bytes and again before signing. Retained
+version 1 acceptances keep their original source and signed bytes after a transport
+amendment; a final history selecting R2 does not convert them into direct
+reservations. Configuring an R2 reader alone does not authorize direct delivery.
+Before publishing acceptance, the owner uses server-side multipart
 copy to place the verified payload at
 `preservation/v1/<cohort>/<model>/<payload>/payload`, rereads and verifies every
 byte, retains a promotion receipt, and deletes the exact incoming object. A
@@ -2347,7 +2354,10 @@ replace native recovery qualification.
 ## Model delivery before recoverable enrollment
 
 `umi-cohort-service-admission-host/9` selects `direct_model_uploads` for cohorts
-whose signed plan uses `direct_r2_multipart_v1`. The host reads one private R2
+whose authenticated transport uses `direct_r2_multipart_v1`. This comes from the
+original signed plan or a committed, published model-delivery adoption in the
+same cohort's recovery history. Installing R2 configuration alone does not change
+transport authority. The host reads one private R2
 credential export, issues short-lived capabilities for exact multipart part
 numbers and sizes, and retains only signed declarations, provider identifiers,
 ETags and verification receipts. Model bytes travel from the miner to private
@@ -2364,16 +2374,61 @@ non-linked owner-private file containing exactly `TOKEN_VALUE`, `ACCESS_KEY_ID`,
 `SECRET_ACCESS_KEY` and `DEFAULT_ENDPOINT`; the account token is ignored by this
 runtime. The endpoint must be the account's HTTPS R2 S3 origin. Keep the direct
 metadata journal, R2 objects and review records across restart or migration.
-Only the signed cohort plan selects direct delivery parameters, so later cohort
-changes do not require a new miner command.
+The public delivery-discovery route resolves the owner's authenticated published
+history. New reservations additionally require fresh finalized-chain authority.
+An unfinished adoption fences new reservations and acceptance intents; the legacy
+reservation holds that fence through its journal commit. Missing or inconsistent
+retained recovery state requires repair rather than fallback to the original
+profile.
 
 A standing series can contain both an older `coordinator_chunked_v1` cohort and
 a successor direct-R2 cohort. In that case version nine carries both
-`model_uploads` and `direct_model_uploads`. The immutable plan digest routes each
-request to exactly one mechanism; the legacy journal and archive remain
+`model_uploads` and `direct_model_uploads`. The immutable cohort identity selects
+the history used to route each new request. Original legacy upload reservations
+remain retryable after adoption, and a retained acceptance intent is loaded before
+consulting current transport callbacks. Its signed request, acceptance ordinal,
+documents and signatures remain unchanged. The legacy journal and archive remain
 available for unfinished older delivery while successor bytes bypass the host.
 If every model-enabled plan in the installed series is direct, omit
 `model_uploads`.
+
+An in-place adoption for an already admitted legacy cohort preserves the original
+plan, cohort identity, clocks and state directories. It binds separate legacy and
+preservation inventories, verified under the intake and upload owner fences before
+signing. Adoption does not itself migrate old archives, release reservations or
+authorize eviction. Keep the original artifacts and consumer bindings until their
+supported storage migration and restore qualification complete.
+
+To select authenticated storage for those original `/1` models, set
+`legacy_model_storage` on the phase reviewer, settlement, reward coordinator and
+standing writer configurations. It is a cohort-sorted list of
+`umi-legacy-model-storage-source/1` entries with `cohort_sha256`, `directory`,
+`baseline_model_sha256` and sorted `incumbent_model_sha256s`. Obtain the baseline
+and incumbent pins from the actual selected rounds and migration census. Each
+private directory contains `legacy-inventory.json`,
+`preservation-inventory.json` and exact raw originals at `objects/<sha256>.json`.
+The list must cover every selected committed adoption. Startup authenticates
+these inventories and original metadata before opening its service state or
+signing keys, then binds the source to the actual R2 credential namespace.
+Missing or damaged metadata requires repair. Empty older configurations retain
+their native archive behavior; they do not establish an R2 storage migration.
+
+Settlement and series-wide reward consumers select the reader by the original
+certificate's cohort. Thus an adopted C6 can use R2 while C5 retains its existing
+archive and clocks. Keep `legacy-model-byte-verification` in private durable
+service state, separate from every disposable cache. This selection does not
+create replacement acceptances or reinterpret old rights approvals.
+
+For original `/1` requests, the phase reviewer still requires its independent
+private rights and reconstruction approval before checking the selected remote
+bytes. It retains the original request, intent, vote and journal bindings; a
+completed vote is reusable after restart without fetching the model again. The
+benchmark host requires that same private intent and uses the authenticated
+legacy source for the candidate and explicitly pinned baseline or incumbent.
+All share the bounded one-model cache and its invocation leases. Keep source
+metadata directories outside the entire disposable cache root, not merely
+outside its current working directory. Missing originals or private approvals
+require repair; an R2 inventory cannot substitute for either.
 
 Each independent `umi-cohort-phase-review-service/7` receives a read-only R2
 credential and the same standing review policy. It authenticates the owner's
@@ -2414,16 +2469,28 @@ waiting and eviction report counts, elapsed time, ETA basis and retry/stall stat
 Before writing, the remaining new allocation plus
 `materialization_free_space_reserve_bytes` must be free. Verified retained files
 and complete files requiring local receipt repair need no second allocation;
-owned partial files are reclaimed before capacity is measured again. The
-baseline remains in the pinned local archive. Put the benchmark workspace on a
-dedicated quota-controlled scratch filesystem. Source schema 2 binds
+owned partial files are reclaimed before capacity is measured again. Without an
+authenticated legacy source, the baseline remains in the pinned local archive.
+An explicitly selected and qualified legacy source restores its pinned baseline
+through the same bounded cache. Source schema 2 supports a dedicated quota-controlled scratch
+filesystem or an explicitly selected bounded boot-disk cache. The default binds
 `materialization_filesystem_maximum_bytes` and at least one
 `materialization_protected_roots` entry. List every validator/coordinator state,
 evidence and journal filesystem in that tuple. Before writing, the reviewer
 requires the scratch device to differ from every listed device and requires the
 filesystem's total capacity to fit the configured maximum. This makes a bounded
-volume or filesystem quota a runtime prerequisite. Capacity exhaustion delays
-work; it never sends candidate bytes to a protected filesystem.
+volume or filesystem quota a prerequisite for the default mode.
+
+To use the boot filesystem, explicitly select `materialization_boot_disk_cache`
+with schema `umi-boot-disk-model-cache/1`, one private `directory`, and
+`maximum_allocated_bytes`. Place every model cache sharing that account and
+filesystem beneath the same allocation root so transfers share its filesystem
+lock. Keep verification receipts, journals and protected roots outside it. This
+mode bounds aggregate cache allocation and rechecks actual free-space reserve
+before every write; separate cache roots do not share that mutex. Existing
+candidate invocation leases still govern replacement and eviction. Capacity
+exhaustion retains completed files for retry. Omitting the option preserves the
+historical configuration bytes and separate-filesystem requirement.
 
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
 the selected recovery interval. A part-level provider `404` causes the miner to
@@ -2483,7 +2550,16 @@ generation. Restore checks those small receipts and object HEADs without loading
 model weights or the reward package. Older receipts lacking these bindings receive
 an explicitly reported first native qualification; existing durable byte checks
 remain reusable. Older directory-based model acceptances retain their original
-native path. Observed receipt or generation damage stays held even if the original
+native path unless their authenticated legacy R2 source is explicitly selected.
+For selected legacy models, retain `legacy-completions/` and
+`legacy-byte-snapshots/` under the original settlement or reward receipt root.
+The independent completion can restore an exactly missing small settlement
+receipt after its chunk generations are checked. Missing or damaged completion
+seals or byte snapshots require restoration; they never trigger a silent full
+model reread. Existing native-required coverage can migrate to authenticated
+remote dependencies only after the same original owner prepares the unchanged
+package, preserving its previous immutable completion.
+Observed receipt or generation damage stays held even if the original
 later reappears, until explicit scoped repair succeeds.
 
 Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
@@ -2495,6 +2571,50 @@ metadata requires restoration in place. Intact older qualifiers receive a counte
 metadata-only migration without rewriting their bytes or loading model payloads.
 Retain this migration while supported owners still have qualifiers without the
 completion ledger; its private capability refuses reservation-layout changes.
+
+Per-acceptance transport authorization retains a permanent
+`model_transport_authorization_ledger` alongside its qualification pair in the
+original intake or reviewer journal. Intake stores the ledger under
+`completion:<acceptance digest>` in its existing capacity-accounted qualification
+table. Keep this ledger as durable owner state: losing both pair records requires
+explicit repair and never starts an ordinary first qualification. The owner's
+`repair_transport_qualification(cohort, submission, reason=...)` restores the
+small records from an intact ledger and retains an immutable repair audit, without
+repeating the successful transport predicate or reading model bytes. The reviewer
+provides the same method asynchronously. Original signed requests, intents, votes,
+certificates and acceptance blocks remain unchanged.
+
+An older qualification pair without the ledger requires that explicit method
+before cutover. It checks the original historical transport once and atomically
+adds the completion and audit without rewriting the intact pair. Keep this
+migration while supported owner or reviewer journals still contain pre-ledger
+pairs. A completely new qualification writes its pair and ledger atomically;
+failed capacity checks leave neither a partial pair nor a false completion.
+Do not discard ledger or journal state to force a new first pass. These are native
+owner APIs; this surface does not add an operator repair CLI.
+
+Package transport authorization has a separate
+`umi-package-model-transport-authorization/1` scope under the preparation owner's
+native verification directory. Keep `model-transport/` and its adjacent
+`model-transport-owner.json` together. The immutable completion ledger records the
+exact direct-acceptance inventory, including a verified empty inventory for
+packages without direct acceptances. An older `not_selected` model-dependency
+receipt does not establish that inventory. Supported older coverage loads the
+original package metadata once to qualify its historical transport, preserving
+completed native endpoints, block checks and model-byte verification. Normal
+restoration then uses the small qualification without loading the package.
+Later transport adoption cannot authorize an earlier direct acceptance.
+
+For damage confined to the supplementary record, the original native source's
+`repair_model_transport(key, reason=...)` restores its exact completed metadata
+from the immutable ledger and retains an audit of the damaged bytes. It does not
+repeat package scoring, block proofs or model downloads. Missing or damaged
+owner/ledger state requires scoped restoration in place; do not delete or recreate
+the directory to turn damaged completion into a first-time qualification. This migration remains
+necessary while supported owners have completed packages predating this scope.
+Repair-required progress withdraws its ETA and remains the final status until
+repair. Interrupted atomic qualification reports retrying and preserves any
+committed completion for the next attempt.
 
 Missing or damaged completed results require explicit scoped repair. After exact
 original inputs are restored, `NativeRewardCoverageSource.repair(key, reason=...)`

@@ -35,6 +35,7 @@ from umi.private_files import publish_private_model, read_private_model
 from umi.protocol import canonical_json_bytes, sha256_hex
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
+from .test_competition_cohort_model_acceptance import adopt_direct_transport
 from .test_competition_cohort_model_acceptance import base_policy as base_policy
 from .test_competition_cohort_model_acceptance import legacy_scenario as legacy_scenario
 from .test_competition_cohort_model_acceptance import policy as policy
@@ -60,8 +61,10 @@ class ReadOnlyObject:
         self.etag = "read-only-object"
         self.replace_on_read = False
         self.ranges_read = 0
+        self.heads_read = 0
 
     async def head(self, key, *, at=None):
+        self.heads_read += 1
         assert key == self.key
         return SimpleNamespace(size_bytes=len(self.payload), etag=self.etag)
 
@@ -76,7 +79,20 @@ class ReadOnlyObject:
 
 
 @pytest.mark.asyncio
-async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, monkeypatch):
+@pytest.mark.parametrize("recovery", ["legacy6"], indirect=True)
+@pytest.mark.parametrize(
+    "authorization", ["adopted", "unadopted", "later_adoption", "wrong_profile"]
+)
+async def test_reviewer_independently_verifies_owner_bound_r2_object(
+    reviews, monkeypatch, authorization
+):
+    if authorization != "unadopted":
+        adopt_direct_transport(
+            reviews.owner.intake,
+            reviews.cohort,
+            block=221 if authorization == "later_adoption" else 211,
+            part_size_bytes=(6 if authorization == "wrong_profile" else 5) * 1024**2,
+        )
     request = reviews.request
     submission = request.record.request.signed_submission.submission
     bundle = submission.model_bundle
@@ -154,6 +170,16 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, mo
         multipart=source,
     )
 
+    if authorization != "adopted":
+        reviewer = reviews.create("Charlie")
+        reviewer.direct_review = verifier.review
+        with pytest.raises(ValueError, match="authenticated transport profile"):
+            await reviewer.attest(direct_request)
+        assert source.heads_read == source.ranges_read == 0
+        assert not reviews.state.signing
+        assert not reviewer.journal.keys("model_request")
+        assert not reviewer.journal.keys("model_vote")
+        return
     result = await verifier.review(direct_request)
 
     portable = DirectModelArtifactReviewer(
@@ -325,6 +351,58 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(reviews, mo
         await restarted.materialize(direct_request, interrupted_cache)
         assert await restarted.materialized(direct_request, interrupted_cache)
     shutil.rmtree(interrupted_cache)
+
+    # The supported boot-disk mode uses a real shared filesystem and durable
+    # receipts outside its disposable root. Interrupted transfer, process
+    # restart and eviction preserve completed remote checks and signed inputs.
+    boot_root = reviews.root / "boot-cache"
+    boot_config = verifier.config.model_copy(
+        update={
+            "materialization_boot_disk_cache": direct_review.BootDiskModelCacheConfig(
+                schema="umi-boot-disk-model-cache/1",
+                directory=str(boot_root),
+                maximum_allocated_bytes=96 * 1024**3,
+            )
+        }
+    )
+    for unsafe_state in (None, boot_root / "verification"):
+        with pytest.raises(ValueError, match="disjoint durable verification"):
+            DirectModelArtifactReviewer(
+                boot_config,
+                verifier.policy,
+                verifier.owner_hotkey,
+                multipart=source,
+                verification_root=unsafe_state,
+            )
+
+    def boot_reviewer():
+        return DirectModelArtifactReviewer(
+            boot_config,
+            verifier.policy,
+            verifier.owner_hotkey,
+            multipart=source,
+            verification_root=durable_root,
+        )
+
+    signed_before = canonical_json_bytes(direct_request)
+    boot_archive = boot_root / "archive"
+    with monkeypatch.context() as patch:
+        patch.setattr(direct_review, "_filesystem_device", lambda path: path.stat().st_dev)
+        patch.setattr(direct_review, "_filesystem_usage", shutil.disk_usage)
+        patch.setattr(source, "read_range", interrupt_second_file)
+        with pytest.raises(OSError, match="interrupted materialization transfer"):
+            await boot_reviewer().materialize(direct_request, boot_archive)
+    assert await boot_reviewer().resumable(direct_request, boot_archive)
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", remaining_files_only)
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        await boot_reviewer().materialize(direct_request, boot_archive)
+        assert await boot_reviewer().materialized(direct_request, boot_archive)
+    reads_before_eviction = source.ranges_read
+    shutil.rmtree(boot_archive)
+    assert (await boot_reviewer().verify(direct_request, preserved=True))[0] == result
+    assert source.ranges_read == reads_before_eviction
+    assert canonical_json_bytes(direct_request) == signed_before
 
     changed = next(record for record in bundle.files if record.size_bytes)
     changed_path = materialized / digest(bundle) / "model" / changed.path

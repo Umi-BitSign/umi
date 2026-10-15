@@ -10,7 +10,15 @@ from .competition_cohort_capacity import AggregateEvidenceCapacity
 from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_execution_journal import CohortExecutionConfig
 from .competition_cohort_intake import CohortIntakeConfig
-from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
+from .competition_cohort_legacy_model_selection import (
+    LegacyModelStorageSelections,
+    validate_legacy_model_selections,
+)
+from .competition_cohort_model_transport_selection import (
+    ModelDeliveryAdoptionSelections,
+    requires_direct_model_review,
+)
+from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import ObjectCapacity, _disjoint
@@ -83,6 +91,8 @@ class SettlementServiceConfig(StrictProtocolModel):
     original_sources: SettlementOriginalSources | None = None
     request_export_directory: Directory | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None
+    model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
+    legacy_model_storage: LegacyModelStorageSelections = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -99,6 +109,10 @@ class SettlementServiceConfig(StrictProtocolModel):
             value.pop("request_export_directory", None)
         if self.direct_model_review is None:
             value.pop("direct_model_review", None)
+        if not self.model_delivery_adoptions:
+            value.pop("model_delivery_adoptions", None)
+        if not self.legacy_model_storage:
+            value.pop("legacy_model_storage", None)
         return value
 
     def stores(self):
@@ -124,6 +138,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                     if self.direct_model_review
                     else ()
                 ),
+                *(source.directory for source in self.legacy_model_storage),
             )
         )
 
@@ -148,10 +163,26 @@ class SettlementServiceConfig(StrictProtocolModel):
             }
         ) != (self.request_export_directory is not None):
             raise ValueError("automatic request exports require configuration version 3")
-        direct_selected = any(
-            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
-            for plan in self.series.cohorts
-            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        validate_legacy_model_selections(
+            self.legacy_model_storage,
+            series=self.series,
+            policy=self.policy,
+            model_delivery_adoptions=self.model_delivery_adoptions,
+        )
+        direct = self.direct_model_review
+        if (
+            self.legacy_model_storage
+            and direct is not None
+            and direct.materialization_boot_disk_cache is not None
+        ):
+            _disjoint(
+                (
+                    Path(direct.materialization_boot_disk_cache.directory),
+                    *(Path(source.directory) for source in self.legacy_model_storage),
+                )
+            )
+        direct_selected = requires_direct_model_review(
+            self.series, self.policy, self.model_delivery_adoptions
         )
         if (self.schema_ == "umi-cohort-settlement-config/4") != direct_selected or (
             direct_selected != (self.direct_model_review is not None)

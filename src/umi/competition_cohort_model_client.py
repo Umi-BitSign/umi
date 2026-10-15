@@ -21,11 +21,12 @@ from .competition_client import (
     validate_intake_origin,
 )
 from .competition_cohort_client import submit_cohort_participation
-from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
+from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake import history_tip
+from .competition_cohort_model_transport import authenticated_model_delivery
 from .competition_cohort_model_upload import CHUNK_BYTES, ModelUploadChunk
 from .competition_cohort_participation import CohortParticipationReceipt, CohortParticipationRequest
-from .competition_cohort_recovery import ModelDeliveryProfile, cohort_model_delivery
+from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_source_verification import verify_model_source
 from .competition_transport_verification import TransferProgress, current_progress
 from .concurrency import run_owned_thread
@@ -244,15 +245,14 @@ async def fetch_model_delivery_profile(
                     ),
                 )
             )
-            verify_cohort_history(
+            if digest(history.plan) != cohort_sha256:
+                raise ValueError("cohort history identity differs")
+            result = authenticated_model_delivery(
                 history,
                 policy,
                 expected_tip_sha256=history_tip(history),
                 current_block=current,
             )
-            if digest(history.plan) != cohort_sha256:
-                raise ValueError("cohort history identity differs")
-            result = cohort_model_delivery(history.plan)
             progress.advance(1)
             return result
         except ValueError as error:

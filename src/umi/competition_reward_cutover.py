@@ -190,7 +190,7 @@ class NativeRewardCutoverReview:
         self.decisions, self.transactions, self.files = decisions, transactions, files
         self.operation = operation
         self.bootstrap_manifest = bootstrap_manifest
-        self._recovery_started = time.monotonic()
+        self._recovery_sample = None
         binding = {
             "schema": "umi-standing-reward-cutover-target/1",
             "config": digest(config),
@@ -503,6 +503,7 @@ class NativeRewardCutoverReview:
             if not continued:
                 details.update(
                     recovery_eta_seconds=None,
+                    recovery_planning_eta_seconds=None,
                     recovery_eta_basis="capacity_repair_pending_no_completion_estimate",
                 )
             report("pending" if continued else "retrying", **details)
@@ -530,29 +531,72 @@ class NativeRewardCutoverReview:
     def _recovery_progress(self):
         """Expose the native cursor as telemetry, never as verified authority."""
         recovery = self.provider._historical_headers
-        elapsed = time.monotonic() - self._recovery_started
         base = {
-            "recovery_elapsed_seconds": elapsed,
+            "recovery_elapsed_seconds": 0.0,
             "recovery_eta_seconds": None,
+            "recovery_planning_eta_seconds": None,
             "recovery_eta_basis": "waiting_for_native_ancestry_cursor",
             "recovery_eta_scope": "historical_header_recovery_only",
+            "recovery_stalled": False,
         }
         if not recovery.progress or recovery._anchor is None:
+            self._recovery_sample = None
             return base
-        (_, target), raw = next(reversed(recovery.progress.items()))
+        selected_cursor = next(
+            (
+                item
+                for item in reversed(recovery.progress.items())
+                if item[0][0] == recovery._anchor[0]
+            ),
+            None,
+        )
+        if selected_cursor is None:
+            self._recovery_sample = None
+            return base
+        key, raw = selected_cursor
+        _, target = key
         anchor = _decode_header(recovery._anchor[1], maximum_bytes=MAXIMUM_HEADER_BYTES)["number"]
         current = _decode_header(raw, maximum_bytes=MAXIMUM_HEADER_BYTES)["number"]
         completed, total = anchor - current, anchor - target
-        rate = completed / elapsed if elapsed and completed else None
+        now = time.monotonic()
+        selected = (key, anchor)
+        prior = self._recovery_sample
+        if prior is None or prior[0] != selected or completed < prior[3]:
+            # The provider can spend hours checking block history before this
+            # separate ancestry request begins. Use only observations from the
+            # current cursor; earlier stages and restored links are not speed.
+            prior = (selected, now, completed, completed, now)
+        elif completed != prior[3]:
+            prior = (*prior[:3], completed, now)
+        self._recovery_sample = prior
+        elapsed, advanced = now - prior[1], completed - prior[2]
+        rate = advanced / elapsed if elapsed > 0 and advanced > 0 else None
+        remaining = total - completed
+        stalled = bool(remaining and now - prior[4] >= 60)
         return {
             **base,
+            "recovery_elapsed_seconds": elapsed,
             "recovery_completed_headers": completed,
             "recovery_total_headers": total,
             "recovery_percent": 100 * completed / total if total else 100,
-            "recovery_eta_seconds": (total - completed) / rate if rate else None,
-            "recovery_eta_basis": "measured_native_ancestry_headers_per_second"
+            "recovery_stalled": stalled,
+            "recovery_eta_seconds": None
+            if stalled
+            else 0.0
+            if not remaining
+            else remaining / rate
             if rate
-            else "waiting_for_native_ancestry_samples",
+            else None,
+            "recovery_planning_eta_seconds": [remaining / 2000, remaining]
+            if remaining and rate is None and not stalled
+            else None,
+            "recovery_eta_basis": "withdrawn_stalled_current_ancestry"
+            if stalled
+            else "complete_selected_ancestry_interval"
+            if not remaining
+            else "measured_current_ancestry_cursor_per_second"
+            if rate
+            else "planning_assumption_1_to_2000_current_ancestry_links_per_second",
         }
 
     def _pending_result(self, target, next_block):

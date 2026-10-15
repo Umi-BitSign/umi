@@ -5840,6 +5840,47 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
         assert await fresh.credit(*restored) == interval
         assert all(endpoint.covered for endpoint in restored)
     assert not loads and not server.calls
+    # Upgrade a supported old coverage owner with no supplementary transport
+    # domain. The original native endpoints and all byte/block results remain.
+    # An old not_selected dependency mode is not an empty direct inventory.
+    from umi.competition_reward_transport_qualification import KIND
+
+    qualifications = owner.transport_qualifications
+    legacy_original = fresh.checkpoints.load(keys[0])
+    qualifications.root.rename(qualifications.root.with_name("prior-transport-fixture"))
+    qualifications.marker.rename(qualifications.marker.with_suffix(".fixture"))
+    owner._transport_qualifications = None
+
+    def original_package_metadata():
+        loads.append(True)
+        return p.package
+
+    restarted._package_loader = original_package_metadata
+    with monkeypatch.context() as m:
+        m.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        m.setattr(coverage_module, "review_reward_coverage", prohibit)
+        m.setattr(fresh, "_load", prohibit)
+        restored = [await restarted.replay(key) for key in keys]
+    assert loads == [True] and not server.calls
+    assert fresh.checkpoints.load(keys[0]) == legacy_original
+    qualifications = owner.transport_qualifications
+    qualified = qualifications.load(
+        legacy_original["package_sha256"], legacy_original["cohort_sha256"]
+    )
+    assert qualified["direct_acceptances"] == []
+    with qualifications.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind=?", (KIND,))
+    restarted._package_loader = unavailable_package
+    with pytest.raises(CoverageCheckpointRepairRequired, match="scoped repair"):
+        await restarted.replay(keys[0])
+    with monkeypatch.context() as m:
+        m.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        m.setattr(coverage_module, "review_reward_coverage", prohibit)
+        m.setattr(fresh, "_load", prohibit)
+        repaired = await restarted.repair_model_transport(
+            keys[0], reason="restore exact supplementary completion from original ledger"
+        )
+    assert repaired.covered and loads == [True] and not server.calls
     foreign = RewardCoverageJournal(tmp_path / "foreign", rule, expected_rule_sha256=digest(rule))
     with pytest.raises(ValueError, match="lost its native result"):
         await foreign.credit(*restored)
@@ -5890,7 +5931,9 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
         fixed = await restarted.replay(keys[0])
         assert fixed.row_matches == repaired.row_matches
         assert fixed.validator_last_update == metadata["row_state"]["validator_last_update"]
-    assert not loads
+    # Only the earlier supplementary transport migration loaded original
+    # package metadata; subsequent native repair and restart add no loads.
+    assert loads == [True]
 
     # An observed missing remote source remains a hold across restart. Restoring
     # its exact generation requires one explicit transport repair, no proof replay.
@@ -5912,7 +5955,7 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
         m.setattr(coverage_module, "review_reward_eligibility", prohibit)
         m.setattr(coverage_module, "review_reward_coverage", prohibit)
         assert (await restarted.replay(keys[0])).covered
-    assert not server.calls and not loads
+    assert not server.calls and loads == [True]
 
 
 async def test_settlement_releases_parsed_package_after_native_replay(

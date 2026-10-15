@@ -103,6 +103,8 @@ def cohort_intake_bytes(db) -> int:
             "cohort_model_acceptance_intents",
             "cohort_model_acceptance_votes",
             "cohort_model_acceptances",
+            "cohort_model_transport_qualifications",
+            "cohort_model_transport_markers",
         )
         if name in tables
     )
@@ -557,8 +559,13 @@ class CohortIntake:
                 return self._receipt(prior[0], store, request)
             history = store.published_history(cohort)
             _, pending = store.status(cohort)
-            if pending is not None and pending.operation == "adopt_request_tail_rule":
-                raise OSError("cohort intake awaits its reserved request-rule adoption")
+            if pending is not None and pending.is_policy_adoption:
+                kind = (
+                    "model-delivery"
+                    if pending.operation == "adopt_model_delivery"
+                    else "request-rule"
+                )
+                raise OSError(f"cohort intake awaits its reserved {kind} adoption")
             if (
                 db.execute(
                     "SELECT 1 FROM cohort_intake_seals WHERE cohort=? AND tip=?",

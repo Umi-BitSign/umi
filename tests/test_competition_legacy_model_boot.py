@@ -1,0 +1,337 @@
+"""Actual selected boot routes adopted legacy cohorts while preserving C5 paths."""
+
+import asyncio
+import sqlite3
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from umi import competition_cohort_settlement_boot as settlement
+from umi import competition_reward_boot as writer
+from umi import competition_reward_coordinator_boot as coordinator
+from umi.competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from umi.competition_cohort_legacy_model_selection import (
+    AuthenticatedLegacyModelSources,
+    LegacyModelStorageSourceConfig,
+    authenticate_legacy_model_sources,
+    selected_legacy_model_readers,
+    validate_legacy_model_selections,
+)
+from umi.competition_cohort_legacy_model_storage import (
+    LegacyModelPreservationInventory,
+    LegacyModelStorageInventory,
+    LegacyModelStorageRepairRequired,
+)
+from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
+from umi.competition_cohort_model_transport_selection import committed_model_delivery_selection
+from umi.competition_cohort_recovery_store import CohortRecoveryStore
+from umi.competition_model_cache_space import BootDiskModelCacheConfig
+from umi.competition_supervisor_adapters import ProductionSuccessorRuntimeAdapter
+from umi.open_competition import digest
+from umi.private_files import ensure_private_directory, publish_private_model
+from umi.protocol import canonical_json_bytes, sha256_hex
+
+from .test_competition_chunked_model_backup import Remote
+from .test_competition_cohort_legacy_model_storage import backup, bundle_at, retain
+from .test_competition_cohort_recovery import signed_transition
+from .test_competition_effective_model_reward_boot import adopted_case as adopted_case
+from .test_competition_effective_model_reward_boot import chain as chain
+from .test_competition_effective_model_reward_boot import chain_config as chain_config
+from .test_competition_effective_model_reward_boot import config_case as config_case
+from .test_competition_effective_model_reward_boot import control as control
+from .test_competition_effective_model_reward_boot import inputs as inputs
+from .test_competition_effective_model_reward_boot import policy as policy
+from .test_competition_effective_model_reward_boot import selected as selected
+from .test_competition_effective_model_reward_boot import series_case as series_case
+from .test_open_competition import wallet
+
+
+@pytest.fixture
+def legacy_boot(adopted_case, tmp_path):
+    h = adopted_case
+    bundle = bundle_at(tmp_path / "baseline", "legacy-boot-baseline")
+    objects = {}
+    common = dict(
+        cohort_sha256=digest(h.history.plan),
+        policy_sha256=digest(h.candidate.policy),
+        authority_sha256=digest(h.history.authority.authority),
+        predecessor_sha256=digest(h.history.genesis),
+    )
+    legacy = LegacyModelStorageInventory(
+        schema="umi-cohort-legacy-model-storage-inventory/1",
+        **common,
+        captured_at_block=220,
+        baseline_model_sha256=digest(bundle),
+        baseline_manifest_raw_sha256=retain(objects, bundle),
+        entries=(),
+    )
+    preservation = LegacyModelPreservationInventory(
+        schema="umi-cohort-legacy-model-preservation-inventory/1",
+        **common,
+        legacy_inventory_sha256=digest(legacy),
+        models=(backup(objects, bundle, h.candidate.policy),),
+    )
+    proposal = prepare_model_delivery_adoption(
+        h.history,
+        h.candidate.policy,
+        expected_tip_sha256=digest(h.history.genesis),
+        current_block=220,
+        delivery=h.selection.history.transitions[0].transition.model_delivery_adoption.delivery,
+        legacy_inventory_sha256=digest(legacy),
+        preservation_inventory_sha256=digest(preservation),
+    )
+    db = sqlite3.connect(":memory:")
+    try:
+        store = CohortRecoveryStore(db)
+        store.publish_history(h.history, h.candidate.policy, current_block=220)
+        store.reserve_exact(proposal)
+        store.commit(signed_transition(proposal))
+        selection = committed_model_delivery_selection(
+            store, common["cohort_sha256"], h.candidate.policy
+        )
+    finally:
+        db.close()
+    directory = tmp_path / "legacy-source"
+    ensure_private_directory(directory)
+    ensure_private_directory(directory / "objects")
+    publish_private_model(directory / "legacy-inventory.json", legacy)
+    publish_private_model(directory / "preservation-inventory.json", preservation)
+    for key, raw in objects.items():
+        path = directory / "objects" / (key + ".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    source = LegacyModelStorageSourceConfig(
+        schema="umi-legacy-model-storage-source/1",
+        cohort_sha256=common["cohort_sha256"],
+        directory=str(directory),
+        baseline_model_sha256=digest(bundle),
+    )
+    config = type(h.candidate).model_validate_json(
+        canonical_json_bytes(
+            h.candidate.model_copy(
+                update={"model_delivery_adoptions": (selection,), "legacy_model_storage": (source,)}
+            )
+        )
+    )
+    return SimpleNamespace(
+        h=h, config=config, source=source, bundle=bundle, objects=objects, selection=selection
+    )
+
+
+def preflight(value):
+    return authenticate_legacy_model_sources(
+        value.legacy_model_storage,
+        series=value.series,
+        policy=value.policy,
+        model_delivery_adoptions=value.model_delivery_adoptions,
+    )
+
+
+def test_selected_metadata_authenticates_before_binding_remote_namespace(legacy_boot, tmp_path):
+    c = legacy_boot
+    prepared = preflight(c.config)
+    remote = Remote({})
+    sources = selected_legacy_model_readers(
+        prepared, multipart=remote, verification_root=tmp_path / "durable"
+    )
+    assert sources.has_cohort(c.source.cohort_sha256)
+    assert sources.resolve(c.source.cohort_sha256, baseline=True).selection.bundle == c.bundle
+    assert not remote.reads
+    remote.signer.bucket = "other-bucket"
+    with pytest.raises(ValueError, match="credentialed R2 namespace"):
+        selected_legacy_model_readers(
+            prepared, multipart=remote, verification_root=tmp_path / "durable"
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "cohort",
+        "duplicate",
+        "baseline",
+        "inventory",
+        "missing_original",
+        "corrupt_original",
+        "symlink_original",
+    ],
+)
+def test_unsupported_or_damaged_selections_refuse_preflight(legacy_boot, fault, tmp_path):
+    c = legacy_boot
+    config, source = c.config, c.source
+    if fault in {"cohort", "duplicate", "baseline"}:
+        changed = (
+            source.model_copy(
+                update={
+                    "cohort_sha256" if fault == "cohort" else "baseline_model_sha256": "ff" * 32,
+                }
+            )
+            if fault != "duplicate"
+            else source
+        )
+        config = config.model_copy(
+            update={
+                "legacy_model_storage": (changed, changed) if fault == "duplicate" else (changed,)
+            }
+        )
+    elif fault == "inventory":
+        (Path(source.directory) / "legacy-inventory.json").write_bytes(b"{}")
+    else:
+        key = next(iter(c.objects))
+        path = Path(source.directory) / "objects" / (key + ".json")
+        if fault == "missing_original":
+            path.unlink()
+        elif fault == "corrupt_original":
+            path.write_bytes(b"{}")
+        else:
+            original = tmp_path / "moved-original.json"
+            path.rename(original)
+            path.symlink_to(original)
+    with pytest.raises(ValueError):
+        preflight(config)
+
+
+def test_old_config_bytes_and_empty_source_selection_remain_unchanged(legacy_boot):
+    c = legacy_boot
+    original = canonical_json_bytes(c.h.before)
+    assert b'"legacy_model_storage"' not in original
+    assert canonical_json_bytes(type(c.h.before).model_validate_json(original)) == original
+    assert preflight(c.h.before) is None
+    assert (
+        validate_legacy_model_selections(
+            (), series=c.h.before.series, policy=c.h.before.policy, model_delivery_adoptions=()
+        )
+        == ()
+    )
+
+
+def operation(c, monkeypatch, *, forbid=False):
+    h = c.h
+    boot = {"writer": writer, "coordinator": coordinator, "settlement": settlement}[h.kind]
+
+    class Provider:
+        def __init__(self, *args, **kwargs):
+            assert not forbid, "damaged storage reached provider startup"
+            self.policy = c.config.policy
+
+        async def start(self):
+            pass
+
+        async def aclose(self):
+            pass
+
+    if h.kind == "writer":
+        runtime = SimpleNamespace(
+            config=h.inputs.anchor.config,
+            adapter=object.__new__(ProductionSuccessorRuntimeAdapter),
+            _require_lease=lambda: None,
+        )
+        return boot, lambda: writer.run_installed_standing_rewards(
+            runtime, c.config, asyncio.Event()
+        )
+
+    def key(*args):
+        assert not forbid, "damaged storage reached signing key"
+        return wallet("Charlie")
+
+    monkeypatch.setattr(boot, "load_named_hotkey", key)
+    monkeypatch.setattr(
+        boot,
+        "HistoricalRewardControlProvider"
+        if h.kind == "coordinator"
+        else "HistoricalRegistrationProvider",
+        Provider,
+    )
+    return (
+        boot,
+        lambda: (
+            coordinator.run_reward_coordinator(c.config, asyncio.Event())
+            if h.kind == "coordinator"
+            else settlement.run_settlement_service(c.config, asyncio.Event())
+        ),
+    )
+
+
+async def test_actual_boot_passes_series_sources_and_preserves_c5_fallback(
+    legacy_boot, monkeypatch
+):
+    c = legacy_boot
+    boot, run = operation(c, monkeypatch)
+    remote, captured = Remote({}), []
+
+    class ReachedVerifier(Exception):
+        pass
+
+    def artifacts(config, policy, owner, *, verification_root):
+        return SimpleNamespace(
+            config=config, policy=policy, multipart=remote, verification_root=verification_root
+        )
+
+    def verifier(*args, **kwargs):
+        selected = DirectModelSettlementVerifier(*args, **kwargs)
+        c5 = next(digest(plan) for plan in c.config.series.cohorts if plan.sequence == 5)
+        assert selected.legacy_for(c5) is None
+        assert selected.legacy_for(
+            c.source.cohort_sha256
+        ).authenticated.legacy.baseline_model_sha256 == digest(c.bundle)
+        assert selected.legacy_readers.verification_root.name == "legacy-model-byte-verification"
+        captured.append(
+            (selected.archive, selected.receipts, selected.legacy_readers.verification_root)
+        )
+        raise ReachedVerifier
+
+    monkeypatch.setattr(boot, "DirectModelArtifactReviewer", artifacts)
+    monkeypatch.setattr(boot, "DirectModelSettlementVerifier", verifier)
+    for _ in range(2):
+        with pytest.raises(ReachedVerifier):
+            await run()
+    assert captured[0] == captured[1]
+    assert not remote.reads
+
+
+async def test_actual_boot_damaged_original_refuses_before_service_state_or_keys(
+    legacy_boot, monkeypatch
+):
+    c = legacy_boot
+    _, run = operation(c, monkeypatch, forbid=True)
+    (Path(c.source.directory) / "objects" / (next(iter(c.objects)) + ".json")).unlink()
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        await run()
+
+
+def test_original_loader_retains_supported_package_bound_above_legacy_signed_record_bound(tmp_path):
+    # Preserved package metadata supports 64 MiB; signed /1 records have a
+    # separate 33 MiB bound. The shared loader must not narrow the package reader.
+    raw = b'{"document":"' + b"x" * (33 * 1024**2) + b'"}'
+    key = sha256_hex(raw)
+    path = tmp_path / (key + ".json")
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    sources = AuthenticatedLegacyModelSources(None, {}, {key: (path,)})
+    assert sources.load_original(key) == raw
+    path.write_bytes(b"{}")
+    with pytest.raises(LegacyModelStorageRepairRequired, match="raw identity"):
+        sources.load_original(key)
+
+
+def test_config_keeps_original_metadata_outside_the_entire_disposable_cache(legacy_boot, tmp_path):
+    c = legacy_boot
+    cache = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(tmp_path / "disposable"),
+        maximum_allocated_bytes=80 * 1024**3,
+    )
+    direct = c.config.direct_model_review.model_copy(
+        update={"materialization_boot_disk_cache": cache}
+    )
+    candidate = c.config.model_copy(update={"direct_model_review": direct})
+    assert type(candidate).model_validate_json(
+        canonical_json_bytes(candidate)
+    ).legacy_model_storage == (c.source,)
+    for path in (Path(cache.directory), Path(cache.directory) / "metadata"):
+        damaged = candidate.model_copy(
+            update={"legacy_model_storage": (c.source.model_copy(update={"directory": str(path)}),)}
+        )
+        with pytest.raises(ValueError, match="disjoint"):
+            type(damaged).model_validate_json(canonical_json_bytes(damaged))

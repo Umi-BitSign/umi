@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -22,6 +23,10 @@ from .competition_cohort_clip_delivery import CohortClipDelivery
 from .competition_cohort_direct_model_review import DirectModelArtifactReviewer
 from .competition_cohort_endpoint_host import EndpointHost
 from .competition_cohort_endpoint_vote_http import endpoint_vote_routes
+from .competition_cohort_legacy_model_selection import (
+    authenticate_legacy_model_sources,
+    selected_legacy_model_readers,
+)
 from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_origin import CohortEndpointFinalityProvider
@@ -99,6 +104,15 @@ def _http_limits(config: PhaseReviewServiceConfig) -> httpx.Limits:
 @asynccontextmanager
 async def phase_review_app(config: PhaseReviewServiceConfig):
     config = PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(config))
+    legacy_metadata = await run_owned_thread(
+        partial(
+            authenticate_legacy_model_sources,
+            config.legacy_model_storage,
+            series=config.series,
+            policy=config.policy,
+            model_delivery_adoptions=config.model_delivery_adoptions,
+        )
+    )
     root = Path(config.signing.directory)
     ensure_private_directory(root)
     lease = lock_private_file(root / "service.lock")
@@ -175,6 +189,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             )
         models = None
         direct_artifacts = None
+        legacy_readers = None
         app.include_router(
             request_tail_adoption_vote_routes(
                 signer,
@@ -240,6 +255,15 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                         verification_root=root / "direct-model-byte-verification",
                     )
                 )
+                legacy_readers = (
+                    None
+                    if legacy_metadata is None
+                    else selected_legacy_model_readers(
+                        legacy_metadata,
+                        multipart=direct_artifacts.multipart,
+                        verification_root=root / "direct-model-byte-verification",
+                    )
+                )
                 models = ModelArtifactReviewer(
                     config.model_signing,
                     config.policy,
@@ -247,6 +271,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     history,
                     sign,
                     direct_review=(None if direct_artifacts is None else direct_artifacts.review),
+                    legacy_readers=legacy_readers,
                 )
                 await run_owned_thread(
                     models.journal.put,
@@ -279,6 +304,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 sign,
                 model_reviewer=models,
                 direct_artifacts=direct_artifacts,
+                legacy_readers=legacy_readers,
             )
             app.include_router(benchmark.routes)
             app.state.benchmark = benchmark

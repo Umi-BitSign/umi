@@ -6,6 +6,7 @@ from pydantic import Field, JsonValue, model_serializer, model_validator
 
 from .competition_cohort_direct_model_upload import SignedDirectModelUploadReservation
 from .competition_cohort_intake_records import RetainedCohortParticipation
+from .competition_cohort_model_transport import verify_direct_model_transport
 from .competition_cohort_participation import AttestedCohortParticipantAdmission
 from .competition_cohort_recovery import Block, ModelRewardCohortAuthority, verify_recovery_quorum
 from .open_competition import (
@@ -149,6 +150,13 @@ def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
         )
     ):
         raise ValueError("model artifact acceptance differs from the original complete entry")
+    if direct is not None:
+        verify_direct_model_transport(
+            direct,
+            history,
+            policy,
+            accepted_at_block=a.accepted_at_block,
+        )
 
 
 def verify_model_acceptance(certificate, record, history, policy, *, maximum_block):

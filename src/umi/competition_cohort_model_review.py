@@ -18,6 +18,7 @@ from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_intake import CohortIntakeBinding, history_tip
 from .competition_cohort_intake_records import replay_participation
+from .competition_cohort_legacy_model_readers import LegacyModelStorageReaders
 from .competition_cohort_model_acceptance import (
     ModelAcceptanceIntent,
     ModelArtifactReviewInputs,
@@ -28,6 +29,10 @@ from .competition_cohort_model_acceptance import (
 )
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_execution import execution_boundary
+from .competition_model_transport_qualification import (
+    qualify_model_transport,
+    repair_journal_model_transport,
+)
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import CompetitionPolicy, Hotkey, digest, identity
@@ -75,6 +80,7 @@ class ModelArtifactReviewer:
         *,
         direct_review: Callable[[ModelReviewRequest], Awaitable[ModelArtifactReviewInputs]]
         | None = None,
+        legacy_readers: LegacyModelStorageReaders | None = None,
     ):
         self.config = ModelReviewConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -88,6 +94,15 @@ class ModelArtifactReviewer:
         if direct_review is not None and not callable(direct_review):
             raise ValueError("direct model reviewer is not callable")
         self.direct_review = direct_review
+        if legacy_readers is not None and (
+            digest(legacy_readers.policy) != digest(self.policy)
+            or any(
+                self.cohorts.get(cohort) != digest(source.original_history.authority.authority)
+                for cohort, source in legacy_readers.authenticated.items()
+            )
+        ):
+            raise ValueError("legacy model readers differ from the private review authority")
+        self.legacy_readers = legacy_readers
         # Capacity and file placement may change on recovery; identity may not.
         self.journal = RoundJournal(
             Path(c.directory),
@@ -165,6 +180,69 @@ class ModelArtifactReviewer:
             index=index,
         )
 
+    def _transport_history(self, cohort):
+        with self.journal.read_transaction() as db:
+            row = db.execute(
+                "SELECT history FROM model_review_heads WHERE cohort=?", (cohort,)
+            ).fetchone()
+            raw = None if row is None else self.journal.get("model_history", row[0], db=db)
+        if raw is None or digest(raw) != row[0]:
+            raise ValueError("retained transport review history missing; scoped repair required")
+        return CohortRecoveryHistory.model_validate_json(canonical_json_bytes(raw))
+
+    def _qualify_transport(self, acceptance, history=None):
+        if acceptance.direct_artifact is None:
+            return None
+        if history is None:
+            history = self._transport_history(acceptance.cohort_sha256)
+        return qualify_model_transport(
+            acceptance,
+            history,
+            self.policy,
+            read=self.journal.get,
+            publish=self.journal.put_many,
+        )
+
+    async def repair_transport_qualification(self, cohort, submission, *, reason: str, report=None):
+        """Restore only transport metadata using original retained review inputs."""
+
+        def repair():
+            slot = cohort + ":" + submission
+            request = self.journal.get("model_request", slot)
+            intent = self.journal.get("model_intent", slot)
+            if request is None or intent is None:
+                raise ValueError("model transport repair requires original request and intent")
+            request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
+            intent = ModelAcceptanceIntent.model_validate_json(canonical_json_bytes(intent))
+            acceptance = intent.acceptance
+            if (
+                request.acceptance != acceptance
+                or acceptance.cohort_sha256 != cohort
+                or acceptance.submission_sha256 != submission
+                or self.cohorts.get(cohort) != acceptance.authority_sha256
+            ):
+                raise ValueError("model transport repair changes original review binding")
+            vote = self.journal.get("model_vote", slot)
+            if vote is not None:
+                check_model_vote(
+                    ModelArtifactVote.model_validate(vote),
+                    acceptance,
+                    self.policy,
+                    signer=self.config.signer,
+                )
+            return repair_journal_model_transport(
+                self.journal,
+                acceptance,
+                self._transport_history(cohort),
+                self.policy,
+                reason=reason,
+                report=report,
+            )
+
+        async with self.serial:
+            with self.journal.locked():
+                return await run_owned_thread(repair)
+
     async def attest(self, request: ModelReviewRequest) -> ModelArtifactVote:
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
         a = request.acceptance
@@ -192,12 +270,19 @@ class ModelArtifactReviewer:
                         raise ValueError("model vote lacks its original intent")
                     vote = ModelArtifactVote.model_validate(vote)
                     check_model_vote(vote, a, self.policy, signer=self.config.signer)
+                    await run_owned_thread(self._qualify_transport, a)
                     return vote
                 if saved is None:
                     sub = request.record.request.signed_submission.submission
                     if sub.track != "model" or sub.model_bundle is None:
                         raise ValueError("artifact review requires a complete model submission")
                     if request.direct_artifact is not None:
+                        # A staged R2 reader is capability, never cohort authority.
+                        # Reject an unauthorized artifact before remote byte work;
+                        # the normal fresh check below runs again before signing.
+                        source = await self.history(a.cohort_sha256)
+                        block = execution_boundary(await self.capture()).block
+                        self._validate(request, source.history, block)
                         if self.direct_review is None:
                             raise ValueError("direct model review source is unavailable")
                         inputs = await self.direct_review(request)
@@ -210,12 +295,32 @@ class ModelArtifactReviewer:
                                 maximum_bytes=33 * 1024**2,
                             )
                         )
-                        await run_owned_thread(
-                            verify_preserved_bundle,
-                            request.record.request.signed_submission.submission.model_bundle,
-                            Path(self.config.archive_directory),
-                            self.policy,
-                        )
+                        # R2 byte provenance never approves the owner's rights
+                        # claims. These exact privately reviewed documents must
+                        # match the original /1 body before any remote work.
+                        ModelAcceptanceIntent(acceptance=a, inputs=inputs)
+                        legacy = self.legacy_readers
+                        if legacy is not None and legacy.has_cohort(a.cohort_sha256):
+                            source = await self.history(a.cohort_sha256)
+                            block = execution_boundary(await self.capture()).block
+                            self._validate(request, source.history, block)
+                            resolved = await run_owned_thread(
+                                partial(
+                                    legacy.accepted,
+                                    a.cohort_sha256,
+                                    record=request.record,
+                                    admission=request.admission,
+                                    acceptance=a,
+                                )
+                            )
+                            await legacy.reader(resolved).verify()
+                        else:
+                            await run_owned_thread(
+                                verify_preserved_bundle,
+                                request.record.request.signed_submission.submission.model_bundle,
+                                Path(self.config.archive_directory),
+                                self.policy,
+                            )
                     if inputs.model_sha256 != a.model_sha256:
                         raise ValueError("model review documents differ from the artifact")
                     intent = ModelAcceptanceIntent(acceptance=a, inputs=inputs)
@@ -223,6 +328,7 @@ class ModelArtifactReviewer:
                 block = execution_boundary(await self.capture()).block
                 self._validate(request, source.history, block)
                 await run_owned_thread(self._reserve, request, intent, source.history)
+                await run_owned_thread(self._qualify_transport, a, source.history)
                 signature = await wait_for_owned(
                     self.sign(a), timeout=self.config.signing_timeout_seconds
                 )
