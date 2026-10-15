@@ -28,6 +28,7 @@ from umi.competition_reward_coverage_service import StandingRewardCoverageServic
 from umi.competition_reward_handoff import hold_legacy_reward_handoff
 from umi.competition_reward_handoff_models import StandingRewardHandoffPlan
 from umi.competition_reward_history import RewardControlHistoryReader
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.competition_reward_host import StandingRewardHostApproval, bind_standing_reward_host
 from umi.competition_reward_opportunity import (
     RewardOpportunityCertificate,
@@ -855,8 +856,24 @@ async def test_initial_service_rejects_partial_successor_ownership(service_case)
             )
 
 
-async def test_service_restarts_with_original_binding_and_orders_shutdown(service_case):
+@pytest.mark.parametrize("history_workers", [None, 1, 2, 4])
+async def test_service_restarts_with_original_binding_and_orders_shutdown(
+    service_case, history_workers
+):
     c = service_case
+    profile = (
+        None
+        if history_workers is None
+        else HistoryVerificationProfile(
+            schema="umi-history-verification-profile/1",
+            workers=history_workers,
+            maximum_in_flight=history_workers,
+        )
+    )
+    c.service_options["limits"] = c.service_options["limits"].model_copy(
+        update={"history_verification": profile}
+    )
+    original_limits = canonical_json_bytes(c.service_options["limits"])
     original = None
     for _ in range(2):
         c.stop.clear()
@@ -876,6 +893,7 @@ async def test_service_restarts_with_original_binding_and_orders_shutdown(servic
             "close-current",
         ]
     assert len(c.executors) == 2
+    assert canonical_json_bytes(c.service_options["limits"]) == original_limits
 
 
 async def test_service_rejects_approval_before_stop_and_closes_unstarted_providers(service_case):
