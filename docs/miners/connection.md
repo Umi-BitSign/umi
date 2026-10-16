@@ -113,6 +113,57 @@ resource and execution rules. See [model revision](model.md#model-revision) for
 which artifacts define a revision. Public-model admission does not replace
 endpoint admission or paid-work checks.
 
+### Inspect retained obligations before selecting a transition
+
+The Linux `umi-miner-revision-preflight --request /absolute/preflight.json`
+command inspects an already stopped miner under its original service UID. It
+acquires the existing grant and assignment locks without creating or migrating
+original state. It accepts clean rollback databases or fully checkpointed WAL
+main files with no remaining sidecars. An active owner, missing lock, retained
+WAL/journal, changed source file or unsupported layout refuses the inspection;
+the command does not stop services or repair original databases.
+
+The request schema is `umi-miner-revision-preflight-request/1`. Supply the exact
+`original_argv` and `proposed_argv` arrays, `service_uid`, `launch_kind` (`systemd`
+or `container`), `enrollments` entries containing `cohort_sha256` and absolute
+`directory`, and a private `verification_directory` separate from all original
+state. Optional `maximum_inventory_items` (default 65,536) and
+`maximum_summary_bytes` (default 64 MiB) bound inventories and serialized summaries;
+exceeding either reports an explicit refusal, without changing cohort policy or
+execution limits. Both commands must retain the original options except the model revision
+and proposed startup file. The proposed startup retains the entire cohort roster,
+authority, paths, terms and limits. Console-script, Python console-script and
+`python -m umi.miner` launch forms are recognized; recognizing a command does not
+verify its interpreter, installed wallet or container mount identity.
+
+The JSON result reports independently verified grant ancestry, acknowledgment
+intents, exact request-index coverage, signed retirements, response archives and
+signed paid claims. `known_requests_retired` refers only to the enumerated
+retained requests. `local_inventory_complete` reports supplied-directory and
+assignment coverage; it does not certify enrollment contents. Unknown or omitted
+artifacts remain explicit. A claim without a local grant has unknown remote
+admission, not proof that it was rejected. Native assignment-ledger startup
+audit, wallet/runtime identity, enrollment authority, current cohort selection
+and actual process drainage remain separately unverified gates.
+
+Every result has `runtime_migration_authorized: false`. A stopped-state inventory
+cannot fence later grants, move a paid claim, rebind a journal, authorize a backend
+switch, or make four independent cohort replacements atomic. Those obligations
+need an explicitly qualified transition, with retained old-revision execution
+capability wherever native authority has not closed or replaced old work.
+
+Progress on stderr includes counts, elapsed time, stage ETA and its basis. Before
+measured samples, the displayed planning range assumes 0.01–30 seconds per bounded
+local item; it excludes external checks and runtime migration. Completed grant
+and retirement checks persist independently of the source state, allowing restart
+without repeating unchanged native checks. Their keys bind original file identity,
+policy/startup inputs and qualified verifier semantics; a changed grant database
+invalidates its grant checks, and a changed assignment database invalidates its
+retirement checks. Missing or damaged completed metadata requires an explicit
+`--verification-repair-reason`; successful repair replaces only derived metadata.
+Never delete original signed records or substitute an empty verification directory
+to conceal a repair requirement.
+
 ## Upgrade an existing miner
 
 Linux miners managed by systemd use one updater. Choose only whether

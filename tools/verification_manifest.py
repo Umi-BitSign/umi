@@ -54,6 +54,7 @@ seeds = [
     "competition_model_source_verification",
     "competition_cohort_model_client",
     "competition_cohort_direct_model_client",
+    "competition_miner_transition_cli",
 ]
 modules = set()
 external_imports = set()
