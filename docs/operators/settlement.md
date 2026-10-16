@@ -2361,6 +2361,13 @@ ordinary stopped recovery. Integrity failures, ambiguous worker state and launch
 failures never use this shortcut. This completed-audit reuse is process-local;
 a host restart still audits retained run authorities, while the existing durable
 package verification receipts remain reusable. Preserve the original journals.
+Accepting another directive prefix also preserves a completed audit when the
+runtime worker is idle and the adapter confirms it remains stopped with unchanged
+inputs. It checks those identities before and after a fresh owned observation;
+otherwise ordinary stop and recovery apply. Successful reuse emits
+`supervisor_recovery_audit_reused`. Running workers and new supervisor processes
+still require their full initial recovery. Prefix acceptance and launch retain
+all existing signature, finality, authorization and freshness checks.
 Within one recovery, the initial attempt/evidence audit is reused only if the
 exact stopped journal family remains unchanged. If reconciliation changes it,
 the final read runs outside the event loop and drains before cancellation can

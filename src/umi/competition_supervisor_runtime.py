@@ -46,6 +46,7 @@ from .competition_supervisor import (
     verify_signed_successor_supervisor_directive_history,
 )
 from .competition_weight_timing import WeightRateLimitWait
+from .competition_work_progress import WorkProgress
 from .competition_worker import (
     _open_directory_without_links,
     _open_private_regular_file,
@@ -872,6 +873,20 @@ class SuccessorSupervisorRuntime:
     @log_phase("stopped_recovery")
     async def _stop_and_recover(self, observation):
         _, _, worker = self._load_history()
+        if (
+            self._restart_checked
+            and worker.phase == "idle"
+            and await self.adapter.retry_stopped_start()
+        ):
+            # A new directive need not discard the completed audit of a worker
+            # that has remained absent. Recheck its exact retained inputs across
+            # the fresh owned observation; the audit supplies no chain authority.
+            observation = await self._refresh_observation()
+            if await self.adapter.retry_stopped_start():
+                self._require_lease()
+                with WorkProgress("supervisor_recovery_audit_reused", 1, unit="audits") as progress:
+                    progress.advance()
+                return observation
         if worker.phase != "idle":
             self._store_worker(worker.model_copy(update={"phase": "stop_intent"}))
         await self.adapter.stop_worker()
