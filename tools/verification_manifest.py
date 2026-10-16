@@ -58,6 +58,15 @@ seeds = [
     # through the direct owner, including after local payload reclamation.
     "competition_cohort_model_upload_delivery",
     "competition_cohort_direct_model_owner",
+    # Lifecycle publication owns durable native replay outside the intake fence.
+    "competition_cohort_request_publication",
+    # These independent consumers select the private byte-verification owner
+    # and authenticated imports without being imported by the native replay.
+    "competition_cohort_lifecycle_host",
+    "competition_cohort_model_delivery_candidate",
+    "competition_cohort_review_config",
+    "competition_cohort_service_host",
+    "competition_model_byte_store_cli",
     "competition_miner_transition_cli",
 ]
 modules = set()

@@ -1,11 +1,21 @@
 """Adopted original plan through native request close, publication and reopen."""
 
+import asyncio
+import json
+import threading
+import time
+from contextlib import contextmanager
+
 import pytest
 
+from umi import competition_cohort_request_publication as publication_module
 from umi.competition_cohort_coordinator import replay_cohort_decisions
+from umi.competition_cohort_endpoint_archive import JournalEndpointObjects
 from umi.competition_cohort_order_signer import CohortOrderHistory
 from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
 from umi.competition_cohort_request_rule import authenticated_request_tail_rule
+from umi.competition_verification_reuse import VerificationReuse
+from umi.competition_work_progress import check_work_cancelled
 from umi.open_competition import digest
 from umi.private_files import read_private_model
 from umi.protocol import canonical_json_bytes
@@ -41,7 +51,9 @@ from .test_competition_cohort_service_grants import service_quality_inputs as se
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", ["legacy6"], indirect=True)
 @pytest.mark.parametrize("receipt_scenario", ["adopted"], indirect=True)
-async def test_original_adopted_history_closes_and_retries_publication(request_owner, tmp_path):
+async def test_original_adopted_history_closes_and_retries_publication(
+    request_owner, tmp_path, monkeypatch, caplog
+):
     h = request_owner
     original_history = h.intake.history(h.cohort)
     original_plan = canonical_json_bytes(original_history.plan)
@@ -59,6 +71,66 @@ async def test_original_adopted_history_closes_and_retries_publication(request_o
     handoff = tmp_path / "adopted-handoff" / (h.cohort + ".json")
     proofs = []
     failed = False
+    checked_fence = []
+    deliveries = []
+    native_replay = publication_module.replay_request_completion
+    native_delivery = CohortRequestSettlementPublisher._objects
+    native_capture = CohortRequestSettlementPublisher._capture
+    native_connection = h.intake._connection
+    native_publish = publication_module.publish_private_model
+    local = threading.local()
+    final_fences = []
+
+    @contextmanager
+    def connection(*args, **kwargs):
+        with native_connection(*args, **kwargs) as current:
+            previous = getattr(local, "connection", None)
+            local.connection = current
+            try:
+                yield current
+            finally:
+                local.connection = previous
+
+    def captured(publisher, block, *, connection=None):
+        result = native_capture(publisher, block, connection=connection)
+        if connection is not None:
+            local.final_capture = connection
+        return result
+
+    def published(*args, **kwargs):
+        assert local.connection is not None and local.connection is local.final_capture
+        final_fences.append(True)
+        return native_publish(*args, **kwargs)
+
+    monkeypatch.setattr(h.intake, "_connection", connection)
+    monkeypatch.setattr(CohortRequestSettlementPublisher, "_capture", captured)
+    monkeypatch.setattr(publication_module, "publish_private_model", published)
+
+    def delivery(publisher, exported):
+        collector = exported.objects.collector
+        deliveries.append((set(exported.objects), collector.used))
+        return native_delivery(publisher, exported)
+
+    monkeypatch.setattr(CohortRequestSettlementPublisher, "_objects", delivery)
+
+    def replay_without_intake_fence(*args, **kwargs):
+        completed = threading.Event()
+
+        def preflight():
+            with h.intake.fenced_read_snapshot():
+                completed.set()
+
+        thread = threading.Thread(target=preflight, daemon=True)
+        thread.start()
+        assert completed.wait(3), "native replay retained the upload preflight fence"
+        thread.join(3)
+        checked_fence.append(True)
+        return native_replay(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publication_module, "replay_request_completion", replay_without_intake_fence
+    )
+    caplog.set_level("INFO", logger="umi.competition.progress")
 
     async def proof(observation):
         nonlocal failed
@@ -78,16 +150,106 @@ async def test_original_adopted_history_closes_and_retries_publication(request_o
         )
 
     with request_controller(h, tmp_path, publication) as control:
+        remember = VerificationReuse.remember
+        checkpoints = []
+
+        def interrupt_after_checkpoint(owner, *args):
+            remember(owner, *args)
+            checkpoints.append(args[0])
+            raise OSError("first pass interrupted after durable semantic checkpoint")
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(VerificationReuse, "remember", interrupt_after_checkpoint)
+            with pytest.raises(OSError, match="durable semantic checkpoint"):
+                await control.reopen().tick()
+        assert len(checkpoints) == 1
+        assert not handoff.exists()
+        control.publisher = publication(control.decision)
         with pytest.raises(OSError, match="publication interrupted"):
-            await control.reopen().tick()
+            await control.publisher(h.intake.history(h.cohort))
         assert control.store.status(h.cohort)[0].phase == "reference_reveal"
         assert not handoff.exists()
         h.source = h.reopen()
-        control.publisher.source = h.source
+        control.publisher = publication(control.decision)
         closed = h.intake.history(h.cohort)
+
+        # Restart selects durable receipts through the actual caller. No manual
+        # verification scope and no reopening the original journal payloads.
+        native_object = JournalEndpointObjects.__call__
+
+        def no_native_payload(objects, key):
+            if objects.journal.root == h.source.journal.root:
+                pytest.fail("publisher reread unchanged request evidence")
+            # Fresh queue accepted-prefix metadata retains its own native fence.
+            return native_object(objects, key)
+
+        monkeypatch.setattr(JournalEndpointObjects, "__call__", no_native_payload)
+        entered = threading.Event()
+
+        def cancellable_read(*args, **kwargs):
+            entered.set()
+            while True:
+                check_work_cancelled()
+                time.sleep(0.01)
+
+        monkeypatch.setattr(publication_module, "replay_request_completion", cancellable_read)
+        task = asyncio.create_task(control.publisher(closed))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        assert not handoff.exists()
+        monkeypatch.setattr(
+            publication_module, "replay_request_completion", replay_without_intake_fence
+        )
         await control.publisher(closed)
         raw = handoff.read_bytes()
         await control.publisher(closed)
+        assert handoff.read_bytes() == raw
+        assert len(deliveries) == 3 and all(value == deliveries[0] for value in deliveries)
+        assert deliveries[0][1] == sum(
+            len(control.publisher.files(key)) for key in deliveries[0][0]
+        )
+
+        # The actual consumer repairs a missing output from only its affected
+        # original, retaining all unrelated completed semantic checkpoints.
+        derived = {digest(queue.retained_seal()) for queue in h.source.queues}
+        selected = next(iter(deliveries[0][0] - derived))
+        control.publisher.files._path(selected).unlink()
+        repaired = []
+
+        def repair_payload(objects, key):
+            if objects.journal.root == h.source.journal.root:
+                assert key == selected
+                repaired.append(key)
+            return native_object(objects, key)
+
+        with monkeypatch.context() as repair:
+            repair.setattr(JournalEndpointObjects, "__call__", repair_payload)
+            await control.publisher(closed)
+        assert repaired == [selected]
+        assert handoff.read_bytes() == raw
+        assert deliveries[-1] == deliveries[0]
+
+        # Missing completed semantic state is explicitly repaired, never
+        # silently treated as a first verification or a reason to re-import.
+        semantic = next(
+            path
+            for path in control.publisher.verification_reuse.directory.glob("*.json")
+            if "benchmark_closure_sha256"
+            in json.loads(json.loads(path.read_bytes())["result_json"])
+        )
+        semantic.unlink()
+        await control.publisher(closed)
+        assert semantic.exists()
+        assert handoff.read_bytes() == raw and deliveries[-1] == deliveries[0]
+
+        # A warm receipt still charges the complete export against its active
+        # consumer's budget; changing a local bound cannot borrow old capacity.
+        with monkeypatch.context() as bounded:
+            bounded.setattr(h.source, "replay_bytes", deliveries[0][1] - 1)
+            with pytest.raises(ValueError, match=r"bound|budget"):
+                await control.publisher(closed)
         assert handoff.read_bytes() == raw
         exported = read_private_model(handoff, CohortOrderHistory, maximum_bytes=8 * 1024**2)
         assert exported.history == closed
@@ -101,6 +263,18 @@ async def test_original_adopted_history_closes_and_retries_publication(request_o
         assert state.request_tail_rule == "original_request_12h_with_completed_miner/1"
         assert opening in proofs
         assert set(map(digest, proofs)) == {digest(d.observation) for d in exported.decisions}
+        assert checked_fence
+        assert final_fences
+        events = [
+            json.loads(record.message)
+            for record in caplog.records
+            if record.name == "umi.competition.progress"
+        ]
+        assert any(event.get("state") == "hit" for event in events)
+        assert any(
+            event.get("stage") == "verification_receipt" and event.get("state") == "repair_required"
+            for event in events
+        )
 
 
 @pytest.mark.asyncio

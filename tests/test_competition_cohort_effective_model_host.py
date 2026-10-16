@@ -58,7 +58,7 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("adopted", [False, True])
-@pytest.mark.parametrize("with_storage", [False, True])
+@pytest.mark.parametrize("with_storage", [False, True, "shared"])
 async def test_configured_owner_selects_authenticated_transport_and_recovers_reservation(
     host, scenario, tmp_path, monkeypatch, chain_config, adopted, with_storage
 ):
@@ -104,6 +104,17 @@ async def test_configured_owner_selects_authenticated_transport_and_recovers_res
             directory=str(tmp_path / "legacy-metadata"),
             baseline_model_sha256=digest(h.model),
         )
+        if with_storage == "shared":
+            from umi.competition_model_byte_store import ModelByteStoreConfig
+
+            source = source.model_copy(
+                update={
+                    "shared_byte_store": ModelByteStoreConfig(
+                        schema="umi-model-byte-verification-store/1",
+                        directory=str(tmp_path / "shared-bytes"),
+                    )
+                }
+            )
         root = Path(source.directory)
         publish_private_model(root / "legacy-inventory.json", frozen.legacy)
         publish_private_model(root / "preservation-inventory.json", frozen.preservation)
@@ -131,6 +142,12 @@ async def test_configured_owner_selects_authenticated_transport_and_recovers_res
     assert canonical_json_bytes(o.config.series.cohorts[0]) == plan_bytes
     assert o.service.uploads.root == Path(overrides["model_uploads"].directory)
     if with_storage:
+        if with_storage == "shared":
+            assert Path(source.shared_byte_store.directory) in o.config.stores()
+            resolution = o.service.legacy_payloads.sources.resolve(h.cohort, baseline=True)
+            assert o.service.legacy_payloads.sources.reader(resolution).root == Path(
+                source.shared_byte_store.directory
+            )
         sub = frozen.subs[0]
         owner = o.service.models.owner
         assert owner.intent(h.cohort, digest(sub)) is None

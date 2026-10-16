@@ -64,6 +64,7 @@ from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueue
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_model_cache_space import disjoint
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
@@ -469,7 +470,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             protected += (Path(self.legacy_model_verification_directory),)
         paths = self.model_copy(
             update={"legacy_model_storage": (), "legacy_model_verification_directory": None}
-        ).stores()
+        ).stores(include_shared=False)
+        validate_shared_byte_stores(self.byte_store_sources(), self.stores(include_shared=False))
         if any(not disjoint(path, other) for path in protected for other in paths) or any(
             not disjoint(path, other)
             for index, path in enumerate(protected)
@@ -478,7 +480,13 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             raise ValueError("legacy model metadata and verification storage must be disjoint")
         return self
 
-    def stores(self):
+    def byte_store_sources(self):
+        candidates = (
+            () if self.lifecycle is None else self.lifecycle.model_delivery_adoption_candidates
+        )
+        return (*self.legacy_model_storage, *(c.source for c in candidates))
+
+    def stores(self, *, include_shared=True):
         # The same private reviewer serves admission and model votes. Reuse its
         # credential file, but never alias a credential to a mutable state root
         # or to an unrelated reviewer identity/origin.
@@ -492,6 +500,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 raise ValueError("reviewer credential path has conflicting identities or origins")
             tokens[path] = binding
         values = (
+            *(shared_byte_store_paths(self.byte_store_sources()) if include_shared else ()),
             Path(self.queue_directory),
             Path(self.inputs_directory),
             *(Path(source.directory) for source in self.legacy_model_storage),
@@ -501,7 +510,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
                 else ()
             ),
             *tokens,
-            *(self.lifecycle.stores() if self.lifecycle else ()),
+            *(self.lifecycle.stores(include_shared=False) if self.lifecycle else ()),
             *(self.dispatch.stores() if self.dispatch else ()),
             *((Path(self.orders.queue.directory),) if self.orders else ()),
             *((Path(self.model_uploads.directory),) if self.model_uploads else ()),
@@ -562,6 +571,9 @@ class ServiceAdmissionHost:
             c.admission_owner.check_policy(policy)
             if provider is None or provider.policy != policy:
                 raise ValueError("automatic admission requires the owned finality provider")
+        validate_shared_byte_stores(
+            c.byte_store_sources(), (Path(intake.config.directory), promotion.directory)
+        )
         prepared_legacy = None
         if c.legacy_model_storage:
             protected = (

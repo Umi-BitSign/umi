@@ -47,6 +47,7 @@ from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
@@ -107,6 +108,20 @@ class LifecycleHostConfig(StrictProtocolModel):
             and self.model_delivery_operator_token_file is None
         ):
             raise ValueError("model delivery adoption requires a separate operator credential")
+        validate_shared_byte_stores(
+            (c.source for c in self.model_delivery_adoption_candidates),
+            (
+                *self.stores(include_shared=False),
+                *(
+                    p
+                    for p in (
+                        self.request_tail_operator_token_file,
+                        self.model_delivery_operator_token_file,
+                    )
+                    if p is not None
+                ),
+            ),
+        )
         holds = self.automatic_progression_hold_cohorts
         allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
         if len(holds) != len(set(holds)) or not set(holds) <= allowed:
@@ -115,11 +130,18 @@ class LifecycleHostConfig(StrictProtocolModel):
 
     _origin = field_validator("public_origin")(validate_intake_origin)
 
-    def stores(self):
+    def stores(self, *, include_shared=True):
         # Intake and catalog paths are selected by the enclosing admission host.
         return tuple(
             Path(p)
             for p in (
+                *(
+                    shared_byte_store_paths(
+                        c.source for c in self.model_delivery_adoption_candidates
+                    )
+                    if include_shared
+                    else ()
+                ),
                 self.directory,
                 self.request_start.directory,
                 self.request_completion_directory,
@@ -134,7 +156,7 @@ class LifecycleHostConfig(StrictProtocolModel):
                     dict.fromkeys(
                         path
                         for candidate in self.model_delivery_adoption_candidates
-                        for path in candidate.stores()
+                        for path in candidate.stores(include_shared=False)
                     )
                 ),
             )

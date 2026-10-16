@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +72,63 @@ def test_empty_scope_finishes_only_when_exhausted(events):
     assert list(items) == []
     assert [e["state"] for e in events] == ["started", "completed"]
     assert [e["percent"] for e in events] == [0, 100]
+
+
+def test_eta_excludes_fast_reuse_and_invalidates_stalled_rate(events, clock):
+    meter = progress.WorkProgress("closure_participants", 209, unit="participants")
+    for _ in range(124):
+        clock.now += 0.01
+        meter.advance()
+    clock.now += 180
+    meter.advance()
+    meter.emit("running")
+    assert events[-1]["eta_seconds"] == 84 * 180
+    assert events[-1]["eta_basis"] == "recent_active_item_rate"
+    assert events[-1]["eta_samples"] == 1
+    assert events[-1]["eta_ignored_fast_samples"] == 4
+    assert events[-1]["scope"] == "current_attempt_substage"
+    clock.now += 541
+    meter.emit("running")
+    assert events[-1]["stalled"] is True
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["eta_basis"] == "stalled_rate_invalidated"
+    meter.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_owned_thread_stall_emits_without_a_completed_item(events, clock, monkeypatch):
+    entered, release = Event(), Event()
+    monkeypatch.setattr(progress, "_HEARTBEAT_SECONDS", 0.01)
+
+    def read_items():
+        for item in progress.progress_items([1, 2], stage="native_read", unit="items"):
+            if item == 1:
+                clock.now += 10
+            else:
+                clock.now += 40
+                entered.set()
+                assert release.wait(5)
+
+    with progress.work_heartbeats():
+        task = asyncio.create_task(run_owned_thread(read_items))
+        assert await asyncio.to_thread(entered.wait, 5)
+        try:
+
+            async def observed():
+                while not any(event.get("stalled") for event in events):
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(observed(), 2)
+            stalled = [event for event in events if event.get("stalled")]
+            assert stalled[-1]["completed"] == 1
+            assert stalled[-1]["eta_seconds"] is None
+            assert stalled[-1]["eta_basis"] == "stalled_rate_invalidated"
+        finally:
+            release.set()
+            await task
+    count = len(events)
+    await asyncio.sleep(0.03)
+    assert len(events) == count
 
 
 def test_interrupted_item_does_not_count_or_leak_secrets_and_retry_has_new_identity(events):

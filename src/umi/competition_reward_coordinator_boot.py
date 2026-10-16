@@ -33,6 +33,7 @@ from .competition_cohort_model_transport_selection import (
     selected_direct_model_review,
 )
 from .competition_host_activation import _read_root_control_path
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
@@ -235,6 +236,18 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 or manifest.opportunity.runtime_profile_sha256 != digest(eligibility)
             ):
                 raise ValueError("reward coordinator predecessor differs from its series boundary")
+        validate_shared_byte_stores(
+            self.legacy_model_storage,
+            (
+                *self.stores(include_shared=False),
+                *(p for p in (self.signer_key_file, self.control_key_file) if p is not None),
+                *(
+                    (direct.materialization_boot_disk_cache.directory,)
+                    if direct is not None and direct.materialization_boot_disk_cache is not None
+                    else ()
+                ),
+            ),
+        )
         _disjoint(self.stores())
         for value in (self.signer_key_file, self.control_key_file):
             if value is not None:
@@ -245,7 +258,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                     raise ValueError("reward keys must be outside mutable and replicated stores")
         return self
 
-    def stores(self) -> tuple[Path, ...]:
+    def stores(self, *, include_shared=True) -> tuple[Path, ...]:
         return tuple(
             Path(value)
             for value in (
@@ -266,6 +279,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                     else ()
                 ),
                 *(source.directory for source in self.legacy_model_storage),
+                *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
             if value is not None
         )

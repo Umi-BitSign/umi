@@ -35,6 +35,7 @@ from .competition_cohort_model_transport_selection import (
 )
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
@@ -241,10 +242,22 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 or manifest.opportunity.runtime_profile_sha256 != digest(eligibility)
             ):
                 raise ValueError("standing boot predecessor differs from its series boundary")
+        validate_shared_byte_stores(
+            self.legacy_model_storage,
+            (
+                *self.mutable_stores(include_shared=False),
+                *(p for p in (self.approval_path,) if p is not None),
+                *(
+                    (direct.materialization_boot_disk_cache.directory,)
+                    if direct is not None and direct.materialization_boot_disk_cache is not None
+                    else ()
+                ),
+            ),
+        )
         _disjoint(self.mutable_stores())
         return self
 
-    def mutable_stores(self) -> tuple[Path, ...]:
+    def mutable_stores(self, *, include_shared=True) -> tuple[Path, ...]:
         return tuple(
             Path(p)
             for p in (
@@ -261,8 +274,25 @@ class StandingRewardBootConfig(StrictProtocolModel):
                     else ()
                 ),
                 *(source.directory for source in self.legacy_model_storage),
+                *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
         )
+
+
+def validate_writer_byte_store_paths(config, host):
+    """Keep explicitly shared facts outside installed host secrets and journals."""
+    if not any(source.shared_byte_store is not None for source in config.legacy_model_storage):
+        return
+    validate_shared_byte_stores(
+        config.legacy_model_storage,
+        (
+            host.state_root,
+            host.worker_state_root,
+            host.wallet.path,
+            host.release_root,
+            host.operator_input_root,
+        ),
+    )
 
 
 def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> StandingRewardBootConfig:
@@ -306,6 +336,7 @@ def load_standing_boot(path: Path, anchor: MaterializedSuccessorAnchor) -> Stand
         }
         if not was_predecessor or value.predecessor_approval_sha256 is None:
             raise ValueError("standing boot local predecessor authority is incomplete")
+    validate_writer_byte_store_paths(value, anchor.config)
     _disjoint((*value.mutable_stores(), Path(anchor.config.state_root) / "standing-rewards"))
     return value
 
@@ -343,6 +374,7 @@ async def run_installed_standing_rewards(
     if type(runtime.adapter) is not ProductionSuccessorRuntimeAdapter:
         raise TypeError("standing boot requires the original native runtime adapter")
     config = StandingRewardBootConfig.model_validate_json(canonical_json_bytes(config))
+    validate_writer_byte_store_paths(config, runtime.config)
     legacy_sources = await run_owned_thread(
         lambda: authenticate_legacy_model_sources(
             config.legacy_model_storage,

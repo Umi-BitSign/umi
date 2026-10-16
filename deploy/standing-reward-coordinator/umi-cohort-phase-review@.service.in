@@ -21,7 +21,9 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@SIGNING_ROOT@ @CHAIN_STATE@ @PROMOTION_ROOT@ @INPUTS_ROOT@ @PROOF_IMPORT@
+# Expand to explicit account-private shared byte roots; empty for older omitted selections.
+# Preserved import roots remain read-only under ProtectSystem=strict.
+ReadWritePaths=@SIGNING_ROOT@ @CHAIN_STATE@ @PROMOTION_ROOT@ @INPUTS_ROOT@ @PROOF_IMPORT@ @MODEL_BYTE_STORE_ROOTS@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]

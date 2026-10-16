@@ -346,6 +346,8 @@ async def test_command_cancellation_drains_child_before_releasing_lock(
 
         def __init__(self):
             self.stdout = self
+            self.stderr = self
+            self.terminated = asyncio.Event()
 
         async def read(self, _amount):
             entered.set()
@@ -353,8 +355,12 @@ async def test_command_cancellation_drains_child_before_releasing_lock(
 
         def kill(self):
             self.killed = True
+            self.terminated.set()
 
         async def wait(self):
+            # The successor reader waits concurrently with both output pipes.
+            # Native processes wait for exit before or after kill is requested.
+            await self.terminated.wait()
             assert self.killed
             reaping.set()
             await finish.wait()

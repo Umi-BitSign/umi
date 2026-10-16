@@ -6,11 +6,11 @@ The root configuration selects baseline and incumbent identities independently
 of the inventories. Neither these paths nor replica metadata grant authority.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_legacy_model_readers import LegacyModelStorageReaders
 from .competition_cohort_legacy_model_storage import (
@@ -21,6 +21,11 @@ from .competition_cohort_legacy_model_storage import (
     verify_legacy_storage_originals,
 )
 from .competition_cohort_model_transport_selection import effective_model_deliveries
+from .competition_model_byte_store import (
+    ModelByteStoreConfig,
+    qualify_shared_byte_stores,
+    validate_shared_byte_stores,
+)
 from .competition_transport_verification import TransferProgress
 from .open_competition import CompetitionPolicy, digest
 from .private_files import Directory, _read_private_bytes
@@ -33,11 +38,20 @@ class LegacyModelStorageSourceConfig(StrictProtocolModel):
     directory: Directory
     baseline_model_sha256: Hex32
     incumbent_model_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=65536)] = ()
+    shared_byte_store: ModelByteStoreConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if self.shared_byte_store is None:
+            value.pop("shared_byte_store", None)
+        return value
 
     @model_validator(mode="after")
     def unique_incumbents(self):
         if self.incumbent_model_sha256s != tuple(sorted(set(self.incumbent_model_sha256s))):
             raise ValueError("legacy storage incumbent selection must be unique and sorted")
+        validate_shared_byte_stores((self,), (self.directory,))
         return self
 
 
@@ -60,6 +74,7 @@ def validate_legacy_model_selections(sources, *, series, policy, model_delivery_
     ):
         raise ValueError("legacy model sources must exactly cover committed adopted cohorts")
     paths = tuple(Path(value.directory) for value in selected)
+    validate_shared_byte_stores(selected, paths)
     if any(
         left == right or left in right.parents or right in left.parents
         for index, left in enumerate(paths)
@@ -74,6 +89,7 @@ class AuthenticatedLegacyModelSources:
     policy: CompetitionPolicy
     authenticated: dict[str, AuthenticatedLegacyModelStorage]
     original_paths: dict[str, tuple[Path, ...]]
+    byte_stores: dict[str, ModelByteStoreConfig] = field(default_factory=dict)
 
     def load_original(self, raw_sha256):
         paths = self.original_paths.get(raw_sha256)
@@ -101,6 +117,7 @@ def authenticate_legacy_model_sources(sources, *, series, policy, model_delivery
     )
     if not selected:
         return None
+    qualify_shared_byte_stores(selected)
     selections = {digest(value.history.plan): value for value in model_delivery_adoptions}
     authenticated, paths = {}, {}
     with TransferProgress(
@@ -162,7 +179,14 @@ def authenticate_legacy_model_sources(sources, *, series, policy, model_delivery
                 paths.setdefault(key, []).append(root / "objects" / (key + ".json"))
             progress.advance(1)
     prepared = AuthenticatedLegacyModelSources(
-        policy, authenticated, {key: tuple(value) for key, value in paths.items()}
+        policy,
+        authenticated,
+        {key: tuple(value) for key, value in paths.items()},
+        {
+            value.cohort_sha256: value.shared_byte_store
+            for value in selected
+            if value.shared_byte_store is not None
+        },
     )
     for value in authenticated.values():
         namespace = {(entry.endpoint, entry.bucket) for entry in value.preservation.models}
@@ -192,4 +216,5 @@ def selected_legacy_model_readers(prepared, *, multipart, verification_root):
         load_original=prepared.load_original,
         multipart=multipart,
         verification_root=verification_root,
+        byte_stores=prepared.byte_stores,
     )

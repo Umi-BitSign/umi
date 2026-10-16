@@ -227,10 +227,26 @@ def test_omitted_storage_selection_keeps_old_canonical_config_bytes(selected):
     assert selected.config.signing == selected.original.signing
 
 
+@pytest.mark.parametrize("shared", [False, True])
 async def test_real_phase_review_boot_signs_original_and_runs_retained_sandbox_after_restart(
-    selected, monkeypatch, caplog
+    selected, monkeypatch, caplog, tmp_path, shared
 ):
     s, i, c = selected, selected.installed, selected.config
+    if shared:
+        from umi.competition_model_byte_store import ModelByteStoreConfig
+
+        source = s.source.model_copy(
+            update={
+                "shared_byte_store": ModelByteStoreConfig(
+                    schema="umi-model-byte-verification-store/1",
+                    directory=str(tmp_path / "shared-bytes"),
+                )
+            }
+        )
+        c = PhaseReviewServiceConfig.model_validate_json(
+            canonical_json_bytes(c.model_copy(update={"legacy_model_storage": (source,)}))
+        )
+        assert Path(source.shared_byte_store.directory) in c.stores()
     caplog.set_level(logging.INFO, logger="umi.competition.progress")
     first_vote, inodes, reads = None, None, None
     job = i.job.model_copy(update={"evaluator_hotkey": c.signing.signer})
@@ -354,3 +370,27 @@ def test_retained_originals_cannot_be_stored_under_disposable_boot_cache(selecte
     changed = c.model_copy(update={"legacy_model_storage": (cached,)})
     with pytest.raises(ValueError, match="stores must be disjoint"):
         PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(changed))
+
+
+def test_shared_byte_store_rejects_reviewer_cache_signing_and_credentials(selected, tmp_path):
+    from umi.competition_model_byte_store import ModelByteStoreConfig
+
+    c = selected.config
+    for path in (
+        c.signing.directory,
+        c.inputs_directory,
+        c.signer_key_file,
+        c.direct_model_review.r2_credentials_file,
+        c.direct_model_review.materialization_boot_disk_cache.directory,
+    ):
+        source = selected.source.model_copy(
+            update={
+                "shared_byte_store": ModelByteStoreConfig(
+                    schema="umi-model-byte-verification-store/1", directory=str(path)
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="overlaps"):
+            PhaseReviewServiceConfig.model_validate_json(
+                canonical_json_bytes(c.model_copy(update={"legacy_model_storage": (source,)}))
+            )

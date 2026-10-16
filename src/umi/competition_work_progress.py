@@ -9,11 +9,13 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Awaitable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from functools import wraps
 from itertools import count
+from threading import RLock
 from typing import TypeVar
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -23,6 +25,53 @@ _CONTEXT: ContextVar[dict[str, object] | None] = ContextVar(
 )
 _T = TypeVar("_T")
 _HEARTBEAT_SECONDS = 30
+_CANCELLATION: ContextVar[object | None] = ContextVar("competition_read_cancellation", default=None)
+_ACTIVE_METERS = ContextVar("competition_active_work_meters", default=None)
+
+
+@contextmanager
+def work_heartbeats():
+    """One async timer observes its owned threads; it never cancels their work."""
+    if _ACTIVE_METERS.get() is not None:
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    active = (RLock(), set())
+    token = _ACTIVE_METERS.set(active)
+    timer = None
+
+    def heartbeat():
+        nonlocal timer
+        with active[0]:
+            meters = tuple(active[1])
+        for meter in meters:
+            if not meter.closed:
+                meter.emit("running")
+        timer = loop.call_later(_HEARTBEAT_SECONDS, heartbeat)
+
+    try:
+        timer = loop.call_later(_HEARTBEAT_SECONDS, heartbeat)
+        yield
+    finally:
+        if timer is not None:
+            timer.cancel()
+        _ACTIVE_METERS.reset(token)
+
+
+@contextmanager
+def cancellable_work(event):
+    """Select cooperative read boundaries; atomic writes still drain to completion."""
+    token = _CANCELLATION.set(event)
+    try:
+        yield
+    finally:
+        _CANCELLATION.reset(token)
+
+
+def check_work_cancelled():
+    event = _CANCELLATION.get()
+    if event is not None and event.is_set():
+        raise asyncio.CancelledError("owned read work cancelled at a checkpoint")
 
 
 def _name(value: object, maximum: int) -> bool:
@@ -54,9 +103,15 @@ class WorkProgress:
         self.identity = next(_IDS)
         self.completed = 0
         self.started = time.monotonic()
+        self.last_completed = self.started
+        self.durations = deque(maxlen=5)
         self.last_emitted = self.started
         self.context = dict(_CONTEXT.get() or {})
         self.closed = False
+        self.active_meters = _ACTIVE_METERS.get()
+        if self.active_meters is not None:
+            with self.active_meters[0]:
+                self.active_meters[1].add(self)
         self.emit("started")
 
     def __enter__(self):
@@ -80,6 +135,9 @@ class WorkProgress:
             # Counted units alone do not establish successful scope completion.
             percent = 100.0 if state == "completed" else min(percent, 99.9)
             eta = None
+            samples = [value for value in self.durations if value >= 1] or list(self.durations)
+            mean = sum(samples) / len(samples) if samples else None
+            stalled = mean is not None and now - self.last_completed > max(30, 3 * mean)
             if state == "completed":
                 eta = 0.0
             elif (
@@ -87,8 +145,10 @@ class WorkProgress:
                 and state == "running"
                 and 0 < self.completed < self.total
                 and elapsed >= 1
+                and mean is not None
+                and not stalled
             ):
-                eta = max(0.0, elapsed * (self.total - self.completed) / self.completed)
+                eta = max(0.0, mean * (self.total - self.completed))
             body = {
                 "schema": "umi-competition-work-progress/1",
                 "pid": os.getpid(),
@@ -109,12 +169,19 @@ class WorkProgress:
                     if state == "completed"
                     else "unestimated_scope"
                     if not self.estimate
-                    else "completed_work_rate"
+                    else "recent_active_item_rate"
                     if eta is not None
+                    else "stalled_rate_invalidated"
+                    if stalled
                     else "insufficient_samples"
                 ),
-                "eta_samples": self.completed,
-                "eta_assumption": "remaining_units_have_similar_cost" if self.estimate else None,
+                "eta_samples": len(samples),
+                "eta_window_completed": len(self.durations),
+                "eta_ignored_fast_samples": len(self.durations) - len(samples),
+                "eta_assumption": (
+                    "remaining_units_match_recent_active_cost" if self.estimate else None
+                ),
+                "stalled": stalled,
                 "scope": "current_attempt_substage",
                 "certification_authority": False,
             }
@@ -126,9 +193,13 @@ class WorkProgress:
             return
         if self.completed >= self.total:
             self.closed = True
+            self._release_heartbeat()
             self.emit("accounting_mismatch")
             return
         self.completed += 1
+        now = time.monotonic()
+        self.durations.append(max(0.0, now - self.last_completed))
+        self.last_completed = now
         if self.completed <= 2 or time.monotonic() - self.last_emitted >= 10:
             self.emit("running")
 
@@ -136,12 +207,19 @@ class WorkProgress:
         if self.closed:
             return
         self.closed = True
+        self._release_heartbeat()
         self.emit("completed" if self.completed == self.total else "accounting_mismatch")
 
     def interrupt(self) -> None:
         if not self.closed:
             self.closed = True
+            self._release_heartbeat()
             self.emit("interrupted")
+
+    def _release_heartbeat(self):
+        if self.active_meters is not None:
+            with self.active_meters[0]:
+                self.active_meters[1].discard(self)
 
 
 def progress_items(
@@ -151,6 +229,7 @@ def progress_items(
     progress = WorkProgress(stage, len(items), unit=unit, cohort=cohort)
     try:
         for item in items:
+            check_work_cancelled()
             yield item
             progress.advance()
         progress.finish()

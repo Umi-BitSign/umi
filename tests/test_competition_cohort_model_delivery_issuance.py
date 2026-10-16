@@ -795,3 +795,75 @@ def test_model_adoption_complete_exchange_includes_selected_remote_budget(owner_
         policy=i.case.policy,
     )
     assert peer.timeout_seconds == budget.vote_exchange_seconds("adoption") + 10020
+
+
+@pytest.mark.parametrize("migration", [False, True], ids=["shared", "old_root_import"])
+async def test_candidate_to_committed_reader_reuses_account_byte_facts(
+    issuance, tmp_path, migration
+):
+    from umi.competition_cohort_legacy_model_readers import LegacyModelStorageReaders
+    from umi.competition_cohort_legacy_model_storage import authenticate_legacy_storage_inventories
+    from umi.competition_cohort_model_transport_selection import CommittedModelDeliveryHistory
+    from umi.competition_model_byte_store import ModelByteStoreConfig
+
+    from .test_competition_cohort_recovery import signed_transition
+
+    i, c = issuance, issuance.case
+    shared = ModelByteStoreConfig(
+        schema="umi-model-byte-verification-store/1", directory=str(tmp_path / "shared-byte-facts")
+    )
+    source = (
+        i.config.source
+        if migration
+        else i.config.source.model_copy(update={"shared_byte_store": shared})
+    )
+    config = ModelDeliveryAdoptionCandidateConfig.model_validate_json(
+        canonical_json_bytes(i.config.model_copy(update={"source": source}))
+    )
+    candidate = ModelDeliveryAdoptionCandidate(config, c.policy, multipart=i.remote)
+    await candidate.verify(c.history, i.transition)
+    if migration:
+        shared = shared.model_copy(
+            update={"imports": await candidate.export_completed(c.history, i.transition)}
+        )
+    i.remote.reads.clear()
+    history = c.history.model_copy(update={"transitions": (signed_transition(i.transition),)})
+    committed = CommittedModelDeliveryHistory(
+        schema="umi-committed-model-delivery-history/1",
+        history=history,
+        committed_tip_sha256=digest(i.transition),
+        observed_at_block=221,
+    )
+    authenticated = authenticate_legacy_storage_inventories(
+        canonical_json_bytes(c.legacy),
+        canonical_json_bytes(c.preservation),
+        selection=committed,
+        policy=c.policy,
+        expected_baseline_sha256=digest(c.baseline),
+        expected_incumbent_sha256s=(),
+    )
+    consumer = LegacyModelStorageReaders(
+        {c.cohort: authenticated},
+        policy=c.policy,
+        load_original=candidate.originals,
+        multipart=i.remote,
+        verification_root=tmp_path / "committed-role-root",
+        byte_stores={c.cohort: shared},
+    )
+    for _ in range(2):
+        for selector in (
+            {"baseline": True},
+            {"request_sha256": digest(c.requests[0].record.request)},
+        ):
+            resolution = consumer.resolve(c.cohort, **selector)
+            reader = consumer.reader(resolution)
+            snapshot = await reader.verify(
+                document_paths=tuple(
+                    r.path
+                    for r in resolution.selection.bundle.files
+                    if r.role in {"license", "provenance"}
+                )
+            )
+            reader.require_verified(snapshot)
+    assert not i.remote.reads
+    assert c.owner.intake.pending_policy_adoption(c.cohort) is None

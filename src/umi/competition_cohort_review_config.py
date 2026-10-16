@@ -37,6 +37,7 @@ from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -135,10 +136,20 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             self.maximum_aggregate_evidence_bytes, LEGACY_AGGREGATE_REPLAY_BYTES
         )
 
-    def stores(self) -> tuple[Path, ...]:
+    def stores(self, *, include_shared=True) -> tuple[Path, ...]:
         return tuple(
             Path(p)
             for p in (
+                *(
+                    shared_byte_store_paths(
+                        (
+                            *self.legacy_model_storage,
+                            *(c.source for c in self.model_delivery_adoption_candidates),
+                        )
+                    )
+                    if include_shared
+                    else ()
+                ),
                 self.chain.state_directory,
                 self.signing.directory,
                 self.inputs_directory,
@@ -149,7 +160,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                     dict.fromkeys(
                         path
                         for candidate in self.model_delivery_adoption_candidates
-                        for path in candidate.stores()
+                        for path in candidate.stores(include_shared=False)
                     )
                 ),
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
@@ -369,6 +380,21 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                     else ()
                 ),
             )
+        )
+        validate_shared_byte_stores(
+            (
+                *self.legacy_model_storage,
+                *(c.source for c in self.model_delivery_adoption_candidates),
+            ),
+            (
+                *self.stores(include_shared=False),
+                *secrets,
+                *(
+                    (direct.materialization_boot_disk_cache.directory,)
+                    if direct is not None and direct.materialization_boot_disk_cache is not None
+                    else ()
+                ),
+            ),
         )
         _disjoint((*self.stores(), *secrets))
         return self

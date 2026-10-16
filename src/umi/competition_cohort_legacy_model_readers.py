@@ -5,6 +5,8 @@ and the exact retained originals loader. This never grants rights approval or
 manufactures a replacement acceptance. Each consumer retains its native checks.
 """
 
+from pathlib import Path
+
 from .competition_chunked_model_backup import ChunkedBackupSelection, ChunkedModelBackupReader
 from .competition_cohort_legacy_model_storage import (
     LegacyModelStorageRepairRequired,
@@ -16,15 +18,27 @@ from .competition_cohort_model_acceptance import (
     verify_model_acceptance_body,
 )
 from .open_competition import digest
-from .private_files import private_path
+from .private_files import ensure_private_directory, private_path
 from .protocol import canonical_json_bytes, sha256_hex
 
 
 class LegacyModelStorageReaders:
-    def __init__(self, authenticated, *, policy, load_original, multipart, verification_root):
+    def __init__(
+        self,
+        authenticated,
+        *,
+        policy,
+        load_original,
+        multipart,
+        verification_root,
+        byte_stores=None,
+    ):
         self.authenticated = dict(authenticated)
         self.policy, self.load_original = policy, load_original
         self.multipart, self.verification_root = multipart, verification_root
+        self.byte_stores = {k: v for k, v in (byte_stores or {}).items() if v is not None}
+        if not set(self.byte_stores) <= set(self.authenticated):
+            raise ValueError("byte stores require authenticated cohort selections")
         private_path(str(verification_root))
         if not callable(load_original) or any(
             key != digest(value.original_history.plan) or digest(value.policy) != digest(policy)
@@ -112,26 +126,37 @@ class LegacyModelStorageReaders:
             binding.endpoint,
             binding.bucket,
         )
-        if not any(
-            binding.provenance_sha256 == digest(value.preservation)
-            and selected
-            in {
-                (
-                    model.model_sha256,
-                    model.manifest_raw_sha256,
-                    model.association_raw_sha256,
-                    model.package_raw_sha256,
-                    model.endpoint,
-                    model.bucket,
-                )
-                for model in value.preservation.models
-            }
-            for value in self.authenticated.values()
-        ):
+        matches = [
+            cohort
+            for cohort, value in self.authenticated.items()
+            if (
+                binding.provenance_sha256 == digest(value.preservation)
+                and selected
+                in {
+                    (
+                        model.model_sha256,
+                        model.manifest_raw_sha256,
+                        model.association_raw_sha256,
+                        model.package_raw_sha256,
+                        model.endpoint,
+                        model.bucket,
+                    )
+                    for model in value.preservation.models
+                }
+            )
+        ]
+        if not matches:
             raise ValueError("legacy model reader source is outside its authenticated inventories")
+        stores = [self.byte_stores[cohort] for cohort in matches if cohort in self.byte_stores]
+        if stores and any(value != stores[0] for value in stores[1:]):
+            raise ValueError("authenticated model sources select conflicting byte stores")
+        store = stores[0] if stores else None
+        if store is not None:
+            ensure_private_directory(Path(store.directory))
         return ChunkedModelBackupReader(
             selection,
             policy=self.policy,
             multipart=self.multipart,
-            verification_root=self.verification_root,
+            verification_root=self.verification_root if store is None else Path(store.directory),
+            byte_store_imports=() if store is None else store.imports,
         )
