@@ -758,6 +758,51 @@ def test_different_controls_never_reuse_previous_stage(case):
     second.recheck()
 
 
+def test_renewed_controls_and_atomic_promotion_reuse_package_verification(
+    installed, monkeypatch, tmp_path
+):
+    from umi import competition_package as package
+    from umi.competition_package_reuse import package_verification_session
+    from umi.competition_supervisor import load_bound_successor_replay_package
+
+    value = installed
+    case = value.case
+    directory = tmp_path / "package-verification"
+
+    def load(path):
+        return load_bound_successor_replay_package(
+            path,
+            directive=case.selection.signed.directive,
+            observed_release=case.selection.signed.directive.release.replay_release_identity,
+        )
+
+    with package_verification_session(directory=directory):
+        expected = load(case.files.package_path)
+        load(value.source / "current/package")
+        load(value.first.path / "package")
+
+        def no_replay(*args, **kwargs):
+            pytest.fail("renewal or promotion repeated package semantics")
+
+        monkeypatch.setattr(package, "_verify_publications", no_replay)
+        changed = case.execution.model_copy(
+            update={
+                "replay_capacity": case.execution.replay_capacity.model_copy(
+                    update={"maximum_receipts": 19}
+                )
+            }
+        )
+        files = replace(case.files, worker_execution_bytes=canonical_json_bytes(changed))
+        staged = _stage(case, files=files)
+        assert staged.path != value.first.path
+        selected = material.select_staged_successor_current(staged, anchor=value.anchor)
+        assert load(selected.current_path / "package") == expected
+        assert _stage(case, files=files).directive_sha256 == staged.directive_sha256
+    with package_verification_session(directory=directory):
+        assert load(selected.current_path / "package") == expected
+        assert load(selected.retained_previous_path / "package") == expected
+
+
 @pytest.mark.parametrize("receipts", [19, 9])
 def test_old_control_mismatch_skips_package_hashing(case, monkeypatch, receipts):
     first = _stage(case)

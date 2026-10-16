@@ -49,6 +49,7 @@ seeds = [
     "competition_reward_writer_broker_worker",
     "competition_reward_writer_review_cli",
     "competition_reward_history_transfer_cli",
+    "competition_package_reuse_cli",
     "historical_header_hint_import_cli",
     "competition_model_source_verification",
     "competition_cohort_model_client",

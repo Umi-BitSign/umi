@@ -34,7 +34,8 @@ from .competition_host_activation import (
     _parse_worker_execution_config,
     _validate_worker_execution_bindings,
 )
-from .competition_package import _limit_for
+from .competition_materialization_reuse import sealed_materialization_identity as _identity
+from .competition_package_copy import copy_verified_package
 from .competition_package_reuse import current_package_reuse
 from .competition_supervisor import (
     MAX_SUCCESSOR_HISTORY_BYTES,
@@ -83,20 +84,6 @@ def successor_materialization_paths(config: ValidatorSupervisorConfig) -> tuple[
 
 def _hash(payload):
     return hashlib.sha256(payload).hexdigest()
-
-
-def _identity(info):
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_uid,
-        info.st_gid,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-        info.st_nlink,
-    )
 
 
 def _directory(path, *, modes):
@@ -330,28 +317,16 @@ def _write_at(fd, name, payload):
 
 
 def _copy_package(source, destination, package, directive):
-    source_fd = _directory(source, modes={0o500})
-    destination.mkdir(mode=0o700)
-    destination_fd = _directory(destination, modes={0o700})
-    try:
-        _write_at(destination_fd, "manifest.json", canonical_json_bytes(package.manifest))
-        for entry in package.manifest.files:
-            # The loader checked canonical bytes, signatures and all declared hashes.
-            # Read/copy one bounded object at a time, then reverify the complete copy.
-            payload = _read_at(
-                source_fd,
-                entry.name,
-                _limit_for(entry.name, directive.replay_package.limits),
-                expected_sha256=entry.sha256,
-            )
-            if len(payload) != entry.size_bytes:
-                raise SuccessorMaterializationError("package size changed during copying")
-            _write_at(destination_fd, entry.name, payload)
-        os.fchmod(destination_fd, 0o500)
-        os.fsync(destination_fd)
-    finally:
-        os.close(source_fd)
-        os.close(destination_fd)
+    target = directive.replay_package
+    copy_verified_package(
+        source,
+        destination,
+        package.manifest,
+        expected_package_sha256=target.package_sha256,
+        expected_policy_sha256=target.policy_sha256,
+        observed_release=directive.release.replay_release_identity,
+        limits=target.limits,
+    )
 
 
 def _controls(selection, files, config, consent, worker_limits):
