@@ -505,6 +505,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert kwargs["history"].journal.maximum_bytes == selected.maximum_history_bytes
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
         collection = kwargs["coverage"]
+        assert collection.journal.runtime_selection == boot.select_boot_runtime(selected)
         assert collection.provider is kwargs["provider"]
         assert collection.preparation is kwargs["preparation"]
         assert collection.history is kwargs["history"]

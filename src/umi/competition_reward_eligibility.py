@@ -12,7 +12,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .competition_chain import _hotkey, _uint
 from .competition_chain_state import (
@@ -31,14 +31,81 @@ from .validator_chain import StorageReadSpec
 
 _ISSUER = object()
 _MAX_EVIDENCE_BYTES = 32 * 1024**2
+# Exact scoped predicate qualification, independently reviewed; this does not
+# claim build or contract-execution equivalence. Retained provenance and limits:
+# tests/fixtures/reward-eligibility/runtime479-qualification.json.
+# A signed transition still needs this gate and every endpoint's native proofs.
+_QUALIFIED_YUMA_RUNTIMES: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "d0ea4955e6b4366d8561038307d5e47572c1ad67664638402c8253cde26a84be",
+            "f4786f9087cac84cfab37cbdf1e01c399042653a",
+        ),
+    }
+)
 
 
 class RewardEligibilityRuntime(StrictProtocolModel):
-    schema_: Literal["umi-reward-eligibility-runtime/1"] = Field(alias="schema")
+    """Selected code and reviewed pre-consensus semantics, never a code wildcard.
+
+    /1 preserves historical c004 evidence exactly. /2 supports the reviewed
+    f4786f Yuma path only: each endpoint must also prove its epoch mode. The
+    source revision alone cannot select that mutable subnet state.
+    """
+
+    schema_: Literal["umi-reward-eligibility-runtime/1", "umi-reward-eligibility-runtime/2"] = (
+        Field(alias="schema")
+    )
     genesis_hash: Literal[FINNEY_GENESIS_HASH]
     netuid: Literal[78]
     runtime_code_sha256: Hex32
-    epoch_source_revision: Literal["c004cebf360f4088187ee49d851dfb1a1eaaf710"]
+    epoch_source_revision: Literal[
+        "c004cebf360f4088187ee49d851dfb1a1eaaf710",
+        "f4786f9087cac84cfab37cbdf1e01c399042653a",
+    ]
+
+    @model_validator(mode="after")
+    def selected_semantics(self):
+        expected = (
+            "c004cebf360f4088187ee49d851dfb1a1eaaf710"
+            if self.schema_ == "umi-reward-eligibility-runtime/1"
+            else "f4786f9087cac84cfab37cbdf1e01c399042653a"
+        )
+        if self.epoch_source_revision != expected:
+            raise ValueError("reward eligibility profile schema and source semantics differ")
+        return self
+
+    @property
+    def requires_epoch_consensus_proof(self) -> bool:
+        return self.schema_ == "umi-reward-eligibility-runtime/2"
+
+
+class UnsupportedRewardEpochConsensus(ValueError):
+    """A proved endpoint is outside the selected Yuma eligibility semantics."""
+
+    reason_code = "reward_epoch_consensus_unsupported"
+
+
+class UnsupportedRewardEligibilityRuntime(ValueError):
+    """The requested new profile has no reviewed exact code/source binding."""
+
+    reason_code = "reward_eligibility_runtime_unqualified"
+
+
+def validate_qualified_reward_runtime(profile: RewardEligibilityRuntime) -> None:
+    """Require qualification separately from authorization for new semantics.
+
+    This gate is for newly authorized profiles. Existing /1 native consumers
+    retain their original installed qualification and signed selector instead;
+    a new adoption cannot use /1 to authorize an arbitrary replacement hash.
+    """
+    profile = RewardEligibilityRuntime.model_validate_json(canonical_json_bytes(profile))
+    if (
+        not profile.requires_epoch_consensus_proof
+        or (profile.runtime_code_sha256, profile.epoch_source_revision)
+        not in _QUALIFIED_YUMA_RUNTIMES
+    ):
+        raise UnsupportedRewardEligibilityRuntime("reward eligibility lacks a qualified runtime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +190,8 @@ async def collect_reward_eligibility(
     profile = RewardEligibilityRuntime.model_validate_json(canonical_json_bytes(profile))
     if digest(profile) != expected_runtime_profile_sha256:
         raise ValueError("reward eligibility runtime differs from selected profile")
+    if profile.requires_epoch_consensus_proof:
+        validate_qualified_reward_runtime(profile)
     _uint(maximum_parent_hotkeys, 65536)
     if maximum_parent_hotkeys == 0 or not isinstance(provider, FinalizedRewardControlProvider):
         raise ValueError("reward eligibility requires a standing provider and parent capacity")
@@ -180,7 +249,7 @@ async def _collect(provider, chain, profile, maximum_parent_hotkeys):
             chain.validator_row,
         )
         state, batches = await _eligibility_inputs(
-            subject, runtime, provider._weight_read, maximum_parent_hotkeys
+            subject, runtime, provider._weight_read, maximum_parent_hotkeys, profile=profile
         )
         reason = epoch_eligibility(state)
         raw = canonical_json_bytes(
@@ -229,6 +298,8 @@ async def _eligibility_inputs(
     runtime: ExecutedRuntimeContext,
     read_batch,
     maximum_parent_hotkeys: int,
+    *,
+    profile: RewardEligibilityRuntime,
 ):
     batches = []
     reads = {}
@@ -262,8 +333,10 @@ async def _eligibility_inputs(
         _spec("ValidatorPermit", 78),
         _spec("LastUpdate", 78),
     )
+    consensus_spec = _spec("SubnetEpochConsensus", 78)
     await read(
         globals_
+        + ((consensus_spec,) if profile.requires_epoch_consensus_proof else ())
         + tuple(
             spec
             for r in members
@@ -277,6 +350,13 @@ async def _eligibility_inputs(
             )
         )
     )
+    if profile.requires_epoch_consensus_proof and (
+        type(reads[consensus_spec]) is not str or reads[consensus_spec] != "Yuma"
+    ):
+        raise UnsupportedRewardEpochConsensus("reward eligibility requires proved Yuma consensus")
+    # The native batch authenticates membership or absence at runtime.snapshot.
+    # For ValueQuery absence, decode_storage uses the executed metadata default;
+    # never infer Yuma from a missing response, permit, or earlier endpoint.
     parents = tuple(_links(reads[_spec("ParentKeys", r.hotkey, 78)]) for r in members)
     children = tuple(_links(reads[_spec("ChildKeys", r.hotkey, 78)]) for r in members)
     known = {account_id32(r.hotkey): r.hotkey for r in members}

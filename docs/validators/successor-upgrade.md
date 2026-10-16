@@ -568,6 +568,52 @@ installing the exact successor approval that names the retained predecessor
 approval digest; an empty host or a newly added validator cannot claim
 predecessor authority.
 
+Standing runtime compatibility uses the optional `runtime_adoptions` selection
+in writer, coordinator and reviewer configurations. Keep `eligibility`, the
+signed series, manifest, policy, reward allocation and clocks unchanged. Each
+`umi-standing-reward-runtime-adoption/1` contract names those original identities,
+the recovery authority, an exact effective eligibility profile, a bounded block
+range and its immutable revision predecessor. The original policy quorum must
+sign it. Later selections append complete signed revisions; they cannot replace
+an earlier range. The `extend_boot_runtime_adoptions` preparation API validates
+the existing supported boot, authenticates the additive selection and reports
+three counted checks before returning a candidate. It does not write a control,
+stop a service, change a capacity approval or authorize a transaction.
+
+Authorization and code qualification remain separate. New profile version 2
+requires an explicitly qualified runtime code/source pair and a native proof of
+`SubnetEpochConsensus(78)` at every endpoint's exact state root. Only proved Yuma
+is supported; an absent value uses that runtime's proved metadata default.
+Unknown code, Null or malformed consensus state refuses with an explicit reason.
+A release or source label alone does not establish runtime equivalence.
+
+Choose the first adopted block no later than the earliest endpoint still needed
+by the collector, using retained native runtime evidence for that range. Finding
+the chain's exact upgrade boundary is unnecessary when required capture starts
+after an already proved new-runtime block. A wrongly scoped old-runtime endpoint
+refuses capture rather than falling back to another profile. Keep the final
+adopted block within the separately selected operating horizon; extending that
+scope does not extend a capacity approval or signed cohort clock.
+
+Coverage keeps the original manifest profile as its anchor and records the
+effective profile and adoption digest separately for new endpoints. Existing
+evidence, successful checkpoints and owner paths retain their original bindings;
+restoring them does not rerun unchanged native proofs. New-profile archive replay
+and checkpoint restore require the independently selected adoption. Preserve the
+same adoption under `predecessor_runtime_adoptions` when preparing a separately
+signed successor series. The original profile remains in
+`predecessor_eligibility`; never relabel old evidence to fit the new profile.
+
+Qualify the selected runtime through capture, archive replay, restart and the
+independent final acceptance observer before cutover. Independent observers use
+`collect_selected_reward_eligibility` and `validate_selected_reward_eligibility`;
+portable archive consumers use `review_selected_reward_eligibility`. Updating
+the reward owners alone does not update a separately pinned observer. Retain
+all complete-row, finality and same-root checks in that observer's supported
+source/profile transition. A productive-owner rollout also needs its current
+capacity assessment and startup approval; do not extend an earlier preparation
+horizon or signed clock in place.
+
 At the first successor activation, the host natively replays the exact reward
 opportunity named by the activation, stops the old worker under its permanent
 handoff intent, and holds the predecessor journal's writer lock. A signed pending

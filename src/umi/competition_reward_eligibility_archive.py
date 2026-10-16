@@ -28,6 +28,7 @@ from .competition_reward_eligibility import (
     _eligibility_inputs,
     _EligibilitySubject,
     _vector,
+    validate_qualified_reward_runtime,
 )
 from .competition_reward_eligibility_math import epoch_eligibility
 from .competition_weight_archive import WeightStateArchive, _hex
@@ -254,6 +255,8 @@ async def review_reward_eligibility(
         or _uint(maximum_parent_hotkeys, 65536) == 0
     ):
         raise ValueError("historical eligibility requires selected native inputs")
+    if profile.requires_epoch_consensus_proof:
+        validate_qualified_reward_runtime(profile)
     hotkey = _hotkey(validator_hotkey)
     async with provider._lock:
         observed, runtime = await provider._review_control_runtime_locked(control, metadata)
@@ -296,7 +299,7 @@ async def review_reward_eligibility(
         archive = await run_owned_thread(_EligibilityArchive, eligibility, chain, profile, runtime)
         collector = provider._proofs.with_evidence_rpc(archive)
         state, _ = await _eligibility_inputs(
-            subject, runtime, collector.storage_reads, maximum_parent_hotkeys
+            subject, runtime, collector.storage_reads, maximum_parent_hotkeys, profile=profile
         )
         archive.consumed()
         result = OwnedHistoricalRewardEligibility(

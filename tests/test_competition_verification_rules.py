@@ -28,6 +28,8 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_reward_writer_prefix.py",
         "competition_reward_writer_selection.py",
         "competition_reward_writer_review.py",
+        "competition_reward_runtime_adoption.py",
+        "competition_reward_runtime_review.py",
         "competition_reward_history_transfer.py",
         "competition_reward_history_transfer_owner.py",
         "competition_reward_history_transfer_runtime.py",

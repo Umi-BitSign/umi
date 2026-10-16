@@ -21,6 +21,7 @@ from .competition_reward_eligibility import (
     RewardEligibilityRuntime,
     _eligibility_inputs,
     _spec,
+    validate_qualified_reward_runtime,
 )
 from .competition_reward_eligibility_archive import (
     OwnedHistoricalRewardEligibility,
@@ -68,6 +69,8 @@ async def capture_reward_eligibility(
         or _uint(maximum_parent_hotkeys, 65536) == 0
     ):
         raise ValueError("historical capture requires selected native inputs")
+    if profile.requires_epoch_consensus_proof:
+        validate_qualified_reward_runtime(profile)
     validate_historical_reward_control(
         control,
         expected_control_hotkey=control_hotkey,
@@ -150,7 +153,7 @@ async def _capture(provider, control, hotkey, control_hotkey, profile, maximum_p
         if len(chain) > _MAX_EVIDENCE_BYTES:
             raise ValueError("historical weight evidence exceeds its byte bound")
         _, eligibility_batches = await _eligibility_inputs(
-            subject, runtime, provider._weight_read, maximum_parent_hotkeys
+            subject, runtime, provider._weight_read, maximum_parent_hotkeys, profile=profile
         )
         eligibility = canonical_json_bytes(
             {

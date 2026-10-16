@@ -310,6 +310,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     async def collect(self, stop, *, poll_seconds):
         collector_lifecycle.append("started")
         try:
+            assert self.journal.runtime_selection == boot.select_boot_runtime(config)
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             assert self.history.verification_profile == history_profile
             if config.proof_stores is not None:
