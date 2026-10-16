@@ -2767,7 +2767,7 @@ recreating an empty model directory. Lock contention retries unchanged.
 These accounting ports do not prove R2 durability, restoration coverage or
 consumer release. Do not invoke them to reclaim a live installation. The remaining
 deployment gate is an authenticated census and migration of every shared archive
-consumer, including active C5, baseline and incumbent bindings, together with
+consumer, including active cohort, baseline and incumbent bindings, together with
 supported remote retry service. Neither a config flag nor a supplied list of
 consumers establishes that gate.
 

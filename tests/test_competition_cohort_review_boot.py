@@ -571,8 +571,9 @@ async def test_restart_retains_host_selection_and_allows_capacity_change(selecte
 
 
 @pytest.mark.parametrize("selected_profile", [False, True])
+@pytest.mark.parametrize("adoption", ["request_tail", "model_delivery"])
 async def test_boot_selects_adoption_route_and_readers_from_same_profile(
-    selected, providers, monkeypatch, selected_profile
+    selected, providers, monkeypatch, selected_profile, adoption
 ):
     from .test_competition_cohort_review_budget import profile, select
 
@@ -580,17 +581,22 @@ async def test_boot_selects_adoption_route_and_readers_from_same_profile(
     if selected_profile:
         c = select(c, profile(c.policy))
     selected_routes = []
-    native = boot.request_tail_adoption_vote_routes
+    route_name = adoption + "_adoption_vote_routes"
+    native = getattr(boot, route_name)
 
     def routes(signer, series, **kwargs):
         selected_routes.append((signer, kwargs))
         return native(signer, series, **kwargs)
 
-    monkeypatch.setattr(boot, "request_tail_adoption_vote_routes", routes)
+    monkeypatch.setattr(boot, route_name, routes)
     async with boot.phase_review_app(c) as app:
         signer, kwargs = selected_routes[0]
         assert kwargs["budget"] == c.phase_review_budget
-        reviewer = signer.reviewer.adoption
+        reviewer = (
+            signer.reviewer.adoption
+            if adoption == "request_tail"
+            else signer.reviewer.model_delivery_adoption
+        )
         assert reviewer.budget == c.phase_review_budget
         assert reviewer.history.timeout == (
             c.phase_review_budget.export_exchange_seconds if selected_profile else 2400
@@ -599,7 +605,9 @@ async def test_boot_selects_adoption_route_and_readers_from_same_profile(
             transport=httpx.ASGITransport(app=app), base_url="http://local"
         ) as client:
             assert (
-                await client.post("/internal/cohorts/request-tail-adoption/vote", json={})
+                await client.post(
+                    "/internal/cohorts/" + adoption.replace("_", "-") + "-adoption/vote", json={}
+                )
             ).status_code == 401
 
 
