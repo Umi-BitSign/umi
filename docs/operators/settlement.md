@@ -129,10 +129,18 @@ contributes only one completion example. Interrupted or mismatched counters
 remain unfinished. Original forecasts and misses are retained; a forecast past
 its finish time remains an overdue unfinished forecast until that scope completes.
 Forecasts issued by later repeated attempts are retained separately and excluded
-from comparison with the first completion. Summary miss counts and errors score numerical point forecasts
-only. Planning-only ranges remain retained for later analysis; the summary does
-not yet score whether an actual completion fell inside those ranges. A backward
-wall-clock correction
+from comparison with the first completion. Legacy scalar miss counts and errors
+score numerical point forecasts. The original point and range each also receive
+a comparison against the first retained completion. An optional
+`completion_range_unix_ms` records uncertainty without inventing an exact finish;
+older terminal events retain their original observation time as an exact pair.
+Poll-derived `(last incomplete, first complete]` outcomes use a conservative
+closed envelope for scoring, including at forecast boundaries. A wholly earlier
+outcome is `early`, a wholly later one `late`, an enclosed outcome `inside`, and
+partial or spanning overlap `ambiguous`. Unfinished ranges remain `pending` or
+`pending_overdue`; they are not completed misses. Uncertain completion exposes
+elapsed/error intervals and withdraws the corresponding exact scalar claims.
+A backward wall-clock correction
 withdraws elapsed/error claims for that scope rather than fabricating an exact
 duration across the correction.
 
@@ -140,15 +148,52 @@ The diagnostic API `ForecastLedger.scopes(after=..., limit=...)` provides bounde
 keyset pages, including unfinished scopes whose workers are no longer running.
 `status(scope)` exposes original elapsed time, overdue/missed forecasts and the
 first forecast error; `records(scope)` retains the individual immutable revisions
-and actual attempts. `sample_kind` distinguishes pending work, duration-only
-outcomes and numerical prediction/outcome pairs. Only complete coverage without
-a clock regression makes a prediction/outcome pair `calibration_eligible`;
-completed duration-only samples have separate eligibility. This does not certify
-that different runtimes, workload sizes or stages form a comparable population.
-The ledger builds summaries in one streaming validation pass when opened. Routine
-progress updates do not reread, decode or hash its prior events. These records are
-correlation data, not independent examples just because multiple stages or
-attempts appear in the same cohort.
+and actual attempts. `sample_kind` distinguishes pending work, duration-only,
+point prediction/outcome and range-only prediction/outcome pairs. The legacy
+`calibration_eligible` flag is deprecated and false: no calibrated estimator is
+selected. `empirical_outcome_eligible` instead identifies a candidate with complete
+coverage, a prospective original preceding the earliest possible completion,
+qualified comparison metadata and no clock regression. Group selection can still
+exclude that candidate; it does not establish independent samples or a calibrated
+future ETA. Completed duration-only samples keep their separate eligibility.
+
+`status(scope)` exposes `original_point_comparison` and
+`original_range_comparison`, including exact exclusion reasons. The earliest
+numeric original for each metric is frozen before outcome filtering; a later
+prospective revision cannot replace an earlier legacy or retrospective original.
+New adapters label their issuance `prospective`; retained events without an origin
+remain `legacy_unknown` and are excluded from prospective samples without
+rewriting their bytes. Retrospective imports remain diagnostic. Explicit
+`forecast_scores(scope, after_sequence=..., limit=...)` pages score every retained
+revision, scanning at most the requested event rows (including nonforecast rows).
+Forecasts after the first completion remain excluded even if backdated. These APIs
+score the current retained state: `observed_unix_ms` controls unfinished overdue
+checks, not historical outcome visibility or a leakage-free backtest.
+
+`calibration_report(population_sha256, metric="point"|"range", maximum_scopes=...)`
+is a bounded descriptive report over the compact summaries. It refuses a partial
+sample when its explicit scope budget is exceeded. The supported native
+population binds exact policy, chain, verifier semantics, workload/runtime regime,
+role, rate semantics and original total, remaining and restored block counts.
+Generic work meters lacking these dimensions or a qualified outcome/group
+identity remain unpoolable. Each native fixed interval is one outcome unit;
+intervals in a shared history series form one conservative correlation group.
+The earliest matching original in each group is selected **before** testing its
+eligibility or completion, so an unfinished or ineligible earlier unit cannot be
+silently replaced by a later success. Reports name selected units, discarded units,
+group identities and exclusions; missing groups are separate from repeats.
+Multiple future cohorts can still share that native lineage until the owner
+provides a qualified finer run boundary. Reported groups are not independent runs.
+
+Reports expose completed early/inside/late/ambiguous counts, pending and overdue
+counts, mean point-error intervals and observed error envelopes from only eligible
+matching completed groups. They do not fit a distribution, select an ETA correction,
+claim P50/P90, or promote a sample-count threshold into proof of calibration.
+Matching declared native dimensions does not control every resource or operational
+condition. The ledger builds summaries in one streaming validation pass when opened.
+Routine updates and compact reports do not reread, decode or hash prior events.
+Malformed new brackets are rejected before commit and mark the lost diagnostic
+observation; the native outcome remains authoritative and unchanged.
 
 Exhausting the database budget stops further recording with `capacity_required`;
 it never deletes prior records or stops native work. Restarting with the same
@@ -201,7 +246,7 @@ estimates remain diagnostic observations when the owner does not expose their
 completion; they do not become invented calibration samples. These fixed-interval
 estimates exclude subsequent chain growth and reward activation.
 
-Automatic R2 retention, comparable-outcome range calibration, original whole-cohort
+Automatic R2 retention, prospective estimator/range calibration, original whole-cohort
 elapsed accounting, dispatch outcomes, miner/client and standalone repair,
 preparation or history-migration adapters, and the end-to-end rewards forecast
 remain separate qualification work. Source qualification does not establish

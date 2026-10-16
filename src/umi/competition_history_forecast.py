@@ -14,6 +14,7 @@ import time
 import uuid
 
 from .competition_forecast import ForecastCapacityRequired, ForecastLedger
+from .competition_forecast_scoring import population_sha256
 from .open_competition import digest
 
 logger = logging.getLogger("umi.competition_reward_history_progress")
@@ -123,9 +124,7 @@ class HistoryForecast:
             )
         ):
             unknown = {
-                key: value
-                for key, value in body.items()
-                if not key.endswith("elapsed_seconds")
+                key: value for key, value in body.items() if not key.endswith("elapsed_seconds")
             }
             if unknown.get("ancestry_progress") is not None:
                 unknown["ancestry_progress"] = {
@@ -148,6 +147,7 @@ class HistoryForecast:
         values = {
             **common,
             "revision": self.revision,
+            "forecast_origin": "prospective",
             "state": body["state"],
             "completed": body["completed_blocks"],
             "total": body["total_blocks"],
@@ -178,14 +178,45 @@ class HistoryForecast:
                 "moving finalized head and reward activation are outside this estimate",
             ],
             "native_progress": body,
-            "substage_finish_unix_ms": None
-            if stage_eta is None
-            else now + round(stage_eta * 1000),
+            "substage_finish_unix_ms": None if stage_eta is None else now + round(stage_eta * 1000),
             "substage_finish_range_unix_ms": None
             if stage_planning is None
             else [now + round(value * 1000) for value in stage_planning],
             "substage_outcome_basis": "retained_observation_only_no_independent_completion_event",
         }
+        population_fields = (
+            "policy_sha256",
+            "chain_config_sha256",
+            "verifier_semantics",
+            "workload_regime_sha256",
+            "role",
+        )
+        if all(self.identity.get(key) for key in population_fields) and self.identity.get(
+            "series_sha256"
+        ):
+            population = {
+                "schema": "umi-forecast-comparison-population/1",
+                **{key: self.identity[key] for key in population_fields},
+                "stage": "selected_native_history_interval",
+                "unit": "blocks",
+                "rate_semantics": values["rate_semantics"],
+                "total_blocks": body["total_blocks"],
+                "remaining_blocks": body["total_blocks"] - body["completed_blocks"],
+                "restored_completed": body["restored_completed"],
+            }
+            values.update(
+                {
+                    "comparison_population": population,
+                    "comparison_population_sha256": population_sha256(population),
+                    "comparison_outcome_unit_identity": self.scope,
+                    # Targets in a continuous series share native history and
+                    # are not independent runs. Restarts retain this grouping.
+                    # It may intentionally span several future cohorts until
+                    # the real owner supplies a qualified finer run boundary.
+                    "comparison_correlation_group_identity": self.identity["series_sha256"],
+                    "comparison_correlation_group_basis": "shared_native_history_series",
+                }
+            )
         self.ledger.append(
             self.attempt + ":observation:" + str(self.revision),
             self.scope,

@@ -31,6 +31,7 @@ from .competition_forecast_health import (
     write_initialization,
 )
 from .competition_forecast_io import stream_file
+from .competition_forecast_scoring import empirical_report, retained_forecast, score_forecast
 from .competition_forecast_summary import ForecastSummary
 
 _CONTEXT = ContextVar("competition_forecast_scope", default=None)
@@ -208,19 +209,113 @@ class ForecastLedger:
         now = time.time_ns() // 1_000_000 if observed_unix_ms is None else observed_unix_ms
         with self.lock:
             result = self.summaries[scope].status(scope, now)
+            comparisons = {
+                metric: self.summaries[scope].comparison(
+                    metric,
+                    observed_unix_ms=now,
+                    coverage_complete=self.health["coverage_complete"],
+                )
+                for metric in ("point", "range")
+            }
             return {
                 **result,
                 "status": "capacity_required" if self.capacity_required else "retained",
                 "accounting_coverage_complete": self.health["coverage_complete"],
-                "calibration_eligible": self.health["coverage_complete"]
-                and not result["clock_regression"]
-                and result["sample_kind"] == "prediction_outcome",
+                # Deprecated: accounting completeness was never proof of an
+                # empirically calibrated estimator or independent outcome pool.
+                "calibration_eligible": False,
+                "calibration_eligibility_basis": "no_calibrated_estimator_selected",
+                "empirical_outcome_eligible": any(
+                    value is not None and value["empirical_eligible"]
+                    for value in comparisons.values()
+                ),
                 "duration_sample_eligible": self.health["coverage_complete"]
                 and not result["clock_regression"]
                 and result["outcome"] == "completed",
                 "accounting_gap_count": self.health["gap_count"],
                 "accounting_first_gap": self.health["first_gap"],
                 "accounting_last_gap": self.health["last_gap"],
+                "original_point_comparison": comparisons["point"],
+                "original_range_comparison": comparisons["range"],
+            }
+
+    def calibration_report(
+        self, population, *, metric, observed_unix_ms=None, maximum_scopes=10000
+    ):
+        """Explicit compact-summary report, never an automatic future ETA adjustment."""
+        _identifier(population, digest=True)
+        if (
+            metric not in {"point", "range"}
+            or type(maximum_scopes) is not int
+            or not 1 <= maximum_scopes <= 100000
+        ):
+            raise ValueError("invalid forecast comparison selection")
+        now = time.time_ns() // 1_000_000 if observed_unix_ms is None else observed_unix_ms
+        with self.lock:
+            if len(self.summaries) > maximum_scopes:
+                raise ValueError("forecast report exceeds explicit scope budget; no partial sample")
+            comparisons = (
+                summary.comparison(
+                    metric,
+                    observed_unix_ms=now,
+                    coverage_complete=self.health["coverage_complete"],
+                )
+                for summary in self.summaries.values()
+            )
+            return empirical_report(
+                (value for value in comparisons if value is not None),
+                population=population,
+                metric=metric,
+            )
+
+    def forecast_scores(self, scope, *, after_sequence=0, limit=100, observed_unix_ms=None):
+        """Explicit bounded inspection scores every retained original revision."""
+        if (
+            type(after_sequence) is not int
+            or after_sequence < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("invalid forecast score page")
+        now = time.time_ns() // 1_000_000 if observed_unix_ms is None else observed_unix_ms
+        with self.lock:
+            summary = self.summaries[scope]
+            regressed = summary.status(scope, now)["clock_regression"]
+            rows = self.db.execute(
+                "SELECT sequence,body,previous,digest FROM events "
+                "WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?",
+                (scope, after_sequence, limit),
+            ).fetchall()
+            values = []
+            for sequence, body, previous, checksum in rows:
+                if hashlib.sha256(previous.encode() + body).hexdigest() != checksum:
+                    raise ForecastRepairRequired("forecast scoring record changed")
+                event = json.loads(body)
+                if event["kind"] != "forecast":
+                    continue
+                for metric in ("point", "range"):
+                    forecast = retained_forecast(event, metric)
+                    if forecast is None:
+                        continue
+                    values.append(
+                        {
+                            "sequence": sequence,
+                            **score_forecast(
+                                forecast,
+                                summary.completion_range,
+                                metric=metric,
+                                observed_unix_ms=now,
+                                clock_regression=regressed,
+                                coverage_complete=self.health["coverage_complete"],
+                                after_first_completion=summary.completion_sequence is not None
+                                and sequence > summary.completion_sequence,
+                            ),
+                        }
+                    )
+            return {
+                "scores": values,
+                "through_sequence": rows[-1][0] if rows else after_sequence,
+                "page_basis": "bounded_event_rows_including_nonforecast_records",
             }
 
     def scopes(self, *, after="", limit=100):
@@ -264,7 +359,7 @@ class ForecastLedger:
                 or event["certification_authority"] is not False
             ):
                 raise ForecastRepairRequired("forecast accounting identity is damaged")
-            self.summaries.setdefault(scope, ForecastSummary()).accept(event)
+            self.summaries.setdefault(scope, ForecastSummary()).accept(event, sequence=seq)
             previous, sequence = digest, seq
         self.head = previous, sequence
         if self.db.execute("SELECT digest,sequence FROM head").fetchall() != [self.head]:
@@ -319,6 +414,8 @@ class ForecastLedger:
                 ).fetchone() or (_ZERO, 0)
                 if latest != self.head:
                     raise ForecastRepairRequired("forecast accounting changed outside its owner")
+                summary = self.summaries.get(scope) or ForecastSummary()
+                prepared = summary.prepare(event)
                 digest = hashlib.sha256(self.head[0].encode() + body).hexdigest()
                 self.db.execute(
                     "INSERT INTO events VALUES(?,?,?,?,?,?)",
@@ -327,7 +424,8 @@ class ForecastLedger:
                 self.db.execute("UPDATE head SET digest=?,sequence=?", (digest, self.head[1] + 1))
                 self.db.commit()
                 self.head = digest, self.head[1] + 1
-                self.summaries.setdefault(scope, ForecastSummary()).accept(event)
+                summary.accept(event, sequence=self.head[1], prepared=prepared)
+                self.summaries[scope] = summary
                 self.last_failure_token = None
                 return event
             except BaseException as error:
@@ -598,6 +696,7 @@ class ForecastAttempt:
                         **common,
                         **forecast,
                         "revision": self.revision,
+                        "forecast_origin": "prospective",
                         "finish_range_unix_ms": None,
                         "range_basis": "not_yet_calibrated",
                         "classification": "measured_substage" if eta is not None else "unknown",
