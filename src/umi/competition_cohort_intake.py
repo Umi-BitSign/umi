@@ -248,6 +248,35 @@ class CohortIntake:
         )
 
     @contextmanager
+    def fenced_read_snapshot(self):
+        """Owned metadata export under the native fence, without schema writes.
+
+        The ordinary history reader remains available to other consumers. This
+        bounded export also holds the writer fence so it can take the upload
+        journal next and observe both original ledgers at one boundary.
+        """
+        with self._process_lock.hold():
+            self._directory()
+            lease = self._file("intake.lock", read_only=True)
+            try:
+                until = time.monotonic() + 10
+                while True:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= until:
+                            raise TimeoutError("cohort intake busy; retry unchanged") from None
+                        time.sleep(0.02)
+                with self._history_connection() as value:
+                    yield value
+                    path, held = (self.directory / "intake.lock").lstat(), os.fstat(lease)
+                    if (path.st_dev, path.st_ino) != (held.st_dev, held.st_ino):
+                        raise ValueError("cohort intake fence changed during metadata export")
+            finally:
+                os.close(lease)
+
+    @contextmanager
     def _history_connection(self):
         # Owner-authenticated history must remain readable while admission,
         # model preservation or another history caller owns the write gate.

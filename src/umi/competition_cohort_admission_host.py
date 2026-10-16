@@ -37,6 +37,7 @@ from .competition_cohort_intake_review import NativeIntakeProgressSource
 from .competition_cohort_intake_review_http import intake_review_routes
 from .competition_cohort_lifecycle_host import LifecycleHost
 from .competition_cohort_model_delivery_api import model_delivery_adoption_owner_routes
+from .competition_cohort_model_delivery_preflight import model_delivery_preflight_routes
 from .competition_cohort_model_delivery_reservation import model_delivery_reservation_routes
 from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
@@ -245,6 +246,16 @@ async def admission_owner_app(
             else review_timeout_seconds
         )
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+        if service_host is not None and service_host.uploads is not None:
+            app.include_router(
+                model_delivery_preflight_routes(
+                    intake,
+                    service_host.uploads,
+                    token=token,
+                    maximum_bytes=c.maximum_export_bytes,
+                    timeout_seconds=phase_export_timeout_seconds,
+                )
+            )
         if requests_stage_policy() is not None:
             app.add_middleware(
                 RequestsStageASGIBinding, controller=selected_memory(), private_role="intake"

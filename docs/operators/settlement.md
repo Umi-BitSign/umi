@@ -2537,6 +2537,25 @@ intents and completed certificates, plus the selected baseline and execution
 incumbents. Do not infer census completeness from an R2 listing or rewrite old
 signed requests to the direct-upload schema.
 
+Obtain the original metadata through the existing private owner's
+`POST /internal/cohorts/model-delivery-preflight` route, using its export credential.
+Supply `umi-model-delivery-preflight-request/1` with `cohort_sha256`, the expected
+`expected_predecessor_sha256` and a fresh `challenge`. This unsigned authenticated
+observation includes every retained model participation and upload-only request,
+the exact raw JSON objects referenced by SHA-256, admission and acceptance lineage,
+local preservation receipts and conservative allocation totals across all cohorts.
+The owner holds its intake fence then the upload journal while taking the bounded
+metadata snapshot. It does not open payloads, contact R2, capture new finality,
+initialize lifecycle control, sign, reserve or change the hold. A stale predecessor,
+inconsistent original or complete response exceeding configured export capacity
+refuses without returning a truncated census. Logs expose counted progress and ETA.
+Reconstruct each object's original bytes from `raw_json` and verify its
+`raw_sha256`; do not treat the observation or local preservation receipt as remote
+durability, baseline/incumbent selection or adoption authority. Supply that separate
+qualified provenance when constructing the candidate. Prepare and reserve compare
+the complete inventory again, so an earlier observation cannot authorize omission
+of a later upload. Do not read live owner databases with a diagnostic process.
+
 1. `POST /prepare` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
    predecessor. The existing owner obtains native finalized height, authenticates
    both inventory files and verifies their R2 bytes with durable file checkpoints.

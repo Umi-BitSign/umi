@@ -284,6 +284,7 @@ async def test_service_owner_shares_its_capture_with_every_reviewer(owned, tmp_p
         preparation=o.preparation,
         provider=o.h.archive.reviewer,
         capture=shared_capture,
+        uploads=None,
         config=ServiceAdmissionHostConfig(
             schema="umi-cohort-service-admission-host/1",
             series=series,
