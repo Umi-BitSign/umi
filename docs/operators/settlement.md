@@ -89,6 +89,126 @@ history, verified reward package and finalized chain observation to establish
 those milestones. These log records explicitly carry
 `certification_authority: false`.
 
+The cohort lifecycle owner also retains diagnostic forecast history under
+`<lifecycle.directory>/<series-digest>/forecast-accounting/forecasts.sqlite3`.
+The explicit `forecast_accounting_bytes` setting bounds that database (default
+32 MiB; supported range 64 KiB–1 GiB). Its rollback journal and an explicit
+backup/repair copy require additional temporary space. Older lifecycle configs
+retain their original canonical bytes when the default is selected. This
+separate database changes no authorization journal, signed term or payload
+cache, and upgrades keep its directory in place.
+The sibling `forecast-accounting.initialized` marker distinguishes a missing
+previously installed accounting directory from a legacy installation. The fixed
+4 KiB `forecast-accounting.health` sibling preserves accounting coverage gaps
+even when the event database has reached its budget. Upgrades from the original
+`/1` marker retain all events and conservatively report unknown earlier coverage;
+the `/2` marker requires the retained health file. A missing or torn health file
+requires explicit repair, never silent reinitialization.
+
+Progress review, decision review, history publication and closed-result
+publication bind their first progress meter to the cohort and the digest of the
+actual reviewed progress, transition or published history. Nested meters need
+their own explicit immutable input scope; stage names and process-local IDs
+alone cannot identify durable work. The counted request-object delivery stage
+has its own scope binding the actual exported history, object digests and derived
+seal digests. It records numerical forecasts after completed deliveries provide a
+rate, including when the enclosing publication has only a one-unit wait meter.
+`forecast_accounting` in the ordinary work log identifies the retained scope, attempt and service invocation. Each issued
+forecast revision retains its original absolute finish time, counts, raw recent
+durations, omitted fast-sample count, assumption and revision reason. A wait
+with no measured rate retains an unknown forecast; it does not invent a finish
+time or a confidence range. No P50/P90 interpretation is provided.
+
+`elapsed_including_gaps_seconds` runs from the first retained observation of
+that exact scope through completion, including downtime between attempts. An
+upgrade cannot reconstruct time before accounting was first installed. Current
+attempt rates retain their own invocation and never borrow samples from the
+previous process. The first successful owner return records one terminal scope
+outcome. Repeated publication retains separate attempt observations but still
+contributes only one completion example. Interrupted or mismatched counters
+remain unfinished. Original forecasts and misses are retained; a forecast past
+its finish time remains an overdue unfinished forecast until that scope completes.
+Forecasts issued by later repeated attempts are retained separately and excluded
+from comparison with the first completion. Summary miss counts and errors score numerical point forecasts
+only. Planning-only ranges remain retained for later analysis; the summary does
+not yet score whether an actual completion fell inside those ranges. A backward
+wall-clock correction
+withdraws elapsed/error claims for that scope rather than fabricating an exact
+duration across the correction.
+
+The diagnostic API `ForecastLedger.scopes(after=..., limit=...)` provides bounded
+keyset pages, including unfinished scopes whose workers are no longer running.
+`status(scope)` exposes original elapsed time, overdue/missed forecasts and the
+first forecast error; `records(scope)` retains the individual immutable revisions
+and actual attempts. `sample_kind` distinguishes pending work, duration-only
+outcomes and numerical prediction/outcome pairs. Only complete coverage without
+a clock regression makes a prediction/outcome pair `calibration_eligible`;
+completed duration-only samples have separate eligibility. This does not certify
+that different runtimes, workload sizes or stages form a comparable population.
+The ledger builds summaries in one streaming validation pass when opened. Routine
+progress updates do not reread, decode or hash its prior events. These records are
+correlation data, not independent examples just because multiple stages or
+attempts appear in the same cohort.
+
+Exhausting the database budget stops further recording with `capacity_required`;
+it never deletes prior records or stops native work. Restarting with the same
+budget preserves the failure latch. Increasing the explicit diagnostic budget
+and reopening permits new recording, but retains the gap and excludes incomplete
+history from calibration. Any unretained observation, including an encoding or
+SQLite I/O failure, records a coverage gap. Consumers also mark failures before
+an observation reaches the ledger. A durable open-session marker is installed
+before SQLite startup, so an abrupt exit or a failed gap-marker update cannot
+reopen as a clean accounting run. Older health records without that session
+marker migrate with unknown coverage. A failed open-session write invalidates
+only a previously validated initialization marker for explicit repair; already
+damaged marker bytes remain unchanged until pinned repair. Graceful close keeps
+any known gap instead of resetting coverage. Missing, changed or damaged records report `repair_required` instead of becoming a fresh cache. The owning service
+must be offline for repair. `ForecastLedger.snapshot(destination)` creates a
+consistent SQLite backup with a digest, exact head and byte-count receipt;
+retain that receipt and backup independently. `restore_forecast_snapshot` requires
+the exact selected backup/receipt and current damaged-file digest (or explicit
+missing-file state), verifies the complete record chain, preserves the damaged
+file, and atomically restores the snapshot. A missing health marker is repaired
+with unknown coverage. For a torn marker, supply its exact
+`damaged_health_sha256`; repair preserves those marker bytes separately before
+replacement. A damaged initialization marker similarly requires its exact
+`damaged_initialized_sha256`; repair preserves those bytes, refuses linked or
+conflicting preservation paths and restores the supported `/2` marker. Both
+repairs work even when the database already matches the snapshot. Repeat
+restoration is idempotent.
+Repair refuses pending SQLite rollback/WAL sidecars; original SQLite recovery
+must complete before a snapshot can replace the database.
+An older snapshot cannot reconstruct later unarchived forecasts. Before replacing
+the database, repair durably records that discontinuity in the health file; it
+survives restart and excludes the affected accounting history from calibration.
+Snapshot and restoration hashing/copying use bounded 64 KiB reads rather than
+materializing the database. Diagnostic storage failures never replace a native
+result or exception.
+
+The selected reward writer and coordinator/reviewer history owners retain native
+history forecasts separately under
+`<series-state>/history-forecast-accounting/forecasts.sqlite3`. Their explicit
+`forecast_accounting_bytes` defaults to 512 MiB (supported range 64 KiB–1 GiB)
+and is omitted at its default to preserve older canonical configuration bytes.
+Forced per-checkpoint reports can retain far more observations than the usual
+heartbeat rate; size this separate budget for the expected run and watch
+accounting health. Exhaustion preserves earlier forecasts and stops diagnostic
+recording without stopping native history work. Main and predecessor
+readers retain the exact issued fixed-target estimates, planning ranges, native
+and restored work counts, verified-ahead counts, errors, invocation and target
+resets, and the first actual completed interval. Nested ancestry and restoration
+estimates remain diagnostic observations when the owner does not expose their
+completion; they do not become invented calibration samples. These fixed-interval
+estimates exclude subsequent chain growth and reward activation.
+
+Automatic R2 retention, comparable-outcome range calibration, original whole-cohort
+elapsed accounting, dispatch outcomes, miner/client and standalone repair,
+preparation or history-migration adapters, and the end-to-end rewards forecast
+remain separate qualification work. Source qualification does not establish
+deployment readiness for every consuming path or calibrated confidence ranges.
+In particular, a completed publication is not proof that rewards are live;
+the rewards endpoint remains fresh finalized whole-row acceptance.
+
 ## Durable native verification
 
 Settlement and reward owners retain completed closure, participant, terminal,

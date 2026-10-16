@@ -54,6 +54,8 @@ class HistoryProgress:
         self.ancestry_progress = None
         self._ancestry_watch = None
         self._ancestry_sample = None
+        self.forecast = None
+        self.forecast_health = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -396,6 +398,7 @@ class HistoryProgress:
                 "total_blocks": total,
                 "percent": 100.0 * done / total if total else 0.0,
                 "native_completed": self.native_completed,
+                "native_applied": self.native_applied,
                 "captured_blocks": self.counts["captured"],
                 "verified_blocks": verified,
                 "completed_admission_blocks": completed_admission,
@@ -445,6 +448,25 @@ class HistoryProgress:
                 )
             if force or state != "running" or now - self.last_emitted >= self.heartbeat_seconds:
                 self.last_emitted = now
+                if self.forecast is not None:
+                    try:
+                        accounting = self.forecast.observe(dict(self.latest))
+                    except Exception as error:
+                        self.forecast.ledger.note_failure(
+                            "consumer_observation_failed", error=error
+                        )
+                        accounting = {
+                            "status": "capacity_required"
+                            if self.forecast.ledger.capacity_required
+                            else "repair_required",
+                            "certification_authority": False,
+                        }
+                    self.latest["forecast_accounting"] = accounting
+                elif self.forecast_health is not None:
+                    self.latest["forecast_accounting"] = {
+                        "status": self.forecast_health,
+                        "certification_authority": False,
+                    }
                 logger.info("reward_history_progress %s", self.latest)
         except Exception:
             pass

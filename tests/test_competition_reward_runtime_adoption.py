@@ -273,5 +273,5 @@ async def test_coordinator_and_reviewer_assembly_receive_runtime_selection(
         config_case.config, adopted.runtime_adoptions
     )
     await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
-        config_case, monkeypatch, role, None, False
+        config_case, monkeypatch, role, None, False, successor=False
     )

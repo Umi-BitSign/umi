@@ -18,6 +18,8 @@ from itertools import count
 from threading import RLock
 from typing import TypeVar
 
+from .competition_forecast import ForecastAttempt, ForecastCapacityRequired
+
 _LOG = logging.getLogger("umi.competition.progress")
 _IDS = count(1)
 _CONTEXT: ContextVar[dict[str, object] | None] = ContextVar(
@@ -107,6 +109,12 @@ class WorkProgress:
         self.durations = deque(maxlen=5)
         self.last_emitted = self.started
         self.context = dict(_CONTEXT.get() or {})
+        self.forecast = None
+        self.forecast_error = None
+        try:
+            self.forecast = ForecastAttempt.current(stage, unit, self.context)
+        except Exception:
+            self.forecast_error = "repair_required"
         self.closed = False
         self.active_meters = _ACTIVE_METERS.get()
         if self.active_meters is not None:
@@ -178,6 +186,7 @@ class WorkProgress:
                 "eta_samples": len(samples),
                 "eta_window_completed": len(self.durations),
                 "eta_ignored_fast_samples": len(self.durations) - len(samples),
+                "eta_raw_sample_seconds": list(self.durations),
                 "eta_assumption": (
                     "remaining_units_match_recent_active_cost" if self.estimate else None
                 ),
@@ -185,6 +194,27 @@ class WorkProgress:
                 "scope": "current_attempt_substage",
                 "certification_authority": False,
             }
+            if self.forecast is not None:
+                try:
+                    body["forecast_accounting"] = self.forecast.observe(body)
+                except ForecastCapacityRequired:
+                    self.forecast_error = "capacity_required"
+                except Exception as error:
+                    self.forecast.ledger.note_failure("consumer_observation_failed", error=error)
+                    # This ledger cannot change native validation, cancellation,
+                    # transaction recovery, signed evidence or successful results.
+                    self.forecast_error = "repair_required"
+            if self.forecast_error is not None:
+                body["forecast_accounting"] = {
+                    "status": self.forecast_error,
+                    "eta_seconds": None,
+                    "eta_basis": (
+                        "increase_forecast_accounting_budget_preserving_existing_records"
+                        if self.forecast_error == "capacity_required"
+                        else "restore_retained_forecast_accounting"
+                    ),
+                    "certification_authority": False,
+                }
             _LOG.info(json.dumps(body, separators=(",", ":")))
             self.last_emitted = now
 

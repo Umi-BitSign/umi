@@ -659,6 +659,121 @@ async def test_request_publication_recovers_after_certification(
         assert all(control.publisher.files(k) == raw for k, raw in exported.objects.items())
 
 
+async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
+    request_owner, tmp_path, monkeypatch
+):
+    from umi import competition_cohort_request_publication as publication_module
+    from umi import competition_work_progress as progress_module
+    from umi.competition_forecast import ForecastLedger, forecast_scope
+
+    h = request_owner
+    h.window()
+    clock = SimpleNamespace(now=100.0, wall=1_700_000_000.0)
+    monkeypatch.setattr(
+        progress_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock.now, time_ns=lambda: round(clock.wall * 1_000_000_000)
+        ),
+    )
+
+    async def proof(observation):
+        pass
+
+    def publication(decisions):
+        return publication_module.CohortRequestSettlementPublisher(
+            h.source,
+            h.provider.collect,
+            decisions,
+            proof,
+            sources=h.sources,
+            history_directory=tmp_path / "handoff",
+        )
+
+    ledger = ForecastLedger(tmp_path / "forecast-accounting")
+    with request_controller(h, tmp_path, publication) as control:
+        original = control.publisher.objects.ensure
+        attempts = []
+
+        def ensure(*args, **kwargs):
+            result = original(*args, **kwargs)
+            clock.now += 2
+            clock.wall += 2
+            attempts.append(args[0])
+            if len(attempts) == 3:
+                raise OSError("counted publication interrupted")
+            return result
+
+        monkeypatch.setattr(control.publisher.objects, "ensure", ensure)
+        with (
+            pytest.raises(OSError, match="counted publication interrupted"),
+            forecast_scope(
+                ledger,
+                cohort=h.cohort,
+                work_sha256=digest(h.intake.history(h.cohort)),
+                operation="closed_result_publication",
+            ),
+            progress_module.WorkProgress("requests_result_publication", 1, unit="responses"),
+        ):
+            await control.reopen().tick()
+        scopes = [
+            key
+            for key in ledger.scopes()
+            if ledger.records(key)[0]["operation"] == "request_object_delivery"
+        ]
+        assert len(scopes) == 1
+        key = scopes[0]
+        forecasts = [
+            r
+            for r in ledger.records(key)
+            if r["kind"] == "forecast" and r["finish_unix_ms"] is not None
+        ]
+        assert forecasts and forecasts[0]["total"] > 3
+        assert ledger.status(key)["sample_kind"] == "pending"
+        ledger.close()
+        clock.now += 3600
+        clock.wall += 3600
+        ledger = ForecastLedger(tmp_path / "forecast-accounting")
+        history = h.intake.history(h.cohort)
+        signed_calls = tuple(h.calls)
+        for _ in range(2):
+            with (
+                forecast_scope(
+                    ledger,
+                    cohort=h.cohort,
+                    work_sha256=digest(history),
+                    operation="closed_result_publication",
+                ),
+                progress_module.WorkProgress(
+                    "requests_result_publication", 1, unit="responses"
+                ) as outer,
+            ):
+                await control.publisher(history)
+                outer.advance()
+        result = ledger.status(key)
+        assert result["completion_examples"] == 1
+        assert result["sample_kind"] == "prediction_outcome"
+        assert result["calibration_eligible"] is True
+        assert result["missed_forecasts"] >= 1
+        assert result["elapsed_including_gaps_seconds"] >= 3600
+        assert result["repeat_attempt_forecasts_excluded"] >= 1
+        assert tuple(h.calls) == signed_calls
+        assert (
+            len(
+                [
+                    k
+                    for k in ledger.scopes()
+                    if ledger.records(k)[0]["operation"] == "request_object_delivery"
+                ]
+            )
+            == 1
+        )
+        assert [r for r in ledger.records(key) if r["kind"] == "forecast"][: len(forecasts) + 1][
+            1:
+        ] == forecasts
+    ledger.close()
+
+
 @pytest.mark.parametrize("failure", ["missing_seal", "revoked_during_delivery"])
 async def test_request_publication_rechecks_native_authority_and_evidence(
     request_owner, tmp_path, failure

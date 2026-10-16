@@ -455,6 +455,18 @@ def test_proof_read_selection_preserves_existing_boot_bytes(inputs):
         )
 
 
+def test_forecast_budget_preserves_existing_boot_bytes(inputs):
+    i = inputs
+    original = canonical_json_bytes(i.value)
+    assert b'"forecast_accounting_bytes"' not in original
+    selected = i.value.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2})
+    i.save(i.path, canonical_json_bytes(selected))
+    assert boot.load_standing_boot(i.path, i.anchor).forecast_accounting_bytes == 64 * 1024**2
+    assert canonical_json_bytes(
+        selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
+    ) == original
+
+
 @pytest.mark.parametrize("proof_reads", [False, True])
 @pytest.mark.parametrize("failure", [None, "constructor", "service", "cancel"])
 async def test_native_assembly_preserves_configuration_and_closes_owned_providers(
@@ -501,6 +513,11 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert kwargs["legacy_providers"] == {digest(old.chain): providers[1]}
         assert providers[1].kwargs["resources"] == old.resources
         assert kwargs["history"].verification_profile == history_profile
+        forecast = kwargs["history"].progress.forecast
+        assert forecast is not None
+        assert forecast.identity["series_sha256"] == digest(selected.series)
+        assert forecast.identity["role"] == "reward_writer"
+        assert forecast.identity["checkpoint_owner"] == kwargs["history"].checkpoints.owner
         assert kwargs["history"].config_sha256 == digest(i.value.chain)
         assert kwargs["history"].journal.maximum_bytes == selected.maximum_history_bytes
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
@@ -542,6 +559,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
 async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch):
     i = inputs
     candidate, approval = successor_boot(i)
+    assert b'"forecast_accounting_bytes"' not in canonical_json_bytes(candidate)
     candidate = candidate.model_copy(update={"maximum_history_bytes": 64 * 1024**3})
     i.save(Path(candidate.approval_path), canonical_json_bytes(approval))
     history_profile = HistoryVerificationProfile(schema="umi-history-verification-profile/1")
@@ -585,6 +603,12 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert coverage.history.export_archive is kwargs["history"].export_archive
         assert coverage.history.journal.maximum_bytes == 64 * 1024**3
         assert kwargs["history"].journal.maximum_bytes == 64 * 1024**3
+        assert coverage.history.progress.forecast.identity["series_sha256"] == digest(
+            candidate.predecessor_series
+        )
+        assert kwargs["history"].progress.forecast.identity["series_sha256"] == digest(
+            candidate.series
+        )
 
     runtime = SimpleNamespace(
         config=i.anchor.config,

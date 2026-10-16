@@ -33,6 +33,7 @@ from .competition_cohort_model_transport_selection import (
     requires_direct_model_review,
     selected_direct_model_review,
 )
+from .competition_history_forecast import DEFAULT_HISTORY_FORECAST_BYTES, select_history_forecasts
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
@@ -124,6 +125,9 @@ class StandingRewardBootConfig(StrictProtocolModel):
     maximum_witness_bytes: ObjectCapacity
     maximum_header_bytes: Capacity
     maximum_header_database_bytes: Capacity
+    forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = (
+        DEFAULT_HISTORY_FORECAST_BYTES
+    )
     runtime_proof_reads: bool = False
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
@@ -142,6 +146,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def omit_successor_inputs(self, handler):
         value = handler(self)
+        if self.forecast_accounting_bytes == DEFAULT_HISTORY_FORECAST_BYTES:
+            value.pop("forecast_accounting_bytes", None)
         if self.proof_stores is None:
             value.pop("proof_stores", None)
         if self.host_memory_admission is None:
@@ -466,6 +472,9 @@ async def run_installed_standing_rewards(
         runtime_selection=select_boot_runtime(config),
     )
     async with AsyncExitStack() as constructing:
+        select_history_forecasts(
+            history, root=root, config=config, resources=constructing, role="reward_writer"
+        )
         constructing.enter_context(
             memory_runtime(
                 config.host_memory_admission,
@@ -528,6 +537,14 @@ async def run_installed_standing_rewards(
                 verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
+            )
+            select_history_forecasts(
+                old_history,
+                root=old_root,
+                config=config,
+                resources=constructing,
+                role="reward_writer",
+                predecessor=True,
             )
             old_preparation = StandingRewardPreparation(
                 old_reader,
