@@ -170,7 +170,7 @@ async def test_native_coordinator_assembly_keeps_selected_adoption(config_case, 
     monkeypatch.setattr(coordinator.boot, "StandingRewardOffers", offers)
     case = SimpleNamespace(**(vars(config_case) | {"config": selected}))
     await coordinator.test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
-        case, monkeypatch, role, None, False
+        case, monkeypatch, role, None, False, successor=False
     )
     assert {name for name, _ in observed} == (
         {"reader", "signer", "offers"} if role == "coordinator" else {"reader", "signer"}

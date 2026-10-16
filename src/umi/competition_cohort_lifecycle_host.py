@@ -47,6 +47,7 @@ from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
+from .competition_forecast import ForecastCapacityRequired, ForecastLedger
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
@@ -77,6 +78,7 @@ class LifecycleHostConfig(StrictProtocolModel):
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     sample_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
+    forecast_accounting_bytes: Annotated[int, Field(ge=64 * 1024, le=1024**3)] = 32 * 1024**2
     request_tail_operator_token_file: Directory | None = None
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
     model_delivery_operator_token_file: Directory | None = None
@@ -85,6 +87,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
         value = handler(self)
+        if self.forecast_accounting_bytes == 32 * 1024**2:
+            value.pop("forecast_accounting_bytes", None)
         if self.proof_stores is None:
             value.pop("proof_stores", None)
         if self.request_tail_operator_token_file is None:
@@ -187,6 +191,24 @@ class LifecycleHost:
         self.policy = service.intake.policy
         self.credentials, self.sign = credentials, sign
         self.root = Path(c.directory) / digest(service.config.series)
+        self.forecast_ledger = None
+        try:
+            self.forecast_ledger = ForecastLedger(
+                self.root / "forecast-accounting", maximum_bytes=c.forecast_accounting_bytes
+            )
+            resources.callback(self.forecast_ledger.close)
+        except ForecastCapacityRequired:
+            logger.warning(
+                "cohort_forecast_accounting status=capacity_required "
+                "maximum_bytes=%s eta_basis=increase_forecast_accounting_budget "
+                "certification_authority=false",
+                c.forecast_accounting_bytes,
+            )
+        except (OSError, ValueError, sqlite3.Error):
+            logger.warning(
+                "cohort_forecast_accounting status=repair_required "
+                "eta_basis=restore_retained_forecast_accounting certification_authority=false"
+            )
         self.gate = SeriesRequestStart(
             c.request_start, service.config.series, self.provider, service.history
         )
@@ -499,6 +521,7 @@ class LifecycleHost:
             },
             request_start=self.gate,
             before_tick=preflight_before_tick,
+            forecast_ledger=self.forecast_ledger,
         )
         self.nodes[cohort] = node
         return node

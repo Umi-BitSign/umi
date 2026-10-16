@@ -29,9 +29,10 @@ from .competition_cohort_recovery import CohortRecoveryState, Phase, StandingCoh
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_cohort_request_start import SeriesRequestStart
 from .competition_execution import execution_boundary
+from .competition_forecast import ForecastLedger, forecast_scope
 from .competition_work_progress import await_progress
 from .host_memory_runtime import authorize_memory
-from .open_competition import CompetitionPolicy, Signature
+from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class CohortLifecycleService:
         *,
         request_start: SeriesRequestStart | None = None,
         before_tick: Callable[[], Awaitable[None]] | None = None,
+        forecast_ledger: ForecastLedger | None = None,
     ):
         if set(phases) != set(PHASES):
             raise ValueError("cohort lifecycle requires intake, preparation and request runtimes")
@@ -72,6 +74,7 @@ class CohortLifecycleService:
             raise ValueError("request start gate differs from its lifecycle owner")
         self.request_start = request_start
         self.before_tick = before_tick
+        self.forecast_ledger = forecast_ledger
         self.publish_history = publish_history
         self.drivers: dict[Phase, CohortPhaseDriver] = {}
         self.last_report = None
@@ -210,11 +213,17 @@ class CohortLifecycleService:
         self.stage = "progress_review"
         self.last_progress = progress
         self._log_lifecycle("phase_progress_review_started")
-        result = await await_progress(
-            driver.observer.attest(progress),
-            stage=progress.phase + "_progress_quorum",
+        with forecast_scope(
+            self.forecast_ledger,
             cohort=self.cohort,
-        )
+            work_sha256=digest(progress),
+            operation="progress_review",
+        ):
+            result = await await_progress(
+                driver.observer.attest(progress),
+                stage=progress.phase + "_progress_quorum",
+                cohort=self.cohort,
+            )
         self._log_lifecycle("phase_progress_review_completed")
         return result
 
@@ -225,11 +234,17 @@ class CohortLifecycleService:
         driver = await self._driver(transition.phase)
         self.stage = "decision_certification"
         self._log_lifecycle("phase_decision_review_started")
-        result = await await_progress(
-            driver.observer.certify(transition, evidence),
-            stage=transition.phase + "_decision_quorum",
+        with forecast_scope(
+            self.forecast_ledger,
             cohort=self.cohort,
-        )
+            work_sha256=digest(transition),
+            operation="decision_review",
+        ):
+            result = await await_progress(
+                driver.observer.certify(transition, evidence),
+                stage=transition.phase + "_decision_quorum",
+                cohort=self.cohort,
+            )
         self._log_lifecycle("phase_decision_review_completed")
         return result
 
@@ -239,9 +254,17 @@ class CohortLifecycleService:
         self._remember_state(self.controller.store.status(self.cohort)[0])
         self.stage = "history_publication"
         self._log_lifecycle("history_publication_started")
-        await await_progress(
-            self.publish_history(history), stage="lifecycle_history_publication", cohort=self.cohort
-        )
+        with forecast_scope(
+            self.forecast_ledger,
+            cohort=self.cohort,
+            work_sha256=digest(history),
+            operation="history_publication",
+        ):
+            await await_progress(
+                self.publish_history(history),
+                stage="lifecycle_history_publication",
+                cohort=self.cohort,
+            )
         if any(t.transition.operation == "revoke" for t in history.transitions):
             return
         for signed in history.transitions:
@@ -253,7 +276,17 @@ class CohortLifecycleService:
             if driver.publish_closed is not None:
                 self.stage = "result_publication"
                 self._log_lifecycle("result_publication_started")
-                await driver.publish_closed(history)
+                with forecast_scope(
+                    self.forecast_ledger,
+                    cohort=self.cohort,
+                    work_sha256=digest(transition),
+                    operation="closed_result_publication",
+                ):
+                    await await_progress(
+                        driver.publish_closed(history),
+                        stage=phase + "_result_publication",
+                        cohort=self.cohort,
+                    )
             # Replaying publication also repairs a missing derived file. A
             # memory-only acknowledgement must not prevent that recovery.
 

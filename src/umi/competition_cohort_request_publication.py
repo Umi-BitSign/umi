@@ -35,6 +35,7 @@ from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_execution import ExecutionBoundary
+from .competition_forecast import forecast_subscope
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .competition_work_progress import cancellable_work, check_work_cancelled, progress_items
 from .concurrency import run_owned_thread
@@ -261,10 +262,28 @@ class CohortRequestSettlementPublisher:
 
     def _objects(self, exported: CertifiedRequestExport) -> None:
         seals = {digest(seal) for seal in exported.seals}
-        for key in progress_items(
-            sorted(exported.objects), stage="request_publication_delivery", unit="objects"
+        keys = sorted(exported.objects)
+        # Native export already authenticates these immutable object identities.
+        # Bind the exact delivery set and derivation rules without rehashing any
+        # evidence payload, or aliasing another nested publication substage.
+        with forecast_subscope(
+            cohort=self.source.cohort,
+            work_sha256=digest(
+                {
+                    "history_sha256": digest(exported.history),
+                    "object_sha256s": keys,
+                    "derived_seal_sha256s": sorted(seals),
+                }
+            ),
+            operation="request_object_delivery",
         ):
-            self.objects.ensure(key, exported.objects.__getitem__, derived=key in seals)
+            for key in progress_items(
+                keys,
+                stage="request_publication_delivery",
+                unit="objects",
+                cohort=self.source.cohort,
+            ):
+                self.objects.ensure(key, exported.objects.__getitem__, derived=key in seals)
 
     def _commit(self, exported: CertifiedRequestExport, current_block: int) -> None:
         owner, initial = self.source, exported.history.history

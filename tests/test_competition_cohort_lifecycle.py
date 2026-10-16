@@ -55,6 +55,7 @@ from umi.competition_cohort_service_work import (
     SignedServiceWorkClaim,
 )
 from umi.competition_execution import execution_boundary
+from umi.competition_forecast import ForecastLedger
 from umi.competition_historical_registration import HistoricalRegistration
 from umi.competition_reward_decisions import StandingRewardSeries
 from umi.competition_reward_manifest import (
@@ -705,6 +706,48 @@ async def test_lifecycle_monitor_recovers_published_round_identity_after_restart
     assert expected is not None
     restarted = h.reopen()
     assert restarted.expected_round_sha256 == expected
+
+
+async def test_lifecycle_retains_bound_review_and_publication_outcomes_across_restart(
+    lifecycle, tmp_path
+):
+    h = lifecycle
+    ledger = ForecastLedger(tmp_path / "forecasts")
+    for worker in h.admissions:
+        await worker.poll_once()
+    service = h.reopen(forecast_ledger=ledger)
+    while h.store.status(h.cohort)[0].phase != "requests":
+        await service.tick()
+        h.block += 5
+    completed = {
+        key: ledger.status(key)
+        for key in ledger.scopes()
+        if ledger.status(key)["outcome"] == "completed"
+    }
+    assert completed
+    records = [record for key in completed for record in ledger.records(key)]
+    assert {record["operation"] for record in records} >= {
+        "progress_review",
+        "decision_review",
+        "history_publication",
+        "closed_result_publication",
+    }
+    assert all(record["cohort_sha256"] == h.cohort for record in records)
+    assert all(record["certification_authority"] is False for record in records)
+    history = h.intake.history(h.cohort)
+    signed = canonical_json_bytes(history)
+    ledger.close()
+    ledger = ForecastLedger(tmp_path / "forecasts")
+    restarted = h.reopen(forecast_ledger=ledger)
+    await restarted._publish(history)
+    assert canonical_json_bytes(h.intake.history(h.cohort)) == signed
+    assert all(ledger.status(key)["completion_examples"] == 1 for key in completed)
+    assert all(
+        ledger.status(key)["elapsed_including_gaps_seconds"]
+        == value["elapsed_including_gaps_seconds"]
+        for key, value in completed.items()
+    )
+    ledger.close()
 
 
 async def test_lifecycle_recovers_partial_preparation_vote_and_publication(lifecycle, monkeypatch):

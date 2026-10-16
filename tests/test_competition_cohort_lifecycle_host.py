@@ -681,7 +681,12 @@ def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_pa
     config = configured(lifecycle, tmp_path / "host").lifecycle
     old = canonical_json_bytes(config)
     assert b"automatic_progression_hold_cohorts" not in old
+    assert b"forecast_accounting_bytes" not in old
     assert canonical_json_bytes(LifecycleHostConfig.model_validate_json(old)) == old
+    expanded = LifecycleHostConfig.model_validate_json(
+        canonical_json_bytes(config.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2}))
+    )
+    assert expanded.forecast_accounting_bytes == 64 * 1024**2
     cohort = config.sources.intake.cohorts[0].cohort_sha256
     value = config.model_dump(by_alias=True)
     value["automatic_progression_hold_cohorts"] = (cohort,)

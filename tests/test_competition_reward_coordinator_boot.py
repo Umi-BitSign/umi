@@ -112,6 +112,18 @@ def test_proof_read_selection_preserves_existing_configuration_bytes(config_case
         )
 
 
+def test_forecast_budget_preserves_existing_configuration_bytes(config_case):
+    h = config_case
+    original = canonical_json_bytes(h.config)
+    assert b'"forecast_accounting_bytes"' not in original
+    selected = h.config.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2})
+    h.save(h.path, canonical_json_bytes(selected))
+    assert boot.load_reward_coordinator_config(h.path).forecast_accounting_bytes == 64 * 1024**2
+    assert canonical_json_bytes(
+        selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
+    ) == original
+
+
 def test_coordinator_history_capacity_matches_native_history_envelope(config_case):
     original = config_case.config.model_dump(by_alias=True)
     for maximum in [1024, 16 * 1024**3 + 1, 64 * 1024**3, 512 * 1024**3]:
@@ -135,8 +147,7 @@ def test_direct_series_requires_read_only_coordinator_source(config_case, tmp_pa
         )
 
 
-def test_successor_configuration_binds_complete_predecessor_context(config_case):
-    old = config_case.config
+def successor_configuration(old):
     successor = successor_series(old.series)
     manifest = old.manifest.model_copy(
         update={
@@ -155,7 +166,7 @@ def test_successor_configuration_binds_complete_predecessor_context(config_case)
         cohort_sha256=digest(successor.cohorts[0]),
         predecessor=successor.predecessor,
     )
-    candidate = old.model_copy(
+    return old.model_copy(
         update={
             "schema_": "umi-reward-coordinator-config/3",
             "series": successor,
@@ -166,9 +177,15 @@ def test_successor_configuration_binds_complete_predecessor_context(config_case)
             "predecessor_eligibility": old.eligibility,
         }
     )
+
+
+def test_successor_configuration_binds_complete_predecessor_context(config_case):
+    old = config_case.config
+    candidate = successor_configuration(old)
     checked = boot.RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(candidate))
     assert checked == candidate
     assert b'"predecessor_series"' not in canonical_json_bytes(old)
+    assert b'"forecast_accounting_bytes"' not in canonical_json_bytes(candidate)
     for change in (
         {"predecessor_series": None},
         {"predecessor_manifest": old.manifest.model_copy(update={"policy_sha256": "ff" * 32})},
@@ -209,6 +226,7 @@ def test_wallet_and_replication_stores_cannot_overlap(config_case):
 
 
 @pytest.mark.parametrize("proof_reads", [False, True])
+@pytest.mark.parametrize("successor", [False, True])
 @pytest.mark.parametrize(
     "role,failure",
     [
@@ -218,10 +236,10 @@ def test_wallet_and_replication_stores_cannot_overlap(config_case):
     ],
 )
 async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
-    config_case, monkeypatch, role, failure, proof_reads
+    config_case, monkeypatch, role, failure, proof_reads, successor
 ):
     h = config_case
-    config = h.config.model_copy(
+    config = (successor_configuration(h.config) if successor else h.config).model_copy(
         update={
             "runtime_proof_reads": proof_reads,
             "maximum_history_bytes": 512 * 1024**3
@@ -310,9 +328,19 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
     async def collect(self, stop, *, poll_seconds):
         collector_lifecycle.append("started")
         try:
-            assert self.journal.runtime_selection == boot.select_boot_runtime(config)
+            selected_series = self.preparation.reader.series
+            predecessor = selected_series != config.series
+            assert not predecessor or selected_series == config.predecessor_series
+            assert self.journal.runtime_selection == boot.select_boot_runtime(
+                config, predecessor=predecessor
+            )
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             assert self.history.verification_profile == history_profile
+            assert self.history.progress.forecast is not None
+            assert self.history.progress.forecast.identity["series_sha256"] == digest(
+                selected_series
+            )
+            assert self.history.progress.forecast.identity["role"] == role
             if config.proof_stores is not None:
                 assert self.history.archive.remote.config == config.proof_stores.imported
                 assert self.history.export_archive.remote.config == config.proof_stores.exported
@@ -420,6 +448,6 @@ async def test_r2_reward_owner_boot_retains_selection_on_restart(
     config_case.config, opened, _ = select_remote_proofs(config_case.config, tmp_path, monkeypatch)
     for _ in range(2):
         await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
-            config_case, monkeypatch, role, None, True
+            config_case, monkeypatch, role, None, True, successor=False
         )
     assert len(opened) == 4
