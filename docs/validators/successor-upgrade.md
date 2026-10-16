@@ -1871,7 +1871,13 @@ installation or replace the signed host transition.
 Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
 It clones the selected signed dependency tree, checks the pinned source and
 unchanged dependency locks, and migrates both lifecycle launchers before sealing
-the new manifest. `competition_host_entrypoints` renders isolated launchers with
+the new manifest. Added `project.scripts` declarations are supported when all
+existing commands and every other parsed project field remain unchanged. They
+are recorded as `uninstalled_added_project_scripts`: the supervisor host installs
+only its two lifecycle launchers; new miner/operator commands use the ordinary
+package installation. Changes to dependencies, existing commands or other project
+metadata require a separate migration and refuse before creating a build tree.
+`competition_host_entrypoints` renders isolated launchers with
 `if __name__ == "__main__"` so spawned history workers do not enter the supervisor
 or acquire its startup lease. The builder accepts the original unguarded wrapper
 and the guarded successor; an unknown wrapper requires a separately qualified
