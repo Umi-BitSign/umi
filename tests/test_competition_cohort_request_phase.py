@@ -753,7 +753,13 @@ async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
         result = ledger.status(key)
         assert result["completion_examples"] == 1
         assert result["sample_kind"] == "prediction_outcome"
-        assert result["calibration_eligible"] is True
+        assert result["calibration_eligible"] is False
+        assert result["duration_sample_eligible"] is True
+        assert result["empirical_outcome_eligible"] is False
+        assert (
+            "comparison_population_unqualified"
+            in result["original_point_comparison"]["exclusion_reasons"]
+        )
         assert result["missed_forecasts"] >= 1
         assert result["elapsed_including_gaps_seconds"] >= 3600
         assert result["repeat_attempt_forecasts_excluded"] >= 1
