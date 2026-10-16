@@ -335,3 +335,101 @@ def test_config_keeps_original_metadata_outside_the_entire_disposable_cache(lega
         )
         with pytest.raises(ValueError, match="disjoint"):
             type(damaged).model_validate_json(canonical_json_bytes(damaged))
+
+
+def shared_selection(c, tmp_path):
+    from umi.competition_model_byte_store import ModelByteStoreConfig
+
+    store = ModelByteStoreConfig(
+        schema="umi-model-byte-verification-store/1", directory=str(tmp_path / "shared-facts")
+    )
+    source = c.source.model_copy(update={"shared_byte_store": store})
+    return type(c.config).model_validate_json(
+        canonical_json_bytes(c.config.model_copy(update={"legacy_model_storage": (source,)}))
+    )
+
+
+def test_explicit_byte_store_is_in_every_consumer_store_inventory(legacy_boot, tmp_path):
+    c = legacy_boot
+    selected = shared_selection(c, tmp_path)
+    roots = selected.mutable_stores() if c.h.kind == "writer" else selected.stores()
+    shared = Path(selected.legacy_model_storage[0].shared_byte_store.directory)
+    assert roots.count(shared) == 1
+    protected = [roots[0], selected.direct_model_review.r2_credentials_file]
+    if c.h.kind != "writer":
+        protected.append(selected.signer_key_file)
+    for path in protected:
+        source = selected.legacy_model_storage[0]
+        source = source.model_copy(
+            update={
+                "shared_byte_store": source.shared_byte_store.model_copy(
+                    update={"directory": str(path)}
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="overlaps"):
+            type(selected).model_validate_json(
+                canonical_json_bytes(
+                    selected.model_copy(update={"legacy_model_storage": (source,)})
+                )
+            )
+
+
+async def test_actual_consumer_boot_forwards_selected_shared_store(
+    legacy_boot, tmp_path, monkeypatch
+):
+    c = legacy_boot
+    c.config = shared_selection(c, tmp_path)
+    boot, run = operation(c, monkeypatch)
+    remote = Remote({})
+    selected_root = Path(c.config.legacy_model_storage[0].shared_byte_store.directory)
+
+    class ReachedVerifier(Exception):
+        pass
+
+    def artifacts(config, policy, owner, *, verification_root):
+        return SimpleNamespace(
+            config=config, policy=policy, multipart=remote, verification_root=verification_root
+        )
+
+    def verifier(*args, **kwargs):
+        selected = DirectModelSettlementVerifier(*args, **kwargs)
+        resolution = selected.legacy_readers.resolve(c.source.cohort_sha256, baseline=True)
+        assert selected.legacy_readers.reader(resolution).root == selected_root
+        assert selected_root.stat().st_mode & 0o077 == 0
+        raise ReachedVerifier
+
+    monkeypatch.setattr(boot, "DirectModelArtifactReviewer", artifacts)
+    monkeypatch.setattr(boot, "DirectModelSettlementVerifier", verifier)
+    for _ in range(2):
+        with pytest.raises(ReachedVerifier):
+            await run()
+    assert not remote.reads
+
+
+@pytest.mark.parametrize("adopted_case", ["writer"], indirect=True)
+def test_writer_shared_store_cannot_alias_installed_host_roots(legacy_boot, tmp_path):
+    c = legacy_boot
+    selected = shared_selection(c, tmp_path)
+    host = c.h.inputs.anchor.config
+    writer.validate_writer_byte_store_paths(selected, host)
+    for path in (
+        host.state_root,
+        host.worker_state_root,
+        host.wallet.path,
+        host.release_root,
+        host.operator_input_root,
+    ):
+        source = selected.legacy_model_storage[0]
+        for directory in (path, str(Path(path) / "byte-facts")):
+            source = source.model_copy(
+                update={
+                    "shared_byte_store": source.shared_byte_store.model_copy(
+                        update={"directory": directory}
+                    )
+                }
+            )
+            with pytest.raises(ValueError, match="overlaps"):
+                writer.validate_writer_byte_store_paths(
+                    selected.model_copy(update={"legacy_model_storage": (source,)}), host
+                )

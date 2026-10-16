@@ -47,9 +47,16 @@ model artifacts; package construction and verification count evidence objects.
 An exhausted substage reaches 100%. A failed or interrupted attempt keeps its
 completed count and does not claim completion.
 
-ETA uses the elapsed time and the completed work rate for that substage. It is
-`null` until there is enough completed work to estimate a rate. Uneven object
-sizes or expensive remaining inputs can change the estimate. Counted validation
+ETA uses the last five completed item durations for that substage. When that
+window includes work taking at least one second, subsecond reuse/skipped items
+are excluded from its active-work rate. `eta_samples`, `eta_window_completed`
+and `eta_ignored_fast_samples` disclose that basis. The estimate assumes all
+remaining units have the recent active cost; it can overestimate a suffix of
+cached items and never forecasts total shutdown or certification time. A current
+item exceeding three times that rate (and at least 30 seconds) invalidates the
+ETA with `stalled_rate_invalidated`; a new completed item establishes a fresh
+sample. It is `null` until enough completed work establishes a rate. Uneven
+object sizes or expensive remaining inputs can change the estimate. Counted validation
 steps with different costs deliberately retain a `null` ETA. Owner exports,
 quorum votes, native review workers and history publication emit waiting
 heartbeats with a `null` ETA: an external dependency has no measured finish time.
@@ -98,6 +105,35 @@ object file identities and metadata; unchanged payloads need no repeated hashing
 or evidence replay. Dependency coverage and resource budgets are still counted
 when a verdict is reused. Payloads are read when a new consumer actually needs them.
 A completed participant's verdict survives interruption before full closure.
+
+The lifecycle request publisher selects its own durable verification owner under
+`<request-journal>/request-publication/verification`. It captures original
+closure decisions and current queue/service fences while owning the intake
+fence, then releases that fence before long evidence replay. Upload preflight
+can take the intake fence during that replay. Current authority, closure prefix
+and queue/service fences are checked again before publishing the handoff.
+
+Journal-authenticated endpoint objects use the existing settlement export files;
+no second payload copy is created. Private per-object descriptors under
+`<request-journal>/request-publication/objects` bind the native journal owner,
+content-addressed original, full export file identity and validated JSON shape.
+Unchanged verification checks metadata and fresh journal conflict fences without
+reading original payloads. The first pass checkpoints each object and completed
+semantic item. Existing exports are imported with unchanged canonical wrapper
+bytes and file identity. Missing or damaged derived descriptors/exports emit
+explicit repair progress and restore only the affected original; conflicting or
+missing native journal originals refuse reuse. Retain the original journals
+and these descriptors with their exports. Independent owners still verify their
+own inputs.
+
+Cancellation stops at the next evidence or semantic-item boundary. An atomic
+export/descriptor write already in progress drains to completion; completed
+checkpoints remain reusable on restart. Queue accepted-prefix metadata still
+receives fresh native checks; that existing work cancels between catalogs,
+not between each assignment within a catalog. A failed or cancelled replay/proof
+publication cannot publish a new discoverable handoff. Preserve existing closed
+history files until a qualified successor can regenerate them; this is required
+for installed older publishers or a locally held lifecycle owner.
 
 The default verdict location is
 `promotion_directory/verification/<series-sha256>/native`. A reviewer and its
@@ -2644,6 +2680,74 @@ authenticated cohorts sharing those same inputs reuse the byte result; their
 selection-bound verification snapshots and admission checks remain separate.
 Changing a remote generation repairs only the affected files. These private
 receipts never confer admission, eviction or reservation-release authority.
+
+An optional `shared_byte_store` on each `LegacyModelStorageSourceConfig` selects
+one durable byte store explicitly across candidate verification, committed
+intake, phase review, benchmark, settlement, coordinator and reward writer. Use
+schema `umi-model-byte-verification-store/1`, an absolute `directory`, and an
+`imports` array (empty for a new store). Omitted selections retain each role's
+existing path and canonical configuration bytes. Equal explicit selections may
+share a directory; conflicting selections, ancestors/descendants and overlaps
+with original metadata, credentials, signing journals, proof state or disposable
+model caches are refused. Candidate and committed selections that coexist must
+name the same store and imports. This does not share rights approvals, private
+review decisions, admission authority or signing state.
+
+Provision a separate mode0700 root owned by each actual service UID. Candidate,
+reviewer and owner may reuse one root only when they run as that same UID; another
+reviewer account independently verifies its bytes or imports its own prior
+results. A different hotkey under the same service account still performs its
+independent authority checks. Add the explicit roots to the service namespace's
+writable paths (`MODEL_BYTE_STORE_ROOTS` in the reviewer, settlement and
+coordinator unit templates); include the writer and owner units when selecting
+these roots there. Preserve the old import roots read-only and keep their existing
+ownership. Native config store inventories include shared roots for upgrade and
+recovery disjointness checks. `model_byte_store_access` probes the actual account's
+private writable root before candidate verification and before committed service
+startup loads signing keys. Qualify this in each installed service namespace
+before replacing its running unit; successful host-account tests alone do not
+establish the deployed mount binding.
+
+To migrate completed results from separate older roots, run
+`python -I -B -m umi.competition_model_byte_store_cli export --request PATH` as the
+original service account. The mode0444 root-controlled canonical request uses
+schema `umi-model-byte-store-export-request/1` and contains the original `candidate`
+configuration, `policy`, `history` and proposed `transition`. Keep its old
+verification directory selected. The native candidate authenticates original
+inventories and signed history, checks current remote generations, and exports
+only completed native facts. It never downloads model payloads, signs, reserves
+or adopts a transport. Old selection-bound receipts undergo their original
+native migration first; old receipt/marker bytes remain untouched. Existing old
+intermediate roots may be0755, but must be owned by the service account and not
+group/world writable; explicitly provision their permissions before exporting if
+an older installation used a broader umask. Record original file identities
+before and after that provisioning.
+
+The command returns sorted `imports` entries containing the old `directory` and
+its native `export_sha256`. Put these exact pins into the root-controlled new
+shared selection. Do not copy/chown another account's receipts or repin changed
+metadata to bypass refusal. Exports bind the source root device/inode/UID, original
+selection/provenance, package/policy/namespace/verifier context, exact signed file
+coverage, current object generations, and original receipt/marker/document hashes
+and identities. Import confirms fresh remote metadata before and after, holds
+only the target native lock, and checkpoints each restored file. A changed remote
+generation triggers only that file's native check. Missing or damaged selected
+source metadata is an explicit repair gate; restore its original selected bytes
+and identities, or rerun native authenticated export and deliberately update the
+configuration pin. Do not manually manufacture a byte receipt.
+
+`model_byte_store_export`, `model_byte_store_import`, and
+`model_byte_store_authenticated_export` expose completed files/models, elapsed
+time, planning or measured ETA, and repair/retry status. Requested bounded rights
+documents are retained during candidate verification and restored with imported
+facts. Import interruption preserves completed target results; repeat and restart
+reuse them without old-source or payload reads. Missing/damaged target facts can
+be restored from the selected intact source. Retain every configured old import root while unfinished targets, supported
+consumers or this repair path depend on it. An unfinished target may inspect an
+earlier selected export before learning that it belongs to a different model,
+so partial import completion does not authorize removal of another selected root. A completely populated new store is
+self-contained for ordinary reuse, but removal of old import roots requires
+checking recovery dependencies and replacing obsolete import selections.
 
 Supported older installations may retain selection-bound receipts under the
 model's `remote` directory. Keep that directory while any deployed reader or

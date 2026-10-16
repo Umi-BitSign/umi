@@ -21,6 +21,11 @@ from .competition_cohort_legacy_model_storage import (
 )
 from .competition_cohort_model_transport import prepare_model_delivery_adoption
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_byte_store import (
+    qualify_shared_byte_stores,
+    shared_byte_store_paths,
+    validate_shared_byte_stores,
+)
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -43,7 +48,8 @@ class ModelDeliveryAdoptionCandidateConfig(StrictProtocolModel):
     def direct_only(self):
         if self.delivery.mechanism != "direct_r2_multipart_v1":
             raise ValueError("model delivery candidate requires direct R2 transport")
-        paths = self.stores()
+        paths = self.stores(include_shared=False)
+        validate_shared_byte_stores((self.source,), paths)
         if any(
             a == b or a in b.parents or b in a.parents
             for i, a in enumerate(paths)
@@ -52,13 +58,14 @@ class ModelDeliveryAdoptionCandidateConfig(StrictProtocolModel):
             raise ValueError("model delivery candidate paths must be disjoint")
         return self
 
-    def stores(self):
+    def stores(self, *, include_shared=True):
         return tuple(
             Path(p)
             for p in (
                 self.source.directory,
                 self.r2_credentials_file,
                 self.verification_directory,
+                *(shared_byte_store_paths((self.source,)) if include_shared else ()),
             )
         )
 
@@ -69,6 +76,10 @@ ModelDeliveryAdoptionCandidates = Annotated[
 
 
 def validate_adoption_candidates(candidates, cohorts):
+    validate_shared_byte_stores(
+        (c.source for c in candidates),
+        tuple(p for c in candidates for p in c.stores(include_shared=False)),
+    )
     keys = tuple(c.source.cohort_sha256 for c in candidates)
     if keys != tuple(sorted(set(keys))) or not set(keys) <= set(cohorts):
         raise ValueError("model delivery candidates must name unique selected cohorts")
@@ -187,6 +198,19 @@ class ModelDeliveryAdoptionCandidate:
         return authenticated
 
     async def verify(self, history, transition):
+        return await self._run(history, transition)
+
+    async def export_completed(self, history, transition):
+        """Export old native receipts through their original authenticated selection.
+
+        This reads metadata and bounded retained documents only. Missing first-pass
+        results refuse with repair telemetry; this method never fetches model bytes,
+        reserves an adoption, acquires a signer or publishes cohort history.
+        """
+        return await self._run(history, transition, export_only=True)
+
+    async def _run(self, history, transition, *, export_only=False):
+        await run_owned_thread(qualify_shared_byte_stores, (self.config.source,))
         value = await run_owned_thread(self.authenticate, history, transition)
         if self.multipart is None:
             loaded = await run_owned_thread(
@@ -202,6 +226,7 @@ class ModelDeliveryAdoptionCandidate:
             load_original=self.originals,
             multipart=self.multipart,
             verification_root=Path(self.config.verification_directory),
+            byte_stores={transition.cohort_sha256: self.config.source.shared_byte_store},
         )
         selectors = {value.legacy.baseline_model_sha256: {"baseline": True}}
         selectors.update(
@@ -214,8 +239,11 @@ class ModelDeliveryAdoptionCandidate:
                 if e.payload_state == "preserved"
             }
         )
+        exports = []
         with TransferProgress(
-            "model_delivery_adoption_remote_review",
+            "model_byte_store_authenticated_export"
+            if export_only
+            else "model_delivery_adoption_remote_review",
             len(selectors),
             unit="models",
             planning_unit_seconds=(1, 3600),
@@ -227,7 +255,31 @@ class ModelDeliveryAdoptionCandidate:
                     )
                 )
                 reader = readers.reader(resolution)
-                snapshot = await reader.verify()
+                if export_only:
+                    exports.append(await reader.export_completed())
+                    progress.advance(1)
+                    continue
+                documents = tuple(
+                    r.path
+                    for r in resolution.selection.bundle.files
+                    if r.role in {"license", "provenance"}
+                )
+                # Retain bounded rights documents during the first byte pass.
+                # This does not grant the independent downstream rights review.
+                if (
+                    sum(
+                        r.size_bytes
+                        for r in resolution.selection.bundle.files
+                        if r.path in documents
+                    )
+                    > 16 * 1024**2
+                ):
+                    documents = ()
+                snapshot = await reader.verify(document_paths=documents)
                 await run_owned_thread(reader.require_verified, snapshot)
                 progress.advance(1)
-        return value
+        return (
+            tuple(sorted(exports, key=lambda v: (v.directory, v.export_sha256)))
+            if export_only
+            else value
+        )

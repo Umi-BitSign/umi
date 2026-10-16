@@ -22,6 +22,7 @@ import json
 import os
 import stat
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -34,6 +35,11 @@ from .competition_artifacts import (
     _file_identity,
     _preserved_verification_record,
     _remember_preserved_verification,
+)
+from .competition_model_byte_store import (
+    export_completed_byte_facts,
+    import_completed_byte_facts,
+    publish_byte_export,
 )
 from .competition_transport_verification import (
     ByteCheckpoints,
@@ -250,6 +256,7 @@ class ChunkedModelBackupReader:
         multipart: R2MultipartClient,
         verification_root: Path,
         metadata_workers: int = 8,
+        byte_store_imports=(),
     ):
         self.selection = ChunkedBackupSelection.model_validate_json(canonical_json_bytes(selection))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -260,6 +267,7 @@ class ChunkedModelBackupReader:
             raise ValueError("chunked model metadata concurrency is outside its bound")
         self.metadata_workers = metadata_workers
         self.multipart, self.root = multipart, Path(verification_root)
+        self.byte_store_imports = tuple(byte_store_imports)
         private_path(str(self.root))
         self.serial = asyncio.Lock()
         self._namespace()
@@ -357,6 +365,10 @@ class ChunkedModelBackupReader:
         await self._heads(report, {key: self.chunks[key] for key in heads}, expected=heads)
 
     def _store(self, progress):
+        # Older readers created intermediate parents with the account umask.
+        # Preserve those roots; explicit new shared roots are private at selection.
+        if not self.root.exists():
+            ensure_private_directory(self.root)
         context = self._remote_context()
         return ByteCheckpoints(
             self.root / self.selection.binding.model_sha256 / "remote-bytes-v2" / digest(context),
@@ -476,6 +488,14 @@ class ChunkedModelBackupReader:
                 self._store(progress) as saved,
             ):
                 self._migrate_remote_receipts(saved, heads, report=report)
+                import_completed_byte_facts(
+                    self,
+                    saved,
+                    heads,
+                    self.byte_store_imports,
+                    document_paths=document_paths,
+                    report=report,
+                )
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
                     source = self._source(item, heads)
                     prior = saved.load(record.path, source)
@@ -534,6 +554,22 @@ class ChunkedModelBackupReader:
                 objects=tuple(heads[key] for key in sorted(heads)),
                 documents=documents,
             )
+
+    async def export_completed(self, *, report=None):
+        """Export complete native results without fetching or repairing model bytes.
+
+        The calling authenticated source retains all authority checks. Older
+        selection-bound receipts must first run their native original-selection
+        migration; an incomplete source is a visible repair gate, not an export.
+        """
+        async with self.serial:
+            self._context()
+            heads = await self._heads(report)
+            value = await run_owned_thread(
+                partial(export_completed_byte_facts, self, heads, report=report)
+            )
+            await self._unchanged(heads, report)
+            return await run_owned_thread(publish_byte_export, self, value)
 
     def require_verified(self, snapshot: ChunkedModelVerification):
         """Consume owned byte checkpoints, never a supplied digest as byte proof.

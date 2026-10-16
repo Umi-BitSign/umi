@@ -20,6 +20,7 @@ from .competition_cohort_model_transport_selection import (
 )
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
+from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import ObjectCapacity, _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -115,7 +116,7 @@ class SettlementServiceConfig(StrictProtocolModel):
             value.pop("legacy_model_storage", None)
         return value
 
-    def stores(self):
+    def stores(self, *, include_shared=True):
         return tuple(
             Path(p)
             for p in (
@@ -139,6 +140,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                     else ()
                 ),
                 *(source.directory for source in self.legacy_model_storage),
+                *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
         )
 
@@ -216,6 +218,18 @@ class SettlementServiceConfig(StrictProtocolModel):
             )
         ):
             raise ValueError("settlement service changes its selected role or authority")
+        validate_shared_byte_stores(
+            self.legacy_model_storage,
+            (
+                *self.stores(include_shared=False),
+                *(p for p in (self.signer_key_file,) if p is not None),
+                *(
+                    (direct.materialization_boot_disk_cache.directory,)
+                    if direct is not None and direct.materialization_boot_disk_cache is not None
+                    else ()
+                ),
+            ),
+        )
         _disjoint(self.stores())
         key = Path(self.signer_key_file)
         if any(key.is_relative_to(root) or root.is_relative_to(key) for root in self.stores()):

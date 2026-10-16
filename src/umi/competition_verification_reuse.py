@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from .canonical_stream import canonical_json_matches
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_verification_rules import runtime_identity
-from .competition_work_progress import WorkProgress
+from .competition_work_progress import WorkProgress, check_work_cancelled, work_heartbeats
 from .host_memory_request_bounds import check_stage_json, stage_bounds, stage_limit
 from .private_files import (
     PrivateStateBusyError,
@@ -244,7 +244,16 @@ class VerificationReuse:
             Path(pending).unlink(missing_ok=True)
 
 
-def _event(stage, state, dependencies=0, *, elapsed=0.0, planning_range=None):
+def _event(
+    stage,
+    state,
+    dependencies=0,
+    *,
+    elapsed=0.0,
+    planning_range=None,
+    planning_basis="package_bytes_at_1_to_10_mib_per_second",
+    planning_scope="native_package_decode_and_identity_only",
+):
     _LOG.info(
         json.dumps(
             {
@@ -263,8 +272,8 @@ def _event(stage, state, dependencies=0, *, elapsed=0.0, planning_range=None):
                     if planning_range is None
                     else {
                         "planning_eta_seconds": planning_range,
-                        "planning_eta_basis": "package_bytes_at_1_to_10_mib_per_second",
-                        "planning_eta_scope": "native_package_decode_and_identity_only",
+                        "planning_eta_basis": planning_basis,
+                        "planning_eta_scope": planning_scope,
                     }
                 ),
             },
@@ -281,6 +290,7 @@ def verified_replay(stage, result_model):
 
         @wraps(function)
         def run(*args, **kwargs):
+            check_work_cancelled()
             reuse = _CURRENT.get()
             if reuse is None or reuse.pid != os.getpid():
                 return function(*args, **kwargs)
@@ -319,6 +329,7 @@ def verified_replay(stage, result_model):
                     ) as progress:
                         valid = True
                         for dependency in receipt.dependencies:
+                            check_work_cancelled()
                             source = sources[dependency.kind]
                             trusted = (
                                 getattr(source, "verification_identity", lambda _: None)(
@@ -481,7 +492,7 @@ def verification_owner_operation(function):
 
     @wraps(function)
     async def run(self, *args, **kwargs):
-        with self.verification_reuse.selected():
+        with self.verification_reuse.selected(), work_heartbeats():
             try:
                 return await function(self, *args, **kwargs)
             except VerificationSourceChanged:

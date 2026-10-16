@@ -629,15 +629,15 @@ async def test_request_publication_recovers_after_certification(
 
     monkeypatch.setattr(module, "publish_private_model", publish)
     with request_controller(h, tmp_path, publication) as control:
-        original_object = control.publisher.files.publish
+        original_object = control.publisher.objects.ensure
 
-        def object_publish(*args):
-            original_object(*args)
+        def object_publish(*args, **kwargs):
+            original_object(*args, **kwargs)
             if failure == "objects" and not failed:
                 failed.append(True)
                 raise OSError("object publication interrupted")
 
-        monkeypatch.setattr(control.publisher.files, "publish", object_publish)
+        monkeypatch.setattr(control.publisher.objects, "ensure", object_publish)
         with pytest.raises(OSError, match=r"interrupted|acknowledgement lost"):
             await control.reopen().tick()
         assert control.store.status(h.cohort)[0].phase == "reference_reveal"

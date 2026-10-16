@@ -21,7 +21,12 @@ from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_host_anchor import MaterializedSuccessorAnchor
 from .competition_proof_archive_selection import selected_proof_archives
-from .competition_reward_boot import MAX_BOOT_BYTES, StandingRewardBootConfig, _disjoint
+from .competition_reward_boot import (
+    MAX_BOOT_BYTES,
+    StandingRewardBootConfig,
+    _disjoint,
+    validate_writer_byte_store_paths,
+)
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_cutover_ownership import _existing
 from .competition_reward_cutover_runtime import _await_initial_finality
@@ -144,6 +149,7 @@ def select_stopped_writer_boot(anchor, boot_path, *, held_approval=None):
         }:
             raise ValueError("writer validator differs from the selected series")
         verify_recovery_authority(series.recovery, config.policy)
+    validate_writer_byte_store_paths(config, anchor.config)
     _disjoint((*config.mutable_stores(), Path(anchor.config.state_root) / "standing-rewards"))
     result = StoppedWriterBoot(
         config,
