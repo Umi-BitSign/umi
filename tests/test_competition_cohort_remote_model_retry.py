@@ -109,6 +109,21 @@ def assert_no_payloads(f):
     assert not (f.uploads.archive / f.model / "model").exists()
 
 
+async def test_certified_original_refuses_new_direct_continuation(released):
+    f = released
+    allocation = f.uploads.allocations.snapshot()
+    original = f.uploads.journal.get_raw("upload", f.key)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app_for(f)), base_url="https://intake.example"
+    ) as client:
+        response = await client.get(f"/v1/competition/model-uploads/{f.key}/continuation")
+    assert response.status_code == 404
+    assert not f.remote.reads
+    assert f.uploads.journal.get_raw("upload", f.key) == original
+    assert f.uploads.allocations.snapshot() == allocation
+    assert_no_payloads(f)
+
+
 async def test_upgraded_client_retries_released_original_without_uploading_again(
     released, monkeypatch, tmp_path
 ):

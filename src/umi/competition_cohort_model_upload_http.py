@@ -82,6 +82,17 @@ def model_upload_routes(
         except (OSError, ValueError, sqlite3.Error) as error:
             raise HTTPException(503, "model delivery state unavailable") from error
 
+    @router.get("/v1/competition/model-uploads/{key}/continuation")
+    async def continuation(key: str):
+        await lookup(key)
+        try:
+            value = await run_owned_thread(delivery.continuation, key)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise HTTPException(503, "original upload continuation unavailable") from error
+        if value is None:
+            raise HTTPException(404, "original upload retains legacy transport")
+        return value.model_dump(mode="json", by_alias=True)
+
     @router.put("/v1/competition/model-uploads/{key}/files/{index}")
     async def upload(key: str, index: int, request: Request, offset: int = 0):
         signed = await lookup(key)

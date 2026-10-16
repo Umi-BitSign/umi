@@ -48,11 +48,23 @@ generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
 not change.
 An upgraded client checks for a retained legacy reservation for the exact same
-signed request before starting direct R2 delivery. That request keeps its original
-chunked protocol and saved offsets even after the cohort adopts direct delivery;
-already preserved remote bytes need no reupload. An unavailable or invalid retained
-status stops or retries that lookup instead of creating a new direct reservation.
-Only requests without a legacy reservation use the authenticated direct profile.
+signed request before starting direct R2 delivery. A certified legacy original
+keeps its original protocol; already preserved remote bytes need no reupload.
+An unfinished or uncertified original can continue through direct R2 when the
+host supplies the quorum-signed adoption and its frozen original census. The
+client verifies that proof against the original request, policy, authority and
+clocks, then signs a separate direct payload declaration with your hotkey. It
+uploads the original local bundle to R2 and completes ordinary admission and
+artifact review. Your signed participation request does not change. Interrupted
+direct delivery resumes the same reservation across upgrades and restarts.
+
+The `model_upload_continuation` progress stage reports proof verification and
+retries separately from model transfer. An unavailable or invalid retained status
+or continuation cannot silently create a direct reservation. Older hosts without
+this continuation route keep the original chunked protocol and saved offsets;
+an uncertified original needs the supported host and client upgrade to finish
+after adoption. Requests without a legacy reservation use the authenticated direct
+profile normally. Retain your original local bundle until delivery completes.
 Keep the original request file and rerun it unchanged after a client upgrade.
 Local verification records live in `~/.local/state/umi/model-verification` by
 default, or the absolute private `UMI_MODEL_VERIFICATION_DIRECTORY` you select.

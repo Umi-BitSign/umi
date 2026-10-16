@@ -25,6 +25,11 @@ from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake import history_tip
 from .competition_cohort_model_transport import authenticated_model_delivery
 from .competition_cohort_model_upload import CHUNK_BYTES, ModelUploadChunk
+from .competition_cohort_model_upload_continuation import (
+    MAX_CONTINUATION_BYTES,
+    LegacyModelUploadContinuation,
+    verify_upload_continuation,
+)
 from .competition_cohort_participation import CohortParticipationReceipt, CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_source_verification import verify_model_source
@@ -180,7 +185,13 @@ async def _admit_model(*, origin, policy, request, transport, retry_seconds, rep
 
 
 async def _exchange(
-    client: httpx.AsyncClient, method: str, path: str, *, body=b"", headers=None
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    body=b"",
+    headers=None,
+    maximum_bytes=512 * 1024,
 ) -> bytes:
     async def send():
         async with client.stream(method, path, content=body, headers=headers) as response:
@@ -196,7 +207,7 @@ async def _exchange(
                 raise CompetitionSubmissionError("invalid_model_upload_encoding")
             data = bytearray()
             async for chunk in response.aiter_bytes():
-                if len(data) + len(chunk) > 512 * 1024:
+                if len(data) + len(chunk) > maximum_bytes:
                     raise CompetitionSubmissionError("model_upload_status_too_large")
                 data.extend(chunk)
             return bytes(data)
@@ -262,10 +273,10 @@ async def fetch_model_delivery_profile(
 async def _has_retained_legacy_upload(*, origin, request, transport, retry_seconds, report):
     """Resolve the exact old reservation before selecting newly adopted transport.
 
-    Only an explicit absence permits direct delivery. An unavailable or damaged
-    legacy status must never cause the same signed request to be reserved again
-    under a different protocol. The subsequent legacy POST replays the original
-    request and obtains current offsets; this read does not reserve anything.
+    An explicit absence permits normal direct delivery; an exact retained
+    original requires its separate authenticated continuation. An unavailable
+    or damaged status never silently selects another protocol. This read does
+    not reserve anything.
     """
     key = digest(request)
     bundle = request.signed_submission.submission.model_bundle
@@ -292,6 +303,45 @@ async def _has_retained_legacy_upload(*, origin, request, transport, retry_secon
             retained = await _retry(lookup, retry_seconds, report)
             progress.advance(1)
             return retained
+
+
+async def _has_direct_continuation(
+    *, origin, request, policy, delivery, transport, retry_seconds, report
+):
+    """A legacy reservation changes transport only with its committed census proof."""
+    with TransferProgress("model_upload_continuation", 1, report, unit="proofs") as progress:
+        async with httpx.AsyncClient(
+            base_url=origin,
+            transport=transport,
+            timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
+            follow_redirects=False,
+            trust_env=False,
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+        ) as client:
+
+            async def lookup():
+                try:
+                    raw = await _exchange(
+                        client,
+                        "GET",
+                        f"/v1/competition/model-uploads/{digest(request)}/continuation",
+                        maximum_bytes=MAX_CONTINUATION_BYTES,
+                    )
+                except CompetitionSubmissionError as error:
+                    if error.reason_code == "model_upload_rejected" and error.status_code == 404:
+                        return False  # Supported older host or an original /1 admission.
+                    raise
+                try:
+                    value = LegacyModelUploadContinuation.model_validate_json(raw)
+                    if verify_upload_continuation(value, request, policy) != delivery:
+                        raise ValueError("continuation differs from discovered transport")
+                except ValueError as error:
+                    raise CompetitionSubmissionError("invalid_model_upload_continuation") from error
+                return True
+
+            result = await _retry(lookup, retry_seconds, report)
+            progress.advance(1)
+            return result
 
 
 async def submit_cohort_model(
@@ -346,13 +396,24 @@ async def submit_cohort_model(
         )
     else:
         delivery = ModelDeliveryProfile.model_validate_json(canonical_json_bytes(delivery))
-    if delivery.mechanism == "direct_r2_multipart_v1" and not await _has_retained_legacy_upload(
+    use_direct = delivery.mechanism == "direct_r2_multipart_v1"
+    if use_direct and await _has_retained_legacy_upload(
         origin=origin,
         request=request,
         transport=transport,
         retry_seconds=retry_seconds,
         report=report,
     ):
+        use_direct = await _has_direct_continuation(
+            origin=origin,
+            request=request,
+            policy=policy,
+            delivery=delivery,
+            transport=transport,
+            retry_seconds=retry_seconds,
+            report=report,
+        )
+    if use_direct:
         from .competition_cohort_direct_model_client import submit_direct_cohort_model
 
         return await submit_direct_cohort_model(

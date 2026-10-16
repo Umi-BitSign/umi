@@ -11,10 +11,17 @@ import sqlite3
 from functools import partial
 from typing import TYPE_CHECKING
 
+from .competition_cohort_model_transport_selection import committed_model_delivery_selection
 from .competition_cohort_model_upload import validate_model_upload_chunk
+from .competition_cohort_model_upload_continuation import (
+    MAX_CONTINUATION_BYTES,
+    LegacyModelUploadContinuation,
+    verify_upload_continuation,
+)
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
+from .protocol import canonical_json_bytes
 
 if TYPE_CHECKING:
     from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
@@ -42,6 +49,37 @@ class ModelUploadDelivery:
         if self.remote is None or not self.remote.contains(request):
             raise OSError("released model awaits its authenticated remote retry owner")
         return request
+
+    def continuation(self, key: str) -> LegacyModelUploadContinuation | None:
+        """Export only committed authority for a new direct declaration.
+
+        Existing /1 admissions and intents continue on their original path.
+        No old upload record, payload, clock or allocation is changed here.
+        """
+        request = self.uploads.retained(key)
+        cohort = request.consent.consent.cohort_sha256
+        selected = None if self.remote is None else self.remote.sources.authenticated.get(cohort)
+        if selected is None:
+            return None
+        entry = next((e for e in selected.legacy.entries if e.request_sha256 == key), None)
+        if entry is None:
+            raise OSError("retained legacy upload is missing from its selected census")
+        if entry.admission_raw_sha256 is not None:
+            return None
+        with self.uploads.intake._connection(prefer_history=True) as (_, store):
+            selection = committed_model_delivery_selection(
+                store, cohort, self.uploads.intake.policy
+            )
+            value = LegacyModelUploadContinuation(
+                schema="umi-legacy-model-upload-continuation/1",
+                request_sha256=key,
+                selection=selection,
+                legacy_inventory=selected.legacy,
+            )
+            verify_upload_continuation(value, request, self.uploads.intake.policy)
+        if len(canonical_json_bytes(value)) > MAX_CONTINUATION_BYTES:
+            raise OSError("legacy continuation metadata exceeds its supported delivery bound")
+        return value
 
     def _remote_status(self, key: str, request: CohortParticipationRequest) -> dict[str, object]:
         if self._remote_request(key) != request:

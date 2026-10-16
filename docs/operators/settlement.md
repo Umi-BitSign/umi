@@ -2813,15 +2813,37 @@ their original metadata directory. A missing retained review requires repair;
 the poll does not recreate an archive to rerun it. Restart and repeated polls
 preserve the upload journal, allocation credit and original signed request.
 
-Before adopting direct delivery, census original reservations that lack a
-certified participation or a retained acceptance intent. Client chunk retries
-preserve their transport, but this alone does not qualify their later admission
-and acceptance. The frozen remote owner covers only its authenticated certified
-originals; an `incomplete_upload` entry cannot be relabeled as a completed remote
-artifact or gain a new certificate in that immutable inventory. Keep such a
-transition held until its supported completion path is qualified across routing,
-acceptance, review and reward replay. A request rejected before reservation has
-no retained legacy upload and may use authorized direct delivery normally.
+The native adoption census includes original reservations that lack participation
+or an admission certificate, including partial uploads. For these originals, the
+supported completion path is a new direct payload declaration signed by the miner
+over the unchanged request and bundle. The public read-only
+`GET /v1/competition/model-uploads/{request_sha256}/continuation` route supplies
+`umi-legacy-model-upload-continuation/1`: the committed adoption history and its
+complete frozen legacy inventory. The upgraded client authenticates the history,
+inventory digest, request raw bytes, model, original authority and clocks before
+signing. A pending owner decision or inconsistent selected census returns 503;
+invalid proof stops the client before it requests a direct reservation.
+
+Only frozen originals without admission, intent or acceptance certificates use
+this continuation. It works for incomplete uploads, fully uploaded unadmitted
+originals and retained participation awaiting attestation. The direct owner
+independently checks current intake authority, verifies the R2 payload and standing
+review, and uses ordinary admission and version-two artifact acceptance. Certified
+legacy originals retain their existing version-one path. A host without the route
+returns 404 and preserves the legacy client protocol; an uncertified original
+requires a supported client upgrade to complete after adoption. A request rejected
+before reservation has no retained legacy upload and may use authorized direct
+delivery normally.
+
+Continuation does not expand or relabel the frozen inventory, rewrite the plan,
+add a certificate to an `incomplete_upload` entry, or release any original local
+bytes or allocation charges. Keep the original upload journal, partial files and
+archive until the separate release and restore qualification authorizes reclamation.
+Select the authenticated legacy source and direct owner together, and qualify
+the installed clients, routing, admission, review, acceptance and reward replay
+before cutover. Source fixtures with synthetic finality and R2 establish protocol
+behavior, not production storage readiness. These compatibility paths remain
+necessary while a selected cohort retains legacy originals or their replay consumers.
 
 Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model
