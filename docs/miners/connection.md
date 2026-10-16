@@ -76,14 +76,36 @@ provide the route; HTTP 404 is not evidence that no participation exists.
 
 An `admission_certified` response authenticates that participation; it does not
 prove it remains the newest entry or authorize changing the running model. The
-current updater is a runtime upgrade, not a model-revision rollover. It preserves
-the installed revision, complete cohort roster, authority, service account and
-state paths. The grant journal binds the revision and roster, so editing either,
+current updater supports selected runtime upgrades while preserving the installed
+revision, authority, service account and state paths. It does not provide a
+model-revision rollover or a general migration for custom multi-cohort rosters;
+unsupported authority layouts refuse before changes. The grant journal binds
+the revision and complete roster, so editing either,
 removing a closed cohort, or substituting an empty grant directory is not a
 supported in-place upgrade. Preserve the original configuration, grants, requests,
 responses and retirement receipts. Qualify an explicit transition for the actual
 installed startup layout and any remaining old-revision obligations before
 switching the endpoint; cohort closure alone does not release retained state.
+
+Paid-work claims also bind the original `submission_sha256`. A replacement
+participation does not move an accepted claim or its assigned work to the new
+revision. A retained but unaccepted claim still names the old submission; changing
+its fields while reusing its nonce is not a retry. Inventory the authoritative
+claim/admission state and all outstanding old-revision work across the configured
+cohorts before selecting a transition. Exact cached response recovery and grant
+or retirement replay are separate paths; the latter still require the original
+grant authority even after the response has been retired. Preserve signed bytes
+and journal bindings rather than rewriting them or starting an empty journal.
+
+A transition must inspect the effective startup command, account, state paths,
+systemd drop-ins or container mounts, and model-service dependencies. Drain the
+miner before changing its sidecar/backend. `KillMode=mixed` with a finite
+`TimeoutStopSec` can still force-kill remaining processes unless the effective
+settings disable that. The supported runtime updater uses an infinite stop
+timeout and `SendSIGKILL=no`; those settings alone do not authorize a revision
+migration. A container needs equivalent signal forwarding, restart control,
+confirmed process-tree drainage and exclusive ownership of the original mounted
+state. Preserve old model assets until their retained obligations are released.
 
 Endpoint participation does not require the unmodified baseline. A fine-tuned
 model must declare its own revision and meet the applicable provenance, license,
