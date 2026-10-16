@@ -2316,6 +2316,15 @@ Within one recovery, the initial attempt/evidence audit is reused only if the
 exact stopped journal family remains unchanged. If reconciliation changes it,
 the final read runs outside the event loop and drains before cancellation can
 release ownership. Current finality and post-read mutation checks still apply.
+For legacy evidence stored entirely inside SQLite, completed stopped recovery
+also retains its immutable attempt results through the launch checks. Reuse
+requires unchanged installation limits, registry, packages and the complete
+private SQLite family under the native worker lock, and ends when the worker
+starts or stopped state changes.
+External content-addressed evidence still receives its full native audit. Any
+required launch or completed-worker audit runs outside the event loop and drains
+on cancellation, so independent history work can continue. Fresh chain proofs,
+authority checks and all signed bytes remain unchanged.
 
 <a id="open-competition-round-publisher--current-checks-and-recovery"></a>
 

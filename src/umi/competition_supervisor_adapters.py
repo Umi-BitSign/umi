@@ -15,7 +15,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -272,6 +272,15 @@ def _decode_record(
     return result if recovery_history is None else (*result, restored)
 
 
+@dataclass(frozen=True, slots=True)
+class _StoppedAttemptAudit:
+    """Completed legacy audit bound to one still-stopped installation snapshot."""
+
+    binding: tuple
+    snapshot: tuple
+    attempts: tuple[tuple[str, _WeightAttempt], ...]
+
+
 class _RetainedRuns(Mapping):
     """One bounded registry snapshot, with histories reconstructed on access."""
 
@@ -383,6 +392,7 @@ class ProductionSuccessorRuntimeAdapter:
         self._recovered: OwnedCompetitionChainObservation | None = None
         self._recovered_floor: tuple[int, str] | None = None
         self._stopped_audit: tuple | None = None
+        self._stopped_attempts: _StoppedAttemptAudit | None = None
 
     @contextmanager
     def _registry(self):
@@ -643,6 +653,7 @@ class ProductionSuccessorRuntimeAdapter:
 
     async def stop_worker(self):
         self._stopped_audit = None
+        self._stopped_attempts = None
         self._recovered = None
         self._recovered_floor = None
         self._stopped = False
@@ -750,9 +761,43 @@ class ProductionSuccessorRuntimeAdapter:
             attempts_snapshot,
         )
 
+    def _attempt_audit_binding(self):
+        return (
+            self._binding,
+            digest(self.installation.worker_execution_limits),
+            self.config.validator_hotkey,
+            str(selected_weight_state_root(self.installation)),
+        )
+
+    def _current_attempts(self):
+        saved, self._stopped_attempts = self._stopped_attempts, None
+        if (
+            saved is not None
+            and self._stopped
+            and self._recovered is not None
+            and self.installation.worker_execution_limits.weight_evidence_storage is None
+            and saved.binding == self._attempt_audit_binding()
+        ):
+            with ExitStack() as held:
+                if saved.snapshot != ("absent",):
+                    root = selected_weight_state_root(self.installation)
+                    descriptor = _open_private_regular_file(
+                        root / "competition-weights.lock", "stopped worker journal lock"
+                    )
+                    held.callback(os.close, descriptor)
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if self._stopped_audit_matches() and saved.snapshot == self._stopped_audit[1]:
+                    # Preserve the native lock while checking the completed
+                    # legacy audit's exact SQLite family. The prior audit, not
+                    # metadata, established its evidence and attempt results.
+                    self._stopped_attempts = saved
+                    return dict(saved.attempts)
+        return self._attempts()
+
     @log_phase("transaction_recovery")
     async def recover_stopped_transactions(self, observation):
         self._stopped_audit = None
+        self._stopped_attempts = None
         self._recovered = None
         self._recovered_floor = None
         floor = self._observation_floor(observation)
@@ -855,6 +900,10 @@ class ProductionSuccessorRuntimeAdapter:
         self._recovered = observation
         self._recovered_floor = self._observation_floor(observation)
         self._stopped_audit = (registry_snapshot, attempts_snapshot, packages)
+        if self.installation.worker_execution_limits.weight_evidence_storage is None:
+            self._stopped_attempts = _StoppedAttemptAudit(
+                self._attempt_audit_binding(), attempts_snapshot, tuple(final_attempts.items())
+            )
 
     def _stopped_audit_matches(self):
         if self._stopped_audit is None:
@@ -936,7 +985,8 @@ class ProductionSuccessorRuntimeAdapter:
         await run_owned_thread(self._completed_replay, prepared)
         await run_owned_thread(self._replay, prepared)
         if prepared.authorization is not None:
-            attempt = self._attempts().get(prepared.authorization.authorization.authorization_id)
+            attempts = await run_owned_thread(self._current_attempts)
+            attempt = attempts.get(prepared.authorization.authorization.authorization_id)
             if attempt is None or attempt.phase not in {"applied", "recovered_effect"}:
                 return False
             if (
@@ -980,7 +1030,10 @@ class ProductionSuccessorRuntimeAdapter:
             raise SuccessorAdapterError("worker release has not been staged")
         if (await self.container.status()).phase == "running":
             raise SuccessorAdapterError("managed worker restarted after stopped recovery")
-        if any(attempt.phase not in _TERMINAL for attempt in self._attempts().values()):
+        # This owns its SQLite snapshot and may audit the full retained evidence
+        # budget. Let independent history work run, draining the audit on cancel.
+        attempts = await run_owned_thread(self._current_attempts)
+        if any(attempt.phase not in _TERMINAL for attempt in attempts.values()):
             raise SuccessorAdapterError("a successor attempt became unresolved before start")
         if not self._stopped_audit_matches():
             raise SuccessorAdapterError("stopped recovery inputs changed before start")
@@ -994,7 +1047,8 @@ class ProductionSuccessorRuntimeAdapter:
         await self._preflight_at_floor(selection, floor)
         observation = self._preflight[selection.directive_sha256]
         if prepared.authorization is not None:
-            if prepared.authorization.authorization.authorization_id in self._attempts():
+            attempts = await run_owned_thread(self._current_attempts)
+            if prepared.authorization.authorization.authorization_id in attempts:
                 # A stopped failed/held process may have had its exact effect
                 # recovered after exit. Verify that result without a new run.
                 if await self.worker_is_healthy(selection):
@@ -1054,6 +1108,7 @@ class ProductionSuccessorRuntimeAdapter:
         self._stopped, self._recovered = False, None
         self._recovered_floor = None
         self._stopped_audit = None
+        self._stopped_attempts = None
         await self.container.launch(activation, self._staged[selection.directive_sha256].release)
 
     async def start_replay(self, selection):
