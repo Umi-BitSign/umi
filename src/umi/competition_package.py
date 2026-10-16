@@ -442,12 +442,14 @@ def load_competition_package(
     if reuse is None:
         return _load_competition_package(package_path, **arguments)
     key, input_bytes = _package_reuse_key(package_path, **arguments)
-    cached = reuse.lookup(key)
-    manifest_sha256 = None
-    if cached is None:
-        manifest_sha256 = reuse.verified_manifest(key)
-        if manifest_sha256 is not None:
-            cached = reuse.lookup(key, verified_manifest_sha256=manifest_sha256)
+    # Consult durable state even if the parsed object is present: damage or a
+    # missing completed receipt must remain visible, including during repair.
+    manifest_sha256 = reuse.verified_manifest(key)
+    cached = (
+        reuse.lookup(key, verified_manifest_sha256=manifest_sha256)
+        if manifest_sha256 is not None
+        else None
+    )
     if cached is not None:
         # Deep-copying a large parsed package is not an atomic metadata read.
         # Recheck the selected copy before returning any cached projection.
