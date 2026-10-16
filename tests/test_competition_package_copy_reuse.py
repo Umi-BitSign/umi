@@ -99,7 +99,9 @@ def test_changed_copy_or_receipt_never_reuses_other_copy(
                 observed_release=release_identity,
                 limits=package_limits,
             )
-            receipt = directory / (reuse_module._metadata_digest(key) + ".json")
+            receipt = directory / (
+                reuse_module._metadata_digest(reuse_module._sealed_identity(key)) + ".json"
+            )
             receipt.write_bytes(b"{}")
         elif change == "mode":
             item.chmod(0o600)

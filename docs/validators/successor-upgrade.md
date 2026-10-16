@@ -43,18 +43,47 @@ a later installed transition no longer depends on the original receipt.
 The supervisor verifies each sealed package once and retains a small private
 verification receipt under its state root. The worker retains its receipt under
 the existing replay state root. Reuse binds the exact directory and file
-identities, policy, release and capacity bounds. Within a process, unchanged
+identities, native verifier semantics, policy, release and capacity bounds. Within a process, unchanged
 packages use the parsed object. When switching between stored copies of the same
 package, each copy must already have its own valid receipt for its exact current
 file identities. Matching package, policy, release, limits and manifest then permit
-reuse of the parsed content without rereading it. A fresh copy still receives its
-own verification. Returned models remain isolated, and metadata is checked again
+reuse of the parsed content without rereading it. The materializer's own copier
+authenticates a fresh destination by checking its already-verified source,
+streaming and hashing each payload once as it writes, and matching the complete
+sealed destination tree to the actual write descriptors. It then retains the
+destination verdict and those byte hashes without another payload pass or
+publication replay. An arbitrary external copy still requires native verification.
+Returned models remain isolated, and metadata is checked again
 after copying the parsed object. Only one parsed package is retained within the
 existing memory budget. After restart, the worker reconstructs the object once
 from a qualified copy without repeating payload hashes or publication replay.
 Receipts do not duplicate package evidence. A replaced or changed file cannot
 borrow a previous result. Reward authority and current chain state remain
 separate checks for every execution.
+
+Moving a stage's parent to `current`, or reading the same sealed package through
+the fixed read-only mount, preserves these results only when every package
+directory and file identity remains exact. The current path, complete tree,
+ownership, modes, link counts and bounds are still checked. Existing path-bound
+receipts are read at their original selected path and migrated using metadata;
+this compatibility is limited to the original native verification ABI. A changed
+ABI requires native verification. Their signed payloads and semantic verdicts are unchanged. Keep this compatibility
+reader while deployed supervisors or retained worker state contain those receipts.
+
+New completion markers distinguish a lost completed package receipt from first
+verification. A damaged or missing completed receipt reports
+`package_verification_metadata` / `repair_required` and refuses normal reuse.
+Repair only that derived metadata using the original package and native bounds:
+`python -m umi.competition_package_reuse_cli repair --request REQUEST.json --reason 'restore package verification metadata'`.
+The private, canonical request uses schema `umi-package-verification-repair/1`
+with `directory` (the existing verification store), `package_path`,
+`expected_package_sha256`, `expected_policy_sha256`, `observed_release` and `limits`.
+Take the expected identities, release and limits from the already-selected signed
+directive; do not create a new store or broaden bounds to bypass repair.
+Repair performs full native verification before atomically replacing a damaged
+derived record, retains signed bytes, and reports counted repair progress.
+A failed or interrupted repair does not authorize reuse. Existing valid records
+remain reusable; unrelated package receipts are not rebuilt.
 
 The same session retains per-file SHA-256 results for sealed materialization
 trees under `successor-package-verification/sealed-file-digests`. These small,
