@@ -923,9 +923,12 @@ async def test_namespace_repair_must_restore_exact_mounts(launch_setup):
 class FakeProcess:
     def __init__(self, output=b"ok", exit_code=0, hangs=False):
         self.stdout = self
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_eof()
         self.output, self.exit_code, self.hangs = output, exit_code, hangs
         self.returncode = None
         self.killed = False
+        self.exited = asyncio.Event()
 
     async def read(self, amount):
         if self.hangs:
@@ -934,12 +937,16 @@ class FakeProcess:
         return result
 
     async def wait(self):
-        self.returncode = self.exit_code
+        if self.hangs:
+            await self.exited.wait()
+        if self.returncode is None:
+            self.returncode = self.exit_code
         return self.returncode
 
     def kill(self):
         self.killed = True
         self.returncode = -9
+        self.exited.set()
 
 
 @pytest.mark.parametrize("fault", ["oversized", "failed", "timeout", "cancelled"])
@@ -953,7 +960,7 @@ async def test_command_failure_kills_child_and_never_inherits_environment(monkey
 
     async def spawn(*args, **kwargs):
         assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
-        assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
         assert kwargs["env"] == containers._command_environment()
         return process
 
@@ -970,5 +977,54 @@ async def test_command_failure_kills_child_and_never_inherits_environment(monkey
         (containers.SuccessorContainerError, asyncio.TimeoutError, asyncio.CancelledError)
     ):
         await task
-    if fault != "failed":
+    if fault in {"timeout", "cancelled"}:
         assert process.killed
+    assert process.returncode is not None
+
+
+@pytest.mark.parametrize("inspection", ["owned", "unrelated", "failed", "timeout"])
+async def test_failed_start_reports_only_owned_native_error_without_replacing_failure(
+    launch_setup, monkeypatch, inspection
+):
+    from umi import competition_progress as progress
+
+    c = launch_setup
+    await c.adapter.prepare_image(c.release)
+    original = containers.SuccessorContainerError("original command failure")
+    events = []
+    monkeypatch.setattr(progress, "_emit", lambda body, **_: events.append(body))
+    runner = c.adapter._runner
+    failed = False
+
+    async def fault(arguments, **bounds):
+        nonlocal failed
+        if arguments[2] == "start":
+            failed = True
+            c.runner.container["State"]["Error"] = (
+                "slirp4netns: cannot mount tmpfs on /tmp; create_sandbox failed; "
+                "private-password Authorization: Bearer private-token"
+            )
+            if inspection == "unrelated":
+                c.runner.container["Config"]["Labels"][containers._LABEL + "hotkey"] = "00" * 32
+            raise original
+        if failed:
+            if inspection == "failed":
+                raise RuntimeError("private-inspection-error")
+            if inspection == "timeout":
+                await asyncio.Event().wait()
+        return await runner(arguments, **bounds)
+
+    c.adapter._runner = fault
+    c.adapter.limits = replace(c.adapter.limits, command_timeout_seconds=0.01)
+    before = len(c.runner.calls)
+    with pytest.raises(containers.SuccessorContainerError) as caught:
+        await c.adapter.launch(c.cap, c.release)
+    assert caught.value is original
+    if inspection == "owned":
+        assert events[-1]["source"] == "owned_state_error"
+        assert events[-1]["returncode"] == 0
+        assert events[-1]["reason_codes"] == ["tmpfs_mount_failed", "network_sandbox_failed"]
+        assert "private-" not in json.dumps(events)
+    else:
+        assert events == []
+    assert not any(call[2] in {"rm", "stop"} for call in c.runner.calls[before:])

@@ -127,13 +127,15 @@ async def test_command_uses_safe_cwd_and_exact_environment(selected_view, monkey
     stream = asyncio.StreamReader()
     stream.feed_data(b"ok")
     stream.feed_eof()
+    errors = asyncio.StreamReader()
+    errors.feed_eof()
 
     async def done():
         return 0
 
     async def spawn(*args, **kwargs):
         calls.append((args, kwargs))
-        return SimpleNamespace(stdout=stream, wait=done)
+        return SimpleNamespace(stdout=stream, stderr=errors, wait=done, returncode=0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert (

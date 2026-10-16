@@ -2254,6 +2254,20 @@ retained container, including a stopped one, prevents this automatic refresh.
 The supervisor must first reconcile and remove its own prior worker. Keep each
 validator on its dedicated service account.
 
+Podman command failures emit `container_command_failed` with the allowlisted
+operation, exit status, elapsed time, observed byte count and fixed error codes.
+Both output pipes drain concurrently; stdout retains its configured bound and
+only the first 16 KiB of stderr is classified. Arbitrary stderr, command
+arguments, environment values and URLs are never logged. A failed worker start
+also attempts an ownership-checked, read-only inspection for up to five seconds.
+Its `source: owned_state_error` record classifies native `State.Error`; its exit
+status can still be zero when startup failed. `tmpfs_mount_failed` with
+`network_sandbox_failed` and component `slirp4netns` identifies a host network
+sandbox startup failure. These records do not authorize retries or change
+container cleanup, retained state, certification or reward decisions. An unknown
+error remains `unclassified_runtime_error`; inspect the exact owned container
+privately when more detail is needed.
+
 ### Miner HTTP rejection diagnostics
 
 A failed translate logs its HTTP status and a separate `miner_http_rejection`

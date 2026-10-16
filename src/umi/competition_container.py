@@ -18,6 +18,7 @@ import platform
 import pwd
 import re
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -27,6 +28,7 @@ from .competition_host_activation import (
     selected_weight_state_root,
     validate_authenticated_successor_activation,
 )
+from .competition_progress import report_container_command_failure
 from .competition_release import (
     VerifiedSuccessorOCI,
     extract_successor_release_bundle,
@@ -34,7 +36,7 @@ from .competition_release import (
 )
 from .competition_supervisor import SuccessorSupervisorReleaseTarget
 from .competition_worker import _open_directory_without_links
-from .concurrency import kill_and_reap
+from .concurrency import await_owned_task, kill_and_reap, wait_for_owned
 from .encoding import account_id32
 from .protocol import canonical_json_bytes
 from .rpc_transport import CONFIG_ENV, CONFIG_FILENAME, WORKER_DIRECTORY, load_routes
@@ -332,35 +334,97 @@ def _command_environment() -> dict[str, str]:
 async def _run_command(arguments, *, timeout_seconds, maximum_output_bytes):
     if not arguments or any(not isinstance(arg, str) or "\0" in arg for arg in arguments):
         raise SuccessorContainerError("invalid Podman arguments")
+    started = time.monotonic_ns()
     process = await asyncio.create_subprocess_exec(
         *arguments,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
         env=_command_environment(),
         cwd="/",
     )
 
+    diagnostic = bytearray()
+    diagnostic_bytes = 0
+
     async def collect():
-        if process.stdout is None:
+        if process.stdout is None or process.stderr is None:
+            await kill_and_reap(process)
             raise SuccessorContainerError("Podman output pipe is absent")
         output = bytearray()
-        while True:
-            part = await process.stdout.read(min(65536, maximum_output_bytes + 1 - len(output)))
-            if not part:
-                break
-            output.extend(part)
-            if len(output) > maximum_output_bytes:
+        exceeded = asyncio.get_running_loop().create_future()
+
+        async def read_stdout():
+            while part := await process.stdout.read(65536):
+                remaining = maximum_output_bytes - len(output)
+                output.extend(part[:remaining])
+                if len(part) > remaining and not exceeded.done():
+                    exceeded.set_result(None)
+                # Keep draining until the owner kills the child on overflow.
+
+        async def read_stderr():
+            nonlocal diagnostic_bytes
+            while part := await process.stderr.read(65536):
+                diagnostic_bytes += len(part)
+                diagnostic.extend(part[: max(0, 16384 - len(diagnostic))])
+
+        readers = [asyncio.create_task(read_stdout()), asyncio.create_task(read_stderr())]
+        finished = asyncio.gather(*readers, process.wait())
+        failed = False
+        try:
+            await asyncio.wait((finished, exceeded), return_when=asyncio.FIRST_COMPLETED)
+            if exceeded.done():
                 raise SuccessorContainerError("Podman output bound exceeded")
-        if await process.wait() != 0:
-            raise SuccessorContainerError("Podman command failed")
-        return bytes(output)
+            code = finished.result()[-1]
+            if code != 0:
+                raise SuccessorContainerError(f"Podman command failed (exit {code})")
+            return bytes(output)
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            # Readers drain concurrently through child termination, including
+            # when stdout exceeded its bound. Repeated cancellation cannot
+            # abandon this cleanup or leave pipe reader tasks behind.
+            async def drain():
+                try:
+                    await kill_and_reap(process)
+                finally:
+                    finished.cancel()
+                    exceeded.cancel()
+                    await asyncio.gather(finished, return_exceptions=True)
+
+            try:
+                await await_owned_task(asyncio.create_task(drain()))
+            except Exception:
+                if not failed:
+                    raise
 
     try:
-        return await asyncio.wait_for(collect(), timeout_seconds)
-    except BaseException:
+        return await wait_for_owned(collect(), timeout=timeout_seconds)
+    except BaseException as error:
+        # Cancellation may arrive before the owned collector gets its first
+        # turn, so it cannot be the sole owner of child cleanup.
         with contextlib.suppress(Exception):
             await kill_and_reap(process)
+        command_index = (
+            2 if len(arguments) > 1 and arguments[1] == PODMAN_CGROUP_MANAGER_ARGUMENT else 1
+        )
+        with contextlib.suppress(Exception):
+            report_container_command_failure(
+                arguments[command_index] if len(arguments) > command_index else "unknown",
+                process.returncode,
+                bytes(diagnostic),
+                observed_bytes=diagnostic_bytes,
+                elapsed_ms=max(0, (time.monotonic_ns() - started) // 1_000_000),
+                outcome=(
+                    "cancelled"
+                    if isinstance(error, asyncio.CancelledError)
+                    else "timeout"
+                    if isinstance(error, (TimeoutError, asyncio.TimeoutError))
+                    else "failed"
+                ),
+            )
         raise
 
 
@@ -841,7 +905,28 @@ class PodmanSuccessorContainer:
         self._validate_release(release)
         self._validate_activation(activation, release)
         self._worker_mounts(activation)
-        await self._command("start", container_id)
+        try:
+            await self._command("start", container_id)
+        except Exception:
+            # A failed start can leave ExitCode=0 and its actual runtime error
+            # only in State.Error. Inspect this exact owned ID without changing
+            # it; optional diagnosis cannot replace the original failure.
+            with contextlib.suppress(Exception):
+                failed = await wait_for_owned(
+                    self._inspect_owned(container_id),
+                    timeout=min(5, self.limits.command_timeout_seconds),
+                )
+                state = failed.get("State", {})
+                detail = state.get("Error")
+                if type(detail) is str and detail:
+                    report_container_command_failure(
+                        "start",
+                        state.get("ExitCode"),
+                        detail[:16384].encode("utf-8"),
+                        source="owned_state_error",
+                        observed_bytes=len(detail.encode("utf-8")),
+                    )
+            raise
         return await self.status()
 
     async def _inspect_owned(self, container_id):

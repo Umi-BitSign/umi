@@ -221,19 +221,73 @@ def report_settlement_retry(*, cohort, role, stage, error):
         )
 
 
-def report_container_command_failure(command, returncode, stderr):
-    """Keep runtime errors useful without logging arguments or bearer URLs."""
-    if command not in {"info", "ps", "image", "container", "load", "create", "start", "stop", "rm"}:
+def report_container_command_failure(
+    command,
+    returncode,
+    stderr,
+    *,
+    source="stderr",
+    observed_bytes=None,
+    elapsed_ms=None,
+    outcome="failed",
+):
+    """Classify bounded untrusted output; never publish its text or arguments."""
+    if command not in {
+        "info",
+        "ps",
+        "image",
+        "container",
+        "load",
+        "create",
+        "start",
+        "stop",
+        "rm",
+        "system",
+        "unshare",
+    }:
         command = "unknown"
-    detail = stderr.decode("utf-8", errors="replace")[:16384]
-    detail = re.sub(r"(?:https?|wss?)://[^\s<>\"']+", "[redacted URL]", detail)
-    detail = re.sub(r"/v1/clips/[^\s<>\"']+", "/v1/clips/[redacted]", detail)
+    detail = stderr[:16384].lower() if type(stderr) is bytes else b""
+    # Fixed labels remain useful even when a tool echoes credentials, an entire
+    # environment or a model-controlled path around the recognized phrase.
+    reasons = [
+        code
+        for phrase, code in (
+            (b"cannot mount tmpfs on /tmp", "tmpfs_mount_failed"),
+            (b"create_sandbox failed", "network_sandbox_failed"),
+            (b"permission denied", "permission_denied"),
+            (b"operation not permitted", "operation_not_permitted"),
+            (b"no space left on device", "storage_full"),
+            (b"no such file or directory", "path_missing"),
+            (b"connection refused", "connection_refused"),
+            (b"read-only file system", "read_only_filesystem"),
+        )
+        if phrase in detail
+    ]
+    components = [
+        name
+        for name in ("slirp4netns", "crun", "conmon", "dbus", "systemd")
+        if name.encode("ascii") in detail
+    ]
+    count = (
+        observed_bytes
+        if type(observed_bytes) is int and observed_bytes >= 0
+        else len(stderr)
+        if type(stderr) is bytes
+        else 0
+    )
     _emit(
         {
             "event": "container_command_failed",
+            "outcome": outcome if outcome in {"failed", "timeout", "cancelled"} else "unknown",
             "command": command,
-            "returncode": returncode,
-            "stderr": detail,
+            "returncode": returncode if type(returncode) is int else None,
+            "source": source if source in {"stderr", "owned_state_error"} else "unknown",
+            "reason_codes": reasons or ["unclassified_runtime_error"],
+            "components": components,
+            "observed_bytes": count,
+            "classified_bytes": len(detail),
+            "truncated": count > len(detail),
+            "elapsed_ms": elapsed_ms if type(elapsed_ms) is int and elapsed_ms >= 0 else None,
         },
         failed=True,
     )

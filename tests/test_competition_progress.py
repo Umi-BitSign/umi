@@ -42,7 +42,7 @@ def test_nested_phases_preserve_result_and_do_not_log_arguments(progress_events)
     assert progress._PARENT.get() is None
 
 
-def test_container_failure_keeps_reason_and_redacts_urls(progress_events):
+def test_container_failure_classifies_without_untrusted_output(progress_events):
     progress.report_container_command_failure(
         "create",
         125,
@@ -53,9 +53,10 @@ def test_container_failure_keeps_reason_and_redacts_urls(progress_events):
     event = progress_events[-1]
     assert event["event"] == "container_command_failed"
     assert event["command"] == "create" and event["returncode"] == 125
-    assert "statfs /run/umi-successor-activation" in event["stderr"]
-    assert "capability" not in event["stderr"] and "secret" not in event["stderr"]
-    assert "https://origin" not in event["stderr"]
+    assert event["reason_codes"] == ["path_missing"]
+    assert "stderr" not in event
+    assert "capability" not in json.dumps(event) and "secret" not in json.dumps(event)
+    assert "https://origin" not in json.dumps(event)
 
 
 def test_rate_limit_is_an_expected_wait_with_next_eligible_block(progress_events):
@@ -73,9 +74,13 @@ def test_rate_limit_is_an_expected_wait_with_next_eligible_block(progress_events
 
 
 def test_container_failure_does_not_log_unknown_command_arguments(progress_events):
-    progress.report_container_command_failure("secret-value", 125, b"x" * 32768)
+    progress.report_container_command_failure(
+        "secret-value", 125, b"x" * 32768, observed_bytes=32768
+    )
     assert progress_events[-1]["command"] == "unknown"
-    assert len(progress_events[-1]["stderr"]) == 16384
+    assert progress_events[-1]["classified_bytes"] == 16384
+    assert progress_events[-1]["truncated"] is True
+    assert progress_events[-1]["reason_codes"] == ["unclassified_runtime_error"]
 
 
 @pytest.mark.parametrize(
