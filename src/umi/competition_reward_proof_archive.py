@@ -14,7 +14,7 @@ import stat
 import sys
 import time
 from collections import OrderedDict
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
@@ -84,6 +84,135 @@ def history_archive_key(chain_sha256: str, hotkey: str, height: int) -> str:
     return digest({"chain": chain_sha256, "control": identity(hotkey), "block": height})
 
 
+def _directory_identity(info):
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("reward archive object directory must be owned and private")
+    return info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode
+
+
+def _object_identity(path, parent, info):
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise ValueError("reward archive object is not an owned private regular file")
+    return (
+        str(path),
+        *_directory_identity(parent),
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_gid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+class _ObjectDirectory:
+    """Pin one selected private object directory for one synchronous operation.
+
+    Leaf receipts still bind complete inode metadata. First/final namespace
+    checks prevent a renamed directory or ancestor symlink from turning this
+    descriptor into authority for another selected path. Actual reads and durable
+    publications retain their ordinary canonical, bounded private-file paths.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.pid = os.getpid()
+        ensure_private_directory(path)
+        self.fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            self.identity = _directory_identity(os.fstat(self.fd))
+            if not self.unchanged():
+                raise ValueError("reward archive object directory changed while opening")
+        except BaseException:
+            self.close()
+            raise
+
+    def unchanged(self):
+        private_path(str(self.path))
+        current = _directory_identity(self.path.lstat())
+        return os.getpid() == self.pid and current == self.identity
+
+    def stamp(self, path):
+        if os.getpid() != self.pid:
+            return RewardProofArchive._object_stamp(path)
+        parent = os.fstat(self.fd)
+        info = os.stat(path.name, dir_fd=self.fd, follow_symlinks=False)
+        return _object_identity(path, parent, info)
+
+    def close(self):
+        os.close(self.fd)
+
+
+class _FrameRead:
+    """Bounded duplicate resolution within one frame, never proof authority.
+
+    Only the ordinary verified reader can supply a reusable inode receipt. Every
+    reused receipt is checked again before eviction or before returning a frame;
+    subsequent reads still perform their own namespace and object checks. Remote
+    reads retain the transport's receipt/restore behavior without this shortcut.
+    """
+
+    def __init__(self, archive, directory=None):
+        self.archive = archive
+        self.directory = directory
+        self.pid = os.getpid()
+        self.objects = OrderedDict()
+        self.bytes = 0
+
+    def _check(self, sha, entry, directory=None):
+        stamp, raw, reused = entry
+        if not reused and self.directory is None:
+            return
+        path = self.archive.root / "objects" / (sha + ".json")
+        current_stamp = self.archive._object_stamp if directory is None else directory.stamp
+        if os.getpid() != self.pid or current_stamp(path) != stamp:
+            # A valid same-byte replacement remains compatible. Changed or
+            # damaged storage must take the original canonical/hash checks.
+            self.archive._read_object(path, sha, len(raw))
+
+    def resolve(self, sha: str, maximum: int) -> bytes:
+        if os.getpid() != self.pid:
+            # Do not use a receipt or acquire an inherited lock after fork.
+            return self.archive._bytes(sha, maximum)
+        entry = self.objects.get(sha)
+        if entry is not None:
+            checked_size(maximum, MAX_EVIDENCE_BYTES)
+            checked_size(len(entry[1]), maximum)
+            self.objects.move_to_end(sha)
+            entry[2] = True
+            return entry[1]
+        raw, stamp = self.archive._verified_bytes(sha, maximum, directory=self.directory)
+        if stamp is not None and len(raw) <= _MAX_READ_BYTES and _MAX_READ_OBJECTS > 0:
+            while self.objects and (
+                self.bytes + len(raw) > _MAX_READ_BYTES or len(self.objects) >= _MAX_READ_OBJECTS
+            ):
+                old_sha, old = self.objects.popitem(last=False)
+                # Evicted receipts cannot escape their selected namespace check.
+                self._check(old_sha, old)
+                self.bytes -= len(old[1])
+            self.objects[sha] = [stamp, raw, False]
+            self.bytes += len(raw)
+        return raw
+
+    def finish(self):
+        directory = self.directory
+        if directory is not None and not directory.unchanged():
+            directory = None
+        for sha, entry in self.objects.items():
+            self._check(sha, entry, directory)
+        if directory is not None and not directory.unchanged():
+            for sha, entry in self.objects.items():
+                self._check(sha, entry)
+
+
 class RewardProofArchive:
     """Private immutable output and read-only imported input use separate roots.
 
@@ -128,37 +257,25 @@ class RewardProofArchive:
         private_path(str(path))
         ensure_private_directory(path.parent)
         parent, info = path.parent.lstat(), path.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            raise ValueError("reward archive object is not an owned private regular file")
-        return (
-            str(path),
-            parent.st_dev,
-            parent.st_ino,
-            parent.st_uid,
-            parent.st_gid,
-            parent.st_mode,
-            info.st_dev,
-            info.st_ino,
-            info.st_uid,
-            info.st_gid,
-            info.st_mode,
-            info.st_nlink,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-        )
+        return _object_identity(path, parent, info)
+
+    @contextmanager
+    def _directory_scope(self, *, enabled=True):
+        if not enabled or self.remote is not None or os.getpid() != self._pid:
+            yield None
+            return
+        directory = _ObjectDirectory(self.root / "objects")
+        try:
+            yield directory
+        finally:
+            directory.close()
 
     def _path(self, kind: Kind, key: str) -> Path:
         if kind not in ("history", "endpoint", "interval", "registration"):
             raise ValueError("unknown reward archive frame kind")
         return self.root / kind / (checked_digest(key) + ".json")
 
-    def _retain_bytes(self, raw: bytes) -> str:
+    def _retain_bytes(self, raw: bytes, *, directory=None) -> str:
         checked_size(len(raw), MAX_EVIDENCE_BYTES)
         sha = hashlib.sha256(raw).hexdigest()
         if self.remote is not None:
@@ -171,11 +288,12 @@ class RewardProofArchive:
             # Do not acquire a possibly inherited thread lock after fork.
             self._publish_bytes(path, raw)
             return sha
+        object_stamp = self._object_stamp if directory is None else directory.stamp
         with self._publication_lock:
             prior = self._published.pop(sha, None)
             if prior is not None:
                 with suppress(OSError, ValueError):
-                    if self._object_stamp(path) == prior:
+                    if object_stamp(path) == prior:
                         self._published[sha] = prior
                         return sha
             verification_tick = _publication_clock_ns()
@@ -183,6 +301,9 @@ class RewardProofArchive:
             # Only a completed durable publication creates a reusable receipt.
             # Retain bounded metadata, never object payloads or proof authority.
             with suppress(OSError, ValueError):
+                # Ordinary publication uses the selected pathname. A pinned
+                # directory may have moved while it ran and cannot authenticate
+                # the newly published object's receipt on that path.
                 stamp = self._object_stamp(path)
                 # Only cache a file whose ctime predates this verification.
                 # A newly written file must be checked after its creation tick;
@@ -207,23 +328,35 @@ class RewardProofArchive:
             )
 
     def _bytes(self, sha: str, maximum: int) -> bytes:
+        return self._verified_bytes(sha, maximum)[0]
+
+    def _verified_bytes(
+        self, sha: str, maximum: int, *, directory=None
+    ) -> tuple[bytes, tuple | None]:
         if self.remote is not None:
-            return self.remote.read_object(checked_digest(sha), maximum=maximum)
+            return self.remote.read_object(checked_digest(sha), maximum=maximum), None
         path = self.root / "objects" / (checked_digest(sha) + ".json")
         checked_size(maximum, MAX_EVIDENCE_BYTES)
         if os.getpid() != self._pid:
             # Inherited locks and verification receipts are not usable after fork.
-            return self._read_object(path, sha, maximum)
+            return self._read_object(path, sha, maximum), None
+        object_stamp = self._object_stamp if directory is None else directory.stamp
         with self._read_lock:
             prior = self._read_objects.pop(sha, None)
             if prior is not None:
                 self._read_bytes -= len(prior[1])
-            stamp = self._object_stamp(path)
+            stamp = object_stamp(path)
             if prior is not None and prior[0] == stamp:
                 checked_size(len(prior[1]), maximum)
                 self._read_objects[sha] = prior
                 self._read_bytes += len(prior[1])
-                return prior[1]
+                return prior[1], stamp
+            if directory is not None:
+                # The cold reader resolves the selected pathname, not our held
+                # descriptor. Pair its bytes only with ordinary pathname stamps;
+                # otherwise a concurrent directory swap could seed a receipt for
+                # an inode whose content was never actually read.
+                stamp = self._object_stamp(path)
             verification_tick = _publication_clock_ns()
             raw = self._read_object(path, sha, maximum)
             # Reuse only verified bytes from an unchanged, private object whose
@@ -242,7 +375,8 @@ class RewardProofArchive:
                 ):
                     _, (_, removed) = self._read_objects.popitem(last=False)
                     self._read_bytes -= len(removed)
-            return raw
+                return raw, stamp
+            return raw, None
 
     @staticmethod
     def _read_object(path: Path, sha: str, maximum: int) -> bytes:
@@ -287,62 +421,68 @@ class RewardProofArchive:
                 or set(existing.fields) != set(fields)
             ):
                 raise ValueError("retained archive frame differs from selected publication")
-        refs = {}
-        for name, raw in fields.items():
-            if type(raw) is not bytes:
-                raise ValueError("reward archive requires original byte evidence")
-            checked_size(len(raw), MAX_FIELD_BYTES)
-            prepared = None if prepared_encodings is None else prepared_encodings.get(name)
-            if (
-                prepared is not None
-                and len(prepared) != (len(raw) + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
-            ):
-                raise ValueError("prepared encoding count differs from original archive bytes")
-            parts = []
-            for number, offset in enumerate(range(0, len(raw), MAX_EVIDENCE_BYTES)):
-                chunk = raw[offset : offset + MAX_EVIDENCE_BYTES]
-                if prepared is not None and type(prepared[number]) is not PreparedEvidenceEncoding:
-                    raise ValueError("archive export requires a codec-owned prepared encoding")
-                encoded = (
-                    encode_evidence(chunk, kind="proof")
-                    if prepared is None
-                    else prepared[number].for_bytes(chunk, kind="proof")
-                )
-                if prepared is not None and not prepared[number].canonical_encoder:
-                    part = _Part(
-                        sha256=encoded.sha256,
-                        expanded_bytes=encoded.expanded_bytes,
-                        recipe_sha256=hashlib.sha256(encoded.recipe).hexdigest(),
-                    )
+        with self._directory_scope(enabled=bool(fields)) as directory:
+            refs = {}
+            for name, raw in fields.items():
+                if type(raw) is not bytes:
+                    raise ValueError("reward archive requires original byte evidence")
+                checked_size(len(raw), MAX_FIELD_BYTES)
+                prepared = None if prepared_encodings is None else prepared_encodings.get(name)
+                if (
+                    prepared is not None
+                    and len(prepared) != (len(raw) + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
+                ):
+                    raise ValueError("prepared encoding count differs from original archive bytes")
+                parts = []
+                for number, offset in enumerate(range(0, len(raw), MAX_EVIDENCE_BYTES)):
+                    chunk = raw[offset : offset + MAX_EVIDENCE_BYTES]
                     if (
-                        existing is None
-                        or number >= len(existing.fields[name])
-                        or existing.fields[name][number] != part
+                        prepared is not None
+                        and type(prepared[number]) is not PreparedEvidenceEncoding
                     ):
-                        encoded = encode_evidence(chunk, kind="proof")
-                for value in encoded.objects.values():
-                    self._retain_bytes(value)
-                parts.append(
-                    _Part(
-                        sha256=encoded.sha256,
-                        expanded_bytes=encoded.expanded_bytes,
-                        recipe_sha256=self._retain_bytes(encoded.recipe),
+                        raise ValueError("archive export requires a codec-owned prepared encoding")
+                    encoded = (
+                        encode_evidence(chunk, kind="proof")
+                        if prepared is None
+                        else prepared[number].for_bytes(chunk, kind="proof")
                     )
-                )
-            refs[name] = tuple(parts)
-        frame = _Frame(
-            schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
-        )
-        if self.remote is None:
-            if self.physical_budget is not None:
-                self.physical_budget.check(self.root, MAX_FRAME_BYTES)
-            publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
-        else:
-            raw = canonical_json_bytes(frame)
-            checked_size(len(raw), MAX_FRAME_BYTES)
-            # The original /1 frame and codec recipes form the immutable object
-            # index. Publish the frame only after every referenced byte object.
-            self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+                    if prepared is not None and not prepared[number].canonical_encoder:
+                        part = _Part(
+                            sha256=encoded.sha256,
+                            expanded_bytes=encoded.expanded_bytes,
+                            recipe_sha256=hashlib.sha256(encoded.recipe).hexdigest(),
+                        )
+                        if (
+                            existing is None
+                            or number >= len(existing.fields[name])
+                            or existing.fields[name][number] != part
+                        ):
+                            encoded = encode_evidence(chunk, kind="proof")
+                    for value in encoded.objects.values():
+                        self._retain_bytes(value, directory=directory)
+                    parts.append(
+                        _Part(
+                            sha256=encoded.sha256,
+                            expanded_bytes=encoded.expanded_bytes,
+                            recipe_sha256=self._retain_bytes(encoded.recipe, directory=directory),
+                        )
+                    )
+                refs[name] = tuple(parts)
+            frame = _Frame(
+                schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
+            )
+            if directory is not None and not directory.unchanged():
+                raise ValueError("reward archive object directory changed during publication")
+            if self.remote is None:
+                if self.physical_budget is not None:
+                    self.physical_budget.check(self.root, MAX_FRAME_BYTES)
+                publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+            else:
+                raw = canonical_json_bytes(frame)
+                checked_size(len(raw), MAX_FRAME_BYTES)
+                # The original /1 frame and codec recipes form the immutable object
+                # index. Publish the frame only after every referenced byte object.
+                self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
 
     def copy_encoded_transport(self, kind: Kind, key: str, *, context, fields, resolve) -> bool:
         """Transfer existing recipes without issuing any proof acceptance.
@@ -432,26 +572,29 @@ class RewardProofArchive:
         frame = self._frame(kind, key)
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
-        result = {}
-        for name, maximum in bounds.items():
-            checked_size(maximum, MAX_FIELD_BYTES)
-            parts = frame.fields[name]
-            if (
-                not 0 < len(parts) <= (maximum + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
-                or sum(p.expanded_bytes for p in parts) > maximum
-            ):
-                raise ValueError("reward archive field expansion exceeds its bound")
-            result[name] = b"".join(
-                decode_evidence(
-                    self._bytes(p.recipe_sha256, MAX_RECIPE_BYTES),
-                    sha256=p.sha256,
-                    expanded_bytes=p.expanded_bytes,
-                    kind="proof",
-                    resolve=self._bytes,
+        with self._directory_scope(enabled=bool(frame.fields)) as directory:
+            resolver = _FrameRead(self, directory)
+            result = {}
+            for name, maximum in bounds.items():
+                checked_size(maximum, MAX_FIELD_BYTES)
+                parts = frame.fields[name]
+                if (
+                    not 0 < len(parts) <= (maximum + MAX_EVIDENCE_BYTES - 1) // MAX_EVIDENCE_BYTES
+                    or sum(p.expanded_bytes for p in parts) > maximum
+                ):
+                    raise ValueError("reward archive field expansion exceeds its bound")
+                result[name] = b"".join(
+                    decode_evidence(
+                        resolver.resolve(p.recipe_sha256, MAX_RECIPE_BYTES),
+                        sha256=p.sha256,
+                        expanded_bytes=p.expanded_bytes,
+                        kind="proof",
+                        resolve=resolver.resolve,
+                    )
+                    for p in parts
                 )
-                for p in parts
-            )
-        return frame.context, result
+            resolver.finish()
+            return frame.context, result
 
     def interval(self, key: str) -> dict:
         context, _ = self.read("interval", key, bounds={})

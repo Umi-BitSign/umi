@@ -113,6 +113,9 @@ class Adapter:
         if self.fail_recovery:
             raise ValueError("ambiguous transaction")
 
+    async def retry_stopped_start(self):
+        return False
+
     async def worker_is_healthy(self, selection):
         return self.health and self.alive == selection.directive_sha256
 
@@ -329,6 +332,112 @@ async def test_rate_wait_does_not_repeat_recovery_for_unchanged_stopped_audit(
         case.observation.block = 160
         final = await engine.reconcile()
         assert final.status == "started"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checks", [(True, True), (False,), (True, False)])
+async def test_new_prefix_reuses_only_still_stopped_unchanged_audit(
+    case, monkeypatch, checks, caplog
+):
+    import json
+
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    case.fetcher.pending = [next_directive(case)]
+    case.observation.block = 150
+    remaining = iter(checks)
+    observed_at_check = []
+    observations = []
+
+    async def observe():
+        observations.append(case.observation.block)
+        return case.observation
+
+    async def retry():
+        assert case.adapter.alive is None
+        observed_at_check.append(len(observations))
+        return next(remaining)
+
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry)
+    async with case.make(observation_reader=SimpleNamespace(observe=observe)) as engine:
+        result = await engine.reconcile()
+        assert result.status == "started" and result.accepted_sequence == 3
+        recoveries = sum(event[0] == "recover" for event in case.adapter.events)
+        assert recoveries == (1 if checks == (True, True) else 2)
+        if len(checks) == 2:
+            assert observed_at_check[1] > observed_at_check[0]
+        reused = [
+            json.loads(record.message)
+            for record in caplog.records
+            if record.name == "umi.competition.progress"
+            and '"stage":"supervisor_recovery_audit_reused"' in record.message
+        ]
+        if checks == (True, True):
+            assert reused[-1]["state"] == "completed"
+            assert reused[-1]["completed"] == reused[-1]["total"] == 1
+            assert reused[-1]["percent"] == 100
+            assert reused[-1]["eta_seconds"] == 0
+            assert reused[-1]["eta_basis"] == "completed"
+            assert reused[-1]["elapsed_seconds"] >= 0
+            assert reused[-1]["stalled"] is False
+        else:
+            assert not reused
+
+
+@pytest.mark.asyncio
+async def test_new_prefix_does_not_reuse_audit_of_running_worker(case, monkeypatch):
+    async def unexpected_retry():
+        pytest.fail("running worker must take full stop and recovery")
+
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", unexpected_retry)
+    async with case.make() as engine:
+        assert (await engine.reconcile()).status == "started"
+        case.fetcher.pending = [next_directive(case)]
+        case.observation.block = 150
+        assert (await engine.reconcile()).accepted_sequence == 3
+        assert sum(event[0] == "recover" for event in case.adapter.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_prefix_audit_reuse_requires_fresh_owned_observation(case, monkeypatch):
+    case.fetcher.pending = [next_directive(case)]
+    case.observation.block = 150
+
+    async def retry():
+        case.observation.live = False
+        return True
+
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry)
+    async with case.make() as engine:
+        result = await engine.reconcile()
+        assert result.status == "holding" and result.accepted_sequence == 2
+        assert case.adapter.alive is None
+        assert not any(event[0] == "replay" for event in case.adapter.events)
+        assert not engine._restart_checked
+
+
+@pytest.mark.asyncio
+async def test_restarted_owner_repeats_initial_audit_before_prefix_reuse(case, monkeypatch):
+    from umi.competition_weight_timing import WeightRateLimitWait
+
+    case.fetcher.pending = [next_directive(case, mode="competition_weights")]
+    case.observation.block = 150
+
+    async def wait(selection):
+        raise WeightRateLimitWait(150, 160)
+
+    async def retry():
+        return case.adapter.alive is None
+
+    monkeypatch.setattr(case.adapter, "start_weights", wait)
+    monkeypatch.setattr(case.adapter, "retry_stopped_start", retry)
+    async with case.make() as engine:
+        assert (await engine.reconcile()).status == "waiting"
+        first = sum(event[0] == "recover" for event in case.adapter.events)
+        assert first == 1
+    case.fetcher.pending = []
+    async with case.make() as restarted:
+        assert (await restarted.reconcile()).status == "waiting"
+        assert sum(event[0] == "recover" for event in case.adapter.events) == first + 1
 
 
 @pytest.mark.asyncio
