@@ -49,6 +49,7 @@ from .competition_cohort_model_upload import (
     authorize_model_delivery,
     owned_model_delivery,
 )
+from .competition_cohort_model_upload_delivery import ModelUploadDelivery
 from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
@@ -786,7 +787,11 @@ class ServiceAdmissionHost:
 
     async def _poll_legacy_uploads(self):
         authorize_memory(None, None, "intake")
-        return await run_owned_thread(self.uploads.poll_once)
+        if self.legacy_payloads is None:
+            return await run_owned_thread(self.uploads.poll_once)
+        return await ModelUploadDelivery(
+            self.uploads, remote_payloads=self.legacy_payloads
+        ).poll_once()
 
     async def _poll_direct_uploads(self):
         authorize_memory(None, None, "intake")

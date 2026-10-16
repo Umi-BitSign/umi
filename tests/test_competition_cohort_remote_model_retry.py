@@ -5,15 +5,21 @@ allocation fencing and signatures are real. This does not qualify deletion or
 issue consumer-release authority; no production payload is accessed.
 """
 
+import asyncio
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from umi.competition_cohort_model_client import _status
+from umi.competition_cohort_api import cohort_routes
+from umi.competition_cohort_model_client import _status, submit_cohort_model
 from umi.competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
+from umi.competition_cohort_model_upload_delivery import ModelUploadDelivery
 from umi.competition_cohort_model_upload_http import model_upload_routes
+from umi.competition_cohort_service_host import ServiceAdmissionHost
 from umi.open_competition import digest
-from umi.private_files import ensure_private_directory
+from umi.private_files import ensure_private_directory, publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_legacy_model_admission import frozen as frozen
@@ -25,6 +31,7 @@ from .test_competition_cohort_model_award import receipt_scenario as receipt_sce
 from .test_competition_cohort_model_award import recovery as recovery
 from .test_competition_cohort_model_award import runtime as runtime
 from .test_competition_cohort_model_upload import signed_chunk
+from .test_open_competition import wallet
 
 pytestmark = [
     pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True),
@@ -100,6 +107,132 @@ def assert_no_payloads(f):
     assert not (f.uploads.root / "files" / f.model / "model").exists()
     assert not list((f.uploads.root / "files" / f.model).glob("partial-*"))
     assert not (f.uploads.archive / f.model / "model").exists()
+
+
+async def test_upgraded_client_retries_released_original_without_uploading_again(
+    released, monkeypatch, tmp_path
+):
+    f = released
+    monkeypatch.setenv("UMI_MODEL_VERIFICATION_DIRECTORY", str(tmp_path / "client-verification"))
+    original = f.uploads.journal.get_raw("upload", f.key)
+    allocation = f.uploads.allocations.snapshot()
+
+    async def forbidden_capture():
+        raise AssertionError("retained original requires no new registration capture")
+
+    receipts = []
+    for attempt in range(2):
+        if attempt:
+            f.uploads = CohortModelUploads(f.uploads.config, f.uploads.intake, f.uploads.archive)
+            f.owner, f.router = f.create()
+        app = app_for(f)
+        app.include_router(
+            cohort_routes(f.uploads.intake, forbidden_capture, maximum_body_bytes=4 * 1024**2)
+        )
+        native, requests = httpx.ASGITransport(app), []
+
+        async def send(wire, native=native, requests=requests):
+            assert wire.method != "PUT" and "direct-model-uploads" not in wire.url.path
+            requests.append((wire.method, wire.url.path, wire.content))
+            return await native.handle_async_request(wire)
+
+        f.remote.reads.clear()
+        receipts.append(
+            await asyncio.wait_for(
+                submit_cohort_model(
+                    origin="https://intake.example",
+                    policy=f.uploads.intake.policy,
+                    request=f.request,
+                    source=tmp_path / "offline-original" / "model",
+                    wallet=wallet("Alice"),
+                    transport=httpx.MockTransport(send),
+                    retry_seconds=0.001,
+                ),
+                20,
+            )
+        )
+        assert ("GET", f"/v1/competition/model-uploads/{f.key}", b"") in requests
+        assert [row[2] for row in requests if row[0] == "POST"] == [original, original]
+        if attempt:
+            assert not f.remote.reads
+        assert f.uploads.journal.get_raw("upload", f.key) == original
+        assert f.uploads.allocations.snapshot() == allocation
+        assert_no_payloads(f)
+    assert receipts[0] == receipts[1]
+
+
+@pytest.mark.parametrize("released", ["release_prepared", "released"], indirect=True)
+async def test_recurring_host_poll_reuses_remote_original_without_recreating_payloads(released):
+    f = released
+    original = f.uploads.journal.get_raw("upload", f.key)
+    allocation = f.uploads.allocations.snapshot()
+    for attempt in range(2):
+        if attempt:
+            f.uploads = CohortModelUploads(f.uploads.config, f.uploads.intake, f.uploads.archive)
+            f.owner, f.router = f.create()
+        host = SimpleNamespace(uploads=f.uploads, legacy_payloads=f.owner.legacy_payloads)
+        f.remote.reads.clear()
+        result = await ServiceAdmissionHost._poll_legacy_uploads(host)
+        assert result["models_preserved"] == 1 and result["models_pending"] == 0
+        assert result["storage_allocations"] == allocation
+        assert result["artifact_review_certified"] is False
+        assert not result["last_error_type"]
+        if attempt:
+            assert not f.remote.reads
+        assert f.uploads.journal.get_raw("upload", f.key) == original
+        assert_no_payloads(f)
+
+
+@pytest.mark.parametrize("failure", ["missing_owner", "missing_chunk", "corrupt_admission"])
+async def test_recurring_remote_poll_keeps_unverified_storage_pending(released, failure):
+    f = released
+    if failure == "missing_chunk":
+        f.remote.objects.clear()
+    elif failure == "corrupt_admission":
+        with f.uploads.intake._connection() as (db, _):
+            db.execute("UPDATE cohort_admission_certificates SET body=?", (b"{}",))
+    events = []
+    result = await ModelUploadDelivery(
+        f.uploads, remote_payloads=f.owner.legacy_payloads if failure != "missing_owner" else None
+    ).poll_once(report=events.append)
+    assert result["models_preserved"] == 0 and result["models_pending"] == 1
+    assert result["last_error_type"]
+    assert any(row["status"] == "retrying" and row["eta_seconds"] is None for row in events)
+    assert_no_payloads(f)
+
+
+async def test_released_poll_uses_only_retained_review_and_recovers_after_metadata_repair(
+    released, tmp_path
+):
+    f = released
+    config = f.uploads.config.model_copy(
+        update={"admission_reviews_directory": str(tmp_path / "original-reviews")}
+    )
+    f.uploads = CohortModelUploads(config, f.uploads.intake, f.uploads.archive)
+    poller = ModelUploadDelivery(f.uploads, remote_payloads=f.owner.legacy_payloads)
+    first = await poller.poll_once()
+    assert first["models_pending"] == 1 and first["model_reviews_ready"] == 0
+    assert first["last_error_type"] == "OSError"
+    assert_no_payloads(f)
+    target = tmp_path / "original-reviews" / (f.model + ".json")
+    publish_private_model(target, f.inputs, maximum_bytes=33 * 1024**2)
+    original = target.read_bytes()
+    f.remote.reads.clear()
+    second = await poller.poll_once()
+    assert second["models_pending"] == 0 and second["model_reviews_ready"] == 1
+    assert not f.remote.reads and target.read_bytes() == original
+    assert_no_payloads(f)
+
+
+@pytest.mark.parametrize("frozen", ["unadmitted", "incomplete"], indirect=True)
+async def test_recurring_remote_poll_refuses_original_outside_authenticated_selection(released):
+    f = released
+    result = await ModelUploadDelivery(
+        f.uploads, remote_payloads=f.owner.legacy_payloads
+    ).poll_once()
+    assert result["models_preserved"] == 0 and result["models_pending"] == 1
+    assert not f.remote.reads
+    assert_no_payloads(f)
 
 
 @pytest.mark.parametrize("released", ["release_prepared", "released"], indirect=True)

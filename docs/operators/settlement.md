@@ -2784,6 +2784,26 @@ returns 503 so the client retains its unchanged request. A missing remote owner 
 an original absent from its authenticated inventory stays fenced. This read-only
 retry support grants no capacity refund or permission to remove local files.
 
+The recurring upload poll uses that same authenticated remote owner for
+`release_prepared` and `released` models. It restores durable verification facts
+before counting remote originals as preserved and never calls the local staging
+or completion path for them. The `legacy_model_remote_reconciliation` stage
+reports request counts, elapsed time and its ETA basis; unavailable ownership or
+storage stays retrying and pending. Completed pre-admission reviews remain in
+their original metadata directory. A missing retained review requires repair;
+the poll does not recreate an archive to rerun it. Restart and repeated polls
+preserve the upload journal, allocation credit and original signed request.
+
+Before adopting direct delivery, census original reservations that lack a
+certified participation or a retained acceptance intent. Client chunk retries
+preserve their transport, but this alone does not qualify their later admission
+and acceptance. The frozen remote owner covers only its authenticated certified
+originals; an `incomplete_upload` entry cannot be relabeled as a completed remote
+artifact or gain a new certificate in that immutable inventory. Keep such a
+transition held until its supported completion path is qualified across routing,
+acceptance, review and reward replay. A request rejected before reservation has
+no retained legacy upload and may use authorized direct delivery normally.
+
 Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model
 artifacts and provenance before production launch. A local preservation receipt

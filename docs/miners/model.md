@@ -32,7 +32,7 @@ its bundle manifest:
 ```
 
 The command checks local hashes, verifies the cohort history, selects the model
-delivery mechanism from that signed cohort plan, waits for complete byte
+delivery mechanism from the signed plan or its authenticated transport adoption, waits for complete byte
 verification, then submits the original consent. Older plans upload bounded
 signed chunks through intake. A plan using `direct_r2_multipart_v1` obtains
 short-lived, exact-part R2 capabilities from intake and sends model bytes
@@ -47,6 +47,13 @@ idempotent parts. If the object store has expired an old unfinished multipart
 generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
 not change.
+An upgraded client checks for a retained legacy reservation for the exact same
+signed request before starting direct R2 delivery. That request keeps its original
+chunked protocol and saved offsets even after the cohort adopts direct delivery;
+already preserved remote bytes need no reupload. An unavailable or invalid retained
+status stops or retries that lookup instead of creating a new direct reservation.
+Only requests without a legacy reservation use the authenticated direct profile.
+Keep the original request file and rerun it unchanged after a client upgrade.
 Local verification records live in `~/.local/state/umi/model-verification` by
 default, or the absolute private `UMI_MODEL_VERIFICATION_DIRECTORY` you select.
 Keep this directory across client upgrades and restarts. On qualified Linux

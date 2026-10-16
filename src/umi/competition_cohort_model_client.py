@@ -259,6 +259,41 @@ async def fetch_model_delivery_profile(
             raise CompetitionSubmissionError("invalid_model_upload_status") from error
 
 
+async def _has_retained_legacy_upload(*, origin, request, transport, retry_seconds, report):
+    """Resolve the exact old reservation before selecting newly adopted transport.
+
+    Only an explicit absence permits direct delivery. An unavailable or damaged
+    legacy status must never cause the same signed request to be reserved again
+    under a different protocol. The subsequent legacy POST replays the original
+    request and obtains current offsets; this read does not reserve anything.
+    """
+    key = digest(request)
+    bundle = request.signed_submission.submission.model_bundle
+    with TransferProgress("model_upload_retry_lookup", 1, report, unit="reservations") as progress:
+        async with httpx.AsyncClient(
+            base_url=origin,
+            transport=transport,
+            timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=10),
+            follow_redirects=False,
+            trust_env=False,
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+        ) as client:
+
+            async def lookup():
+                try:
+                    raw = await _exchange(client, "GET", f"/v1/competition/model-uploads/{key}")
+                except CompetitionSubmissionError as error:
+                    if error.reason_code == "model_upload_rejected" and error.status_code == 404:
+                        return False
+                    raise
+                _status(raw, key, bundle)
+                return True
+
+            retained = await _retry(lookup, retry_seconds, report)
+            progress.advance(1)
+            return retained
+
+
 async def submit_cohort_model(
     *,
     origin: str,
@@ -311,7 +346,13 @@ async def submit_cohort_model(
         )
     else:
         delivery = ModelDeliveryProfile.model_validate_json(canonical_json_bytes(delivery))
-    if delivery.mechanism == "direct_r2_multipart_v1":
+    if delivery.mechanism == "direct_r2_multipart_v1" and not await _has_retained_legacy_upload(
+        origin=origin,
+        request=request,
+        transport=transport,
+        retry_seconds=retry_seconds,
+        report=report,
+    ):
         from .competition_cohort_direct_model_client import submit_direct_cohort_model
 
         return await submit_direct_cohort_model(

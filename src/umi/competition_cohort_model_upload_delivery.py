@@ -7,9 +7,12 @@ release capacity, remove files, admit participants or replace signed requests.
 
 from __future__ import annotations
 
+import sqlite3
+from functools import partial
 from typing import TYPE_CHECKING
 
 from .competition_cohort_model_upload import validate_model_upload_chunk
+from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
 
@@ -68,6 +71,32 @@ class ModelUploadDelivery:
             # The caller supplied only a retained identity. Failure to authenticate
             # its original metadata/source requires repair, not a changed request.
             raise OSError("remote model delivery requires storage verification repair") from error
+
+    async def poll_once(self, *, report=None) -> dict[str, object]:
+        """Restore remote byte facts before the ordinary recurring upload poll.
+
+        This shares the authenticated HTTP retry boundary. It neither releases
+        capacity nor creates local payloads, and the synchronous poll rechecks
+        current owned authority before counting a model as preserved.
+        """
+        keys = await run_owned_thread(self.uploads.journal.keys, "upload")
+        with TransferProgress(
+            "legacy_model_remote_reconciliation", len(keys), report, unit="requests"
+        ) as progress:
+            for key in keys:
+                try:
+                    request = await run_owned_thread(self._remote_request, key)
+                    if request is not None:
+                        await self.status(key)
+                    progress.advance(1)
+                except (OSError, ValueError, sqlite3.Error):
+                    # Missing/damaged storage retains a pending model in the
+                    # native poll below. Do not turn a failed check into a
+                    # success, and continue independent models in this cycle.
+                    progress.emit("retrying", reason="remote_model_storage_repair_required")
+            return await run_owned_thread(
+                partial(self.uploads.poll_once, remote_payloads=self.remote)
+            )
 
     async def put_chunk(
         self, chunk: ModelUploadChunk, signature: Signature, data: bytes

@@ -25,8 +25,11 @@ from umi.competition_commands import COMMAND_HANDLERS
 from umi.competition_commands.arguments import build_parser
 from umi.concurrency import run_owned_thread
 from umi.open_competition import SignedSubmission, digest, sign_object
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes
 
+from .test_competition_cohort_intake import capture_at
+from .test_competition_cohort_model_acceptance import adopt_direct_transport
 from .test_competition_cohort_model_upload import (
     base_policy as base_policy,
 )
@@ -48,6 +51,7 @@ from .test_competition_cohort_model_upload import (
 from .test_competition_cohort_model_upload import (
     runtime as runtime,
 )
+from .test_competition_cohort_model_upload import signed_chunk
 from .test_open_competition import wallet
 
 pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
@@ -98,6 +102,122 @@ def restart(h):
         cohort_routes(h.intake, h.capture, maximum_body_bytes=4 * 1024**2, models=h.owner)
     )
     h.app.include_router(model_upload_routes(h.owner, h.capture))
+
+
+def direct_profile():
+    return ModelDeliveryProfile(
+        schema="umi-model-delivery-profile/1",
+        mechanism="direct_r2_multipart_v1",
+        part_size_bytes=5 * 1024**2,
+        maximum_concurrent_parts=2,
+        capability_ttl_seconds=900,
+    )
+
+
+@pytest.mark.parametrize("preserved", [False, True])
+@pytest.mark.parametrize("recovery", ["legacy6"], indirect=True)
+async def test_upgraded_client_keeps_exact_legacy_reservation_after_adoption(
+    delivery, monkeypatch, preserved
+):
+    h = delivery
+    key = h.owner.reserve(h.request, await h.capture())
+    bundle = h.request.signed_submission.submission.model_bundle
+    for index, file in enumerate(bundle.files):
+        data = (h.source / file.path).read_bytes()
+        if not preserved:
+            data = data[: max(1, len(data) // 2)]
+        chunk, signature = signed_chunk(key, index, data)
+        h.owner.put_chunk(chunk, signature, data)
+        if not preserved:
+            break
+    if preserved:
+        assert h.owner.poll_once()["models_preserved"] == 1
+    offsets = h.owner.status(key)["file_offsets"]
+    original = h.owner.journal.get_raw("upload", key)
+    allocation = h.owner.allocations.snapshot()
+    plan = canonical_json_bytes(h.intake.history(h.cohort).plan)
+    adopt_direct_transport(h.intake, h.cohort)
+
+    async def capture():
+        return capture_at(212)
+
+    h.capture = capture
+    events, discovered = [], []
+    native_discover = client.fetch_model_delivery_profile
+
+    async def discover(**values):
+        discovered.append(values["cohort_sha256"])
+        result = await native_discover(**values)
+        assert result.mechanism == "direct_r2_multipart_v1"
+        return result
+
+    monkeypatch.setattr(client, "fetch_model_delivery_profile", discover)
+    receipts = []
+    for attempt in range(2):
+        restart(h)
+        native = httpx.ASGITransport(h.app)
+        requests = []
+
+        async def send(wire, requests=requests, native=native):
+            assert "direct-model-uploads" not in wire.url.path
+            if not wire.url.path.endswith("history"):
+                requests.append((wire.method, wire.url.path, wire.content, wire.url.params))
+                if len(requests) == 1:
+                    return httpx.Response(503)  # Unavailability must not select new transport.
+            return await native.handle_async_request(wire)
+
+        args = options(h, httpx.MockTransport(send))
+        args.pop("delivery")
+        async with preservation(h):
+            receipts.append(
+                await asyncio.wait_for(client.submit_cohort_model(**args, report=events.append), 20)
+            )
+        assert requests[0][:2] == requests[1][:2] == ("GET", f"/v1/competition/model-uploads/{key}")
+        reservations = [row for row in requests if row[1].endswith("model-uploads")]
+        assert reservations and {row[2] for row in reservations} == {original}
+        writes = [row for row in requests if row[0] == "PUT"]
+        if attempt or preserved:
+            assert not writes
+        else:
+            assert int(writes[0][3]["offset"]) == offsets[0]
+        assert h.owner.journal.get_raw("upload", key) == original
+        assert h.owner.allocations.snapshot() == allocation
+        assert canonical_json_bytes(h.intake.history(h.cohort).plan) == plan
+    assert receipts[0] == receipts[1]
+    assert discovered == [h.cohort, h.cohort]
+    progress = [row for row in events if row.get("stage") == "model_upload_retry_lookup"]
+    assert any(row["status"] == "retrying" and row["eta_seconds"] is None for row in progress)
+    assert sum(row["status"] == "completed" for row in progress) == 2
+
+
+@pytest.mark.parametrize("failure", ["key", "model", "offset", "reward", "redirect", "forbidden"])
+async def test_direct_discovery_never_bypasses_invalid_retained_status(delivery, failure):
+    h = delivery
+    key = h.owner.reserve(h.request, await h.capture())
+    status = h.owner.status(key)
+    seen = []
+
+    async def send(wire):
+        seen.append(wire)
+        assert wire.method == "GET" and wire.url.path == f"/v1/competition/model-uploads/{key}"
+        if failure == "redirect":
+            return httpx.Response(307, headers={"Location": "https://other.example"})
+        if failure == "forbidden":
+            return httpx.Response(403)
+        if failure in {"key", "model"}:
+            status["upload_sha256" if failure == "key" else "model_sha256"] = "ff" * 32
+        elif failure == "offset":
+            status["file_offsets"][0] = -1
+        else:
+            status["artifact_review_certified"] = True
+        return httpx.Response(200, json=status)
+
+    args = options(h, httpx.MockTransport(send))
+    args["delivery"] = direct_profile()
+    with pytest.raises(CompetitionSubmissionError):
+        await client.submit_cohort_model(**args)
+    assert len(seen) == 1
+    assert h.intake.receipt(h.request) is None
 
 
 async def test_signed_history_selects_legacy_delivery(delivery, monkeypatch):
@@ -170,7 +290,10 @@ async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(deliv
         if wire.method == "PUT":
             writes.append((wire.url.path, int(wire.url.params["offset"])))
         if wire.url.path.endswith("participation"):
-            assert h.owner.status(key)["payload_preserved"]
+            try:
+                assert h.owner.status(key)["payload_preserved"]
+            except PrivateStateBusyError:
+                return httpx.Response(503)  # Match the native route's concurrent-owner retry.
             enrollments.append(wire.content)
         response = await native.handle_async_request(wire)
         if response.status_code == 503:

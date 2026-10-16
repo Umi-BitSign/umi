@@ -504,8 +504,10 @@ class CohortModelUploads:
         finally:
             os.close(lease)
 
-    def poll_once(self):
+    def poll_once(self, *, remote_payloads=None):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
+        if remote_payloads is not None and remote_payloads.intake is not self.intake:
+            raise ValueError("remote model polling requires the same native intake owner")
         ready = pending = 0
         reviews_ready = reviews_pending = reviews_held = 0
         review_hold_reason = ""
@@ -513,11 +515,27 @@ class CohortModelUploads:
         seen = set()
         for key in self.journal.keys("upload"):
             try:
-                bundle, staging = self._paths(key)
+                request = self.retained(key)
+                bundle = request.signed_submission.submission.model_bundle
                 model = digest(bundle)
                 if model in seen:
                     continue
                 seen.add(model)
+                if self.allocations.state(model) in {"release_prepared", "released"}:
+                    if remote_payloads is None:
+                        raise OSError("released model awaits its authenticated remote poll owner")
+                    remote_payloads.require_owned_payload(request)
+                    ready += 1
+                    review_status, reason = self._ensure_review(bundle, allow_local=False)
+                    if review_status == "ready":
+                        reviews_ready += 1
+                    elif review_status == "held":
+                        reviews_held += 1
+                        review_hold_reason = reason
+                    elif review_status == "pending":
+                        reviews_pending += 1
+                    continue
+                bundle, staging = self._paths(key)
                 receipt = self.journal.get("preserved", model)
                 if receipt is not None and (self.archive / model).is_dir():
                     if any((staging / "model").iterdir()):
@@ -564,7 +582,7 @@ class CohortModelUploads:
             "storage_allocations": self.allocations.snapshot(),
         }
 
-    def _ensure_review(self, bundle: ModelBundle) -> tuple[str, str]:
+    def _ensure_review(self, bundle: ModelBundle, *, allow_local=True) -> tuple[str, str]:
         """Retain one stable review or one stable hold for an exact model."""
 
         if self.config.admission_reviews_directory is None:
@@ -583,6 +601,10 @@ class CohortModelUploads:
             if retained.model_sha256 != model:
                 raise ValueError("pre-admission review differs from the preserved model")
             return "ready", ""
+        if not allow_local:
+            # A released model's completed reviews are retained metadata. Never
+            # reconstruct a durable archive or repeat local review after release.
+            raise OSError("released model requires retained pre-admission review repair")
         standing = self.config.standing_review_policy
         if standing is None:
             return "pending", ""
