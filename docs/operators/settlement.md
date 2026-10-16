@@ -292,6 +292,19 @@ shutdown drains the work before releasing it. This avoids repeating serializatio
 of unchanged bindings, while every owner, authority, source and file check still
 runs. Mutated content gets new canonical bytes; this grants no reusable verdict.
 
+Local proof archive reads and exports pin their private objects directory for
+one frame operation. Leaf inode, ownership, permissions and size checks use that
+descriptor; the selected directory path is checked before and after the operation.
+Reads reuse verified duplicate objects within a bounded 32 MiB, 4,096-entry frame
+working set, with checks before eviction and return. The shared object cache has
+the same independent bounds. A changed read namespace takes ordinary private
+file validation again; an export refuses a changed namespace before publishing
+its frame. Every descriptor closes on success or failure. Forked processes and
+remote transports keep their ordinary read paths. Canonical payload reads,
+durable publication, field limits and native proof checks remain required.
+This optimization changes no retained formats or verification ABI, so existing
+completed checkpoints remain reusable after a compatible runtime upgrade.
+
 Transfer preserves existing writer results and compares overlapping native facts.
 It copies compact original source records and records their actual target mutation
 tokens. Persistent source mappings let repeated shared objects survive interruption
