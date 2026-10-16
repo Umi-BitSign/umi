@@ -121,6 +121,9 @@ async def test_real_signed_oci_load_and_inert_sandbox(tmp_path):
     staged = port.stage_release(source, target)
     try:
         await port.prepare_image(staged)
+        # Exercise the weight worker's real network setup without mounting any
+        # credentials/state or making network requests from the inert image.
+        await port._rehearse_network(staged, "slirp4netns:allow_host_loopback=false")
         assert (await port.status()).phase == "absent"
         assert not Path(config.wallet.path).exists()
         assert not Path(config.worker_state_root).exists()

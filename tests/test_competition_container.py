@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import fcntl
 import json
 import os
 from dataclasses import replace
@@ -87,6 +88,7 @@ class FakePodman:
         self.rehearsal_error = None
         self.rehearsal = {"schema": "umi-successor-sandbox-rehearsal/1", "ok": True}
         self.namespace_stale = False
+        self.namespace_deleted_tmp = False
         self.namespace_repair_fails = False
         self.other_containers = []
 
@@ -118,12 +120,14 @@ class FakePodman:
             if self.namespace_stale:
                 raise containers.SuccessorContainerError("mounted source is absent")
             return b"".join(
-                f"{st.st_dev}:{st.st_ino}\n".encode("ascii")
-                for st in (Path(path).stat() for path in args[4:])
+                f"{st.st_dev}:{st.st_ino}:{links}\n".encode("ascii")
+                for path, st in ((path, Path(path).stat()) for path in args[4:])
+                for links in (0 if self.namespace_deleted_tmp and path == "/tmp" else st.st_nlink,)
             )
         elif args[:2] == ("system", "migrate"):
             if not self.namespace_repair_fails:
                 self.namespace_stale = False
+                self.namespace_deleted_tmp = False
             return b""
         elif args[0] == "create":
             labels = self.image["Config"]["Labels"] | dict(
@@ -223,7 +227,14 @@ def setup(artifact, monkeypatch):  # noqa: F811
     monkeypatch.setattr(containers, "_require_safe_executable", lambda path: None)
     # Fake Podman has no kernel scope. Real descriptor-walk tests are separate.
     monkeypatch.setattr(containers, "_require_empty_container_cgroup", lambda cid: None)
-    return SimpleNamespace(release=release, runner=runner, adapter=adapter, artifact=artifact)
+    root = Path(artifact.config.state_root)
+    root.mkdir(exist_ok=True, mode=0o700)
+    with (root / "supervisor-process.lock").open("xb") as lease:
+        os.fchmod(lease.fileno(), 0o600)
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield SimpleNamespace(
+            release=release, runner=runner, adapter=adapter, artifact=artifact, lease=lease
+        )
 
 
 @pytest.fixture
@@ -388,6 +399,15 @@ async def test_weight_command_uses_finney_clients_without_firewall_claim(launch_
     assert "--network=slirp4netns:allow_host_loopback=false" in create
     assert "--network=host" not in create
     assert "firewall" not in " ".join(create)
+    rehearsals = [
+        call
+        for call in value.runner.calls
+        if call[2] == "create" and "inert-rehearsal" in " ".join(call)
+    ]
+    assert len(rehearsals) == 2
+    assert "--network=none" in rehearsals[0]
+    assert "--network=slirp4netns:allow_host_loopback=false" in rehearsals[1]
+    assert "--mount" not in rehearsals[1] and containers.HOTKEY_PATH not in rehearsals[1]
 
 
 async def test_private_rpc_mount_and_explicit_worker_environment(setup, tmp_path, monkeypatch):
@@ -918,6 +938,121 @@ async def test_namespace_repair_must_restore_exact_mounts(launch_setup):
     with pytest.raises(containers.SuccessorContainerError, match="differs from service mounts"):
         await c.adapter.launch(c.cap, c.release)
     assert not any(call[2] == "create" for call in c.runner.calls[before:])
+
+
+@pytest.mark.asyncio
+async def test_deleted_private_tmp_repairs_only_before_network_probe(launch_setup, caplog):
+    c = launch_setup
+    c.cap.profile = "competition_weights"
+    await c.adapter.prepare_image(c.release)
+    c.runner.namespace_deleted_tmp = True
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    await c.adapter.launch(c.cap, c.release)
+    calls = [call[2:] for call in c.runner.calls]
+    migrated = calls.index(("system", "migrate"))
+    remaining = calls[migrated + 1 :]
+    creates = [call for call in remaining if call[0] == "create"]
+    assert len(creates) == 2
+    assert "inert-rehearsal" in " ".join(creates[0])
+    assert "inert-rehearsal" not in " ".join(creates[1])
+    assert all("--network=slirp4netns:allow_host_loopback=false" in call for call in creates)
+    assert all("--security-opt=no-new-privileges" in call for call in creates)
+    assert all("--cap-drop=ALL" in call for call in creates)
+    records = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("stage", "").startswith("podman_")
+    ]
+    assert any(record.get("stage") == "podman_namespace_repair" for record in records)
+    assert any(record.get("stage") == "podman_network_rehearsal" for record in records)
+    for record in records:
+        assert {"elapsed_seconds", "percent", "eta_seconds", "eta_basis"} <= record.keys()
+
+
+@pytest.mark.asyncio
+async def test_namespace_restart_and_healthy_repeat_preserve_original_owner(setup):
+    c = setup
+    lock = Path(c.adapter.config.state_root) / "supervisor-process.lock"
+    before = lock.stat()
+    await c.adapter._refresh_mount_namespace(())
+    assert not any(call[2:4] == ("system", "migrate") for call in c.runner.calls)
+    c.runner.namespace_deleted_tmp = True
+    reopened = containers.PodmanSuccessorContainer(
+        c.adapter.config, limits=_limits(), command_runner=c.runner
+    )
+    await reopened._refresh_mount_namespace(())
+    await reopened._refresh_mount_namespace(())
+    assert sum(call[2:4] == ("system", "migrate") for call in c.runner.calls) == 1
+    after = lock.stat()
+    assert (before.st_ino, before.st_size, before.st_ctime_ns) == (
+        after.st_ino,
+        after.st_size,
+        after.st_ctime_ns,
+    )
+    with lock.open("rb") as contender, pytest.raises(BlockingIOError):
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.asyncio
+async def test_namespace_migration_requires_current_original_owner(setup):
+    c = setup
+    fcntl.flock(c.lease, fcntl.LOCK_UN)
+    c.runner.namespace_deleted_tmp = True
+    with pytest.raises(ValueError, match="original lock"):
+        await c.adapter._refresh_mount_namespace(())
+    assert not any(call[2:4] == ("system", "migrate") for call in c.runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_namespace_owner_is_rechecked_after_inventory(setup):
+    c = setup
+    c.runner.namespace_deleted_tmp = True
+
+    async def release_owner(arguments, **kwargs):
+        result = await c.runner(arguments, **kwargs)
+        if arguments[2:] == ("ps", "--all", "--format=json"):
+            fcntl.flock(c.lease, fcntl.LOCK_UN)
+        return result
+
+    c.adapter._runner = release_owner
+    with pytest.raises(ValueError, match="original lock"):
+        await c.adapter._refresh_mount_namespace(())
+    assert not any(call[2:4] == ("system", "migrate") for call in c.runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_namespace_interrupted_repair_rechecks_before_retry(setup):
+    c = setup
+    c.runner.namespace_deleted_tmp = True
+
+    async def interrupt_after_migration(arguments, **kwargs):
+        result = await c.runner(arguments, **kwargs)
+        if arguments[2:] == ("system", "migrate"):
+            raise asyncio.CancelledError
+        return result
+
+    c.adapter._runner = interrupt_after_migration
+    with pytest.raises(asyncio.CancelledError):
+        await c.adapter._refresh_mount_namespace(())
+    c.adapter._runner = c.runner
+    await c.adapter._refresh_mount_namespace(())
+    assert sum(call[2:4] == ("system", "migrate") for call in c.runner.calls) == 1
+    assert c.runner.calls[-1][2:4] == ("unshare", "/usr/bin/stat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
+async def test_network_rehearsal_failure_never_creates_weight_worker(launch_setup, failure):
+    c = launch_setup
+    c.cap.profile = "competition_weights"
+    await c.adapter.prepare_image(c.release)
+    c.runner.rehearsal_error = failure("network sandbox did not complete")
+    before = len(c.runner.calls)
+    with pytest.raises(failure):
+        await c.adapter.launch(c.cap, c.release)
+    creates = [call for call in c.runner.calls[before:] if call[2] == "create"]
+    assert len(creates) == 1 and "inert-rehearsal" in " ".join(creates[0])
+    assert c.runner.container is None
 
 
 class FakeProcess:

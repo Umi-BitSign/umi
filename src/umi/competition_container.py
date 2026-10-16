@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .competition_container_namespace import require_supervisor_process_owner
 from .competition_host_activation import (
     AuthenticatedSuccessorActivation,
     selected_weight_state_root,
@@ -35,6 +36,7 @@ from .competition_release import (
     verify_staged_successor_release,
 )
 from .competition_supervisor import SuccessorSupervisorReleaseTarget
+from .competition_work_progress import WorkProgress, await_progress
 from .competition_worker import _open_directory_without_links
 from .concurrency import await_owned_task, kill_and_reap, wait_for_owned
 from .encoding import account_id32
@@ -60,6 +62,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _ARCH = {"x86_64": "linux/amd64", "aarch64": "linux/arm64"}
 _LABEL = "vision.umi.successor."
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
+_WEIGHT_NETWORK = "slirp4netns:allow_host_loopback=false"
 
 
 def _container_cgroup(container_id: str) -> str:
@@ -135,7 +138,7 @@ def _require_empty_container_cgroup(container_id: str) -> None:
         os.close(descriptor)
 
 
-# Fixed signed-image code: no model imports, network, wallet, or retained state.
+# Fixed signed-image code: no model imports, network requests, wallet, or retained state.
 _REHEARSAL = r"""
 import hashlib, json, os, pathlib, stat, subprocess, sys
 from umi.pinned_artifact import PinnedArtifact, staged_pinned_artifacts
@@ -154,7 +157,12 @@ require(int((group / 'pids.max').read_text()) == int(sys.argv[3]))
 quota, period = (group / 'cpu.max').read_text().split()
 require(int(quota) * 1000 == int(period) * int(sys.argv[4]))
 devices = pathlib.Path('/proc/net/dev').read_text().splitlines()[2:]
-require({line.split(':')[0].strip() for line in devices} <= {'lo'})
+interfaces = {line.split(':')[0].strip() for line in devices}
+if sys.argv[5] == 'none':
+    require(interfaces <= {'lo'})
+else:
+    require(sys.argv[5] == 'slirp4netns:allow_host_loopback=false')
+    require(len(interfaces - {'lo'}) == 1)
 require(not pathlib.Path('/run/umi-successor-hotkey').exists())
 probe = pathlib.Path('/tmp/umi-inert-rehearsal')
 probe.write_bytes(b'ok'); probe.unlink()
@@ -587,6 +595,12 @@ class PodmanSuccessorContainer:
         )
 
     async def rehearse(self, release: VerifiedSuccessorOCI) -> None:
+        await self._rehearse_network(release, "none")
+        self._rehearsed.add(release.target.release_bundle_sha256)
+
+    async def _rehearse_network(self, release: VerifiedSuccessorOCI, network: str) -> None:
+        if network not in {"none", _WEIGHT_NETWORK}:
+            raise SuccessorContainerError("unsupported inert rehearsal network")
         self._validate_release(release)
         await self.check_host()
         await self._inspect_image(release)
@@ -599,7 +613,7 @@ class PodmanSuccessorContainer:
             _LABEL + "purpose": "inert-rehearsal",
             _LABEL + "release": release.target.release_bundle_sha256,
         }
-        args = ["create", "--name", name, *self._sandbox("none")]
+        args = ["create", "--name", name, *self._sandbox(network)]
         for key, value in sorted(labels.items()):
             args.extend(("--label", f"{key}={value}"))
         args.extend(
@@ -614,6 +628,7 @@ class PodmanSuccessorContainer:
                 str(self.config.worker_memory_bytes),
                 str(self.config.worker_pids_limit),
                 str(self.config.worker_cpu_millis),
+                network,
             )
         )
         try:
@@ -643,7 +658,6 @@ class PodmanSuccessorContainer:
                     raise SuccessorContainerError("inert rehearsal removal is unconfirmed")
         if _json(output) != {"schema": "umi-successor-sandbox-rehearsal/1", "ok": True}:
             raise SuccessorContainerError("inert successor sandbox rehearsal failed")
-        self._rehearsed.add(release.target.release_bundle_sha256)
 
     async def _inspect_rehearsal(self, container_id, expected_labels):
         if not _HEX64.fullmatch(container_id):
@@ -810,32 +824,60 @@ class PodmanSuccessorContainer:
         inode identities without reading mounted credentials or evidence.
         The caller owns the supervisor lock; never migrate another workload.
         """
-        sources = tuple(
-            dict(part.split("=", 1) for part in mount.split(","))["src"] for mount in mounts
+        sources = (
+            "/tmp",
+            "/var/tmp",
+            *(dict(part.split("=", 1) for part in mount.split(","))["src"] for mount in mounts),
         )
-        expected = b"".join(
-            f"{value.st_dev}:{value.st_ino}\n".encode("ascii")
-            for value in (os.stat(path, follow_symlinks=False) for path in sources)
-        )
+
+        def service_identity():
+            values = tuple(os.stat(path, follow_symlinks=False) for path in sources)
+            if any(not stat.S_ISDIR(value.st_mode) or value.st_nlink == 0 for value in values[:2]):
+                raise SuccessorContainerError("service temporary directories are unavailable")
+            return b"".join(f"{value.st_dev}:{value.st_ino}\n".encode("ascii") for value in values)
+
+        expected = service_identity()
 
         async def visible():
             try:
-                return (
-                    await self._command(
-                        "unshare", "/usr/bin/stat", "--format=%d:%i", "--", *sources
-                    )
-                    == expected
+                payload = await self._command(
+                    "unshare", "/usr/bin/stat", "--format=%d:%i:%h", "--", *sources
                 )
+                lines = payload.splitlines()
+                if len(lines) != len(sources):
+                    return False
+                identities = []
+                for line in lines:
+                    if re.fullmatch(rb"[0-9]+:[0-9]+:[0-9]+", line) is None:
+                        return False
+                    identity, links = line.rsplit(b":", 1)
+                    if int(links) == 0:
+                        return False
+                    identities.append(identity + b"\n")
+                return b"".join(identities) == expected
             except SuccessorContainerError:
                 return False
 
         if await visible():
             return
-        if _json(await self._command("ps", "--all", "--format=json")) != []:
-            raise SuccessorContainerError("stale Podman namespace still owns containers")
-        await self._command("system", "migrate")
-        if not await visible():
-            raise SuccessorContainerError("Podman namespace differs from service mounts")
+        # This repairs namespace lifetime only. Signed inputs, image contents,
+        # original journals and all network/sandbox flags remain unchanged.
+        with WorkProgress("podman_namespace_repair", 3, unit="checks") as progress:
+            require_supervisor_process_owner(Path(self.config.state_root))
+            if _json(await self._command("ps", "--all", "--format=json")) != []:
+                raise SuccessorContainerError("stale Podman namespace still owns containers")
+            require_supervisor_process_owner(Path(self.config.state_root))
+            if service_identity() != expected:
+                raise SuccessorContainerError("service mounts changed during namespace repair")
+            progress.advance()
+            await await_progress(
+                self._command("system", "migrate"), stage="podman_namespace_migration"
+            )
+            progress.advance()
+            require_supervisor_process_owner(Path(self.config.state_root))
+            if service_identity() != expected or not await visible():
+                raise SuccessorContainerError("Podman namespace differs from service mounts")
+            progress.advance()
 
     async def launch(
         self, activation: AuthenticatedSuccessorActivation, release: VerifiedSuccessorOCI
@@ -857,11 +899,15 @@ class PodmanSuccessorContainer:
         labels = self._labels(activation)
         if self.source_overlay is not None:
             labels[_LABEL + "worker-source-host"] = self.source_overlay.host_manifest_sha256
-        network = (
-            "none"
-            if activation.profile == "competition_replay"
-            else "slirp4netns:allow_host_loopback=false"
-        )
+        network = "none" if activation.profile == "competition_replay" else _WEIGHT_NETWORK
+        if network == _WEIGHT_NETWORK:
+            with WorkProgress("podman_network_rehearsal", 1, unit="sandboxes") as progress:
+                await await_progress(
+                    self._rehearse_network(release, network), stage="podman_network_sandbox"
+                )
+                progress.advance()
+            self._validate_release(release)
+            self._validate_activation(activation, release)
         args = ["create", "--name", self.name, *self._sandbox(network)]
         for key, value in sorted(labels.items()):
             args.extend(("--label", f"{key}={value}"))
