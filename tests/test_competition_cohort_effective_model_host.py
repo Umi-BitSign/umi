@@ -172,6 +172,15 @@ async def test_configured_owner_selects_authenticated_transport_and_recovers_res
     )
 
     async def reserve(service):
+        if with_storage:
+            bridge = service.continued_payloads
+            assert bridge.intake is h.intake
+            assert bridge.uploads is service.uploads
+            assert bridge.acceptances is service.models.owner
+            assert bridge.sources is service.legacy_payloads.sources
+            assert bridge.direct is service.direct_uploads
+        else:
+            assert service.continued_payloads is None
         app = FastAPI()
         app.include_router(
             cohort_routes(

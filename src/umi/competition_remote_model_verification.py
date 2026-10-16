@@ -67,6 +67,38 @@ def remember_model_bytes(saved, source, payload, documents):
         saved.remember("object", source, digest(result))
 
 
+def require_remote_model_bytes(multipart, key, bundle, payload, *, root, context, head):
+    """Require completed owner byte facts; never repair by rereading a payload.
+
+    The caller authenticates the original promotion and rechecks current provider
+    identity around I/O. Missing or damaged completion is an explicit repair gate.
+    """
+    with TransferProgress("remote_model_completed_verification", 1, unit="objects") as progress:
+        source = remote_identity(multipart, key, head)
+        with model_byte_store(root, key, bundle, payload, context, (), progress) as saved:
+            if saved is None:
+                raise ValueError("completed remote model requires durable byte verification")
+            prior = saved.load("object", source)
+            try:
+                path = saved.root / "result.json"
+                if path.lstat().st_size > 64 * 1024**2:
+                    raise ValueError("completed remote model result exceeds its metadata bound")
+                raw = saved._read(path)
+                result = RemoteModelBytes.model_validate_json(raw)
+                if (
+                    prior is None
+                    or canonical_json_bytes(result) != raw
+                    or digest(result) != prior
+                    or result.payload_sha256 != payload.payload_sha256
+                    or result.documents
+                ):
+                    raise ValueError("completed remote model byte facts differ")
+            except (OSError, ValueError) as error:
+                progress.emit("repair_required", reason="remote_model_completion_repair_required")
+                raise OSError("completed remote model byte verification requires repair") from error
+            progress.advance(1, restored=True)
+
+
 async def verify_remote_model(
     multipart,
     key,

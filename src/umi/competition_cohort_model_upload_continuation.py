@@ -14,7 +14,10 @@ from .competition_cohort_legacy_model_storage import (
     MAX_INVENTORY_BYTES,
     LegacyModelStorageInventory,
 )
-from .competition_cohort_model_transport_selection import CommittedModelDeliveryHistory
+from .competition_cohort_model_transport_selection import (
+    CommittedModelDeliveryHistory,
+    committed_model_delivery_selection,
+)
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .open_competition import CompetitionPolicy, digest
@@ -29,6 +32,30 @@ class LegacyModelUploadContinuation(StrictProtocolModel):
     request_sha256: Hex32
     selection: CommittedModelDeliveryHistory
     legacy_inventory: LegacyModelStorageInventory
+
+
+def owned_upload_continuation(intake, sources, request):
+    """Read current committed authority without changing any frozen original."""
+    cohort, key = request.consent.consent.cohort_sha256, digest(request)
+    selected = None if sources is None else sources.authenticated.get(cohort)
+    if selected is None:
+        return None
+    entry = next((e for e in selected.legacy.entries if e.request_sha256 == key), None)
+    if entry is None:
+        raise OSError("retained legacy upload is missing from its selected census")
+    if entry.admission_raw_sha256 is not None:
+        return None
+    with intake._connection(prefer_history=True) as (_, store):
+        value = LegacyModelUploadContinuation(
+            schema="umi-legacy-model-upload-continuation/1",
+            request_sha256=key,
+            selection=committed_model_delivery_selection(store, cohort, intake.policy),
+            legacy_inventory=selected.legacy,
+        )
+        verify_upload_continuation(value, request, intake.policy)
+    if len(canonical_json_bytes(value)) > MAX_CONTINUATION_BYTES:
+        raise OSError("legacy continuation metadata exceeds its supported delivery bound")
+    return value
 
 
 def verify_upload_continuation(

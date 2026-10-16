@@ -2835,10 +2835,29 @@ requires a supported client upgrade to complete after adoption. A request reject
 before reservation has no retained legacy upload and may use authorized direct
 delivery normally.
 
+After an original completes through version two, the same old upload GET, POST
+and signed PUT routes can read its preserved direct object when a separately
+qualified release owner fences the original allocation. The service requires the
+exact frozen request and committed adoption, its actual native admission quorum,
+retained independent version-two acceptance, original direct reservation and
+completed R2 promotion. It reuses the promotion's durable byte-verification result
+and checks the preserved object's current generation. GET, POST and recurring
+polls do not download the model; PUT compares only the requested signed range.
+Restart restores these facts without recreating local payloads or recertifying
+the model. Missing or damaged completed facts require visible repair and return
+503; they do not authorize a fresh full-payload pass. The
+`continued_model_remote_reconciliation` and `remote_model_completed_verification`
+stages report counted progress, elapsed time, ETA basis and retry/repair status.
+
 Continuation does not expand or relabel the frozen inventory, rewrite the plan,
 add a certificate to an `incomplete_upload` entry, or release any original local
 bytes or allocation charges. Keep the original upload journal, partial files and
 archive until the separate release and restore qualification authorizes reclamation.
+The retry bridge is not an archive-release worker. Cross-cohort consumer migration,
+durable restoration coverage, crash-safe release/refund ownership and the supported
+rollback fence still require independent qualification before reclaiming bytes.
+Byte release also does not free cumulative `maximum_models` journal entries; keep
+those original metadata records and size that bound explicitly.
 Select the authenticated legacy source and direct owner together, and qualify
 the installed clients, routing, admission, review, acceptance and reward replay
 before cutover. Source fixtures with synthetic finality and R2 establish protocol

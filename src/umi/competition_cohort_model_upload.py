@@ -504,7 +504,7 @@ class CohortModelUploads:
         finally:
             os.close(lease)
 
-    def poll_once(self, *, remote_payloads=None):
+    def poll_once(self, *, remote_payloads=None, remote_review=None):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
         if remote_payloads is not None and remote_payloads.intake is not self.intake:
             raise ValueError("remote model polling requires the same native intake owner")
@@ -525,8 +525,12 @@ class CohortModelUploads:
                     if remote_payloads is None:
                         raise OSError("released model awaits its authenticated remote poll owner")
                     remote_payloads.require_owned_payload(request)
+                    review_status, reason = (
+                        self._ensure_review(bundle, allow_local=False)
+                        if remote_review is None
+                        else remote_review(request)
+                    )
                     ready += 1
-                    review_status, reason = self._ensure_review(bundle, allow_local=False)
                     if review_status == "ready":
                         reviews_ready += 1
                     elif review_status == "held":

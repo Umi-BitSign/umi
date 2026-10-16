@@ -17,11 +17,13 @@ from umi.competition_cohort_api import cohort_routes
 from umi.competition_cohort_direct_model_owner import (
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
+    DirectModelUploadOwners,
 )
 from umi.competition_cohort_direct_model_review import (
     DirectModelArtifactReviewer,
     DirectModelReviewSourceConfig,
 )
+from umi.competition_cohort_direct_model_upload import DirectModelUploadPart
 from umi.competition_cohort_direct_model_upload_http import direct_model_upload_routes
 from umi.competition_cohort_history import verify_cohort_history
 from umi.competition_cohort_intake import history_tip
@@ -43,6 +45,7 @@ from umi.competition_cohort_model_upload import CohortModelUploads, authorize_mo
 from umi.competition_cohort_model_upload_continuation import verify_upload_continuation
 from umi.competition_cohort_model_upload_delivery import ModelUploadDelivery
 from umi.competition_cohort_model_upload_http import model_upload_routes
+from umi.competition_cohort_model_upload_replay import ContinuedModelUploadPayloads
 from umi.competition_cohort_recovery import (
     SignedCohortRecoveryAuthority,
     admit_recoverable_cohort,
@@ -51,6 +54,7 @@ from umi.competition_cohort_service_host import CohortModelPayloadRouter
 from umi.open_competition import digest, sign_object, verify_signature
 from umi.private_files import read_private_model
 from umi.protocol import canonical_json_bytes
+from umi.r2_multipart import R2ObjectHead
 
 from .test_competition_cohort_direct_model_client import Multipart
 from .test_competition_cohort_intake import capture_at
@@ -72,6 +76,68 @@ pytestmark = [
     pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True),
     pytest.mark.parametrize("recovery", ["legacy6"], indirect=True),
 ]
+
+
+class RetainedMultipart(Multipart):
+    """Object-aware provider port; actual owner promotion and checks are exercised."""
+
+    def __init__(self):
+        super().__init__()
+        self.objects, self.copied_parts = {}, {}
+        self.reads, self.copies, self.deletes = [], [], []
+
+    async def head(self, key, *, at=None):
+        raw = self.objects.get(key)
+        return (
+            None
+            if raw is None
+            else R2ObjectHead(
+                size_bytes=len(raw), etag=hashlib.md5(raw, usedforsecurity=False).hexdigest()
+            )
+        )
+
+    async def complete(self, key, *, upload_id, parts, at=None):
+        assert (key, upload_id) in self.uploads
+        chunks = self.copied_parts.get((key, upload_id), self.parts)
+        assert tuple(part.part_number for part in parts) == tuple(range(1, len(parts) + 1))
+        for part in parts:
+            raw = chunks[part.part_number]
+            assert len(raw) == part.size_bytes
+            assert hashlib.md5(raw, usedforsecurity=False).hexdigest() == part.etag
+        self.objects[key] = b"".join(chunks[part.part_number] for part in parts)
+        return (await self.head(key)).etag
+
+    async def copy_part(
+        self,
+        key,
+        *,
+        source_key,
+        upload_id,
+        part_number,
+        offset,
+        size_bytes,
+        source_size_bytes,
+        at=None,
+    ):
+        source = self.objects[source_key]
+        assert len(source) == source_size_bytes
+        raw = source[offset : offset + size_bytes]
+        assert len(raw) == size_bytes
+        self.copies.append((key, source_key, offset, size_bytes))
+        self.copied_parts.setdefault((key, upload_id), {})[part_number] = raw
+        return DirectModelUploadPart(
+            part_number=part_number,
+            size_bytes=size_bytes,
+            etag=hashlib.md5(raw, usedforsecurity=False).hexdigest(),
+        )
+
+    async def delete_object(self, key, *, at=None):
+        self.deletes.append(key)
+        self.objects.pop(key, None)
+
+    async def read_range(self, key, *, offset, size_bytes, at=None):
+        self.reads.append((key, offset, size_bytes))
+        return self.objects[key][offset : offset + size_bytes]
 
 
 @pytest.fixture
@@ -157,7 +223,7 @@ def continuation(delivery, tmp_path, monkeypatch, request):
     verify_legacy_storage_originals(
         authenticated, load_original=objects.__getitem__, endpoint=ENDPOINT, bucket=BUCKET
     )
-    multipart = Multipart()
+    multipart = RetainedMultipart()
     sources = LegacyModelStorageReaders(
         {h.cohort: authenticated},
         policy=h.intake.policy,
@@ -202,15 +268,36 @@ def continuation(delivery, tmp_path, monkeypatch, request):
         router = CohortModelPayloadRouter(
             (history.plan,), legacy=h.owner, direct=direct, intake=h.intake, legacy_payloads=remote
         )
+        acceptances = CohortModelAcceptances(
+            h.intake,
+            h.owner.archive,
+            verify_request=router.require_payload,
+            review_artifact=router.review_artifact,
+            legacy_payloads=remote,
+        )
+        continued = ContinuedModelUploadPayloads(
+            h.owner, sources, acceptances, DirectModelUploadOwners({h.cohort: direct})
+        )
         app = FastAPI()
         app.include_router(
             cohort_routes(h.intake, capture, maximum_body_bytes=4 * 1024**2, models=router)
         )
-        app.include_router(model_upload_routes(h.owner, capture, remote_payloads=remote))
+        app.include_router(
+            model_upload_routes(
+                h.owner, capture, remote_payloads=remote, continued_payloads=continued
+            )
+        )
         app.include_router(
             direct_model_upload_routes(direct, now_unix_ms=lambda: 1_800_000_000_000)
         )
-        return SimpleNamespace(remote=remote, direct=direct, router=router, app=app)
+        return SimpleNamespace(
+            remote=remote,
+            direct=direct,
+            router=router,
+            app=app,
+            acceptances=acceptances,
+            continued=continued,
+        )
 
     return SimpleNamespace(
         h=h,

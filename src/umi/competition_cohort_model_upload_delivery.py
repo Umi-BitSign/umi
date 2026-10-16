@@ -11,21 +11,19 @@ import sqlite3
 from functools import partial
 from typing import TYPE_CHECKING
 
-from .competition_cohort_model_transport_selection import committed_model_delivery_selection
 from .competition_cohort_model_upload import validate_model_upload_chunk
 from .competition_cohort_model_upload_continuation import (
-    MAX_CONTINUATION_BYTES,
     LegacyModelUploadContinuation,
-    verify_upload_continuation,
+    owned_upload_continuation,
 )
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
-from .protocol import canonical_json_bytes
 
 if TYPE_CHECKING:
     from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
     from .competition_cohort_model_upload import CohortModelUploads, ModelUploadChunk
+    from .competition_cohort_model_upload_replay import ContinuedModelUploadPayloads
     from .competition_cohort_participation import CohortParticipationRequest
     from .open_competition import Signature
 
@@ -36,18 +34,40 @@ class ModelUploadDelivery:
         uploads: CohortModelUploads,
         *,
         remote_payloads: LegacyModelAdmissionPayloads | None = None,
+        continued_payloads: ContinuedModelUploadPayloads | None = None,
     ) -> None:
         self.uploads, self.remote = uploads, remote_payloads
-        if remote_payloads is not None and remote_payloads.intake is not uploads.intake:
-            raise ValueError("remote model retries require the same native intake owner")
+        self.intake, self.continued = uploads.intake, continued_payloads
+        for owner in (remote_payloads, continued_payloads):
+            if owner is not None and owner.intake is not self.intake:
+                raise ValueError("remote model retries require the same native intake owner")
+
+    def _payload_owner(self, request):
+        for owner in (self.remote, self.continued):
+            if owner is not None and owner.contains(request):
+                return owner
+        raise OSError("released model awaits its authenticated remote retry owner")
+
+    def require_owned_payload(self, request):
+        self._payload_owner(request).require_owned_payload(request)
+
+    def _remote_review(self, request):
+        owner = self._payload_owner(request)
+        owner.require_owned_payload(request)
+        if owner is self.continued:
+            # The exact retained /2 publication, original native admission and
+            # owner's review are already required by the continuation bridge.
+            return "ready", ""
+        return self.uploads._ensure_review(
+            request.signed_submission.submission.model_bundle, allow_local=False
+        )
 
     def _remote_request(self, key: str) -> CohortParticipationRequest | None:
         request = self.uploads.retained(key)
         model = request.signed_submission.submission.model_revision
         if self.uploads.allocations.state(model) not in {"release_prepared", "released"}:
             return None
-        if self.remote is None or not self.remote.contains(request):
-            raise OSError("released model awaits its authenticated remote retry owner")
+        self._payload_owner(request)
         return request
 
     def continuation(self, key: str) -> LegacyModelUploadContinuation | None:
@@ -57,34 +77,17 @@ class ModelUploadDelivery:
         No old upload record, payload, clock or allocation is changed here.
         """
         request = self.uploads.retained(key)
-        cohort = request.consent.consent.cohort_sha256
-        selected = None if self.remote is None else self.remote.sources.authenticated.get(cohort)
-        if selected is None:
-            return None
-        entry = next((e for e in selected.legacy.entries if e.request_sha256 == key), None)
-        if entry is None:
-            raise OSError("retained legacy upload is missing from its selected census")
-        if entry.admission_raw_sha256 is not None:
-            return None
-        with self.uploads.intake._connection(prefer_history=True) as (_, store):
-            selection = committed_model_delivery_selection(
-                store, cohort, self.uploads.intake.policy
-            )
-            value = LegacyModelUploadContinuation(
-                schema="umi-legacy-model-upload-continuation/1",
-                request_sha256=key,
-                selection=selection,
-                legacy_inventory=selected.legacy,
-            )
-            verify_upload_continuation(value, request, self.uploads.intake.policy)
-        if len(canonical_json_bytes(value)) > MAX_CONTINUATION_BYTES:
-            raise OSError("legacy continuation metadata exceeds its supported delivery bound")
-        return value
+        sources = (
+            self.remote.sources
+            if self.remote is not None
+            else (self.continued.sources if self.continued is not None else None)
+        )
+        return owned_upload_continuation(self.intake, sources, request)
 
     def _remote_status(self, key: str, request: CohortParticipationRequest) -> dict[str, object]:
         if self._remote_request(key) != request:
             raise OSError("model allocation changed during remote retry")
-        self.remote.require_owned_payload(request)
+        self.require_owned_payload(request)
         bundle = request.signed_submission.submission.model_bundle
         return {
             "upload_sha256": key,
@@ -103,7 +106,7 @@ class ModelUploadDelivery:
         if request is None:
             return await run_owned_thread(self.uploads.status, key)
         try:
-            await self.remote.ensure_owned(request)
+            await self._payload_owner(request).ensure_owned(request)
             return await run_owned_thread(self._remote_status, key, request)
         except ValueError as error:
             # The caller supplied only a retained identity. Failure to authenticate
@@ -133,7 +136,9 @@ class ModelUploadDelivery:
                     # success, and continue independent models in this cycle.
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
             return await run_owned_thread(
-                partial(self.uploads.poll_once, remote_payloads=self.remote)
+                partial(
+                    self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review
+                )
             )
 
     async def put_chunk(
@@ -144,7 +149,7 @@ class ModelUploadDelivery:
             await run_owned_thread(self.uploads.put_chunk, chunk, signature, data)
             return await self.status(chunk.upload_sha256)
         chunk = await run_owned_thread(validate_model_upload_chunk, request, chunk, signature, data)
-        await self.remote.compare_retry(
+        await self._payload_owner(request).compare_retry(
             request, file_index=chunk.file_index, offset=chunk.offset, data=data
         )
         try:

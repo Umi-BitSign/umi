@@ -14,7 +14,12 @@ from .open_competition import Signature
 
 
 def model_upload_routes(
-    owner: CohortModelUploads, capture, *, capture_timeout_seconds=120, remote_payloads=None
+    owner: CohortModelUploads,
+    capture,
+    *,
+    capture_timeout_seconds=120,
+    remote_payloads=None,
+    continued_payloads=None,
 ):
     if (
         type(capture_timeout_seconds) not in (int, float)
@@ -23,7 +28,9 @@ def model_upload_routes(
         raise ValueError("model upload capture timeout must be between 1 and 3600 seconds")
     router = APIRouter()
     slots = asyncio.Semaphore(owner.config.maximum_concurrent_uploads)
-    delivery = ModelUploadDelivery(owner, remote_payloads=remote_payloads)
+    delivery = ModelUploadDelivery(
+        owner, remote_payloads=remote_payloads, continued_payloads=continued_payloads
+    )
 
     async def lookup(key):
         try:

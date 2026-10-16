@@ -185,7 +185,9 @@ async def test_recurring_host_poll_reuses_remote_original_without_recreating_pay
         if attempt:
             f.uploads = CohortModelUploads(f.uploads.config, f.uploads.intake, f.uploads.archive)
             f.owner, f.router = f.create()
-        host = SimpleNamespace(uploads=f.uploads, legacy_payloads=f.owner.legacy_payloads)
+        host = SimpleNamespace(
+            uploads=f.uploads, legacy_payloads=f.owner.legacy_payloads, continued_payloads=None
+        )
         f.remote.reads.clear()
         result = await ServiceAdmissionHost._poll_legacy_uploads(host)
         assert result["models_preserved"] == 1 and result["models_pending"] == 0

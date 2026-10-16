@@ -50,6 +50,7 @@ from .competition_cohort_model_upload import (
     owned_model_delivery,
 )
 from .competition_cohort_model_upload_delivery import ModelUploadDelivery
+from .competition_cohort_model_upload_replay import ContinuedModelUploadPayloads
 from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
@@ -587,6 +588,7 @@ class ServiceAdmissionHost:
         self.payloads = None
         self.direct_uploads = None
         self.legacy_payloads = None
+        self.continued_payloads = None
         model_authority = isinstance(c.series.recovery.authority, ModelRewardCohortAuthority)
         if (c.model_uploads or c.direct_model_uploads) and not model_authority:
             raise ValueError("model delivery requires model reward authority")
@@ -699,6 +701,10 @@ class ServiceAdmissionHost:
             if c.model_uploads
             else None
         )
+        if self.uploads is not None and self.legacy_payloads is not None:
+            self.continued_payloads = ContinuedModelUploadPayloads(
+                self.uploads, self.legacy_payloads.sources, self.models.owner, self.direct_uploads
+            )
         if self.uploads is not None or self.direct_uploads is not None:
             self.payloads = CohortModelPayloadRouter(
                 c.series.cohorts,
@@ -790,7 +796,9 @@ class ServiceAdmissionHost:
         if self.legacy_payloads is None:
             return await run_owned_thread(self.uploads.poll_once)
         return await ModelUploadDelivery(
-            self.uploads, remote_payloads=self.legacy_payloads
+            self.uploads,
+            remote_payloads=self.legacy_payloads,
+            continued_payloads=self.continued_payloads,
         ).poll_once()
 
     async def _poll_direct_uploads(self):
