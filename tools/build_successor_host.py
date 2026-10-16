@@ -19,6 +19,11 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the locked compatibility reader.
+    import tomli as tomllib
+
 from umi.competition_host_artifacts import (
     HostArtifactFile,
     SignedSuccessorHostArtifact,
@@ -46,6 +51,44 @@ def source_sha256(root: Path) -> str:
         value.update(relative)
         value.update(hashlib.sha256(path.read_bytes()).digest())
     return value.hexdigest()
+
+
+def compatible_project_scripts(previous: bytes, candidate: bytes) -> list[str]:
+    """Permit added CLI declarations without changing cloned dependencies.
+
+    This artifact installs only HOST_ENTRYPOINTS. Added miner/operator commands
+    belong to their ordinary package installation, not the supervisor host.
+    Existing declarations and all other project metadata must stay equivalent.
+    """
+    if previous == candidate:
+        return []
+    try:
+        old, new = (tomllib.loads(raw.decode("utf-8")) for raw in (previous, candidate))
+        old_scripts = old["project"].pop("scripts")
+        new_scripts = new["project"].pop("scripts")
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError("candidate project metadata needs a supported migration") from error
+    if (
+        not isinstance(old_scripts, dict)
+        or not isinstance(new_scripts, dict)
+        or old != new
+        or any(new_scripts.get(name) != target for name, target in old_scripts.items())
+        or any(
+            old_scripts.get(name) != module + ":main" for name, module in HOST_ENTRYPOINTS.items()
+        )
+    ):
+        raise ValueError("candidate project metadata changes dependencies or existing commands")
+    added = sorted(new_scripts.keys() - old_scripts.keys())
+    if any(
+        not re.fullmatch(r"umi-[a-z0-9-]+", name)
+        or not isinstance(new_scripts[name], str)
+        or not re.fullmatch(
+            r"umi(?:\.[A-Za-z_][A-Za-z_0-9]*)+:[A-Za-z_][A-Za-z_0-9]*", new_scripts[name]
+        )
+        for name in added
+    ):
+        raise ValueError("candidate added command declaration is unsupported")
+    return added
 
 
 def _emit(event: dict) -> None:
@@ -260,9 +303,11 @@ def _build(
         config=config,
         expected_manifest_sha256=previous_manifest_sha256,
     )
-    for name in ("pyproject.toml", "uv.lock"):
-        if (source / name).read_bytes() != (previous / name).read_bytes():
-            raise ValueError(f"candidate dependency lock changed: {name}")
+    if (source / "uv.lock").read_bytes() != (previous / "uv.lock").read_bytes():
+        raise ValueError("candidate dependency lock changed: uv.lock")
+    added_scripts = compatible_project_scripts(
+        (previous / "pyproject.toml").read_bytes(), (source / "pyproject.toml").read_bytes()
+    )
     signed_paths = {item.path for item in signed.manifest.files}
     actual_paths = {p.relative_to(previous).as_posix() for p in previous.rglob("*") if p.is_file()}
     extras = actual_paths - signed_paths
@@ -416,6 +461,7 @@ def _build(
         "tree_size_bytes": manifest.total_size_bytes,
         "rewritten_paths": sorted(rewritten),
         "guarded_entrypoints": sorted(HOST_ENTRYPOINTS),
+        "uninstalled_added_project_scripts": added_scripts,
         "wallet_accessed": False,
         "signed": False,
         "staged": False,

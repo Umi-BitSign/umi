@@ -49,7 +49,14 @@ def case(tmp_path, monkeypatch):
     content.update(
         {
             "uv.lock": b"retained dependencies\n",
-            "pyproject.toml": b"same project\n",
+            "pyproject.toml": (
+                '[project]\nname = "umi-subnet"\ndependencies = ["example==1"]\n'
+                "[project.scripts]\n"
+                + "".join(
+                    f'{name} = "{module}:main"\n' for name, module in HOST_ENTRYPOINTS.items()
+                )
+                + 'umi-miner = "umi.miner:main"\n'
+            ).encode(),
             "README.md": b"readme\n",
             "LICENSE": b"license\n",
             ".venv/pyvenv.cfg": f"command = {previous}/.venv/bin/python\n".encode(),
@@ -184,6 +191,66 @@ def test_guarded_successor_supports_another_dependency_preserving_upgrade(case):
     assert second["guarded_entrypoints"] == sorted(HOST_ENTRYPOINTS)
     assert _inventory(prior) == before
     assert not (case.hosts / ("ef" * 20)).exists()
+
+
+def test_added_miner_command_preserves_host_dependencies_and_repeat_upgrade(case):
+    project = case.source / "pyproject.toml"
+    project.write_bytes(
+        project.read_bytes()
+        + b'umi-miner-revision-preflight = "umi.competition_miner_transition_cli:main"\n'
+    )
+    before = _inventory(case.previous)
+    first = _build(case)
+    tree = case.arguments["output_root"] / "unsigned-host/tree"
+    assert first["uninstalled_added_project_scripts"] == ["umi-miner-revision-preflight"]
+    assert (tree / "pyproject.toml").read_bytes() == project.read_bytes()
+    assert not (tree / ".venv/bin/umi-miner-revision-preflight").exists()
+    assert _inventory(case.previous) == before
+    prior = case.hosts / case.arguments["revision"]
+    shutil.copytree(tree, prior)
+    manifest = artifacts.SuccessorHostArtifactManifest.model_validate_json(
+        (tree.parent / "host-manifest.unsigned.json").read_bytes()
+    )
+    case.arguments["maintenance_path"].write_bytes(
+        canonical_json_bytes({"signed_host": sign(manifest).model_dump(mode="json", by_alias=True)})
+    )
+    second = _build(
+        case,
+        previous_revision=case.arguments["revision"],
+        revision="ef" * 20,
+        previous_manifest_sha256=first["manifest_sha256"],
+        output_root=case.arguments["output_root"].with_name("second-build"),
+    )
+    assert second["uninstalled_added_project_scripts"] == []
+    assert second["guarded_entrypoints"] == sorted(HOST_ENTRYPOINTS)
+
+
+@pytest.mark.parametrize(
+    "change", ["dependency", "host", "miner", "remove", "metadata", "malformed", "external"]
+)
+def test_changed_project_semantics_refuse_before_build(case, change):
+    path = case.source / "pyproject.toml"
+    raw = path.read_bytes()
+    if change == "dependency":
+        raw = raw.replace(b"example==1", b"example==2")
+    elif change == "host":
+        raw = raw.replace(b"umi.competition_supervisor_cli:main", b"umi.miner:main")
+    elif change == "miner":
+        raw = raw.replace(b"umi.miner:main", b"umi.other:main")
+    elif change == "remove":
+        raw = raw.replace(b'umi-miner = "umi.miner:main"\n', b"")
+    elif change == "metadata":
+        raw = raw.replace(b'name = "umi-subnet"', b'name = "other"')
+    elif change == "malformed":
+        raw = b"not valid TOML"
+    else:
+        raw += b'umi-extra = "external:main"\n'
+    path.write_bytes(raw)
+    before = _inventory(case.previous)
+    with pytest.raises(ValueError, match=r"candidate.*(metadata|command)"):
+        _build(case)
+    assert not case.arguments["output_root"].exists()
+    assert _inventory(case.previous) == before
 
 
 def test_wrapper_repair_checks_every_wrapper_before_writing_any(case):
