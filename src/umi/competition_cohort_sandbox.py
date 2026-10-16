@@ -101,11 +101,18 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         workspace: Path,
         artifacts: DirectModelArtifactReviewer,
         request: Callable[[RecoverableExecutionJob], ModelReviewRequest],
+        legacy_artifacts=None,
     ) -> None:
+        boot = getattr(getattr(artifacts, "config", None), "materialization_boot_disk_cache", None)
+        if boot is not None:
+            # Create the selected private root before mkdir(parents=True) can
+            # give an intermediate cache directory the process's ordinary umask.
+            artifacts.verify_materialization_filesystem(Path(boot.directory))
         super().__init__(policy, archive=archive, videos=videos, workspace=workspace)
         if not callable(request):
             raise ValueError("direct model execution request source is not callable")
         self.artifacts, self.request = artifacts, request
+        self.legacy_artifacts = legacy_artifacts
         self.materializations = asyncio.Condition()
         self.cache = workspace / "direct-model-cache"
         self.cached_request_sha256: str | None = None
@@ -113,10 +120,11 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         ensure_private_directory(self.cache)
         self.artifacts.verify_materialization_filesystem(self.cache)
 
-    async def _candidate_archive(self, request: ModelReviewRequest, bundle) -> Path:
+    async def _candidate_archive(self, request, bundle, *, materializer=None) -> Path:
+        materializer = self.artifacts if materializer is None else materializer
         archive = self.cache / "archive"
         selected = archive / digest(bundle)
-        request_sha256 = self.artifacts.cache_identity(request)
+        request_sha256 = materializer.cache_identity(request)
         async with self.materializations:
             if self.active_candidate_invocations and self.cached_request_sha256 != request_sha256:
                 with TransferProgress("model_cache_lease_wait", 1, unit="objects") as progress:
@@ -129,19 +137,19 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                     progress.advance(1)
             reusable = selected.is_dir() and (
                 self.cached_request_sha256 == request_sha256
-                or await self.artifacts.materialized(request, archive)
+                or await materializer.materialized(request, archive)
             )
             if not reusable:
                 if self.active_candidate_invocations:
                     raise OSError("active direct model cache became unavailable")
-                if archive.exists() and not await self.artifacts.resumable(request, archive):
+                if archive.exists() and not await materializer.resumable(request, archive):
                     # Only the disposable cache is released. Durable remote
                     # byte results are in the service state outside this tree.
                     with TransferProgress("model_cache_eviction", 1, unit="objects") as progress:
                         ensure_private_directory(archive)
                         await run_owned_thread(shutil.rmtree, archive)
                         progress.advance(1)
-                await self.artifacts.materialize(request, archive)
+                await materializer.materialize(request, archive)
             self.cached_request_sha256 = request_sha256
             self.active_candidate_invocations += 1
             return archive
@@ -157,18 +165,26 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     async def invoke(
         self, job: RecoverableExecutionJob, attempt: CohortExecutionAttempt
     ) -> OfflineCaseExecution:
-        _, role, _ = case_role_model(job, attempt.step_index)
-        if role != "candidate":
+        _, role, bundle = case_role_model(job, attempt.step_index)
+        request = self.request(job) if role == "candidate" else None
+        source = (
+            None
+            if self.legacy_artifacts is None
+            else await run_owned_thread(
+                self.legacy_artifacts.execution_source, job, role, bundle, request
+            )
+        )
+        if source is None and (role != "candidate" or request.direct_artifact is None):
             return await super().invoke(job, attempt)
-        path = self._path(attempt)
-        request = self.request(job)
-        if request.direct_artifact is None:
-            return await super().invoke(job, attempt)
-        bundle = request.record.request.signed_submission.submission.model_bundle
         if bundle is None:
             raise ValueError("direct model execution has no bundle")
+        path = self._path(attempt)
         completed = False
-        archive = await self._candidate_archive(request, bundle)
+        archive = await self._candidate_archive(
+            request if source is None else source,
+            bundle,
+            materializer=None if source is None else self.legacy_artifacts,
+        )
         try:
             result = await self._invoke(job, attempt, archive)
             completed = True

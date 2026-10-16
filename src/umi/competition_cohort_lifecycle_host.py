@@ -23,6 +23,10 @@ from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_d
 from .competition_cohort_intake import CohortIntakePublisher
 from .competition_cohort_intake_phase import CohortIntakePhaseObserver
 from .competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
+from .competition_cohort_model_delivery_candidate import (
+    ModelDeliveryAdoptionCandidates,
+    validate_adoption_candidates,
+)
 from .competition_cohort_phase_vote_http import PhaseVotePeer
 from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
@@ -74,6 +78,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     request_tail_operator_token_file: Directory | None = None
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
+    model_delivery_operator_token_file: Directory | None = None
+    model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
@@ -84,10 +90,23 @@ class LifecycleHostConfig(StrictProtocolModel):
             value.pop("request_tail_operator_token_file", None)
         if not self.automatic_progression_hold_cohorts:
             value.pop("automatic_progression_hold_cohorts", None)
+        if self.model_delivery_operator_token_file is None:
+            value.pop("model_delivery_operator_token_file", None)
+        if not self.model_delivery_adoption_candidates:
+            value.pop("model_delivery_adoption_candidates", None)
         return value
 
     @model_validator(mode="after")
     def known_hold_cohorts(self):
+        validate_adoption_candidates(
+            self.model_delivery_adoption_candidates,
+            (entry.cohort_sha256 for entry in self.sources.intake.cohorts),
+        )
+        if (
+            self.model_delivery_adoption_candidates
+            and self.model_delivery_operator_token_file is None
+        ):
+            raise ValueError("model delivery adoption requires a separate operator credential")
         holds = self.automatic_progression_hold_cohorts
         allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
         if len(holds) != len(set(holds)) or not set(holds) <= allowed:
@@ -111,6 +130,13 @@ class LifecycleHostConfig(StrictProtocolModel):
                 self.sources.objects_directory,
                 self.sources.transport_directory,
                 self.sources.pulses_directory,
+                *(
+                    dict.fromkeys(
+                        path
+                        for candidate in self.model_delivery_adoption_candidates
+                        for path in candidate.stores()
+                    )
+                ),
             )
         )
 
@@ -118,12 +144,16 @@ class LifecycleHostConfig(StrictProtocolModel):
 class LifecycleHost:
     def __init__(self, service: ServiceAdmissionHost, resources, client, credentials, sign):
         self.service, self.resources, self.client = service, resources, client
+        self.model_delivery_candidates = {}
+        self.model_delivery_serial = asyncio.Lock()
         self.config = LifecycleHostConfig.model_validate_json(
             canonical_json_bytes(service.config.lifecycle)
         )
         c, owner = self.config, service.config.admission_owner
         if owner is None or service.provider is None:
             raise ValueError("cohort lifecycle requires the owned admission runtime")
+        if c.model_delivery_adoption_candidates and owner.phase_review_budget is None:
+            raise ValueError("model delivery adoption requires a selected full phase review budget")
         if (
             c.sources.intake != service.intake.config
             or c.sources.eligible_tracks != service.intake.tracks
@@ -393,23 +423,23 @@ class LifecycleHost:
         for decision in original.decisions:
             store.retain_source(cohort, decision)
 
-        adoption_compatible = plan.sequence > 5 and plan.schema_ != "umi-recoverable-cohort-plan/4"
+        # A /4 plan can already carry the tail rule while retaining legacy
+        # model transport. Its model-delivery reservation still needs recovery.
+        adoption_compatible = plan.sequence > 5
 
-        async def reconcile_request_tail_adoption():
+        async def reconcile_policy_adoption():
             # Intake gates receipts first. Resume exact bytes after a crash
             # between that native reservation and control-journal acknowledgement.
-            pending = await run_owned_thread(
-                self.service.intake.pending_request_tail_adoption, cohort
-            )
+            pending = await run_owned_thread(self.service.intake.pending_policy_adoption, cohort)
             if pending is not None:
                 store.reserve_exact(pending)
 
         if adoption_compatible:
-            await reconcile_request_tail_adoption()
+            await reconcile_policy_adoption()
 
         async def preflight_before_tick():
             if adoption_compatible:
-                await reconcile_request_tail_adoption()
+                await reconcile_policy_adoption()
             state, _ = node.controller.store.status(cohort)
             if state.phase not in {"intake", "preparation"}:
                 return

@@ -54,6 +54,11 @@ seeds = [
     "competition_model_source_verification",
     "competition_cohort_model_client",
     "competition_cohort_direct_model_client",
+    # Retained legacy retries consume native acceptance and durable byte facts
+    # through the direct owner, including after local payload reclamation.
+    "competition_cohort_model_upload_delivery",
+    "competition_cohort_direct_model_owner",
+    "competition_miner_transition_cli",
 ]
 modules = set()
 external_imports = set()

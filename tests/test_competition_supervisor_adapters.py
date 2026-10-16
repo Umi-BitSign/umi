@@ -1432,6 +1432,175 @@ async def test_recovery_reuses_attempt_audit_only_for_unchanged_family(
     assert case.adapter._recovered is not None
 
 
+@pytest.mark.parametrize("backend", ["legacy", "content_addressed"])
+@pytest.mark.parametrize("boundary", ["initial", "final"])
+async def test_start_attempt_audits_allow_other_work_and_drain_on_cancel(
+    adapter_case, monkeypatch, backend, boundary
+):
+    import asyncio
+    import threading
+
+    case = adapter_case
+    _candidate_storage(case, backend)
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    # Qualify the native fallback when no process-local completed audit remains.
+    case.adapter._stopped_attempts = None
+    original = case.adapter._attempts
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    calls = 0
+
+    def blocked():
+        nonlocal calls
+        calls += 1
+        assert threading.get_ident() != loop_thread
+        if boundary == "final" and calls == 1:
+            return original()
+        started.set()
+        assert release.wait(10)
+        result = original()
+        finished.set()
+        return result
+
+    monkeypatch.setattr(case.adapter, "_attempts", blocked)
+    task = asyncio.create_task(case.adapter.start_weights(case.selection))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        # A ready independent coroutine runs while the native audit still owns
+        # its work. Cancellation must not abandon it or reach container launch.
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not finished.is_set()
+        assert "launch" not in case.container.events
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert finished.is_set()
+    assert "launch" not in case.container.events
+    assert not case.item.encoded
+
+
+@pytest.mark.parametrize("backend", ["legacy", "content_addressed"])
+async def test_start_reuses_only_completed_unchanged_legacy_attempt_audit(
+    adapter_case, monkeypatch, backend
+):
+    case = adapter_case
+    _candidate_storage(case, backend)
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    saved = case.adapter._stopped_attempts
+    original = case.adapter._attempts
+    calls = []
+
+    def counted():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(case.adapter, "_attempts", counted)
+    await case.adapter.start_weights(case.selection)
+    assert len(calls) == (0 if backend == "legacy" else 2)
+    assert (saved is not None) == (backend == "legacy")
+    assert case.adapter._stopped_attempts is None
+    assert case.container.events[-1] == "launch"
+    assert not case.item.encoded
+
+
+async def test_completed_attempt_reuse_preserves_original_terminal_effects(
+    adapter_case, monkeypatch
+):
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    case.adapter._retain(case.adapter._staged[case.selection.directive_sha256])
+    await _run(case.item)
+    await _stopped(case)
+    expected = case.adapter._attempts()
+    assert expected and all(value.phase in adapters._TERMINAL for value in expected.values())
+
+    def repeated_read():
+        raise AssertionError("unchanged completed recovery must supply its original effects")
+
+    monkeypatch.setattr(case.adapter, "_attempts", repeated_read)
+    first = case.adapter._current_attempts()
+    assert first == expected
+    first.clear()
+    assert case.adapter._current_attempts() == expected
+
+
+@pytest.mark.parametrize("change", ["held", "permissions"])
+async def test_stopped_attempt_reuse_requires_private_uncontended_worker_lock(adapter_case, change):
+    import fcntl
+    import os
+
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    assert case.adapter._stopped_attempts is not None
+    lock = case.item.worker.lock_path
+    descriptor = os.open(lock, os.O_RDONLY)
+    try:
+        if change == "held":
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            expected = BlockingIOError
+        else:
+            lock.chmod(0o644)
+            expected = ValueError
+        assert case.adapter._stopped_audit_matches()
+        with pytest.raises(expected):
+            await case.adapter.start_weights(case.selection)
+        assert case.adapter._stopped_attempts is None
+        assert "launch" not in case.container.events
+        assert not case.item.encoded
+    finally:
+        os.close(descriptor)
+        lock.chmod(0o600)
+
+
+@pytest.mark.parametrize("change", ["evidence", "registry", "limits", "missing_family"])
+async def test_stopped_attempt_reuse_rechecks_dependencies(adapter_case, monkeypatch, change):
+    case = adapter_case
+    case.select("competition_weights")
+    await case.adapter.stage(case.selection)
+    await _stopped(case)
+    assert case.adapter._stopped_attempts is not None
+    original, calls = case.adapter._attempts, []
+
+    def counted():
+        calls.append(True)
+        return original()
+
+    monkeypatch.setattr(case.adapter, "_attempts", counted)
+    if change == "evidence":
+        with case.item.worker._db() as db:
+            db.execute("INSERT INTO evidence VALUES (?,?)", ("ff" * 32, b"damaged"))
+        with pytest.raises(ValueError):
+            case.adapter._current_attempts()
+    elif change == "missing_family":
+        case.item.worker.path.unlink()
+        with pytest.raises(ValueError, match="disappeared"):
+            case.adapter._current_attempts()
+    else:
+        if change == "registry":
+            with case.adapter._registry() as db:
+                db.execute("CREATE TABLE changed_fixture (value INTEGER)")
+        else:
+            limits = case.installation.worker_execution_limits
+            case.installation.worker_execution_limits = limits.model_copy(
+                update={"maximum_weight_attempts": limits.maximum_weight_attempts + 1}
+            )
+        assert case.adapter._current_attempts() == {}
+        assert calls == [True]
+    assert case.adapter._stopped_attempts is None
+
+
 @pytest.mark.parametrize("corrupt_signature", [False, True])
 async def test_shared_recovery_audits_each_run_without_expanding_nested_schemas(
     adapter_case, monkeypatch, corrupt_signature

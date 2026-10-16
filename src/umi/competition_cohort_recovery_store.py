@@ -17,6 +17,7 @@ from pydantic import Field
 
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_recovery import (
+    CohortModelDeliveryAdoption,
     CohortRecoveryGenesis,
     CohortRecoveryState,
     CohortRecoveryTransition,
@@ -223,6 +224,7 @@ class CohortRecoveryStore:
                 extension_blocks=transition.extension_blocks,
                 request_tail_sha256=transition.request_tail_sha256,
                 request_tail_adoption=transition.request_tail_adoption,
+                model_delivery_adoption=transition.model_delivery_adoption,
             )
             if sequence != state.sequence + 1 or transition != expected:
                 raise ValueError("retained cohort decision forks its authenticated history")
@@ -281,7 +283,7 @@ class CohortRecoveryStore:
             )
             _, state, pending = self._load(cohort)
             if pending is not None and (
-                pending.operation != "adopt_request_tail_rule"
+                not pending.is_policy_adoption
                 or not any(signed.transition == pending for signed in history.transitions)
             ):
                 raise ValueError("consumer publication cannot replace a pending signing decision")
@@ -498,6 +500,7 @@ class CohortRecoveryStore:
         extension_blocks: int | None = None,
         request_tail_sha256: str | None = None,
         request_tail_adoption: CohortRequestTailAdoption | None = None,
+        model_delivery_adoption: CohortModelDeliveryAdoption | None = None,
     ) -> CohortRecoveryTransition:
         """Acknowledge the same decision or return pending bytes before new work.
 
@@ -528,6 +531,7 @@ class CohortRecoveryStore:
                 extension_blocks=extension_blocks,
                 request_tail_sha256=request_tail_sha256,
                 request_tail_adoption=request_tail_adoption,
+                model_delivery_adoption=model_delivery_adoption,
             )
             raw = canonical_json_bytes(transition)
             _decode(CohortRecoveryTransition, raw, 16 * 1024)
@@ -567,6 +571,7 @@ class CohortRecoveryStore:
                 extension_blocks=proposal.extension_blocks,
                 request_tail_sha256=proposal.request_tail_sha256,
                 request_tail_adoption=proposal.request_tail_adoption,
+                model_delivery_adoption=proposal.model_delivery_adoption,
             )
             if canonical_json_bytes(expected) != raw:
                 raise ValueError("exact cohort reservation differs from native proposal")

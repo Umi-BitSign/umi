@@ -91,7 +91,7 @@ class CohortIntakePhaseObserver:
                 return
             ready = (
                 serving
-                and (pending is None or pending.operation != "adopt_request_tail_rule")
+                and (pending is None or not pending.is_policy_adoption)
                 and db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
                 < self.intake.capacity.maximum_records
                 and cohort_intake_bytes(db) < self.intake.capacity.maximum_bytes
@@ -178,7 +178,7 @@ class CohortIntakePhaseObserver:
                 _, pending = store.status(cohort)
                 ready = (
                     serving
-                    and (pending is None or pending.operation != "adopt_request_tail_rule")
+                    and (pending is None or not pending.is_policy_adoption)
                     and db.execute("SELECT COUNT(*) FROM cohort_consents").fetchone()[0]
                     < self.intake.capacity.maximum_records
                     and cohort_intake_bytes(db) < self.intake.capacity.maximum_bytes

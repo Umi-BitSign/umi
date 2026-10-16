@@ -1382,9 +1382,16 @@ private verification record. Later completion passes and restarted uploaders
 reuse it while other files are still arriving. These temporary records are
 removed with the upload staging tree after the complete archive is preserved.
 
-For a cohort whose signed model-delivery profile selects direct R2 multipart
+For a cohort whose authenticated history selects direct R2 multipart
 delivery, acceptance version 2 also carries the owner's signed immutable R2
-reservation. Before publishing acceptance, the owner uses server-side multipart
+reservation. Direct acceptance checks the authenticated transport profile at the
+original acceptance block, including its multipart geometry. A later transport
+amendment cannot retroactively authorize an earlier direct acceptance. Reviewers
+check this before fetching remote bytes and again before signing. Retained
+version 1 acceptances keep their original source and signed bytes after a transport
+amendment; a final history selecting R2 does not convert them into direct
+reservations. Configuring an R2 reader alone does not authorize direct delivery.
+Before publishing acceptance, the owner uses server-side multipart
 copy to place the verified payload at
 `preservation/v1/<cohort>/<model>/<payload>/payload`, rereads and verifies every
 byte, retains a promotion receipt, and deletes the exact incoming object. A
@@ -2309,6 +2316,15 @@ Within one recovery, the initial attempt/evidence audit is reused only if the
 exact stopped journal family remains unchanged. If reconciliation changes it,
 the final read runs outside the event loop and drains before cancellation can
 release ownership. Current finality and post-read mutation checks still apply.
+For legacy evidence stored entirely inside SQLite, completed stopped recovery
+also retains its immutable attempt results through the launch checks. Reuse
+requires unchanged installation limits, registry, packages and the complete
+private SQLite family under the native worker lock, and ends when the worker
+starts or stopped state changes.
+External content-addressed evidence still receives its full native audit. Any
+required launch or completed-worker audit runs outside the event loop and drains
+on cancellation, so independent history work can continue. Fresh chain proofs,
+authority checks and all signed bytes remain unchanged.
 
 <a id="open-competition-round-publisher--current-checks-and-recovery"></a>
 
@@ -2463,7 +2479,10 @@ replace native recovery qualification.
 ## Model delivery before recoverable enrollment
 
 `umi-cohort-service-admission-host/9` selects `direct_model_uploads` for cohorts
-whose signed plan uses `direct_r2_multipart_v1`. The host reads one private R2
+whose authenticated transport uses `direct_r2_multipart_v1`. This comes from the
+original signed plan or a committed, published model-delivery adoption in the
+same cohort's recovery history. Installing R2 configuration alone does not change
+transport authority. The host reads one private R2
 credential export, issues short-lived capabilities for exact multipart part
 numbers and sizes, and retains only signed declarations, provider identifiers,
 ETags and verification receipts. Model bytes travel from the miner to private
@@ -2480,16 +2499,178 @@ non-linked owner-private file containing exactly `TOKEN_VALUE`, `ACCESS_KEY_ID`,
 `SECRET_ACCESS_KEY` and `DEFAULT_ENDPOINT`; the account token is ignored by this
 runtime. The endpoint must be the account's HTTPS R2 S3 origin. Keep the direct
 metadata journal, R2 objects and review records across restart or migration.
-Only the signed cohort plan selects direct delivery parameters, so later cohort
-changes do not require a new miner command.
+The public delivery-discovery route resolves the owner's authenticated published
+history. New reservations additionally require fresh finalized-chain authority.
+An unfinished adoption fences new reservations and acceptance intents; the legacy
+reservation holds that fence through its journal commit. Missing or inconsistent
+retained recovery state requires repair rather than fallback to the original
+profile.
 
 A standing series can contain both an older `coordinator_chunked_v1` cohort and
 a successor direct-R2 cohort. In that case version nine carries both
-`model_uploads` and `direct_model_uploads`. The immutable plan digest routes each
-request to exactly one mechanism; the legacy journal and archive remain
+`model_uploads` and `direct_model_uploads`. The immutable cohort identity selects
+the history used to route each new request. Original legacy upload reservations
+remain retryable after adoption, and a retained acceptance intent is loaded before
+consulting current transport callbacks. Its signed request, acceptance ordinal,
+documents and signatures remain unchanged. The legacy journal and archive remain
 available for unfinished older delivery while successor bytes bypass the host.
 If every model-enabled plan in the installed series is direct, omit
 `model_uploads`.
+
+An in-place adoption for an already admitted legacy cohort preserves the original
+plan, cohort identity, clocks and state directories. It binds separate legacy and
+preservation inventories, verified under the intake and upload owner fences before
+signing. Adoption does not itself migrate old archives, release reservations or
+authorize eviction. Keep the original artifacts and consumer bindings until their
+supported storage migration and restore qualification complete.
+
+The normal issuance routes are on the existing private admission and reviewer
+listeners under `/internal/cohorts/model-delivery-adoption`. Enable owner mutations
+with `lifecycle.model_delivery_operator_token_file`, separate from export and vote
+credentials. Select the same cohort-sorted `model_delivery_adoption_candidates` on
+that lifecycle and each independent phase reviewer. Each
+`umi-model-delivery-adoption-candidate/1` contains a `source` with the existing
+legacy source schema, the exact direct-R2 `delivery` profile, `r2_credentials_file`,
+`r2_bucket`, a separate durable `verification_directory`, and optional
+`r2_timeout_seconds`. A selected `phase_review_budget` is required on the owner
+and reviewers. Size its `replay_seconds` for the complete retained R2 model set;
+owner and vote exchanges include that additional work plus fresh finality, rather
+than inheriting a short readiness timeout. Keep the operator client and private
+proxy allowances at least as large as those complete derived exchanges. Candidate
+metadata does not select transport for consumers.
+
+Prepare candidate inventory files and exact original copies in the selected source
+directory using the formats below. Preserve the complete original ledger census,
+including superseded participation, uploads without admission, reserved acceptance
+intents and completed certificates, plus the selected baseline and execution
+incumbents. Do not infer census completeness from an R2 listing or rewrite old
+signed requests to the direct-upload schema.
+
+Obtain the original metadata through the existing private owner's
+`POST /internal/cohorts/model-delivery-preflight` route, using its export credential.
+Supply `umi-model-delivery-preflight-request/1` with `cohort_sha256`, the expected
+`expected_predecessor_sha256` and a fresh `challenge`. This unsigned authenticated
+observation includes every retained model participation and upload-only request,
+the exact raw JSON objects referenced by SHA-256, admission and acceptance lineage,
+local preservation receipts and conservative allocation totals across all cohorts.
+The owner holds its intake fence then the upload journal while taking the bounded
+metadata snapshot. It does not open payloads, contact R2, capture new finality,
+initialize lifecycle control, sign, reserve or change the hold. A stale predecessor,
+inconsistent original or complete response exceeding configured export capacity
+refuses without returning a truncated census. Logs expose counted progress and ETA.
+Reconstruct each object's original bytes from `raw_json` and verify its
+`raw_sha256`; do not treat the observation or local preservation receipt as remote
+durability, baseline/incumbent selection or adoption authority. Supply that separate
+qualified provenance when constructing the candidate. Prepare and reserve compare
+the complete inventory again, so an earlier observation cannot authorize omission
+of a later upload. Do not read live owner databases with a diagnostic process.
+
+1. `POST /prepare` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
+   predecessor. The existing owner obtains native finalized height, authenticates
+   both inventory files and verifies their R2 bytes with durable file checkpoints.
+   It compares the complete census against the original intake and upload journals.
+2. `POST /reserve` receives the exact `ModelDeliveryAdoptionProposal`. It repeats
+   the current census under intake then upload-journal locks, reserves the intake
+   fence before releasing those locks, then reserves the same control transition.
+   New uploads, participation, admission certificates, acceptance intents and
+   acceptance certificates wait. Existing exact original retries retain their
+   bytes. A crash between reservations resumes the same intake pending transition.
+3. Each independent reviewer's `POST /vote` replays the native history and owned
+   finality, checks its privately selected metadata and R2 bytes, then obtains a
+   fresh owner-signed `/reservation` challenge proof. That proof requires both
+   exact reservations and rechecks the original census. The existing signer uses
+   the same predecessor slot as closure and request-tail adoption, preventing
+   conflicting votes. Byte verification and census expose progress and substage
+   ETAs; interrupted byte review resumes successful file checkpoints.
+4. Assemble votes with `assemble_model_delivery_adoption`, then `POST /commit`
+   a `ModelDeliveryAdoptionCommit`. It verifies the original quorum and publishes
+   through the ordinary history path. Retry the same bytes after interruption.
+
+An explicit authenticated operator call can initialize the original lifecycle
+owner while automatic progression is held; it does not tick a phase or remove
+that hold. Keep the hold until every selected consumer is upgraded and the
+installed R2, restoration, reservation and restart paths are qualified. After
+commit, replace candidate-only configuration with the committed selections below,
+retaining the original metadata and durable byte-verification directory. Adoption
+alone neither starts the direct upload service nor releases archive bytes.
+These migration routes remain necessary while an admitted legacy-transport cohort
+needs adoption; retain their history decoder while any supported cohort uses it.
+
+To select authenticated storage for those original `/1` models, set
+`legacy_model_storage` on the version-nine intake host, phase reviewer, settlement,
+reward coordinator and standing writer configurations. It is a cohort-sorted list of
+`umi-legacy-model-storage-source/1` entries with `cohort_sha256`, `directory`,
+`baseline_model_sha256` and sorted `incumbent_model_sha256s`. Obtain the baseline
+and incumbent pins from the actual selected rounds and migration census. Each
+private directory contains `legacy-inventory.json`,
+`preservation-inventory.json` and exact raw originals at `objects/<sha256>.json`.
+The list must cover every selected committed adoption. Startup authenticates
+these inventories and original metadata before opening its service state or
+signing keys, then binds the source to the actual R2 credential namespace.
+Missing or damaged metadata requires repair. Empty older configurations retain
+their native archive behavior; they do not establish an R2 storage migration.
+
+On the intake host, also set `legacy_model_verification_directory` to private
+durable state outside the upload journals, archive, metadata sources and disposable
+caches. The host derives adoption selections from its own committed native history
+before opening new storage or signing keys; it does not accept a supplied history
+as owner authority. The configured direct-upload R2 namespace also supplies the
+originals reader. The acceptance worker streams required byte checks with counted
+progress and ETA, checkpoints each completed file, and reuses those checks after
+restart through object-generation metadata. It keeps no additional full model copy.
+
+Only an exact preserved original with both frozen participation and certified
+admission can finish a new `/1` acceptance after adoption, including an original
+that had no acceptance intent at the fence. The owner checks the actual retained
+admission and committed history before verification and at reservation/publication
+boundaries. An existing intent retains its original ordinal, clock, documents and
+signatures; a new intent reserves its first ordinal only after complete byte checks.
+Independent reviewers still approve the original rights and reconstruction inputs.
+Upload-only entries, incomplete payloads, unknown requests and changed originals do
+not receive this exception. New submissions continue through direct multipart R2.
+This path does not release legacy reservations, delete active archives, or issue the
+production adoption; those require their separate census, release and signing gates.
+
+Settlement and series-wide reward consumers select the reader by the original
+certificate's cohort. An adopted successor can use R2 while an older cohort retains its existing
+archive and clocks. Keep `legacy-model-byte-verification` in private durable
+service state, separate from every disposable cache. This selection does not
+create replacement acceptances or reinterpret old rights approvals.
+
+Remote byte receipts under each model's `remote-bytes-v2/<context-sha256>` directory bind the
+immutable preserved package, policy, R2 namespace and verifier semantics. Each
+file additionally binds the exact remote object generations. Independently
+authenticated cohorts sharing those same inputs reuse the byte result; their
+selection-bound verification snapshots and admission checks remain separate.
+Changing a remote generation repairs only the affected files. These private
+receipts never confer admission, eviction or reservation-release authority.
+
+Supported older installations may retain selection-bound receipts under the
+model's `remote` directory. Keep that directory while any deployed reader or
+recovery consumer uses the older layout. The current reader migrates successful
+receipts and retained requested documents without fetching model payloads, using
+the exact original authenticated selection. Originals remain unchanged; each
+completed file migration survives interruption and restart. Migration checks
+current R2 generations first; synchronous commit checks cannot resurrect an old
+generation from legacy receipts. A receipt belonging
+to another selection reports `chunked_model_legacy_selection_required` and waits
+for that original selection to run its migration, instead of rechecking or
+overwriting its completed bytes. For a mixed older store, invoke each retained
+authenticated selection; completed migrations are shared and retained between
+attempts. Missing or damaged receipts retain the existing explicit scoped repair
+path. Remove the older directory only after supported consumers and recovery
+dependencies have migrated and released it; never remove it to clear a wait.
+
+For original `/1` requests, the phase reviewer still requires its independent
+private rights and reconstruction approval before checking the selected remote
+bytes. It retains the original request, intent, vote and journal bindings; a
+completed vote is reusable after restart without fetching the model again. The
+benchmark host requires that same private intent and uses the authenticated
+legacy source for the candidate and explicitly pinned baseline or incumbent.
+All share the bounded one-model cache and its invocation leases. Keep source
+metadata directories outside the entire disposable cache root, not merely
+outside its current working directory. Missing originals or private approvals
+require repair; an R2 inventory cannot substitute for either.
 
 Each independent `umi-cohort-phase-review-service/7` receives a read-only R2
 credential and the same standing review policy. It authenticates the owner's
@@ -2530,16 +2711,28 @@ waiting and eviction report counts, elapsed time, ETA basis and retry/stall stat
 Before writing, the remaining new allocation plus
 `materialization_free_space_reserve_bytes` must be free. Verified retained files
 and complete files requiring local receipt repair need no second allocation;
-owned partial files are reclaimed before capacity is measured again. The
-baseline remains in the pinned local archive. Put the benchmark workspace on a
-dedicated quota-controlled scratch filesystem. Source schema 2 binds
+owned partial files are reclaimed before capacity is measured again. Without an
+authenticated legacy source, the baseline remains in the pinned local archive.
+An explicitly selected and qualified legacy source restores its pinned baseline
+through the same bounded cache. Source schema 2 supports a dedicated quota-controlled scratch
+filesystem or an explicitly selected bounded boot-disk cache. The default binds
 `materialization_filesystem_maximum_bytes` and at least one
 `materialization_protected_roots` entry. List every validator/coordinator state,
 evidence and journal filesystem in that tuple. Before writing, the reviewer
 requires the scratch device to differ from every listed device and requires the
 filesystem's total capacity to fit the configured maximum. This makes a bounded
-volume or filesystem quota a runtime prerequisite. Capacity exhaustion delays
-work; it never sends candidate bytes to a protected filesystem.
+volume or filesystem quota a prerequisite for the default mode.
+
+To use the boot filesystem, explicitly select `materialization_boot_disk_cache`
+with schema `umi-boot-disk-model-cache/1`, one private `directory`, and
+`maximum_allocated_bytes`. Place every model cache sharing that account and
+filesystem beneath the same allocation root so transfers share its filesystem
+lock. Keep verification receipts, journals and protected roots outside it. This
+mode bounds aggregate cache allocation and rechecks actual free-space reserve
+before every write; separate cache roots do not share that mutex. Existing
+candidate invocation leases still govern replacement and eviction. Capacity
+exhaustion retains completed files for retry. Omitting the option preserves the
+historical configuration bytes and separate-filesystem requirement.
 
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
 the selected recovery interval. A part-level provider `404` causes the miner to
@@ -2563,8 +2756,10 @@ model late.
 service admission host and independent model-review peers. Configure a private
 `directory` disjoint from intake and the model archive, and an explicit
 `maximum_reserved_bytes`. Reservations account for two copies of each declared
-bundle, covering delivery staging and the verified archive. Increase capacity
-without changing accepted manifests or clearing journals. Other bounds are
+bundle, covering delivery staging and the verified archive. The durable model
+allocation ledger migrates the existing journal atomically without changing its
+binding, signed requests, original bundles or ordinals. Repeated startup retains
+each allocation once. Other bounds are
 `maximum_models`, `maximum_metadata_bytes`, `maximum_concurrent_uploads` and
 `idle_timeout_seconds`.
 
@@ -2577,6 +2772,106 @@ worker removes the redundant completed staging tree under its upload lock. It
 keeps incomplete prefixes and the durable archive. This disk reclamation does
 not expand the conservative logical reservation. Accepted original bytes remain
 unchanged. An unfinished model delivery is not admitted to the cohort roster.
+
+The host reports `storage_allocations` with active reserved bytes, released bytes
+and model counts in each lifecycle state. Allocation migration and explicit index
+repair report counted progress, elapsed time and their ETA basis. Missing or
+damaged accounting fails closed. `repair_model_allocation_index` can reconstruct
+the derived index from intact immutable allocation and transition records; it
+refuses to downgrade a state that references a lost transition. Restore that
+exact record from its owned backup first. Preserve the ledger when upgrading;
+mixed old and new upload writers are not a supported migration.
+
+Full archive release remains unavailable in the configured host. Internal
+accounting transitions retain the complete charge through remote qualification,
+release preparation and interrupted deletion. Completion can credit it only
+after the exact bound archive payload, staging payload, interrupted upload files
+and interrupted archive copy are absent and directory changes are synced. A
+prepared or completed release fences local status, completion, polling and chunk
+retry before local payload creation; a distinct request cannot inherit a refund.
+The allocation check and staging-directory creation hold the upload journal
+lease together, so concurrent release cannot be followed by a stale retry
+recreating an empty model directory. Lock contention retries unchanged.
+These accounting ports do not prove R2 durability, restoration coverage or
+consumer release. Do not invoke them to reclaim a live installation. The remaining
+deployment gate is an authenticated census and migration of every shared archive
+consumer, including active cohort, baseline and incumbent bindings, together with
+supported remote retry service. Neither a config flag nor a supplied list of
+consumers establishes that gate.
+
+The configured HTTP delivery routes can serve an exact released original through
+the authenticated legacy R2 payload owner. POST retry and GET status recheck the
+original participation, admission certificate and committed storage history, then
+reuse durable byte verification for unchanged remote objects. Successful status
+retains the original upload identity and exact legacy response schema; it does
+not issue admission or artifact acceptance. Signed PUT retries authenticate the
+original submitting key and compare only the requested range using at most two
+8 MiB chunks, without recreating staging or archive payloads. Wrong signed bytes
+return 422; unavailable or damaged original ownership, remote data or verification
+returns 503 so the client retains its unchanged request. A missing remote owner or
+an original absent from its authenticated inventory stays fenced. This read-only
+retry support grants no capacity refund or permission to remove local files.
+
+The recurring upload poll uses that same authenticated remote owner for
+`release_prepared` and `released` models. It restores durable verification facts
+before counting remote originals as preserved and never calls the local staging
+or completion path for them. The `legacy_model_remote_reconciliation` stage
+reports request counts, elapsed time and its ETA basis; unavailable ownership or
+storage stays retrying and pending. Completed pre-admission reviews remain in
+their original metadata directory. A missing retained review requires repair;
+the poll does not recreate an archive to rerun it. Restart and repeated polls
+preserve the upload journal, allocation credit and original signed request.
+
+The native adoption census includes original reservations that lack participation
+or an admission certificate, including partial uploads. For these originals, the
+supported completion path is a new direct payload declaration signed by the miner
+over the unchanged request and bundle. The public read-only
+`GET /v1/competition/model-uploads/{request_sha256}/continuation` route supplies
+`umi-legacy-model-upload-continuation/1`: the committed adoption history and its
+complete frozen legacy inventory. The upgraded client authenticates the history,
+inventory digest, request raw bytes, model, original authority and clocks before
+signing. A pending owner decision or inconsistent selected census returns 503;
+invalid proof stops the client before it requests a direct reservation.
+
+Only frozen originals without admission, intent or acceptance certificates use
+this continuation. It works for incomplete uploads, fully uploaded unadmitted
+originals and retained participation awaiting attestation. The direct owner
+independently checks current intake authority, verifies the R2 payload and standing
+review, and uses ordinary admission and version-two artifact acceptance. Certified
+legacy originals retain their existing version-one path. A host without the route
+returns 404 and preserves the legacy client protocol; an uncertified original
+requires a supported client upgrade to complete after adoption. A request rejected
+before reservation has no retained legacy upload and may use authorized direct
+delivery normally.
+
+After an original completes through version two, the same old upload GET, POST
+and signed PUT routes can read its preserved direct object when a separately
+qualified release owner fences the original allocation. The service requires the
+exact frozen request and committed adoption, its actual native admission quorum,
+retained independent version-two acceptance, original direct reservation and
+completed R2 promotion. It reuses the promotion's durable byte-verification result
+and checks the preserved object's current generation. GET, POST and recurring
+polls do not download the model; PUT compares only the requested signed range.
+Restart restores these facts without recreating local payloads or recertifying
+the model. Missing or damaged completed facts require visible repair and return
+503; they do not authorize a fresh full-payload pass. The
+`continued_model_remote_reconciliation` and `remote_model_completed_verification`
+stages report counted progress, elapsed time, ETA basis and retry/repair status.
+
+Continuation does not expand or relabel the frozen inventory, rewrite the plan,
+add a certificate to an `incomplete_upload` entry, or release any original local
+bytes or allocation charges. Keep the original upload journal, partial files and
+archive until the separate release and restore qualification authorizes reclamation.
+The retry bridge is not an archive-release worker. Cross-cohort consumer migration,
+durable restoration coverage, crash-safe release/refund ownership and the supported
+rollback fence still require independent qualification before reclaiming bytes.
+Byte release also does not free cumulative `maximum_models` journal entries; keep
+those original metadata records and size that bound explicitly.
+Select the authenticated legacy source and direct owner together, and qualify
+the installed clients, routing, admission, review, acceptance and reward replay
+before cutover. Source fixtures with synthetic finality and R2 establish protocol
+behavior, not production storage readiness. These compatibility paths remain
+necessary while a selected cohort retains legacy originals or their replay consumers.
 
 Keep a legacy upload journal, retained file prefixes and model archive across service
 restart or host migration. Configure durable replication of original model
@@ -2599,7 +2894,16 @@ generation. Restore checks those small receipts and object HEADs without loading
 model weights or the reward package. Older receipts lacking these bindings receive
 an explicitly reported first native qualification; existing durable byte checks
 remain reusable. Older directory-based model acceptances retain their original
-native path. Observed receipt or generation damage stays held even if the original
+native path unless their authenticated legacy R2 source is explicitly selected.
+For selected legacy models, retain `legacy-completions/` and
+`legacy-byte-snapshots/` under the original settlement or reward receipt root.
+The independent completion can restore an exactly missing small settlement
+receipt after its chunk generations are checked. Missing or damaged completion
+seals or byte snapshots require restoration; they never trigger a silent full
+model reread. Existing native-required coverage can migrate to authenticated
+remote dependencies only after the same original owner prepares the unchanged
+package, preserving its previous immutable completion.
+Observed receipt or generation damage stays held even if the original
 later reappears, until explicit scoped repair succeeds.
 
 Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
@@ -2611,6 +2915,50 @@ metadata requires restoration in place. Intact older qualifiers receive a counte
 metadata-only migration without rewriting their bytes or loading model payloads.
 Retain this migration while supported owners still have qualifiers without the
 completion ledger; its private capability refuses reservation-layout changes.
+
+Per-acceptance transport authorization retains a permanent
+`model_transport_authorization_ledger` alongside its qualification pair in the
+original intake or reviewer journal. Intake stores the ledger under
+`completion:<acceptance digest>` in its existing capacity-accounted qualification
+table. Keep this ledger as durable owner state: losing both pair records requires
+explicit repair and never starts an ordinary first qualification. The owner's
+`repair_transport_qualification(cohort, submission, reason=...)` restores the
+small records from an intact ledger and retains an immutable repair audit, without
+repeating the successful transport predicate or reading model bytes. The reviewer
+provides the same method asynchronously. Original signed requests, intents, votes,
+certificates and acceptance blocks remain unchanged.
+
+An older qualification pair without the ledger requires that explicit method
+before cutover. It checks the original historical transport once and atomically
+adds the completion and audit without rewriting the intact pair. Keep this
+migration while supported owner or reviewer journals still contain pre-ledger
+pairs. A completely new qualification writes its pair and ledger atomically;
+failed capacity checks leave neither a partial pair nor a false completion.
+Do not discard ledger or journal state to force a new first pass. These are native
+owner APIs; this surface does not add an operator repair CLI.
+
+Package transport authorization has a separate
+`umi-package-model-transport-authorization/1` scope under the preparation owner's
+native verification directory. Keep `model-transport/` and its adjacent
+`model-transport-owner.json` together. The immutable completion ledger records the
+exact direct-acceptance inventory, including a verified empty inventory for
+packages without direct acceptances. An older `not_selected` model-dependency
+receipt does not establish that inventory. Supported older coverage loads the
+original package metadata once to qualify its historical transport, preserving
+completed native endpoints, block checks and model-byte verification. Normal
+restoration then uses the small qualification without loading the package.
+Later transport adoption cannot authorize an earlier direct acceptance.
+
+For damage confined to the supplementary record, the original native source's
+`repair_model_transport(key, reason=...)` restores its exact completed metadata
+from the immutable ledger and retains an audit of the damaged bytes. It does not
+repeat package scoring, block proofs or model downloads. Missing or damaged
+owner/ledger state requires scoped restoration in place; do not delete or recreate
+the directory to turn damaged completion into a first-time qualification. This migration remains
+necessary while supported owners have completed packages predating this scope.
+Repair-required progress withdraws its ETA and remains the final status until
+repair. Interrupted atomic qualification reports retrying and preserves any
+committed completion for the next attempt.
 
 Missing or damaged completed results require explicit scoped repair. After exact
 original inputs are restored, `NativeRewardCoverageSource.repair(key, reason=...)`

@@ -419,6 +419,27 @@ class CoverageCheckpoints:
                     if additions == {"model_dependencies"}
                     else "native coverage dependency migration"
                 )
+            elif (
+                dependencies is not None
+                and dependencies.mode == "remote"
+                and prior.get("model_dependencies", {}).get("mode") == "native_required"
+                and {
+                    key: item
+                    for key, item in {**prior, "repair": None}.items()
+                    if key != "model_dependencies"
+                }
+                == {key: item for key, item in value.items() if key != "model_dependencies"}
+                and CoverageModelDependencies.model_validate_json(
+                    canonical_json_bytes(prior["model_dependencies"])
+                ).context
+                == dependencies.context
+            ):
+                # The native owner re-prepared the same original package and
+                # now carries independent legacy R2 receipts. Keep the original
+                # native completion immutable; migrate its metadata dependency
+                # under the unchanged owner, policy and source identities.
+                migration = True
+                value["repair"] = "authenticated legacy R2 model dependency migration"
             else:
                 raise CoverageCheckpointRepairRequired("coverage successful result changed")
 

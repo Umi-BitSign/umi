@@ -55,7 +55,7 @@ from .competition_cohort_model_static_review import (
 )
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
-from .competition_remote_model_verification import verify_remote_model
+from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
 from .competition_round_journal import RoundJournal
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
@@ -998,15 +998,18 @@ class DirectModelUploadOwner:
             bundle,
             payload,
             root=Path(self.config.directory) / "byte-verification",
-            context={
-                "cohort_sha256": self.config.cohort_sha256,
-                "owner_hotkey": identity(self.config.owner_hotkey),
-                "delivery": digest(self.config.delivery),
-                "policy_sha256": None if self.policy is None else digest(self.policy),
-            },
+            context=self._byte_context(),
             expected_head=expected_head,
         )
         return head
+
+    def _byte_context(self):
+        return {
+            "cohort_sha256": self.config.cohort_sha256,
+            "owner_hotkey": identity(self.config.owner_hotkey),
+            "delivery": digest(self.config.delivery),
+            "policy_sha256": None if self.policy is None else digest(self.policy),
+        }
 
     async def verify(
         self,
@@ -1140,6 +1143,55 @@ class DirectModelUploadOwner:
             raise ValueError("direct model promotion source binding differs")
         return acceptance, bundle, payload, reservation_sha256, source_key, completed
 
+    def _retained_promotion(
+        self, acceptance, payload, reservation_sha256, source_key, preserved_key
+    ):
+        raw = self.journal.get("direct-promotion", digest(acceptance))
+        if raw is None:
+            return None
+        retained = DirectModelPromotion.model_validate_json(canonical_json_bytes(raw))
+        expected = retained.model_copy(
+            update={
+                "acceptance_sha256": digest(acceptance),
+                "reservation_sha256": reservation_sha256,
+                "source_object_key_sha256": sha256_hex(source_key.encode()),
+                "preserved_object_key_sha256": sha256_hex(preserved_key.encode()),
+                "model_sha256": payload.model_sha256,
+                "payload_sha256": payload.payload_sha256,
+                "total_bytes": payload.total_bytes,
+            }
+        )
+        if retained != expected:
+            raise ValueError("direct model promotion receipt differs")
+        return retained
+
+    def promoted_payload(self, publication):
+        """Read retained promotion/byte facts without promoting, copying or deleting.
+
+        The intake caller must authenticate its retained quorum publication and
+        current authority separately. Current remote HEAD remains an I/O check.
+        """
+        acceptance, bundle, payload, reservation, source_key, _ = self._promotion_source(
+            publication
+        )
+        key = preserved_model_object_key(
+            acceptance.cohort_sha256, payload.model_sha256, payload.payload_sha256
+        )
+        receipt = self._retained_promotion(acceptance, payload, reservation, source_key, key)
+        if receipt is None:
+            raise DirectModelUploadPending("direct model requires its retained promotion")
+        head = R2ObjectHead(size_bytes=receipt.total_bytes, etag=receipt.provider_etag)
+        require_remote_model_bytes(
+            self.multipart,
+            key,
+            bundle,
+            payload,
+            root=Path(self.config.directory) / "byte-verification",
+            context=self._byte_context(),
+            head=head,
+        )
+        return key, head, receipt
+
     async def promote(
         self,
         publication: ModelAcceptancePublication,
@@ -1162,22 +1214,10 @@ class DirectModelUploadOwner:
             expected_source = R2ObjectHead(
                 size_bytes=payload.total_bytes, etag=completed.provider_etag
             )
-            raw = self.journal.get("direct-promotion", acceptance_sha256)
-            if raw is not None:
-                retained = DirectModelPromotion.model_validate_json(canonical_json_bytes(raw))
-                expected = retained.model_copy(
-                    update={
-                        "acceptance_sha256": acceptance_sha256,
-                        "reservation_sha256": reservation_sha256,
-                        "source_object_key_sha256": sha256_hex(source_key.encode()),
-                        "preserved_object_key_sha256": sha256_hex(preserved_key.encode()),
-                        "model_sha256": payload.model_sha256,
-                        "payload_sha256": payload.payload_sha256,
-                        "total_bytes": payload.total_bytes,
-                    }
-                )
-                if retained != expected:
-                    raise ValueError("direct model promotion receipt differs")
+            retained = self._retained_promotion(
+                acceptance, payload, reservation_sha256, source_key, preserved_key
+            )
+            if retained is not None:
                 head = await self.multipart.head(preserved_key)
                 if head is None or (head.size_bytes, head.etag) != (
                     payload.total_bytes,

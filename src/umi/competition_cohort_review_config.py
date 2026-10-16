@@ -16,10 +16,22 @@ from .competition_cohort_capacity import (
 from .competition_cohort_direct_model_review import DirectModelReviewSourceConfig
 from .competition_cohort_endpoint_host import EndpointHostConfig
 from .competition_cohort_intake import CohortIntakeBinding
+from .competition_cohort_legacy_model_selection import (
+    LegacyModelStorageSelections,
+    validate_legacy_model_selections,
+)
+from .competition_cohort_model_delivery_candidate import (
+    ModelDeliveryAdoptionCandidates,
+    validate_adoption_candidates,
+)
 from .competition_cohort_model_review import ModelReviewConfig
 from .competition_cohort_model_static_review import verify_standing_review_policy
+from .competition_cohort_model_transport_selection import (
+    ModelDeliveryAdoptionSelections,
+    requires_direct_model_review,
+)
 from .competition_cohort_progress_signer import CohortProgressSignerConfig
-from .competition_cohort_recovery import cohort_model_delivery, verify_recovery_authority
+from .competition_cohort_recovery import verify_recovery_authority
 from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_budget import service_execution_budget
@@ -74,6 +86,9 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     benchmark: BenchmarkHostConfig | None = None
     endpoint: EndpointHostConfig | None = None
     direct_model_review: DirectModelReviewSourceConfig | None = None
+    model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
+    legacy_model_storage: LegacyModelStorageSelections = ()
+    model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -100,6 +115,12 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("endpoint", None)
         if self.direct_model_review is None:
             value.pop("direct_model_review", None)
+        if not self.model_delivery_adoptions:
+            value.pop("model_delivery_adoptions", None)
+        if not self.legacy_model_storage:
+            value.pop("legacy_model_storage", None)
+        if not self.model_delivery_adoption_candidates:
+            value.pop("model_delivery_adoption_candidates", None)
         return value
 
     @property
@@ -123,6 +144,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.inputs_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *(source.directory for source in self.legacy_model_storage),
+                *(
+                    dict.fromkeys(
+                        path
+                        for candidate in self.model_delivery_adoption_candidates
+                        for path in candidate.stores()
+                    )
+                ),
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 *((self.service_signing.directory,) if self.service_signing else ()),
                 *((self.admission_signing.directory,) if self.admission_signing else ()),
@@ -161,6 +190,16 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 ),
             )
         )
+
+    @model_validator(mode="after")
+    def selected_adoption_candidates(self):
+        if self.model_delivery_adoption_candidates and self.phase_review_budget is None:
+            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        validate_adoption_candidates(
+            self.model_delivery_adoption_candidates,
+            (digest(plan) for plan in self.series.cohorts if plan.sequence > 5),
+        )
+        return self
 
     @model_validator(mode="after")
     def selection(self):
@@ -249,17 +288,36 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
         ):
             raise ValueError("model review changes host signer, tracks or scope")
         direct = self.direct_model_review
-        direct_selected = any(
-            cohort_model_delivery(plan).mechanism == "direct_r2_multipart_v1"
-            for plan in self.series.cohorts
-            if plan.eligible_tracks is None or "model" in plan.eligible_tracks
+        direct_selected = requires_direct_model_review(
+            self.series, self.policy, self.model_delivery_adoptions
         )
+        if self.model_delivery_adoptions and model is None:
+            raise ValueError("model transport adoption requires independent model signing")
         if direct_selected and direct is None and model is not None:
             raise ValueError("direct model cohort requires the independent R2 review source")
         if direct is not None:
             if model is None:
                 raise ValueError("direct model review requires model signing")
             verify_standing_review_policy(direct.standing_review_policy, self.policy)
+        validate_legacy_model_selections(
+            self.legacy_model_storage,
+            series=self.series,
+            policy=self.policy,
+            model_delivery_adoptions=self.model_delivery_adoptions,
+        )
+        if self.legacy_model_storage and (model is None or direct is None):
+            raise ValueError("legacy R2 model review requires private signing and bounded reader")
+        if (
+            self.legacy_model_storage
+            and direct is not None
+            and direct.materialization_boot_disk_cache is not None
+        ):
+            _disjoint(
+                (
+                    Path(direct.materialization_boot_disk_cache.directory),
+                    *(Path(source.directory) for source in self.legacy_model_storage),
+                )
+            )
         admission = self.admission_signing
         if admission is not None and (
             admission.cohorts != expected

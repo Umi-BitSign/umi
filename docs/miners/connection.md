@@ -5,9 +5,11 @@
 The competition uses a recoverable cohort runtime: phase blocks are operating targets, and
 coordinator or validator downtime delays unfinished work instead of expiring the
 cohort. Check [live status](https://api.umi.vision/v1/competition/status) and
-[readiness](https://api.umi.vision/v1/competition/readiness) for the current
-phase and admission state before signing or diagnosing a submission. Send a new
-submission only when `admission_accepting_new` is true.
+the target cohort’s `/v1/competition/cohorts/{cohort_sha256}/readiness` route
+with a fresh 32-character lowercase hexadecimal `nonce` before signing or
+diagnosing a submission. The global `admission_accepting_new` flag does not
+establish that a particular cohort is open. A cohort readiness response is an
+operational observation, not a reservation or admission certificate.
 
 The [request-window recovery contract](../competition/transport-cadence.md)
 explains retained attempts and the new linked-deadline extension. That extension
@@ -30,6 +32,137 @@ produces a certified successor row. Acceptance under an earlier policy does not
 accept the current policy or terms. Participants must retain the acceptance
 receipt for the active policy. Registration, acceptance, selection, scoring and
 reward activation are separate events.
+
+## Change an endpoint model revision
+
+A cohort that still allows the endpoint track can retain a replacement while its
+intake remains unsealed. The new signed submission needs a higher sequence for
+the same hotkey and track, a new `model_revision` for changed inference artifacts,
+and the policy’s minimum submission interval since the previous retained
+observation. Sign separate participation consent for each target cohort. Retry an
+unchanged request using its original signed bytes; do not generate another
+revision or sequence to recover a lost acknowledgement.
+
+The intake seal selects the highest retained sequence even if its admission
+certificate is still pending. Preparation waits for that selected certificate;
+it does not fall back to an older certified entry. The selected replacement can
+still receive its certificate after intake seals. Neither global nor cohort
+readiness promises enough time for certification before the seal. Check the
+exact replacement after submission:
+
+```sh
+umi-competition --policy policy.json query-cohort-admission \
+  --origin https://api.umi.vision --request replacement-participation.json
+```
+
+The read-only participation-status route exposes the latest retained sequence
+and its certificate together:
+
+```text
+GET /v1/competition/cohorts/{cohort_sha256}/participation-status/{hotkey}?track=endpoint&nonce={fresh_32_hex}&consent={consent_sha256}
+```
+
+`consent` is optional. With it, `requested_consent_status` distinguishes `latest`,
+`superseded` and `not_retained`; `latest.admission.status` describes the newest
+entry even while an older one remains certified. `minimum_next_sequence` and
+`submission_not_before_block` are lower bounds, not permission to submit:
+registration, track eligibility, readiness, capacity and the seal still apply.
+A `null` minimum sequence means the sequence range is exhausted. Check `phase`
+as well as `intake_fenced`; a closed phase blocks new participation even without
+a fence at its current tip. This advisory response does not verify the seal’s
+selected roster (`sealed_selection_verified: false`) or authorize a runtime
+migration (`runtime_migration_authorized: false`). Older servers may not yet
+provide the route; HTTP 404 is not evidence that no participation exists.
+
+An `admission_certified` response authenticates that participation; it does not
+prove it remains the newest entry or authorize changing the running model. The
+current updater supports selected runtime upgrades while preserving the installed
+revision, authority, service account and state paths. It does not provide a
+model-revision rollover or a general migration for custom multi-cohort rosters;
+unsupported authority layouts refuse before changes. The grant journal binds
+the revision and complete roster, so editing either,
+removing a closed cohort, or substituting an empty grant directory is not a
+supported in-place upgrade. Preserve the original configuration, grants, requests,
+responses and retirement receipts. Qualify an explicit transition for the actual
+installed startup layout and any remaining old-revision obligations before
+switching the endpoint; cohort closure alone does not release retained state.
+
+Paid-work claims also bind the original `submission_sha256`. A replacement
+participation does not move an accepted claim or its assigned work to the new
+revision. A retained but unaccepted claim still names the old submission; changing
+its fields while reusing its nonce is not a retry. Inventory the authoritative
+claim/admission state and all outstanding old-revision work across the configured
+cohorts before selecting a transition. Exact cached response recovery and grant
+or retirement replay are separate paths; the latter still require the original
+grant authority even after the response has been retired. Preserve signed bytes
+and journal bindings rather than rewriting them or starting an empty journal.
+
+A transition must inspect the effective startup command, account, state paths,
+systemd drop-ins or container mounts, and model-service dependencies. Drain the
+miner before changing its sidecar/backend. `KillMode=mixed` with a finite
+`TimeoutStopSec` can still force-kill remaining processes unless the effective
+settings disable that. The supported runtime updater uses an infinite stop
+timeout and `SendSIGKILL=no`; those settings alone do not authorize a revision
+migration. A container needs equivalent signal forwarding, restart control,
+confirmed process-tree drainage and exclusive ownership of the original mounted
+state. Preserve old model assets until their retained obligations are released.
+
+Endpoint participation does not require the unmodified baseline. A fine-tuned
+model must declare its own revision and meet the applicable provenance, license,
+resource and execution rules. See [model revision](model.md#model-revision) for
+which artifacts define a revision. Public-model admission does not replace
+endpoint admission or paid-work checks.
+
+### Inspect retained obligations before selecting a transition
+
+The Linux `umi-miner-revision-preflight --request /absolute/preflight.json`
+command inspects an already stopped miner under its original service UID. It
+acquires the existing grant and assignment locks without creating or migrating
+original state. It accepts clean rollback databases or fully checkpointed WAL
+main files with no remaining sidecars. An active owner, missing lock, retained
+WAL/journal, changed source file or unsupported layout refuses the inspection;
+the command does not stop services or repair original databases.
+
+The request schema is `umi-miner-revision-preflight-request/1`. Supply the exact
+`original_argv` and `proposed_argv` arrays, `service_uid`, `launch_kind` (`systemd`
+or `container`), `enrollments` entries containing `cohort_sha256` and absolute
+`directory`, and a private `verification_directory` separate from all original
+state. Optional `maximum_inventory_items` (default 65,536) and
+`maximum_summary_bytes` (default 64 MiB) bound inventories and serialized summaries;
+exceeding either reports an explicit refusal, without changing cohort policy or
+execution limits. Both commands must retain the original options except the model revision
+and proposed startup file. The proposed startup retains the entire cohort roster,
+authority, paths, terms and limits. Console-script, Python console-script and
+`python -m umi.miner` launch forms are recognized; recognizing a command does not
+verify its interpreter, installed wallet or container mount identity.
+
+The JSON result reports independently verified grant ancestry, acknowledgment
+intents, exact request-index coverage, signed retirements, response archives and
+signed paid claims. `known_requests_retired` refers only to the enumerated
+retained requests. `local_inventory_complete` reports supplied-directory and
+assignment coverage; it does not certify enrollment contents. Unknown or omitted
+artifacts remain explicit. A claim without a local grant has unknown remote
+admission, not proof that it was rejected. Native assignment-ledger startup
+audit, wallet/runtime identity, enrollment authority, current cohort selection
+and actual process drainage remain separately unverified gates.
+
+Every result has `runtime_migration_authorized: false`. A stopped-state inventory
+cannot fence later grants, move a paid claim, rebind a journal, authorize a backend
+switch, or make four independent cohort replacements atomic. Those obligations
+need an explicitly qualified transition, with retained old-revision execution
+capability wherever native authority has not closed or replaced old work.
+
+Progress on stderr includes counts, elapsed time, stage ETA and its basis. Before
+measured samples, the displayed planning range assumes 0.01–30 seconds per bounded
+local item; it excludes external checks and runtime migration. Completed grant
+and retirement checks persist independently of the source state, allowing restart
+without repeating unchanged native checks. Their keys bind original file identity,
+policy/startup inputs and qualified verifier semantics; a changed grant database
+invalidates its grant checks, and a changed assignment database invalidates its
+retirement checks. Missing or damaged completed metadata requires an explicit
+`--verification-repair-reason`; successful repair replaces only derived metadata.
+Never delete original signed records or substitute an empty verification directory
+to conceal a repair requirement.
 
 ## Upgrade an existing miner
 

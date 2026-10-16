@@ -103,6 +103,8 @@ def cohort_intake_bytes(db) -> int:
             "cohort_model_acceptance_intents",
             "cohort_model_acceptance_votes",
             "cohort_model_acceptances",
+            "cohort_model_transport_qualifications",
+            "cohort_model_transport_markers",
         )
         if name in tables
     )
@@ -244,6 +246,35 @@ class CohortIntake:
                 "tracks": list(self.tracks),
             }
         )
+
+    @contextmanager
+    def fenced_read_snapshot(self):
+        """Owned metadata export under the native fence, without schema writes.
+
+        The ordinary history reader remains available to other consumers. This
+        bounded export also holds the writer fence so it can take the upload
+        journal next and observe both original ledgers at one boundary.
+        """
+        with self._process_lock.hold():
+            self._directory()
+            lease = self._file("intake.lock", read_only=True)
+            try:
+                until = time.monotonic() + 10
+                while True:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= until:
+                            raise TimeoutError("cohort intake busy; retry unchanged") from None
+                        time.sleep(0.02)
+                with self._history_connection() as value:
+                    yield value
+                    path, held = (self.directory / "intake.lock").lstat(), os.fstat(lease)
+                    if (path.st_dev, path.st_ino) != (held.st_dev, held.st_ino):
+                        raise ValueError("cohort intake fence changed during metadata export")
+            finally:
+                os.close(lease)
 
     @contextmanager
     def _history_connection(self):
@@ -438,6 +469,13 @@ class CohortIntake:
                 store.retain_source(cohort, evidence)
             return state
 
+    def pending_policy_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
+        """Recover either native policy reservation without inventing new bytes."""
+        self._allowed(cohort)
+        with self._connection(prefer_history=True) as (_, store):
+            _, pending = store.status(cohort)
+            return pending if pending is not None and pending.is_policy_adoption else None
+
     def pending_request_tail_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
         """Read authenticated pending bytes for lifecycle reservation recovery."""
         self._allowed(cohort)
@@ -557,8 +595,13 @@ class CohortIntake:
                 return self._receipt(prior[0], store, request)
             history = store.published_history(cohort)
             _, pending = store.status(cohort)
-            if pending is not None and pending.operation == "adopt_request_tail_rule":
-                raise OSError("cohort intake awaits its reserved request-rule adoption")
+            if pending is not None and pending.is_policy_adoption:
+                kind = (
+                    "model-delivery"
+                    if pending.operation == "adopt_model_delivery"
+                    else "request-rule"
+                )
+                raise OSError(f"cohort intake awaits its reserved {kind} adoption")
             if (
                 db.execute(
                     "SELECT 1 FROM cohort_intake_seals WHERE cohort=? AND tip=?",

@@ -57,6 +57,7 @@ from .competition_reward_transactions import (
     StandingWeightJournal,
     standing_weight_call,
 )
+from .competition_reward_transport_qualification import PackageTransportQualifications
 from .competition_store import CompetitionStore
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
@@ -147,6 +148,14 @@ class StandingRewardPreparation:
         self._lock = asyncio.Lock()
         self._owner = object()
         self._prepared: dict[str, PreparedStandingReward] = {}
+        self._transport_qualifications = None
+
+    @property
+    def transport_qualifications(self):
+        self._authority()
+        if self._transport_qualifications is None:
+            self._transport_qualifications = PackageTransportQualifications(self)
+        return self._transport_qualifications
 
     def _authority(self) -> None:
         if (
@@ -267,6 +276,11 @@ class StandingRewardPreparation:
             != digest(self.reader.series.recovery.authority)
         ):
             raise ValueError("reward package differs from current standing activation")
+        self.transport_qualifications.qualify(
+            package,
+            package_sha256=activation.package_sha256,
+            cohort_sha256=activation.cohort_sha256,
+        )
         adoption = (
             None
             if activation.reward_adoption_sha256 is None

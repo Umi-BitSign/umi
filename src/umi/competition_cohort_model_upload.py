@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -30,12 +31,14 @@ from .competition_artifacts import (
 from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from .competition_cohort_model_reservations import ModelReservationLedger
 from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review,
     verify_standing_review_policy,
 )
+from .competition_cohort_model_transport import authenticated_model_delivery
 from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
@@ -122,8 +125,38 @@ def authorize_model_delivery(
     intake: CohortIntake,
     request: CohortParticipationRequest,
     capture,
+    *,
+    mechanism: str | None = None,
 ) -> tuple[CohortParticipationRequest, str, Submission]:
-    """Authorize one model request without selecting a payload transport."""
+    """Authorize new delivery against owned history and its pending adoption fence."""
+
+    with _authorized_model_delivery(intake, request, capture, mechanism=mechanism) as value:
+        return value
+
+
+def owned_model_delivery(intake, cohort, *, allow_pending=False):
+    """Resolve a route from the owner's authenticated, monotonic publication.
+
+    This reads persisted finality for discovery, not a fresh admission proof.
+    New reservations independently require fresh owned finality in
+    ``authorize_model_delivery``. No request can select a different prefix.
+    """
+    intake._allowed(cohort)
+    with intake._connection(prefer_history=True) as (_, store):
+        state, pending = store.status(cohort)
+        if not allow_pending and pending is not None and pending.is_policy_adoption:
+            raise OSError("model delivery awaits its reserved policy adoption")
+        return authenticated_model_delivery(
+            store.published_history(cohort),
+            intake.policy,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=state.observed_at_block,
+        )
+
+
+@contextmanager
+def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
+    """Keep the intake fence held through a new legacy reservation's commit."""
 
     request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
     key, sub = digest(request), request.signed_submission.submission
@@ -135,6 +168,17 @@ def authorize_model_delivery(
     # Validation alone: do not add an incomplete model to the roster.
     with intake._connection() as (db, store):
         history = store.published_history(cohort)
+        state, pending = store.status(cohort)
+        if pending is not None and pending.is_policy_adoption:
+            raise OSError("model delivery awaits its reserved policy adoption")
+        delivery = authenticated_model_delivery(
+            history,
+            intake.policy,
+            expected_tip_sha256=state.tip_sha256,
+            current_block=execution_boundary(capture).block,
+        )
+        if mechanism is not None and delivery.mechanism != mechanism:
+            raise ValueError("model delivery route differs from authenticated transport")
         if intake._seal(db, history, history_tip(history)) is not None:
             raise ValueError("model delivery cannot start after intake is sealed")
         admit_recovery_participant(
@@ -146,7 +190,31 @@ def authorize_model_delivery(
             expected_tip_sha256=history_tip(history),
             current_block=execution_boundary(capture).block,
         )
-    return request, key, sub
+        yield request, key, sub
+
+
+def validate_model_upload_chunk(
+    request: CohortParticipationRequest,
+    chunk: ModelUploadChunk,
+    signature: Signature,
+    data: bytes,
+) -> ModelUploadChunk:
+    """Authenticate an exact retry before choosing local or remote byte storage."""
+    chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
+    if chunk.upload_sha256 != digest(request):
+        raise ValueError("model chunk differs from its retained request")
+    if identity(signature.hotkey) != identity(request.signed_submission.submission.hotkey):
+        raise ValueError("model chunk signer differs from its submitting hotkey")
+    verify_signature(chunk, signature)
+    if len(data) != chunk.size_bytes or hashlib.sha256(data).hexdigest() != chunk.sha256:
+        raise ValueError("model chunk differs from its signed bytes")
+    bundle = request.signed_submission.submission.model_bundle
+    if chunk.file_index >= len(bundle.files):
+        raise ValueError("file is outside the signed model manifest")
+    record = bundle.files[chunk.file_index]
+    if chunk.offset + len(data) > record.size_bytes or (not data and record.size_bytes):
+        raise ValueError("chunk is outside the declared file")
+    return chunk
 
 
 class CohortModelUploads:
@@ -184,37 +252,46 @@ class CohortModelUploads:
         )
         ensure_private_directory(self.root / "files")
         self._retained_reuse = AssignmentVerificationReuse()
+        self.allocations = ModelReservationLedger(self.journal)
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
-        request, key, sub = authorize_model_delivery(self.intake, request, capture)
-        with self.journal.locked():
+        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
+        # Existing reservations retain their original request and file bindings
+        # even while adoption is pending, after adoption, or without fresh RPC.
+        prior = self.retry(request)
+        if prior is not None:
+            return prior
+        with (
+            _authorized_model_delivery(
+                self.intake, request, capture, mechanism="coordinator_chunked_v1"
+            ) as (request, key, sub),
+            self.journal.locked(),
+        ):
             prior = self.journal.get("upload", key)
             if prior is not None:
                 if prior != request.model_dump(mode="json", by_alias=True):
                     raise ValueError("model delivery retry changes its signed request")
                 return key
             models = self.journal.keys("bundle")
+            allocation = self.allocations.snapshot()
             if sub.model_revision not in models:
-                reserved = sum(
-                    2
-                    * sum(
-                        f.size_bytes
-                        for f in ModelBundle.model_validate_json(
-                            canonical_json_bytes(self.journal.get("bundle", model))
-                        ).files
-                    )
-                    for model in models
-                )
+                reserved = allocation["active_reserved_bytes"]
                 if len(models) >= self.config.maximum_models or (
                     reserved + 2 * sum(f.size_bytes for f in sub.model_bundle.files)
                     > self.config.maximum_reserved_bytes
                 ):
                     raise OSError("model delivery needs additional durable capacity")
+            else:
+                # A distinct request never inherits a historical refund. It
+                # needs a separately qualified remote path or a new allocation.
+                self.allocations.require_local(sub.model_revision)
             self.journal.put_many(
                 (
                     ("bundle", sub.model_revision, sub.model_bundle),
                     ("upload", key, request),
-                )
+                    self.allocations.reservation_record(sub.model_bundle),
+                ),
+                index=lambda db: self.allocations.index_reserved(db, sub.model_bundle),
             )
         return key
 
@@ -249,11 +326,16 @@ class CohortModelUploads:
         return key
 
     def _paths(self, key):
-        request = self.retained(key)
-        bundle = request.signed_submission.submission.model_bundle
-        staging = self.root / "files" / digest(bundle)
-        ensure_private_directory(staging)
-        ensure_private_directory(staging / "model")
+        # A release owner takes this journal lease before its per-model leases.
+        # Keep the allocation check and directory creation in that same fence:
+        # even an empty tree must not reappear after release preparation.
+        with self.journal.locked():
+            request = self.retained(key)
+            bundle = request.signed_submission.submission.model_bundle
+            self.allocations.require_local(digest(bundle))
+            staging = self.root / "files" / digest(bundle)
+            ensure_private_directory(staging)
+            ensure_private_directory(staging / "model")
         return bundle, staging
 
     def _release_preserved_staging(self, bundle: ModelBundle, staging: Path) -> None:
@@ -319,19 +401,12 @@ class CohortModelUploads:
     def put_chunk(self, chunk: ModelUploadChunk, signature: Signature, data: bytes):
         chunk = ModelUploadChunk.model_validate_json(canonical_json_bytes(chunk))
         request = self.retained(chunk.upload_sha256)
-        if identity(signature.hotkey) != identity(request.signed_submission.submission.hotkey):
-            raise ValueError("model chunk signer differs from its submitting hotkey")
-        verify_signature(chunk, signature)
-        if len(data) != chunk.size_bytes or hashlib.sha256(data).hexdigest() != chunk.sha256:
-            raise ValueError("model chunk differs from its signed bytes")
+        chunk = validate_model_upload_chunk(request, chunk, signature, data)
         bundle, staging = self._paths(chunk.upload_sha256)
-        if chunk.file_index >= len(bundle.files):
-            raise ValueError("file is outside the signed model manifest")
         record = bundle.files[chunk.file_index]
-        if chunk.offset + len(data) > record.size_bytes or (not data and record.size_bytes):
-            raise ValueError("chunk is outside the declared file")
         lease = lock_private_file(staging / "upload.lock")
         try:
+            self.allocations.require_local(digest(bundle))
             for root in (self.archive / digest(bundle) / "model", staging / "model"):
                 if (root / record.path).exists() or (root / record.path).is_symlink():
                     with _directory(root) as descriptor, _artifact(descriptor, record) as (f, _):
@@ -375,6 +450,7 @@ class CohortModelUploads:
         bundle, staging = self._paths(key)
         lease = lock_private_file(staging / "upload.lock")
         try:
+            self.allocations.require_local(digest(bundle))
             if (self.archive / digest(bundle)).exists():
                 self._release_preserved_staging(bundle, staging)
                 return True
@@ -428,8 +504,10 @@ class CohortModelUploads:
         finally:
             os.close(lease)
 
-    def poll_once(self):
+    def poll_once(self, *, remote_payloads=None, remote_review=None):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
+        if remote_payloads is not None and remote_payloads.intake is not self.intake:
+            raise ValueError("remote model polling requires the same native intake owner")
         ready = pending = 0
         reviews_ready = reviews_pending = reviews_held = 0
         review_hold_reason = ""
@@ -437,11 +515,31 @@ class CohortModelUploads:
         seen = set()
         for key in self.journal.keys("upload"):
             try:
-                bundle, staging = self._paths(key)
+                request = self.retained(key)
+                bundle = request.signed_submission.submission.model_bundle
                 model = digest(bundle)
                 if model in seen:
                     continue
                 seen.add(model)
+                if self.allocations.state(model) in {"release_prepared", "released"}:
+                    if remote_payloads is None:
+                        raise OSError("released model awaits its authenticated remote poll owner")
+                    remote_payloads.require_owned_payload(request)
+                    review_status, reason = (
+                        self._ensure_review(bundle, allow_local=False)
+                        if remote_review is None
+                        else remote_review(request)
+                    )
+                    ready += 1
+                    if review_status == "ready":
+                        reviews_ready += 1
+                    elif review_status == "held":
+                        reviews_held += 1
+                        review_hold_reason = reason
+                    elif review_status == "pending":
+                        reviews_pending += 1
+                    continue
+                bundle, staging = self._paths(key)
                 receipt = self.journal.get("preserved", model)
                 if receipt is not None and (self.archive / model).is_dir():
                     if any((staging / "model").iterdir()):
@@ -485,9 +583,10 @@ class CohortModelUploads:
             "last_review_hold_reason": review_hold_reason,
             "last_error_type": error_type,
             "artifact_review_certified": False,
+            "storage_allocations": self.allocations.snapshot(),
         }
 
-    def _ensure_review(self, bundle: ModelBundle) -> tuple[str, str]:
+    def _ensure_review(self, bundle: ModelBundle, *, allow_local=True) -> tuple[str, str]:
         """Retain one stable review or one stable hold for an exact model."""
 
         if self.config.admission_reviews_directory is None:
@@ -506,6 +605,10 @@ class CohortModelUploads:
             if retained.model_sha256 != model:
                 raise ValueError("pre-admission review differs from the preserved model")
             return "ready", ""
+        if not allow_local:
+            # A released model's completed reviews are retained metadata. Never
+            # reconstruct a durable archive or repeat local review after release.
+            raise OSError("released model requires retained pre-admission review repair")
         standing = self.config.standing_review_policy
         if standing is None:
             return "pending", ""

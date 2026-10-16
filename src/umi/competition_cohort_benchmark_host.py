@@ -16,7 +16,8 @@ from pydantic import Field, model_validator
 from .competition_cohort_execution_journal import CohortExecutionConfig, CohortExecutionJournal
 from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
-from .competition_cohort_model_acceptance import ModelReviewRequest
+from .competition_cohort_legacy_model_cache import LegacyCohortModelCache
+from .competition_cohort_model_acceptance import ModelAcceptanceIntent, ModelReviewRequest
 from .competition_cohort_order_http import order_routes
 from .competition_cohort_order_inbox import CohortOrderInbox, CohortOrderInboxConfig
 from .competition_cohort_order_signer import (
@@ -102,6 +103,7 @@ class BenchmarkHost:
         *,
         model_reviewer=None,
         direct_artifacts=None,
+        legacy_readers=None,
     ):
         self.config = c = BenchmarkHostConfig.model_validate_json(
             canonical_json_bytes(config.benchmark)
@@ -131,6 +133,8 @@ class BenchmarkHost:
         )
         if direct_artifacts is not None and model_reviewer is None:
             raise ValueError("direct benchmark artifact review requires the review journal")
+        if legacy_readers is not None and direct_artifacts is None:
+            raise ValueError("legacy R2 benchmark requires explicit bounded materialization")
         if direct_artifacts is None:
             self.sandbox = CohortCpuSandbox(**sandbox)
         else:
@@ -143,10 +147,28 @@ class BenchmarkHost:
                 value = ModelReviewRequest.model_validate_json(canonical_json_bytes(raw))
                 if value.record.request.signed_submission != job.submission:
                     raise ValueError("direct model review request differs from execution")
+                if legacy_readers is not None and legacy_readers.has_cohort(
+                    job.round.cohort_sha256
+                ):
+                    raw_intent = model_reviewer.journal.get("model_intent", slot)
+                    if raw_intent is None:
+                        raise ValueError("legacy execution lacks its private reviewed intent")
+                    intent = ModelAcceptanceIntent.model_validate_json(
+                        canonical_json_bytes(raw_intent)
+                    )
+                    if intent.acceptance != value.acceptance:
+                        raise ValueError("legacy execution changes its private reviewed intent")
                 return value
 
             self.sandbox = DirectCohortCpuSandbox(
-                **sandbox, artifacts=direct_artifacts, request=request
+                **sandbox,
+                artifacts=direct_artifacts,
+                request=request,
+                legacy_artifacts=(
+                    None
+                    if legacy_readers is None
+                    else LegacyCohortModelCache(direct_artifacts, legacy_readers)
+                ),
             )
         self.worker = CohortExecutionWorker(
             self.inbox,

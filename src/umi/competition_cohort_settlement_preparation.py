@@ -153,8 +153,10 @@ class SettlementArtifactPreparation:
             return
         participant, certificate = await run_owned_thread(self._accepted, key, path)
         a = certificate.acceptance
-        if a.direct_artifact is not None:
-            verifier = self.direct.get(a.cohort_sha256)
+        verifier = self.direct.get(a.cohort_sha256)
+        if a.direct_artifact is not None or (
+            verifier is not None and verifier.legacy_for(a.cohort_sha256) is not None
+        ):
             if verifier is None:
                 raise OSError("direct model preparation requires the selected R2 verifier")
             await verifier.ensure(participant, certificate)

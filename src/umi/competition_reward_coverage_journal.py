@@ -49,7 +49,11 @@ from .competition_reward_coverage_models import (
     CoverageModelDependencyRepairRequired,
     restore_coverage_model_dependencies,
 )
-from .competition_reward_coverage_prepared import RetainedCoveragePackage, retained_package_sha256
+from .competition_reward_coverage_prepared import (
+    CoveragePackageReplayRequired,
+    RetainedCoveragePackage,
+    retained_package_sha256,
+)
 from .competition_reward_decisions import DecisionSource, RewardActivation
 from .competition_reward_eligibility import RewardEligibilityRuntime
 from .competition_reward_eligibility_archive import review_reward_eligibility
@@ -60,6 +64,7 @@ from .competition_reward_opportunity import (
 )
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
+from .competition_reward_transport_qualification import PackageTransportRepairRequired
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .competition_verification_snapshot import verified_package_digest
@@ -578,6 +583,7 @@ class RewardCoverageJournal:
                         history=history,
                         history_source=history_source,
                         profile=profile,
+                        package=package,
                     )
                 )
                 if restored is not None:
@@ -644,6 +650,7 @@ class RewardCoverageJournal:
         history,
         history_source,
         profile,
+        package=None,
     ):
         value = await run_owned_thread(self.checkpoints.load, key)
         if value is None:
@@ -694,10 +701,29 @@ class RewardCoverageJournal:
                     current_block=point.block,
                 )
         try:
+            transport = await run_owned_thread(
+                lambda: preparation.transport_qualifications.load(
+                    value["package_sha256"], value["cohort_sha256"]
+                )
+            )
+            if transport is None:
+                if package is None:
+                    return None
+                if type(package) is RetainedCoveragePackage:
+                    raise CoveragePackageReplayRequired
+                # One metadata-only upgrade of the exact original package.
+                # Existing block/coverage/model-byte results remain untouched.
+                await run_owned_thread(
+                    lambda: preparation.transport_qualifications.qualify(
+                        package,
+                        package_sha256=value["package_sha256"],
+                        cohort_sha256=value["cohort_sha256"],
+                    )
+                )
             model_dependencies_ready = await restore_coverage_model_dependencies(
                 preparation, value.get("model_dependencies")
             )
-        except CoverageModelDependencyRepairRequired as error:
+        except (CoverageModelDependencyRepairRequired, PackageTransportRepairRequired) as error:
             raise CoverageCheckpointRepairRequired(str(error)) from error
         if not model_dependencies_ready:
             return None

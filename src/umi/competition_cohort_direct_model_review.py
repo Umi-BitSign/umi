@@ -6,11 +6,12 @@ import asyncio
 import json
 import os
 import shutil
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import (
     _directory,
@@ -22,6 +23,8 @@ from .competition_cohort_direct_model_upload import (
     direct_model_object_key,
     preserved_model_object_key,
 )
+from .competition_cohort_legacy_model_readers import LegacyModelStorageReaders
+from .competition_cohort_legacy_model_settlement import LegacyModelSettlementStorage
 from .competition_cohort_model_acceptance import (
     CertifiedModelArtifactAcceptance,
     ModelArtifactReviewInputs,
@@ -34,6 +37,11 @@ from .competition_cohort_model_static_review import (
     verify_standing_review_policy,
 )
 from .competition_cohort_roster import RecoverableRosterParticipant
+from .competition_model_cache_space import (
+    BootDiskModelCache,
+    BootDiskModelCacheConfig,
+    disjoint,
+)
 from .competition_model_materialization import materialize_model_files, pending_materialization
 from .competition_remote_model_verification import (
     model_byte_store,
@@ -78,16 +86,32 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
         tuple[Directory, ...], Field(min_length=1, max_length=16)
     ]
     materialization_concurrency: Literal[1] = 1
+    materialization_boot_disk_cache: BootDiskModelCacheConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if self.materialization_boot_disk_cache is None:
+            value.pop("materialization_boot_disk_cache", None)
+        return value
 
     @model_validator(mode="after")
     def bounded_materialization_filesystem(self):
-        if (
+        boot = self.materialization_boot_disk_cache
+        if len(set(self.materialization_protected_roots)) != len(
+            self.materialization_protected_roots
+        ) or (
             self.maximum_materialized_bytes + self.materialization_free_space_reserve_bytes
             > self.materialization_filesystem_maximum_bytes
-            or len(set(self.materialization_protected_roots))
-            != len(self.materialization_protected_roots)
+            if boot is None
+            else self.maximum_materialized_bytes >= boot.maximum_allocated_bytes
         ):
             raise ValueError("direct model materialization filesystem bounds differ")
+        if boot is not None and any(
+            not disjoint(Path(boot.directory), Path(path))
+            for path in self.materialization_protected_roots
+        ):
+            raise ValueError("boot-disk model cache overlaps a protected root")
         return self
 
     def stores(self) -> tuple[Path, ...]:
@@ -159,6 +183,12 @@ class DirectModelArtifactReviewer:
             private_path(str(verification_root))
         self.verification_root = verification_root
         self.verification_serial = asyncio.Lock()
+        self.materialization_serial = asyncio.Lock()
+        boot = self.config.materialization_boot_disk_cache
+        if boot is not None and (
+            verification_root is None or not disjoint(Path(boot.directory), Path(verification_root))
+        ):
+            raise ValueError("boot-disk cache requires disjoint durable verification state")
 
     def _source(self, request: ModelReviewRequest, *, preserved: bool = False):
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
@@ -260,30 +290,56 @@ class DirectModelArtifactReviewer:
         return inputs
 
     def verify_materialization_filesystem(self, root: Path):
-        """Fail closed unless scratch is private, bounded and filesystem-isolated."""
+        """Select legacy filesystem isolation or an explicit bounded shared cache."""
 
         root = Path(root)
         ensure_private_directory(root)
         scratch_device = _filesystem_device(root)
+        boot = self.config.materialization_boot_disk_cache
+        if boot is not None:
+            cache = BootDiskModelCache(
+                boot, reserve_bytes=self.config.materialization_free_space_reserve_bytes
+            )
+            cache.validate_root(root)
         for raw_path in self.config.materialization_protected_roots:
             protected = Path(raw_path)
             try:
-                if _filesystem_device(protected) == scratch_device:
+                private_path(str(protected))
+                device = _filesystem_device(protected)
+                if boot is None and device == scratch_device:
                     raise OSError("direct model scratch shares a protected filesystem")
+                if boot is not None and not disjoint(cache.root, protected):
+                    raise OSError("boot-disk model cache overlaps a protected root")
             except FileNotFoundError as error:
                 raise OSError("direct model protected filesystem is unavailable") from error
         usage = _filesystem_usage(root)
-        if usage.total > self.config.materialization_filesystem_maximum_bytes:
+        if boot is not None:
+            cache.available_bytes()
+        elif usage.total > self.config.materialization_filesystem_maximum_bytes:
             raise OSError("direct model scratch filesystem exceeds its configured quota")
         return usage
 
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Transfer into one bounded cache and preserve remote results on eviction."""
         _, payload, _ = self._source(request, preserved=True)
-        with TransferProgress("model_materialization", payload.total_bytes) as progress:
-            return await self._materialize(request, archive, progress)
+        async with self.materialization_serial:
+            boot = self.config.materialization_boot_disk_cache
+            cache = (
+                None
+                if boot is None
+                else BootDiskModelCache(
+                    boot, reserve_bytes=self.config.materialization_free_space_reserve_bytes
+                )
+            )
+            if cache is not None:
+                self.verify_materialization_filesystem(Path(archive).parent)
+            with (
+                TransferProgress("model_materialization", payload.total_bytes) as progress,
+                cache.allocation_lease() if cache is not None else nullcontext(),
+            ):
+                return await self._materialize(request, archive, progress, cache=cache)
 
-    async def _materialize(self, request, archive, progress):
+    async def _materialize(self, request, archive, progress, *, cache=None):
         request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
         bundle, payload, object_key = self._source(request, preserved=True)
         if payload.total_bytes > self.config.maximum_materialized_bytes:
@@ -303,6 +359,10 @@ class DirectModelArtifactReviewer:
         if not archive.is_absolute() or archive.is_symlink():
             raise ValueError("direct model scratch archive differs")
         self.verify_materialization_filesystem(archive.parent)
+        if cache is not None:
+            with TransferProgress("model_cache_space_preparation", 1, unit="objects") as space:
+                cache.prepare(bundle)
+                space.advance(1)
         source = remote_identity(self.multipart, object_key, head)
         document_paths = tuple(
             record.path for record in bundle.files if record.role in {"license", "provenance"}
@@ -337,8 +397,13 @@ class DirectModelArtifactReviewer:
                 verification_root=self.verification_root,
                 document_paths=document_paths,
                 progress=progress,
-                available_bytes=lambda: self.verify_materialization_filesystem(archive.parent).free,
+                available_bytes=(
+                    (lambda: self.verify_materialization_filesystem(archive.parent).free)
+                    if cache is None
+                    else cache.available_bytes
+                ),
                 reserve_bytes=self.config.materialization_free_space_reserve_bytes,
+                check_write=None if cache is None else cache.check_write,
             )
             if await self.multipart.head(object_key) != head:
                 raise ValueError("direct model object changed during materialization")
@@ -391,6 +456,8 @@ class DirectModelArtifactReviewer:
     async def materialized(self, request: ModelReviewRequest, archive: Path) -> bool:
         """Authenticate retained bytes and expose required local cache repair."""
         _, payload, _ = self._source(request, preserved=True)
+        if self.config.materialization_boot_disk_cache is not None:
+            self.verify_materialization_filesystem(Path(archive).parent)
         with TransferProgress(
             "model_cache_validation", 1, unit="objects", planning_work_bytes=payload.total_bytes
         ) as progress:
@@ -438,9 +505,29 @@ class DirectModelSettlementVerifier:
         artifacts: DirectModelArtifactReviewer,
         archive: Path,
         receipts: Path,
+        *,
+        legacy_storage: LegacyModelSettlementStorage | None = None,
+        legacy_readers: LegacyModelStorageReaders | None = None,
     ) -> None:
         self.artifacts = artifacts
+        if legacy_storage is not None and legacy_readers is not None:
+            raise ValueError("legacy settlement selection is ambiguous")
+        self.legacy_storage = legacy_storage
+        self.legacy_readers = legacy_readers
+        sources = legacy_storage.sources if legacy_storage is not None else legacy_readers
         self.archive, self.receipts = Path(archive), Path(receipts)
+        if sources is not None and (
+            digest(sources.policy) != digest(artifacts.policy)
+            or not disjoint(self.archive, Path(sources.verification_root))
+            or (
+                sources.multipart.signer.endpoint,
+                sources.multipart.signer.bucket,
+            )
+            != (artifacts.multipart.signer.endpoint, artifacts.multipart.signer.bucket)
+        ):
+            raise ValueError(
+                "legacy settlement storage differs from its selected policy, namespace or cache"
+            )
         self.serial = asyncio.Lock()
         private_path(str(self.archive))
         ensure_private_directory(self.receipts)
@@ -450,6 +537,14 @@ class DirectModelSettlementVerifier:
             or self.receipts in self.archive.parents
         ):
             raise ValueError("direct settlement receipts and legacy archive must be disjoint")
+
+    def legacy_for(self, cohort):
+        """Choose by the original certificate cohort; other cohorts keep native storage."""
+        if self.legacy_storage is not None:
+            return self.legacy_storage if self.legacy_storage.cohort == cohort else None
+        if self.legacy_readers is not None and self.legacy_readers.has_cohort(cohort):
+            return LegacyModelSettlementStorage(self.legacy_readers, cohort)
+        return None
 
     @staticmethod
     def _request(
@@ -506,6 +601,10 @@ class DirectModelSettlementVerifier:
     ) -> None:
         request = self._request(participant, certificate)
         if request is None:
+            legacy = self.legacy_for(certificate.acceptance.cohort_sha256)
+            if legacy is not None:
+                await legacy.ensure(participant, certificate, self.receipts, repairing=True)
+                return
             await run_owned_thread(
                 verify_preserved_bundle,
                 participant.record.request.signed_submission.submission.model_bundle,
@@ -566,6 +665,10 @@ class DirectModelSettlementVerifier:
     ) -> None:
         request = self._request(participant, certificate)
         if request is None:
+            legacy = self.legacy_for(certificate.acceptance.cohort_sha256)
+            if legacy is not None:
+                legacy.verify_candidate(participant, certificate, self.receipts)
+                return
             verify_preserved_bundle(
                 participant.record.request.signed_submission.submission.model_bundle,
                 self.archive,

@@ -21,6 +21,7 @@ from .competition_cohort_endpoint import (
 from .competition_cohort_intake import CohortIntakeConfig
 from .competition_cohort_miner_case import (
     CohortCaseMinerGrant,
+    MinerGrant,
     grant_requests,
     grant_slot,
     parse_miner_grant,
@@ -105,6 +106,73 @@ _MINER_CONFIG = TypeAdapter(
 )
 
 
+def validate_miner_grant(
+    grant: MinerGrant,
+    validator_hotkey: str,
+    *,
+    config: CohortMinerConfig,
+    policy: CompetitionPolicy,
+    transport: ScoringPolicy,
+) -> MinerGrant:
+    """Replay one original grant without opening or mutating its owner journal.
+
+    Parent lineage and current execution authority remain separate checks.
+    """
+    cohorts = {c.cohort_sha256: c.authority_sha256 for c in config.cohorts}
+    raw = canonical_json_bytes(grant)
+    if len(raw) > MAX_COHORT_GRANT_BYTES:
+        raise ValueError("cohort miner grant exceeds its byte bound")
+    grant = parse_miner_grant(raw)
+    if isinstance(grant, ServiceMinerGrant):
+        if not isinstance(config, CohortServiceMinerConfig):
+            raise ValueError("service grants require explicit miner terms configuration")
+        grant = verify_service_grant(grant, policy, transport)
+        body = grant.body
+        sub = body.assignment.admission.submission.submission
+        if (
+            identity(validator_hotkey) != identity(body.evaluator_hotkey)
+            or identity(sub.hotkey) != identity(config.miner_hotkey)
+            or sub.model_revision != config.model_revision
+            or public_https_origin(sub.endpoint_url) != public_https_origin(config.serving_origin)
+            or body.assignment.catalog.catalog.service_terms_sha256 != config.service_terms_sha256
+            or cohorts.get(body.assignment.round.cohort_sha256)
+            != body.assignment.catalog.catalog.authority_sha256
+        ):
+            raise ValueError("service grant differs from miner configuration")
+        return grant
+    assignment, attempt = grant.assignment, grant.attempt
+    order = assignment.certificate.order
+    verify_recovery_quorum(order, assignment.certificate.signatures, policy)
+    if any(
+        identity(s.hotkey) == identity(order.submission.submission.hotkey)
+        for s in assignment.certificate.signatures
+    ):
+        raise ValueError("miner cannot authorize its own assignment")
+    delivery = check_delivery_receipt(assignment.certificate, assignment.delivery)
+    evaluator = delivery.receipt.evaluator_hotkey
+    if identity(validator_hotkey) != identity(evaluator):
+        raise ValueError("cohort grant caller is not its assigned evaluator")
+    job = recoverable_order_job(order, evaluator)
+    if isinstance(grant, CohortCaseMinerGrant):
+        validate_case_attempt(attempt, policy, transport)
+    else:
+        validate_recoverable_endpoint_transport(attempt, policy, transport)
+    sub = job.submission.submission
+    if (
+        attempt.order.job != job
+        or job.mode != "endpoint_incumbent"
+        or identity(sub.hotkey) != identity(config.miner_hotkey)
+        or sub.model_revision != config.model_revision
+        or public_https_origin(sub.endpoint_url) != public_https_origin(config.serving_origin)
+    ):
+        raise ValueError("cohort grant differs from miner assignment or serving configuration")
+    if isinstance(grant, CohortMinerGrant) and attempt.order.attempt_number != 1:
+        raise ValueError("replacement attempt requires certified remote reconciliation")
+    if job.round.cohort_sha256 not in cohorts:
+        raise ValueError("cohort grant has no configured authority")
+    return grant
+
+
 class CohortMinerAuthorizationAuthority:
     """The host owns the authenticated current history source and finality port."""
 
@@ -178,61 +246,13 @@ class CohortMinerAuthorizationAuthority:
         )
 
     def _validate_one(self, grant, validator_hotkey):
-        raw = canonical_json_bytes(grant)
-        if len(raw) > MAX_COHORT_GRANT_BYTES:
-            raise ValueError("cohort miner grant exceeds its byte bound")
-        grant = parse_miner_grant(raw)
-        if isinstance(grant, ServiceMinerGrant):
-            if not isinstance(self.config, CohortServiceMinerConfig):
-                raise ValueError("service grants require explicit miner terms configuration")
-            grant = verify_service_grant(grant, self.policy, self.transport)
-            body = grant.body
-            sub = body.assignment.admission.submission.submission
-            if (
-                identity(validator_hotkey) != identity(body.evaluator_hotkey)
-                or identity(sub.hotkey) != identity(self.config.miner_hotkey)
-                or sub.model_revision != self.config.model_revision
-                or public_https_origin(sub.endpoint_url)
-                != public_https_origin(self.config.serving_origin)
-                or body.assignment.catalog.catalog.service_terms_sha256
-                != self.config.service_terms_sha256
-                or self.cohorts.get(body.assignment.round.cohort_sha256)
-                != body.assignment.catalog.catalog.authority_sha256
-            ):
-                raise ValueError("service grant differs from miner configuration")
-            return grant
-        assignment, attempt = grant.assignment, grant.attempt
-        order = assignment.certificate.order
-        verify_recovery_quorum(order, assignment.certificate.signatures, self.policy)
-        if any(
-            identity(s.hotkey) == identity(order.submission.submission.hotkey)
-            for s in assignment.certificate.signatures
-        ):
-            raise ValueError("miner cannot authorize its own assignment")
-        delivery = check_delivery_receipt(assignment.certificate, assignment.delivery)
-        evaluator = delivery.receipt.evaluator_hotkey
-        if identity(validator_hotkey) != identity(evaluator):
-            raise ValueError("cohort grant caller is not its assigned evaluator")
-        job = recoverable_order_job(order, evaluator)
-        if isinstance(grant, CohortCaseMinerGrant):
-            validate_case_attempt(attempt, self.policy, self.transport)
-        else:
-            validate_recoverable_endpoint_transport(attempt, self.policy, self.transport)
-        sub = job.submission.submission
-        if (
-            attempt.order.job != job
-            or job.mode != "endpoint_incumbent"
-            or identity(sub.hotkey) != identity(self.config.miner_hotkey)
-            or sub.model_revision != self.config.model_revision
-            or public_https_origin(sub.endpoint_url)
-            != public_https_origin(self.config.serving_origin)
-        ):
-            raise ValueError("cohort grant differs from miner assignment or serving configuration")
-        if isinstance(grant, CohortMinerGrant) and attempt.order.attempt_number != 1:
-            raise ValueError("replacement attempt requires certified remote reconciliation")
-        if job.round.cohort_sha256 not in self.cohorts:
-            raise ValueError("cohort grant has no configured authority")
-        return grant
+        return validate_miner_grant(
+            grant,
+            validator_hotkey,
+            config=self.config,
+            policy=self.policy,
+            transport=self.transport,
+        )
 
     def _validate(self, grant, validator_hotkey):
         grant = self._validate_one(grant, validator_hotkey)

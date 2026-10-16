@@ -6,6 +6,9 @@ from pathlib import Path
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_intake_export import RemoteIntakeProgressReviewer
 from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
+from .competition_cohort_model_delivery_api import ModelDeliveryAdoptionReviewer
+from .competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidate
+from .competition_cohort_model_delivery_reservation import ModelDeliveryReservationReader
 from .competition_cohort_preparation_export import RemotePreparationProgressReviewer
 from .competition_cohort_preparation_review_http import PreparationReviewHTTPClient
 from .competition_cohort_recovery import cohort_tracks, verify_cohort_service_pool
@@ -107,6 +110,26 @@ class SelectedPhaseReviewer:
                 timeout_seconds=adoption_export_timeout,
                 complete_exchange=config.phase_review_budget is not None,
             ),
+            budget=config.phase_review_budget,
+        )
+
+        self.model_delivery_adoption = ModelDeliveryAdoptionReviewer(
+            config.series,
+            self.policy,
+            provider,
+            self.adoption.history,
+            ModelDeliveryReservationReader(
+                client,
+                config.owner_origin,
+                token=token,
+                owner=config.owner_hotkey,
+                timeout_seconds=adoption_export_timeout,
+                complete_exchange=config.phase_review_budget is not None,
+            ),
+            candidates={
+                value.source.cohort_sha256: ModelDeliveryAdoptionCandidate(value, self.policy)
+                for value in config.model_delivery_adoption_candidates
+            },
             budget=config.phase_review_budget,
         )
 

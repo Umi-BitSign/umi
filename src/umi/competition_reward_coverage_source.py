@@ -211,3 +211,16 @@ class NativeRewardCoverageSource:
             )
 
         return self._remember(await self._with_package(review))
+
+    async def repair_model_transport(self, key, *, reason):
+        """Repair supplementary metadata without replaying completed proofs."""
+        async with self._package_guard:
+            value = await run_owned_thread(self.journal.checkpoints.load, key)
+            if value is None:
+                raise ValueError("transport repair requires original completed coverage")
+            await run_owned_thread(
+                lambda: self.preparation.transport_qualifications.repair(
+                    value["package_sha256"], value["cohort_sha256"], reason=reason
+                )
+            )
+            return await self._replay(key)

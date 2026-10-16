@@ -101,6 +101,16 @@ ProgressSampler = Callable[[RegistrationCapture], Awaitable[CohortPhaseProgress]
 ProgressPreparation = Callable[[CohortRecoveryState], AbstractAsyncContextManager[ProgressSampler]]
 
 
+def _pending_control_status(transition: CohortRecoveryTransition) -> str:
+    if transition.operation == "revoke":
+        return "awaiting_revocation_certificate"
+    if transition.operation == "adopt_model_delivery":
+        return "awaiting_model_delivery_adoption_certificate"
+    if transition.operation == "adopt_request_tail_rule":
+        return "awaiting_request_tail_adoption_certificate"
+    raise ValueError("pending control is not a separately certified operation")
+
+
 def _choice(
     state: CohortRecoveryState,
     authority: RecoveryAuthority,
@@ -195,7 +205,7 @@ def replay_cohort_decisions(
     )
     restored = prior_unavailable = 0
     for signed in history.transitions:
-        if signed.transition.operation == "adopt_request_tail_rule":
+        if signed.transition.is_policy_adoption:
             # This separate quorum decision changes no phase or outage credit.
             state = apply_recovery_transition(state, signed, history.authority, policy)
             continue
@@ -308,18 +318,14 @@ class CohortRecoveryCoordinator:
     async def tick(self) -> dict:
         async with self.serial:
             history, state, restored, prior_unavailable = self._history()
-            if (
-                history.plan.sequence > 5
-                and history.plan.schema_ != "umi-recoverable-cohort-plan/4"
-            ):
-                current, pending = self.store.status(self.cohort)
-                if current != state:
-                    return self._report(current, "history_changed_retry")
-                if pending is not None and pending.operation == "adopt_request_tail_rule":
-                    # Intake has already gated receipts for these exact bytes.
-                    # Republishing the predecessor would conflict with that
-                    # reservation before its certificate can be assembled.
-                    return self._report(state, "awaiting_request_tail_adoption_certificate")
+            current, pending = self.store.status(self.cohort)
+            if current != state:
+                return self._report(current, "history_changed_retry")
+            if pending is not None and pending.is_policy_adoption:
+                # Intake has already gated receipts for these exact bytes.
+                # Republishing the predecessor would conflict with that
+                # reservation before its certificate can be assembled.
+                return self._report(state, _pending_control_status(pending))
             # Complete a lost publication acknowledgement before creating more
             # work. This also republishes a terminal cohort after a restart.
             await self.publish(history)
@@ -331,9 +337,7 @@ class CohortRecoveryCoordinator:
             if pending is not None and not pending.requires_progress_evidence:
                 return self._report(
                     state,
-                    "awaiting_revocation_certificate"
-                    if pending.operation == "revoke"
-                    else "awaiting_request_tail_adoption_certificate",
+                    _pending_control_status(pending),
                 )
             if pending is None:
                 intent = None
@@ -404,9 +408,7 @@ class CohortRecoveryCoordinator:
             if not pending.requires_progress_evidence:
                 return self._report(
                     state,
-                    "awaiting_revocation_certificate"
-                    if pending.operation == "revoke"
-                    else "awaiting_request_tail_adoption_certificate",
+                    _pending_control_status(pending),
                 )
             evidence = self.store.source(self.cohort, pending.evidence_sha256, CohortDecisionInput)
             expected, _ = _choice(
