@@ -11,15 +11,18 @@ import pytest
 from fastapi import FastAPI
 
 from umi.competition_cohort_intake import history_tip
+from umi.competition_cohort_legacy_model_storage import LegacyModelOriginals
+from umi.competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidate
 from umi.competition_cohort_model_delivery_preflight import (
     PATH,
     ModelDeliveryPreflightExporter,
     ModelDeliveryPreflightRequest,
     model_delivery_preflight_routes,
 )
-from umi.open_competition import digest
+from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes, sha256_hex
 
+from .test_competition_cohort_intake import capture_at
 from .test_competition_cohort_model_delivery_issuance import base_policy as base_policy
 from .test_competition_cohort_model_delivery_issuance import case as case
 from .test_competition_cohort_model_delivery_issuance import census, post
@@ -134,6 +137,91 @@ def test_pending_adoption_is_observed_without_changing_reservation(issuance):
     value = json.loads(exporter.export(request))
     assert value["pending_transition_sha256"] == digest(issuance.transition)
     assert database_bytes(issuance) == before
+
+
+def test_repeated_submission_keeps_each_original_consent_lineage_through_reservation(issuance):
+    i, c = issuance, issuance.case
+    original = c.requests[0].record.request
+    body = original.consent.consent.model_copy(
+        update={"signed_at_block": original.consent.consent.signed_at_block + 1}
+    )
+    duplicate = original.model_copy(
+        update={
+            "consent": original.consent.model_copy(
+                update={"consent": body, "signature": sign_object(body, wallet("Alice"))}
+            )
+        }
+    )
+    assert duplicate.signed_submission == original.signed_submission
+    assert digest(duplicate) != digest(original)
+    assert i.uploads.reserve(duplicate, capture_at(220)) == digest(duplicate)
+    before = database_bytes(i)
+    exporter, request = selected(i)
+    exported = json.loads(exporter.export(request))
+    assert exporter.export(request) == canonical_json_bytes(exported)
+    assert database_bytes(i) == before
+    entries = {e["request_sha256"]: e for e in exported["entries"]}
+    extra = entries[digest(duplicate)]
+    assert extra["participation_raw_sha256"] is None
+    assert extra["admission_raw_sha256"] is None
+    assert extra["intent_raw_sha256"] is None
+    assert extra["certificate_raw_sha256"] is None
+    accepted = entries[digest(original)]
+    assert accepted["certificate_raw_sha256"] is not None
+    assert accepted["intent_raw_sha256"] is not None
+    raw_objects = {o["raw_sha256"]: o["raw_json"].encode() for o in exported["objects"]}
+    for entry in c.legacy.entries:
+        for field in (
+            "request_raw_sha256",
+            "participation_raw_sha256",
+            "admission_raw_sha256",
+            "intent_raw_sha256",
+            "certificate_raw_sha256",
+        ):
+            identity = getattr(entry, field)
+            if identity is not None:
+                assert raw_objects[identity] == c.objects[identity]
+    for key, raw in raw_objects.items():
+        path = i.root / "objects" / (key + ".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    extra_native = LegacyModelOriginals(
+        request_sha256=digest(duplicate),
+        model_sha256=extra["model_sha256"],
+        request_raw_sha256=extra["request_raw_sha256"],
+        payload_state="preserved",
+    )
+    legacy = c.legacy.model_copy(
+        update={
+            "entries": tuple(
+                sorted((*c.legacy.entries, extra_native), key=lambda e: e.request_sha256)
+            )
+        }
+    )
+    preservation = c.preservation.model_copy(update={"legacy_inventory_sha256": digest(legacy)})
+    (i.root / "legacy-inventory.json").write_bytes(canonical_json_bytes(legacy))
+    (i.root / "preservation-inventory.json").write_bytes(canonical_json_bytes(preservation))
+    i.transition = i.candidate.prepare(c.history, 221)
+    assert census(i, reserve=True).legacy == legacy
+    i.candidate = ModelDeliveryAdoptionCandidate(i.config, c.policy, multipart=i.remote)
+    assert census(i, reserve=True).legacy == legacy
+    assert i.uploads.reserve(duplicate, None) == digest(duplicate)
+    assert not i.remote.reads
+
+
+@pytest.mark.parametrize("boundary", ["preflight", "census"])
+def test_acceptance_without_an_admitted_parent_refuses_instead_of_disappearing(issuance, boundary):
+    i, c = issuance, issuance.case
+    consent = c.requests[0].record.proposed_admission.consent_sha256
+    with c.owner.intake._connection() as (db, _):
+        db.execute("DELETE FROM cohort_admission_certificates WHERE consent=?", (consent,))
+    with pytest.raises(ValueError, match=r"orphaned acceptance|orphaned original acceptance"):
+        if boundary == "preflight":
+            exporter, request = selected(i)
+            exporter.export(request)
+        else:
+            census(i, reserve=True)
+    assert c.owner.intake.pending_policy_adoption(c.cohort) is None
 
 
 @pytest.mark.parametrize("fault", ["changed_tip", "capacity", "orphan"])

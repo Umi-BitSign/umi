@@ -148,8 +148,6 @@ class ModelDeliveryPreflightExporter:
                     if sub.track != "model" or sub.model_bundle is None:
                         raise ValueError("model preflight found a non-model upload")
                     submission = digest(sub)
-                    if participation is not None:
-                        submissions.add(submission)
                     admission = (
                         _body(
                             db,
@@ -161,19 +159,32 @@ class ModelDeliveryPreflightExporter:
                         if consent is not None
                         else None
                     )
-                    intent = _body(
-                        db,
-                        tables,
-                        "cohort_model_acceptance_intents",
-                        "cohort=? AND submission=?",
-                        (cohort, submission),
+                    if admission is not None:
+                        submissions.add(submission)
+                    # Acceptance tables are submission-scoped. A second signed
+                    # consent may share that submission without ever reaching
+                    # admission; it must retain its own missing parent lineage.
+                    intent = (
+                        _body(
+                            db,
+                            tables,
+                            "cohort_model_acceptance_intents",
+                            "cohort=? AND submission=?",
+                            (cohort, submission),
+                        )
+                        if admission is not None
+                        else None
                     )
-                    publication = _body(
-                        db,
-                        tables,
-                        "cohort_model_acceptances",
-                        "cohort=? AND submission=?",
-                        (cohort, submission),
+                    publication = (
+                        _body(
+                            db,
+                            tables,
+                            "cohort_model_acceptances",
+                            "cohort=? AND submission=?",
+                            (cohort, submission),
+                        )
+                        if admission is not None
+                        else None
                     )
                     certificate = None
                     if publication is not None:
