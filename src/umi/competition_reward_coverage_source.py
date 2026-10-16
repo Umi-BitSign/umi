@@ -77,6 +77,13 @@ class NativeRewardCoverageSource:
         self._retained_package = None
         self._package_guard = package_guard if package_guard is not None else asyncio.Lock()
         self.profile = profile
+        self.runtime_selection = journal.runtime_selection
+        if self.runtime_selection is not None:
+            self.runtime_selection.recheck()
+            if self.runtime_selection.manifest_sha256 != digest(
+                preparation.manifest
+            ) or self.runtime_selection.policy_sha256 != digest(reader.policy):
+                raise ValueError("coverage runtime adoption differs from source authority")
         self.maximum_history_blocks = maximum_history_blocks
         self.maximum_cached_endpoints = maximum_cached_endpoints
         self._cache: OrderedDict[str, CoverageEndpoint] = OrderedDict()
@@ -116,13 +123,16 @@ class NativeRewardCoverageSource:
     async def _capture(self, validator_hotkey, height):
         history = await self._history(height)
         control = await self.provider.capture_control_at(self.history.hotkey, height)
+        effective_profile = self.profile
+        if self.runtime_selection is not None:
+            effective_profile, _ = self.runtime_selection.selected(control.snapshot.block_number)
         eligibility = await capture_reward_eligibility(
             self.provider,
             control,
             validator_hotkey=validator_hotkey,
             control_hotkey=self.history.hotkey,
-            profile=self.profile,
-            expected_runtime_profile_sha256=self.journal.rule.runtime_profile_sha256,
+            profile=effective_profile,
+            expected_runtime_profile_sha256=digest(effective_profile),
         )
 
         async def review(package):
@@ -133,6 +143,7 @@ class NativeRewardCoverageSource:
                 history=history,
                 source=self.decisions,
                 expected_runtime_profile_sha256=self.journal.rule.runtime_profile_sha256,
+                runtime_selection=self.runtime_selection,
             )
 
         return self._remember(await self._with_package(review))

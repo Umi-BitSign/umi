@@ -711,6 +711,13 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     await p.provider.aclose()
     await configure_eligibility(item, monkeypatch, tmp_path)
     await item.provider.aclose()
+    runtime_consensus = (
+        request.getfixturevalue("runtime_consensus")
+        if "runtime_consensus" in request.fixturenames
+        else None
+    )
+    if runtime_consensus is not None:
+        item.rpc.values[("SubtensorModule", "SubnetEpochConsensus", (78,))] = runtime_consensus
     options = getattr(request, "param", "matching")
     scale = options if isinstance(options, dict) else {}
     variant = scale.get("kind", options)
@@ -1244,9 +1251,9 @@ async def test_native_coordinator_recovers_admission_then_certifies_first_activa
     assert coordinator.publisher.journal.pending() is None
 
 
-@pytest.mark.parametrize("successor", [False, True])
+@pytest.mark.parametrize("predecessor_revision", [None, 0, 1, 2])
 async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
-    native_package, tmp_path, successor, monkeypatch
+    native_package, tmp_path, predecessor_revision, monkeypatch
 ):
     """Discovery only: later-slot authority and interval claims are synthetic.
 
@@ -1254,8 +1261,14 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     An emitted offer carries no signature or chain permission.
     """
     from umi.competition_cohort_reward_package import publish_reward_package
+    from umi.competition_geometric_rewards import GeometricRewardParameters
+    from umi.competition_reward_adoption import (
+        RewardAdoptionSelection,
+        RewardModelAdoption,
+        SignedRewardModelAdoption,
+    )
     from umi.competition_reward_coverage_journal import RewardCoverageJournal
-    from umi.competition_reward_coverage_service import CoverageCompletion
+    from umi.competition_reward_coverage_service import CoverageCompletion, coverage_work_key
     from umi.competition_reward_files import StandingRewardFiles
     from umi.competition_reward_handoff_models import LegacyRewardHandoffPlan
     from umi.competition_reward_manifest import (
@@ -1271,6 +1284,7 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     )
     from umi.open_competition import identity
 
+    successor = predecessor_revision is not None
     p, policy = native_package, native_package.store.policy
     history = p.package.inputs.history
     plans = (history.plan,)
@@ -1348,6 +1362,8 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
         ),
     )
     prior = None
+    reward_adoptions = None
+    stale_activations = []
     if successor:
         prior = RewardActivation(
             cohort_sha256=digest(plans[0]),
@@ -1356,19 +1372,96 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
             recovery_tip_sha256="66" * 32,
             prior_opportunity_sha256=digest(handoff),
         )
+        if predecessor_revision:
+            legacy_prior = prior
+            stale_activations.append(legacy_prior)
+            adoptions = []
+            for revision in range(1, predecessor_revision + 1):
+                adoption = RewardModelAdoption(
+                    schema="umi-standing-model-reward-adoption/1",
+                    series_sha256=digest(series),
+                    policy_sha256=digest(policy),
+                    cohort_sha256=prior.cohort_sha256,
+                    authority_sha256=digest(body),
+                    package_sha256=prior.package_sha256,
+                    allocation_sha256=prior.allocation_sha256,
+                    service_certificate_sha256="a1" * 32,
+                    quality_manifest_sha256="a2" * 32,
+                    effective_allocation_sha256=f"{revision:064x}",
+                    parameters=GeometricRewardParameters(band_decay_bps=7500 + revision),
+                    revision=revision,
+                    predecessor_adoption_sha256=None
+                    if revision == 1
+                    else digest(adoptions[-1].adoption),
+                    issued_at_block=body.issued_at_block + revision,
+                    lifetime="until_first_verified_live_reward_then_locked",
+                )
+                adoptions.append(
+                    SignedRewardModelAdoption(adoption=adoption, signatures=signatures(adoption))
+                )
+            reward_adoptions = RewardAdoptionSelection(
+                schema="umi-standing-reward-adoption-selection/1", adoptions=tuple(adoptions)
+            )
+            prior = legacy_prior.model_copy(
+                update={
+                    "reward_adoption_sha256": digest(adoptions[0].adoption),
+                    "effective_allocation_sha256": (
+                        adoptions[0].adoption.effective_allocation_sha256
+                    ),
+                }
+            )
         prefix += (
             signed(
                 RewardControlDecision(
-                    schema="umi-reward-control-decision/1",
+                    schema="umi-reward-control-decision/3"
+                    if predecessor_revision
+                    else "umi-reward-control-decision/1",
                     series_sha256=digest(series),
                     sequence=1,
                     predecessor_sha256=digest(prefix[-1].decision),
                     kind="activate",
-                    observed_at_block=body.issued_at_block + 1,
+                    observed_at_block=body.issued_at_block + 3,
                     activation=prior,
                 )
             ),
         )
+        if predecessor_revision == 2:
+            stale_activations.append(prior)
+            prefix += (
+                signed(
+                    RewardControlDecision(
+                        schema="umi-reward-control-decision/3",
+                        series_sha256=digest(series),
+                        sequence=len(prefix),
+                        predecessor_sha256=digest(prefix[-1].decision),
+                        kind="suspend_activation",
+                        observed_at_block=body.issued_at_block + 4,
+                        activation=prior,
+                    )
+                ),
+            )
+            prior = legacy_prior.model_copy(
+                update={
+                    "reward_adoption_sha256": digest(adoptions[-1].adoption),
+                    "effective_allocation_sha256": (
+                        adoptions[-1].adoption.effective_allocation_sha256
+                    ),
+                }
+            )
+            prefix += (
+                signed(
+                    RewardControlDecision(
+                        schema="umi-reward-control-decision/3",
+                        series_sha256=digest(series),
+                        sequence=len(prefix),
+                        predecessor_sha256=digest(prefix[-1].decision),
+                        kind="revise_activation",
+                        observed_at_block=body.issued_at_block + 5,
+                        activation=prior,
+                        revision_clearance_sha256="ca" * 32,
+                    )
+                ),
+            )
     files = StandingRewardFiles(
         tmp_path / "offer-files", maximum_package_bytes=8 * 1024**2, maximum_witness_bytes=1024**2
     )
@@ -1385,6 +1478,7 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
         settlements=settlements,
         files=files,
         coverage=coverage,
+        reward_adoptions=reward_adoptions,
     )
     cohort = digest(plans[-1])
     with pytest.raises(ValueError, match="next admitted"):
@@ -1395,6 +1489,18 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     if successor:
         assert offers(cohort, prefix) is None
         assert not (files.root / "packages").exists()
+        for stale in stale_activations:
+            # A legacy completion or earlier adopted revision must not unblock
+            # this revision or attempt to load its unrelated certificate.
+            coverage.journal.put(
+                "coverage_completion",
+                coverage_work_key(stale),
+                CoverageCompletion(
+                    schema="umi-reward-coverage-completion/1", certificate_sha256="f3" * 32
+                ),
+            )
+            assert offers(cohort, prefix) is None
+            assert not (files.root / "packages").exists()
         witness = RewardOpportunityWitness(
             schema="umi-reward-opportunity-witness/1",
             rule_sha256=digest(rule),
@@ -1420,7 +1526,7 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
         completion = CoverageCompletion(
             schema="umi-reward-coverage-completion/1", certificate_sha256=digest(certificate)
         )
-        coverage.journal.put("coverage_completion", prior.cohort_sha256, completion)
+        coverage.journal.put("coverage_completion", coverage_work_key(prior), completion)
         with pytest.raises(FileNotFoundError):
             offers(cohort, prefix)
         files.retain_completion(certificate, lambda _: canonical_json_bytes(witness))
@@ -1446,8 +1552,12 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
             handoff=handoff,
             settlements=settlements,
             files=files,
-            coverage=coverage,
+            coverage=RewardCoverageJournal(
+                tmp_path / "offer-coverage", rule, expected_rule_sha256=digest(rule)
+            ),
+            reward_adoptions=reward_adoptions,
         )
+        assert reopened(cohort, prefix) == offer
         assert reopened(cohort, prefix) == offer
         snapshot = files.verified_package(offer.package_sha256)
         assert snapshot.sha256 == offer.package_sha256
@@ -6180,6 +6290,7 @@ async def test_reward_delivery_consumers_reuse_snapshots_and_require_explicit_re
 
         warm.setattr(snapshot_module, "_read_bounded_private_bytes", metadata_only)
         consume()
+
         record = next(
             path
             for path in (files.root / "verification" / "packages").glob("*.json")
@@ -6217,3 +6328,184 @@ async def test_reward_delivery_consumers_reuse_snapshots_and_require_explicit_re
     with monkeypatch.context() as warm:
         warm.setattr(snapshot_module, "read_aggregate_model", no_fetch)
         consume()
+
+
+@pytest.fixture
+def runtime_consensus(request):
+    return getattr(request, "param", None)
+
+
+@pytest.mark.parametrize("runtime_consensus", ["Yuma"], indirect=True)
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart(
+    complete_preparation_case, tmp_path, monkeypatch, runtime_consensus
+):
+    from umi import competition_reward_coverage_journal as coverage_module
+    from umi.competition_reward_coverage_intervals import coverage_point
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
+    from umi.competition_reward_eligibility import RewardEligibilityRuntime
+    from umi.competition_reward_opportunity import opportunity_rule
+    from umi.competition_reward_runtime_adoption import (
+        RewardRuntimeAdoption,
+        RewardRuntimeAdoptionSelection,
+        SignedRewardRuntimeAdoption,
+        select_reward_runtime,
+    )
+    from umi.competition_reward_runtime_review import (
+        review_selected_reward_eligibility,
+        validate_selected_reward_eligibility,
+    )
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    rule = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    root = tmp_path / "runtime-coverage"
+    preparation_owner = StandingRewardPreparation(
+        c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+
+    def source(journal):
+        return NativeRewardCoverageSource(
+            provider=h.item.provider,
+            journal=journal,
+            history=h.reader,
+            preparation=preparation_owner,
+            package=p.package,
+            decisions=c.source,
+            profile=h.item.profile,
+            maximum_history_blocks=4096,
+        )
+
+    async def capture(owner, height):
+        for _ in range(100):
+            try:
+                return await owner.capture(h.validator_hotkey, height)
+            except CoverageHistoryPending:
+                pass
+        pytest.fail("native fixture history did not converge")
+
+    original = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
+    old = await capture(source(original), h.end - 1)
+    await original.retain_endpoint(old)
+    old_point = coverage_point(old, rule)
+    old_result = original.checkpoints.load(old_point.key())
+    original_evidence = old.eligibility.eligibility_evidence
+    effective = RewardEligibilityRuntime.model_validate_json(
+        canonical_json_bytes(
+            {
+                **h.item.profile.model_dump(mode="json", by_alias=True),
+                "schema": "umi-reward-eligibility-runtime/2",
+                "epoch_source_revision": "f4786f9087cac84cfab37cbdf1e01c399042653a",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "umi.competition_reward_eligibility._QUALIFIED_YUMA_RUNTIMES",
+        frozenset({(effective.runtime_code_sha256, effective.epoch_source_revision)}),
+    )
+    body = RewardRuntimeAdoption(
+        schema="umi-standing-reward-runtime-adoption/1",
+        series_sha256=digest(c.series),
+        manifest_sha256=digest(p.manifest),
+        policy_sha256=digest(c.reader.policy),
+        authority_sha256=digest(c.series.recovery.authority),
+        original_runtime_profile_sha256=digest(h.item.profile),
+        effective_profile=effective,
+        first_block=h.end - 1,
+        last_block=h.end + 100,
+        issued_at_block=h.end,
+        revision=1,
+        predecessor_adoption_sha256=None,
+        original_signed_inputs_unchanged=True,
+    )
+    selection = select_reward_runtime(
+        RewardRuntimeAdoptionSelection(
+            schema="umi-standing-reward-runtime-adoption-selection/1",
+            adoptions=(SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),),
+        ),
+        series=c.series,
+        manifest=p.manifest,
+        policy=c.reader.policy,
+        original_profile=h.item.profile,
+    )
+    journal = RewardCoverageJournal(
+        root, rule, expected_rule_sha256=digest(rule), runtime_selection=selection
+    )
+    current = await capture(source(journal), h.end)
+    new_point = coverage_point(current, rule)
+    assert new_point.runtime_profile_sha256 == digest(h.item.profile)
+    assert new_point.effective_runtime_profile_sha256 == digest(effective)
+    assert new_point.runtime_adoption_sha256 == digest(body)
+    assert current.eligibility.runtime_profile_sha256 == digest(effective)
+    assert current.covered and old.covered
+    await journal.retain_endpoint(current)
+    assert await journal.credit(old, current)
+    assert original_evidence == old.eligibility.eligibility_evidence
+    assert journal.checkpoints.load(old_point.key()) == old_result
+
+    # Independent current observer and portable archive replay use the exact
+    # same authenticated selection and complete native proof path.
+    control, current_eligibility = await current_state(
+        h,
+        (await h.reader.verified_prefix(h.end)).tip,
+        validator_hotkey=h.validator_hotkey,
+        runtime_selection=selection,
+    )
+    chain = current_eligibility.chain
+    assert validate_selected_reward_eligibility(
+        current_eligibility, selection=selection, expected_chain_config_sha256=digest(h.item.config)
+    ) == digest(body)
+    h.reader = await h.restart()
+    archived = await review_selected_reward_eligibility(
+        h.item.provider,
+        selection=selection,
+        block=chain.block,
+        runtime_profile_sha256=digest(effective),
+        runtime_adoption_sha256=digest(body),
+        control=control.evidence,
+        chain=chain.evidence,
+        eligibility=current_eligibility.evidence,
+        metadata=chain.runtime.metadata_bytes,
+        validator_hotkey=h.validator_hotkey,
+        control_hotkey=c.series.control_hotkey,
+    )
+    assert archived.eligible
+    with pytest.raises(ValueError):
+        await review_selected_reward_eligibility(
+            h.item.provider,
+            selection=selection,
+            block=chain.block + 1,
+            runtime_profile_sha256=digest(effective),
+            runtime_adoption_sha256=digest(body),
+            control=control.evidence,
+            chain=chain.evidence,
+            eligibility=current_eligibility.evidence,
+            metadata=chain.runtime.metadata_bytes,
+            validator_hotkey=h.validator_hotkey,
+            control_hotkey=c.series.control_hotkey,
+        )
+
+    fresh = RewardCoverageJournal(
+        root, rule, expected_rule_sha256=digest(rule), runtime_selection=selection
+    )
+    restarted = source(fresh)
+
+    def prohibit(*args, **kwargs):
+        raise AssertionError("unchanged native coverage was reverified or reread")
+
+    with monkeypatch.context() as warm:
+        warm.setattr(coverage_module, "review_reward_eligibility", prohibit)
+        warm.setattr(coverage_module, "review_reward_coverage", prohibit)
+        warm.setattr(fresh, "_load", prohibit)
+        restored = [await restarted.replay(value.key()) for value in (old_point, new_point)]
+        assert await fresh.credit(*restored)
+    assert fresh.checkpoints.load(old_point.key()) == old_result
+    # Dropping the authenticated new profile never lets its completed native
+    # facts be borrowed under the original legacy boot alone.
+    absent = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
+    with pytest.raises(ValueError, match="not independently selected"):
+        await source(absent).replay(new_point.key())

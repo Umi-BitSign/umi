@@ -64,6 +64,7 @@ from .competition_reward_opportunity import (
 )
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
+from .competition_reward_runtime_adoption import SelectedRewardRuntime
 from .competition_reward_transport_qualification import PackageTransportRepairRequired
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
@@ -113,11 +114,13 @@ class RewardCoverageJournal:
         maximum_bytes: int = 4 * 1024**3,
         archive: RewardProofArchive | None = None,
         export_archive: RewardProofArchive | None = None,
+        runtime_selection: SelectedRewardRuntime | None = None,
     ):
         self.rule = RewardCoverageRule.model_validate_json(canonical_json_bytes(rule))
         self.rule_sha256 = checked_digest(expected_rule_sha256)
         self.archive = archive
         self.export_archive = export_archive
+        self.runtime_selection = runtime_selection
         self._check_rule()
         self.remote_store = None if export_archive is None else export_archive.remote
         self.journal = _CoverageJournal(
@@ -176,6 +179,28 @@ class RewardCoverageJournal:
     def _check_rule(self):
         if digest(self.rule) != self.rule_sha256:
             raise ValueError("coverage rule differs from independently selected parameters")
+        if self.runtime_selection is not None:
+            self.runtime_selection.recheck()
+            if (
+                self.runtime_selection.series_sha256 != self.rule.series_sha256
+                or digest(self.runtime_selection.original_profile)
+                != self.rule.runtime_profile_sha256
+            ):
+                raise ValueError("coverage runtime selection changes its original rule")
+
+    def _runtime_profile(self, point, original_profile):
+        self._check_rule()
+        if digest(original_profile) != self.rule.runtime_profile_sha256:
+            raise ValueError("coverage original runtime profile changed")
+        if point.runtime_adoption_sha256 is None:
+            return original_profile
+        if self.runtime_selection is None:
+            raise ValueError("coverage runtime adoption is not independently selected")
+        return self.runtime_selection.check(
+            block=point.block,
+            profile_sha256=point.effective_runtime_profile_sha256,
+            adoption_sha256=point.runtime_adoption_sha256,
+        )
 
     def _object(self, sha: str, size: int) -> bytes:
         self._reading_sources.append(("coverage_object", sha))
@@ -595,13 +620,14 @@ class RewardCoverageJournal:
                 point, frame, blobs = saved
                 if package_sha256 != frame["package"]:
                     raise ValueError("coverage endpoint requires its original package")
+                effective_profile = self._runtime_profile(point, profile)
                 eligibility = await review_reward_eligibility(
                     provider,
                     **blobs,
                     validator_hotkey=frame["validator_hotkey"],
                     control_hotkey=preparation.reader.series.control_hotkey,
-                    profile=profile,
-                    expected_runtime_profile_sha256=self.rule.runtime_profile_sha256,
+                    profile=effective_profile,
+                    expected_runtime_profile_sha256=digest(effective_profile),
                 )
                 if history is None:
                     if history_source is None:
@@ -617,6 +643,9 @@ class RewardCoverageJournal:
                     source=source,
                     expected_runtime_profile_sha256=self.rule.runtime_profile_sha256,
                     model_dependency_repair_reason=repair_reason,
+                    runtime_selection=self.runtime_selection
+                    if point.runtime_adoption_sha256 is not None
+                    else None,
                 )
                 self._check_rule()
                 if coverage_point(endpoint, self.rule) != point:
@@ -661,6 +690,7 @@ class RewardCoverageJournal:
             raise ValueError("coverage restore requires selected native owners")
         preparation._authority()
         point = CoveragePoint.model_validate(value["point"])
+        self._runtime_profile(point, profile)
         if (
             expected_package_sha256 != value["package_sha256"]
             or preparation.policy_sha256 != value["policy_sha256"]

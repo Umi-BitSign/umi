@@ -62,6 +62,7 @@ from .competition_reward_offers import StandingRewardOffers
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_revision import NativeRewardRevisionReviewer
+from .competition_reward_runtime_adoption import RewardRuntimeAdoptionSelection, select_boot_runtime
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, _close_provider, _stop_task
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
@@ -122,6 +123,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     predecessor_eligibility: RewardEligibilityRuntime | None = None
     reward_adoptions: RewardAdoptionSelection | None = None
     predecessor_reward_adoptions: RewardAdoptionSelection | None = None
+    runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
+    predecessor_runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -139,6 +142,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             "predecessor_eligibility",
             "reward_adoptions",
             "predecessor_reward_adoptions",
+            "runtime_adoptions",
+            "predecessor_runtime_adoptions",
         ):
             if getattr(self, name) is None:
                 value.pop(name, None)
@@ -211,6 +216,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             )
         verify_handoff_plan(self.handoff, self.series)
         verify_adoption_selection(self.reward_adoptions, self.series, self.policy)
+        select_boot_runtime(self)
+        select_boot_runtime(self, predecessor=True)
         if self.predecessor_reward_adoptions is not None:
             if self.predecessor_series is None:
                 raise ValueError("predecessor reward adoption requires its original series")
@@ -401,6 +408,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 maximum_bytes=config.maximum_coverage_bytes,
                 archive=imported,
                 export_archive=exported,
+                runtime_selection=select_boot_runtime(config),
             ),
         )
         predecessor = None
@@ -450,6 +458,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                     maximum_bytes=config.maximum_coverage_bytes,
                     archive=imported,
                     export_archive=exported,
+                    runtime_selection=select_boot_runtime(config, predecessor=True),
                 ),
             )
             predecessor = StandingRewardPredecessorOpportunity(

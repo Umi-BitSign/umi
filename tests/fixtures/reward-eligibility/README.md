@@ -17,3 +17,9 @@ checked division with a zero default, and I32F32 normalized stake. Checked sum
 overflow marks an unsupported range; it does not model an overflowing epoch.
 These vectors establish arithmetic agreement with that source profile, not a
 deployed runtime identity or a payment guarantee.
+
+`runtime479-qualification.json` records the exact code/source pair and evidence
+digests for the separately reviewed Yuma eligibility predicate. Its scope excludes
+whole-runtime and contract-execution equivalence. Every endpoint still requires
+native code and complete state proofs, including its own subnet consensus claim;
+the retained mode sample cannot authorize a later root.

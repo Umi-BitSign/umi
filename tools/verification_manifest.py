@@ -48,6 +48,9 @@ seeds = [
     "competition_reward_writer_broker_cli",
     "competition_reward_writer_broker_worker",
     "competition_reward_writer_review_cli",
+    # Independent acceptance observers select authenticated effective profiles
+    # without changing the original signed standing manifest.
+    "competition_reward_runtime_review",
     "competition_reward_history_transfer_cli",
     "competition_package_reuse_cli",
     "historical_header_hint_import_cli",

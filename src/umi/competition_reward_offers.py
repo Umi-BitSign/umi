@@ -10,7 +10,7 @@ from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
-from .competition_reward_coverage_service import CoverageCompletion
+from .competition_reward_coverage_service import CoverageCompletion, coverage_work_key
 from .competition_reward_decisions import (
     RewardActivation,
     StandingRewardSeries,
@@ -87,7 +87,7 @@ class StandingRewardOffers:
         if index:
             predecessor = effective_activation_decision(prefix).activation
             assert predecessor is not None
-            raw = self.coverage.journal.get("coverage_completion", predecessor.cohort_sha256)
+            raw = self.coverage.journal.get("coverage_completion", coverage_work_key(predecessor))
             if raw is None:
                 return None
             prior = CoverageCompletion.model_validate(raw).certificate_sha256

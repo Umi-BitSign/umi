@@ -20,6 +20,7 @@ from .competition_reward_eligibility_archive import (
 )
 from .competition_reward_history import OwnedRewardControlHistory
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
+from .competition_reward_runtime_adoption import SelectedRewardRuntime
 from .open_competition import RegistrationSnapshot, digest, identity
 from .weight_storage import subtensor_stored_weights
 
@@ -36,6 +37,7 @@ class OwnedRewardCoverageEndpoint:
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
     model_dependencies: dict | None = field(default=None, repr=False)
+    runtime_selection: SelectedRewardRuntime | None = field(default=None, repr=False)
 
     @property
     def covered(self) -> bool:
@@ -55,6 +57,9 @@ def _binding(value: OwnedRewardCoverageEndpoint) -> str:
             "projection": digest(value.projection),
             "row_matches": value.row_matches,
             "model_dependencies": value.model_dependencies,
+            "runtime_selection": None
+            if value.runtime_selection is None
+            else value.runtime_selection._binding,
         }
     )
 
@@ -77,11 +82,23 @@ def validate_reward_coverage(
     ):
         raise ValueError("reward coverage lacks selected native provenance")
     control = value.eligibility.control
+    runtime_profile = expected_runtime_profile_sha256
+    if value.runtime_selection is not None:
+        selected = value.runtime_selection
+        selected.recheck()
+        if (
+            selected.series_sha256 != expected_series_sha256
+            or digest(selected.original_profile) != expected_runtime_profile_sha256
+            or selected.policy_sha256 != value.prepared.allocation.policy_sha256
+        ):
+            raise ValueError("coverage runtime adoption changes its original authority")
+        profile, _ = selected.selected(control.snapshot.block_number)
+        runtime_profile = digest(profile)
     validate_historical_reward_eligibility(
         value.eligibility,
         expected_control_hotkey=control.control_hotkey,
         expected_chain_config_sha256=control.chain_config_sha256,
-        expected_runtime_profile_sha256=expected_runtime_profile_sha256,
+        expected_runtime_profile_sha256=runtime_profile,
         expected_policy_sha256=value.prepared.allocation.policy_sha256,
     )
 
@@ -95,6 +112,7 @@ async def review_reward_coverage(
     source: DecisionSource,
     expected_runtime_profile_sha256: str,
     model_dependency_repair_reason: str | None = None,
+    runtime_selection: SelectedRewardRuntime | None = None,
 ) -> OwnedRewardCoverageEndpoint:
     """Reconstruct one endpoint without a fresh lease or current-state substitution.
 
@@ -105,11 +123,23 @@ async def review_reward_coverage(
     if type(preparation) is not StandingRewardPreparation:
         raise ValueError("reward coverage requires native preparation")
     reader = preparation.reader
+    runtime_profile = expected_runtime_profile_sha256
+    if runtime_selection is not None:
+        runtime_selection.recheck()
+        if (
+            runtime_selection.series_sha256 != preparation.series_sha256
+            or runtime_selection.manifest_sha256 != digest(preparation.manifest)
+            or runtime_selection.policy_sha256 != preparation.policy_sha256
+            or digest(runtime_selection.original_profile) != expected_runtime_profile_sha256
+        ):
+            raise ValueError("coverage runtime selection differs from preparation authority")
+        profile, _ = runtime_selection.selected(eligibility.control.snapshot.block_number)
+        runtime_profile = digest(profile)
     validate_historical_reward_eligibility(
         eligibility,
         expected_control_hotkey=reader.series.control_hotkey,
         expected_chain_config_sha256=reader.admission_chain_config_sha256,
-        expected_runtime_profile_sha256=expected_runtime_profile_sha256,
+        expected_runtime_profile_sha256=runtime_profile,
         expected_policy_sha256=preparation.policy_sha256,
     )
     subject = eligibility.subject
@@ -157,6 +187,7 @@ async def review_reward_coverage(
         matches,
         _issuer=_ISSUER,
         model_dependencies=dependencies,
+        runtime_selection=runtime_selection,
     )
     object.__setattr__(result, "_binding", _binding(result))
     validate_reward_coverage(

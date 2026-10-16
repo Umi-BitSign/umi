@@ -1,9 +1,11 @@
 """Pre-consensus eligibility for the explicitly selected Subtensor epoch profile.
 
 Arithmetic follows c004cebf360f4088187ee49d851dfb1a1eaaf710's stake inheritance,
-activity and sparse-row masks. This module neither authenticates its inputs nor
-proves that the reviewed revision is deployed. The native consumer must bind a
-separately qualified runtime code hash and the complete state at one root.
+activity and sparse-row masks, preserved by the Yuma branch of
+f4786f9087cac84cfab37cbdf1e01c399042653a. This module neither authenticates its
+inputs nor proves that the reviewed revision or Yuma mode is selected. The native
+consumer must bind separately qualified runtime code and complete state at one
+root, including the new revision's per-subnet epoch-consensus proof.
 """
 
 from __future__ import annotations

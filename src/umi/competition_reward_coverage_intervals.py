@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, validate_reward_coverage
 from .competition_reward_opportunity import RewardCoverageRule as RewardCoverageRule
@@ -32,6 +32,26 @@ class CoveragePoint(StrictProtocolModel):
     state_root: BlockHash
     timestamp_ms: Count
     covered: bool
+    effective_runtime_profile_sha256: Hex32 | None = None
+    runtime_adoption_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_point(self, handler):
+        value = handler(self)
+        if self.runtime_adoption_sha256 is None:
+            value.pop("runtime_adoption_sha256", None)
+            value.pop("effective_runtime_profile_sha256", None)
+        return value
+
+    @model_validator(mode="after")
+    def runtime_binding(self):
+        if (self.runtime_adoption_sha256 is None) != (
+            self.effective_runtime_profile_sha256 is None
+        ):
+            raise ValueError("coverage runtime adoption requires its effective profile")
+        if self.effective_runtime_profile_sha256 == self.runtime_profile_sha256:
+            raise ValueError("coverage runtime adoption repeats its original profile")
+        return self
 
     def key(self) -> str:
         # Identity does not depend on a proof's encoding, capture time or the
@@ -121,9 +141,12 @@ def coverage_point(value: CoverageEndpoint, rule: RewardCoverageRule) -> Coverag
     )
     e, prepared = value.eligibility, value.prepared
     ref = e.control.snapshot
+    adoption = None
+    if value.runtime_selection is not None:
+        _, adoption = value.runtime_selection.selected(ref.block_number)
     return CoveragePoint(
         series_sha256=rule.series_sha256,
-        runtime_profile_sha256=e.runtime_profile_sha256,
+        runtime_profile_sha256=rule.runtime_profile_sha256,
         activation_sha256=digest(prepared.activation),
         allocation_sha256=digest(prepared.allocation),
         projection_sha256=digest(value.projection),
@@ -135,6 +158,8 @@ def coverage_point(value: CoverageEndpoint, rule: RewardCoverageRule) -> Coverag
         state_root=ref.state_root,
         timestamp_ms=e.timestamp_ms,
         covered=value.covered,
+        effective_runtime_profile_sha256=e.runtime_profile_sha256 if adoption is not None else None,
+        runtime_adoption_sha256=adoption,
     )
 
 

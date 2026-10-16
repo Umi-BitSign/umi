@@ -58,6 +58,7 @@ from .competition_reward_host import StandingRewardHostApproval
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
+from .competition_reward_runtime_adoption import RewardRuntimeAdoptionSelection, select_boot_runtime
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, run_standing_reward_service
 from .competition_store import CompetitionStore
@@ -132,6 +133,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
     predecessor_eligibility: RewardEligibilityRuntime | None = None
     reward_adoptions: RewardAdoptionSelection | None = None
     predecessor_reward_adoptions: RewardAdoptionSelection | None = None
+    runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
+    predecessor_runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
     predecessor_approval_sha256: Hex32 | None = None
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
@@ -150,6 +153,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
             "predecessor_eligibility",
             "reward_adoptions",
             "predecessor_reward_adoptions",
+            "runtime_adoptions",
+            "predecessor_runtime_adoptions",
             "predecessor_approval_sha256",
         ):
             if getattr(self, name) is None:
@@ -212,6 +217,8 @@ class StandingRewardBootConfig(StrictProtocolModel):
             raise ValueError("standing boot inputs disagree with selected authority")
         verify_handoff_plan(self.handoff, self.series)
         verify_adoption_selection(self.reward_adoptions, self.series, self.policy)
+        select_boot_runtime(self)
+        select_boot_runtime(self, predecessor=True)
         if self.predecessor_reward_adoptions is not None:
             if self.predecessor_series is None:
                 raise ValueError("predecessor reward adoption requires its original series")
@@ -456,6 +463,7 @@ async def run_installed_standing_rewards(
         maximum_bytes=config.maximum_coverage_bytes,
         archive=imported,
         export_archive=exported,
+        runtime_selection=select_boot_runtime(config),
     )
     async with AsyncExitStack() as constructing:
         constructing.enter_context(
@@ -538,6 +546,7 @@ async def run_installed_standing_rewards(
                     maximum_bytes=config.maximum_coverage_bytes,
                     archive=imported,
                     export_archive=exported,
+                    runtime_selection=select_boot_runtime(config, predecessor=True),
                 ),
                 history=old_history,
                 preparation=old_preparation,
