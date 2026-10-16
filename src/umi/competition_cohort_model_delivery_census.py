@@ -74,7 +74,14 @@ def _compare(db, intake, uploads, history, authenticated, originals):
     if requests != expected.keys():
         raise ValueError("model adoption census omits or adds original upload requests")
     acceptance_tables(db)
-    submissions = {submission for _, submission in retained.values()}
+    submissions = {
+        submission
+        for consent, submission in retained.values()
+        if db.execute(
+            "SELECT 1 FROM cohort_admission_certificates WHERE consent=?", (consent,)
+        ).fetchone()
+        is not None
+    }
     for table in ("cohort_model_acceptance_intents", "cohort_model_acceptances"):
         keys = {
             row[0]
@@ -112,17 +119,25 @@ def _compare(db, intake, uploads, history, authenticated, originals):
                     "consent=?",
                     (record.proposed_admission.consent_sha256,),
                 )
-                intent = _body(
-                    db,
-                    "cohort_model_acceptance_intents",
-                    "cohort=? AND submission=?",
-                    (cohort, digest(sub)),
+                intent = (
+                    _body(
+                        db,
+                        "cohort_model_acceptance_intents",
+                        "cohort=? AND submission=?",
+                        (cohort, digest(sub)),
+                    )
+                    if admission is not None
+                    else None
                 )
-                publication = _body(
-                    db,
-                    "cohort_model_acceptances",
-                    "cohort=? AND submission=?",
-                    (cohort, digest(sub)),
+                publication = (
+                    _body(
+                        db,
+                        "cohort_model_acceptances",
+                        "cohort=? AND submission=?",
+                        (cohort, digest(sub)),
+                    )
+                    if admission is not None
+                    else None
                 )
                 if publication is not None:
                     parsed = ModelAcceptancePublication.model_validate_json(publication)

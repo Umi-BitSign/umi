@@ -703,6 +703,7 @@ async def test_actual_lifecycle_initialization_recovers_model_reservation_for_ol
         nodes={},
         stores={cohort: store},
         policy=policy,
+        forecast_ledger=None,
         service=SimpleNamespace(
             history=original,
             intake=intake,

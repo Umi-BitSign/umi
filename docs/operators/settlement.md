@@ -2786,6 +2786,22 @@ qualified provenance when constructing the candidate. Prepare and reserve compar
 the complete inventory again, so an earlier observation cannot authorize omission
 of a later upload. Do not read live owner databases with a diagnostic process.
 
+Keep request identity separate from submission identity. Two signed consents can
+retain the same submission while only one reaches admission. The export and
+reservation census attach acceptance intents and certificates only to originals
+with their own retained participation and admission. An upload-only original
+keeps its request and remote preservation coverage without inheriting another
+consent's admission. A genuine acceptance with no admitted parent still refuses
+as an orphan; it is never silently discarded.
+
+If an older unsigned preflight export attached a shared submission's acceptance
+to an unadmitted request, retain that export as evidence, upgrade the owner and
+obtain a new challenge-bound export before preparing inventories. Do not edit
+the old snapshot, delete either signed request or copy an admission certificate
+between consents. This refresh requirement remains while operators consume
+preflight observations produced by older owners; the signed originals and their
+journals require no migration.
+
 1. `POST /prepare` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
    predecessor. The existing owner obtains native finalized height, authenticates
    both inventory files and verifies their R2 bytes with durable file checkpoints.
