@@ -61,7 +61,7 @@ from .private_files import (
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 from .r2_limits import R2_MAXIMUM_MULTIPART_BYTES
-from .r2_multipart import R2MultipartClient, R2ObjectHead
+from .r2_multipart import R2MultipartClient, R2ObjectHead, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 
@@ -253,7 +253,7 @@ class DirectModelArtifactReviewer:
             > standing.maximum_total_document_bytes
         ):
             raise StaticModelReviewHeld("review_documents_exceed_total_policy")
-        async with self.verification_serial:
+        async with self.verification_serial, r2_connection_scope(self.multipart):
             verified, head = await verify_remote_model(
                 self.multipart,
                 object_key,
@@ -322,7 +322,7 @@ class DirectModelArtifactReviewer:
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Transfer into one bounded cache and preserve remote results on eviction."""
         _, payload, _ = self._source(request, preserved=True)
-        async with self.materialization_serial:
+        async with self.materialization_serial, r2_connection_scope(self.multipart):
             boot = self.config.materialization_boot_disk_cache
             cache = (
                 None
@@ -455,6 +455,10 @@ class DirectModelArtifactReviewer:
 
     async def materialized(self, request: ModelReviewRequest, archive: Path) -> bool:
         """Authenticate retained bytes and expose required local cache repair."""
+        async with r2_connection_scope(self.multipart):
+            return await self._validate_materialized(request, archive)
+
+    async def _validate_materialized(self, request, archive):
         _, payload, _ = self._source(request, preserved=True)
         if self.config.materialization_boot_disk_cache is not None:
             self.verify_materialization_filesystem(Path(archive).parent)

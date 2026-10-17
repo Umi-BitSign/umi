@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
 
 from .competition_cohort_direct_model_upload import DirectModelUploadPart
+from .r2_connection_pool import R2ConnectionPool
 from .r2_limits import R2_MAXIMUM_PART_BYTES, R2_MAXIMUM_PARTS, R2_MINIMUM_PART_BYTES
 from .r2_sigv4 import R2SigV4
 
@@ -38,6 +40,11 @@ class R2ObjectHead:
     etag: str
 
 
+def r2_connection_scope(client: object) -> AbstractAsyncContextManager[None]:
+    """Pool native clients; other providers retain their own transport ownership."""
+    return client.connection_scope() if isinstance(client, R2MultipartClient) else nullcontext()
+
+
 class R2MultipartClient:
     def __init__(
         self,
@@ -51,6 +58,11 @@ class R2MultipartClient:
         self.signer = signer
         self.transport = transport
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 15))
+        self._connections = R2ConnectionPool(transport=transport, timeout=self.timeout)
+
+    def connection_scope(self) -> AbstractAsyncContextManager[None]:
+        """Reuse connections until all overlapping scopes and requests drain."""
+        return self._connections.scope()
 
     async def _exchange(
         self,
@@ -93,12 +105,7 @@ class R2MultipartClient:
             headers["Content-Type"] = "application/xml"
         try:
             async with (
-                httpx.AsyncClient(
-                    transport=self.transport,
-                    timeout=self.timeout,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as client,
+                self._connections.request_client() as client,
                 client.stream(
                     method,
                     self.signer.object_url(key, query=query),
