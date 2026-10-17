@@ -6,6 +6,7 @@ RPC/finality, R2 and keys are fixture ports. No production signing occurs.
 import asyncio
 import sqlite3
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -883,3 +884,64 @@ async def test_candidate_to_committed_reader_reuses_account_byte_facts(
             reader.require_verified(snapshot)
     assert not i.remote.reads
     assert c.owner.intake.pending_policy_adoption(c.cohort) is None
+
+
+async def test_authenticated_shared_file_migration_preserves_native_package_exports(issuance):
+    import shutil
+
+    i = issuance
+    await i.candidate.verify(i.case.history, i.transition)
+    pins = await i.candidate.export_completed(i.case.history, i.transition)
+    before = {
+        str(path): (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in Path(i.config.verification_directory).rglob("*")
+        if path.suffix in {".json", ".complete", ".document"} and "shared-file-" not in str(path)
+    }
+    root = Path(i.config.verification_directory)
+    for name in ("shared-file-bytes-v1", "shared-file-index-v1"):
+        shutil.rmtree(root / name, ignore_errors=True)
+    i.remote.reads.clear()
+    await i.candidate.seed_shared_completed(i.case.history, i.transition)
+    assert await i.candidate.export_completed(i.case.history, i.transition) == pins
+    assert not i.remote.reads
+    assert all(
+        (
+            Path(path).read_bytes(),
+            Path(path).stat().st_ino,
+            Path(path).stat().st_mtime_ns,
+        )
+        == value
+        for path, value in before.items()
+    )
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) is None
+
+
+async def test_authenticated_shared_file_migration_refuses_unsigned_inventory_change(issuance):
+    i = issuance
+    await i.candidate.verify(i.case.history, i.transition)
+    i.remote.reads.clear()
+    path = i.root / "legacy-inventory.json"
+    path.write_bytes(b"{}")
+    with pytest.raises((ValueError, OSError)):
+        await i.candidate.seed_shared_completed(i.case.history, i.transition)
+    assert not i.remote.reads
+
+
+async def test_shared_file_cli_seed_dispatch_uses_authenticated_original_request(
+    issuance, monkeypatch
+):
+    from umi import competition_model_byte_store_cli as cli
+
+    i = issuance
+    await i.candidate.verify(i.case.history, i.transition)
+    request = cli.ModelByteStoreExportRequest(
+        schema="umi-model-byte-store-export-request/1",
+        candidate=i.config,
+        policy=i.case.policy,
+        history=i.case.history,
+        transition=i.transition,
+    )
+    monkeypatch.setattr(cli, "ModelDeliveryAdoptionCandidate", lambda config, policy: i.candidate)
+    i.remote.reads.clear()
+    assert await cli.export_request(request, seed_shared=True) == ()
+    assert not i.remote.reads

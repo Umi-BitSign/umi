@@ -89,10 +89,17 @@ class TransferProgress:
         *,
         unit="bytes",
         planning_work_bytes=None,
+        total_operations=None,
         planning_unit_seconds=(1.0, 300.0),
     ):
         self.stage, self.total, self.report = stage, total, report
         self.unit = unit
+        if total_operations is not None and (
+            type(total_operations) is not int or total_operations < 0
+        ):
+            raise ValueError("transfer operation count must be nonnegative")
+        self.total_operations = total_operations
+        self.completed_operations = self.native_operations = 0
         self.planning_work_bytes = planning_work_bytes
         self.planning_unit_seconds = planning_unit_seconds
         self.last_emit = 0.0
@@ -117,13 +124,38 @@ class TransferProgress:
         if self.thread is not None:
             self.thread.join()
         self.emit(
-            "completed" if kind is None and self.completed == self.total else "retrying",
-            reason="stage_completed"
-            if kind is None and self.completed == self.total
-            else "stage_interrupted",
+            "completed" if kind is None and self._complete() else "retrying",
+            reason="stage_completed" if kind is None and self._complete() else "stage_interrupted",
         )
         if self.token is not None:
             _CURRENT.reset(self.token)
+
+    def _complete(self):
+        return self.completed == self.total and (
+            self.total_operations is None or self.completed_operations == self.total_operations
+        )
+
+    def advance_operations(self, count, *, restored=False):
+        """Count completed exchanges; restored exchanges never inflate native rate."""
+        with self.lock:
+            if (
+                self.total_operations is None
+                or type(count) is not int
+                or not 0 <= count <= self.total_operations - self.completed_operations
+            ):
+                raise ValueError("transfer operations exceed declared work")
+            self.completed_operations += count
+            if not restored:
+                self.native_operations += count
+            if count:
+                self.changed = time.monotonic()
+            if (
+                self.completed_operations == self.total_operations
+                or time.monotonic() - self.last_emit >= self.emit_seconds
+            ):
+                self.emit(
+                    "running", reason="restored_operations" if restored else "native_operations"
+                )
 
     def _monitor(self):
         while not self.stop.wait(self.heartbeat_seconds):
@@ -153,12 +185,11 @@ class TransferProgress:
         a new child's zero count cannot conceal a stalled operation. Each bounded
         child gets a separate reporter so later windows can start from zero.
         """
-        previous = 0
+        previous = {}
         with self.lock:
             self.child = None
 
         def report(event):
-            nonlocal previous
             with self.lock, suppress(Exception):
                 # Keep the child's own stage, rate and terminal visible.
                 if self.report is None:
@@ -168,16 +199,35 @@ class TransferProgress:
                 count, total = event.get("completed_units"), event.get("total_units")
                 if type(count) is not int or type(total) is not int or not 0 <= count <= total:
                     return
+                scope = (event.get("stage"), event.get("unit"), total)
+                prior_count, prior_elapsed = previous.get(scope, (0, None))
+                elapsed = event.get("elapsed_seconds")
+                if count < prior_count and (
+                    event.get("status") == "started"
+                    or (
+                        isinstance(elapsed, (int, float))
+                        and isinstance(prior_elapsed, (int, float))
+                        and elapsed < prior_elapsed
+                    )
+                ):
+                    prior_count = 0
+                previous[scope] = (max(prior_count, count), elapsed)
                 self.child = {
                     key: event.get(key)
-                    for key in ("stage", "status", "completed_units", "total_units", "unit")
+                    for key in (
+                        "stage",
+                        "status",
+                        "completed_units",
+                        "total_units",
+                        "unit",
+                        "eta_seconds",
+                        "eta_basis",
+                    )
                 }
                 state = event.get("status")
                 if state in {"stalled", "retrying", "refused", "repair_required", "waiting"}:
-                    previous = max(previous, count)
                     self.emit(state, reason="child_" + state)
-                elif count > previous and state in {"running", "started", "completed"}:
-                    previous = count
+                elif count > prior_count and state in {"running", "started", "completed"}:
                     self.changed = time.monotonic()
                     self.emit("running", reason="child_progress")
 
@@ -232,6 +282,28 @@ class TransferProgress:
                     [remaining * seconds for seconds in self.planning_unit_seconds],
                     "planning_seconds_per_work_unit_excludes_queue_and_retries",
                 )
+            operation_eta = None
+            if (
+                self.total_operations is not None
+                and state != "completed"
+                and not stalled
+                and state not in {"retrying", "refused", "repair_required", "waiting"}
+            ):
+                operations_left = self.total_operations - self.completed_operations
+                if operations_left and self.native_operations and measured_elapsed >= 1:
+                    operation_eta = operations_left * measured_elapsed / self.native_operations
+                    eta = max(eta or 0, operation_eta)
+                    basis = "maximum_native_byte_and_operation_extrapolations"
+                elif operations_left and remaining == 0:
+                    eta, basis = None, "waiting_for_native_operation_samples"
+            if (
+                remaining == 0
+                and self.child is not None
+                and self.child.get("status") != "completed"
+                and state != "completed"
+                and operation_eta is None
+            ):
+                eta, basis = None, "required_child_scope_incomplete"
             event = {
                 "schema": "umi-transport-work-progress/1",
                 "stage": self.stage,
@@ -259,6 +331,14 @@ class TransferProgress:
                 "certification_authority": False,
                 "active_child": self.child,
             }
+            if self.total_operations is not None:
+                event.update(
+                    completed_operations=self.completed_operations,
+                    total_operations=self.total_operations,
+                    native_operations=self.native_operations,
+                    restored_operations=self.completed_operations - self.native_operations,
+                    operation_eta_seconds=operation_eta,
+                )
             if self.unit == "bytes":
                 event.update(
                     completed_bytes=self.completed,

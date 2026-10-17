@@ -2898,6 +2898,42 @@ selection-bound verification snapshots and admission checks remain separate.
 Changing a remote generation repairs only the affected files. These private
 receipts never confer admission, eviction or reservation-release authority.
 
+Within the same selected account store, `shared-file-bytes-v1` also reuses exact
+unchanged files across different model packages. Its sharded identity binds the
+full file hash and size, ordered chunk hashes/sizes, policy, verifier semantics,
+and actual endpoint, bucket and object-key prefix. Each receipt binds current
+remote object generations. The reader checks generations before reuse and again
+before returning the package snapshot, while retaining the package lock. A file
+fact grants no model rights, admission, transport adoption or signature authority.
+Changed weights require their own native file check; matching supporting files
+do not require payload reads. Different service accounts retain independent stores.
+
+Successful original package checks automatically seed these file facts without
+rewriting intact receipts, markers or bounded rights documents. For a supported
+installation whose original completed packages must be seeded before reviewing a
+new package, run `python -I -B -m umi.competition_model_byte_store_cli seed-shared
+--request PATH` under the original service UID, with the same authenticated
+root-controlled request described below for `export`. This metadata-only migration
+checks remote generations and refuses incomplete native checks or unavailable
+requested documents; it never fetches payloads to conceal missing results. Each
+completed file survives interruption and repeat execution. Keep the original
+selections and old stores while this migration or configured imports need them.
+
+Missing or damaged known file facts are explicit repairs. An intact authenticated
+package receipt can restore the affected fact without payload I/O; otherwise only
+the affected file needs native verification. Unsafe links, owners or permissions
+remain refusals. Per-file private locks prevent overlapping mutation, and sharding
+bounds each local directory rather than collecting all facts in one flat folder.
+
+Transfer progress keeps byte counts and completed GET/HEAD operation counts
+separate. Restored work contributes to neither native rate. When both rates are
+available, the estimate uses the greater remaining-byte and remaining-operation
+extrapolations; this is a measured substage projection, not a calibrated completion
+bound. Final generation confirmation remains a visible required child. Alternating
+byte/object/model scopes retain their own counters, and unchanged heartbeats do
+not refresh liveness. Whole-cohort progress cannot claim completion from byte
+completion while required metadata confirmation is unfinished.
+
 An optional `shared_byte_store` on each `LegacyModelStorageSourceConfig` selects
 one durable byte store explicitly across candidate verification, committed
 intake, phase review, benchmark, settlement, coordinator and reward writer. Use

@@ -41,6 +41,7 @@ from .competition_model_byte_store import (
     import_completed_byte_facts,
     publish_byte_export,
 )
+from .competition_shared_file_bytes import SharedRemoteFileBytes
 from .competition_transport_verification import (
     ByteCheckpoints,
     ProgressReader,
@@ -320,7 +321,7 @@ class ChunkedModelBackupReader:
             "namespace": self._namespace(),
         }
 
-    async def _heads(self, report, chunks=None, *, expected=None):
+    async def _heads(self, report, chunks=None, *, expected=None, operation_progress=None):
         chunks = self.chunks if chunks is None else chunks
         values = {}
         stage = (
@@ -349,6 +350,8 @@ class ChunkedModelBackupReader:
                         raise ValueError("retained model chunk generation changed")
                     values[key] = value
                     progress.advance(1)
+                    if operation_progress is not None:
+                        operation_progress.advance_operations(1)
 
             tasks = [
                 asyncio.create_task(worker())
@@ -379,8 +382,13 @@ class ChunkedModelBackupReader:
             raise ValueError("retained model chunk changed during transfer")
         return raw
 
-    async def _unchanged(self, heads, report):
-        await self._heads(report, {key: self.chunks[key] for key in heads}, expected=heads)
+    async def _unchanged(self, heads, report, *, operation_progress=None):
+        await self._heads(
+            report,
+            {key: self.chunks[key] for key in heads},
+            expected=heads,
+            operation_progress=operation_progress,
+        )
 
     def _store(self, progress):
         # Older readers created intermediate parents with the account umask.
@@ -482,6 +490,7 @@ class ChunkedModelBackupReader:
         document_paths: Sequence[str] = (),
         maximum_document_bytes: int = 16 * 1024**2,
         report: Callable[[dict], None] | None = None,
+        completed_only: bool = False,
     ) -> ChunkedModelVerification:
         """Reuse successful files after HEAD; interrupted work rechecks unfinished files only."""
         async with self.serial:
@@ -501,7 +510,11 @@ class ChunkedModelBackupReader:
             documents = {}
             with (
                 TransferProgress(
-                    "chunked_model_verification", sum(r.size_bytes for r in bundle.files), report
+                    "chunked_model_verification",
+                    sum(r.size_bytes for r in bundle.files),
+                    report,
+                    total_operations=2 * sum(len(f.chunks) for f in self.selection.package.files)
+                    + len(heads),
                 ) as progress,
                 self._store(progress) as saved,
             ):
@@ -515,56 +528,21 @@ class ChunkedModelBackupReader:
                     report=report,
                 )
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
-                    source = self._source(item, heads)
-                    prior = saved.load(record.path, source)
-                    document = None
-                    if prior == record.sha256 and record.path in names:
-                        path = saved.root / (sha256_hex(record.path.encode()) + ".document")
-                        try:
-                            document = _document(path, maximum_document_bytes)
-                        except FileNotFoundError:
-                            document = None
-                        if (
-                            document is None
-                            or len(document) != record.size_bytes
-                            or sha256_hex(document) != record.sha256
-                        ):
-                            progress.emit(
-                                "repair_required",
-                                reason="chunked_model_document_missing_or_damaged",
-                            )
-                            document = self._migrate_remote_document(
-                                saved, record, maximum_document_bytes, report
-                            )
-                    if prior == record.sha256 and (
-                        record.path not in names or document is not None
-                    ):
-                        progress.advance(record.size_bytes, restored=True)
-                    else:
-                        if prior is not None and prior != record.sha256:
-                            progress.emit(
-                                "repair_required", reason="chunked_model_file_receipt_changed"
-                            )
-                        hasher = hashlib.sha256()
-                        content = bytearray() if record.path in names else None
-                        for chunk in item.chunks:
-                            raw = await self._chunk(chunk, heads)
-                            hasher.update(raw)
-                            if content is not None:
-                                content.extend(raw)
-                            progress.advance(len(raw))
-                        if hasher.hexdigest() != record.sha256:
-                            raise ValueError("chunked model file differs from its signed manifest")
-                        document = None if content is None else bytes(content)
-                        if document is not None:
-                            saved._write(
-                                saved.root / (sha256_hex(record.path.encode()) + ".document"),
-                                document,
-                            )
-                        saved.remember(record.path, source, record.sha256)
+                    with SharedRemoteFileBytes(self, record, item, heads, progress) as shared:
+                        document = await self._verify_file(
+                            saved,
+                            shared,
+                            record,
+                            item,
+                            heads,
+                            progress,
+                            wants_document=record.path in names,
+                            maximum_document_bytes=maximum_document_bytes,
+                            completed_only=completed_only,
+                        )
                     if document is not None:
                         documents[record.path] = document.hex()
-                await self._unchanged(heads, report)
+                await self._unchanged(heads, progress.child_report(), operation_progress=progress)
             return ChunkedModelVerification(
                 schema="umi-chunked-model-verification/1",
                 selection_sha256=digest(self.selection),
@@ -572,6 +550,82 @@ class ChunkedModelBackupReader:
                 objects=tuple(heads[key] for key in sorted(heads)),
                 documents=documents,
             )
+
+    async def _verify_file(
+        self,
+        saved,
+        shared,
+        record,
+        item,
+        heads,
+        progress,
+        *,
+        wants_document,
+        maximum_document_bytes,
+        completed_only,
+    ):
+        source = self._source(item, heads)
+        prior = saved.load(record.path, source)
+        shared_prior = shared.load()
+        document = None
+        path = saved.root / (sha256_hex(record.path.encode()) + ".document")
+        if prior == record.sha256 and wants_document:
+            try:
+                document = _document(path, maximum_document_bytes)
+            except FileNotFoundError:
+                document = None
+            if document is not None and (
+                len(document) != record.size_bytes or sha256_hex(document) != record.sha256
+            ):
+                document = None
+            if document is None:
+                progress.emit("repair_required", reason="chunked_model_document_missing_or_damaged")
+                document = self._migrate_remote_document(
+                    saved, record, maximum_document_bytes, progress.child_report()
+                )
+        if document is None and wants_document and shared_prior == record.sha256:
+            document = shared.document(maximum_document_bytes)
+        proven = prior == record.sha256 or shared_prior == record.sha256
+        if proven and (not wants_document or document is not None):
+            # Do not rewrite intact package receipts/documents: existing exports
+            # pin their actual local identities. Shared facts confer bytes only.
+            if prior != record.sha256:
+                saved.remember(record.path, source, record.sha256)
+            if document is not None:
+                try:
+                    existing = _document(path, maximum_document_bytes)
+                except FileNotFoundError:
+                    existing = None
+                if existing != document:
+                    saved._write(path, document)
+            shared.remember_verified(document)
+            progress.advance(record.size_bytes, restored=True)
+            progress.advance_operations(2 * len(item.chunks), restored=True)
+            return document
+        if completed_only:
+            progress.emit(
+                "repair_required", reason="shared_file_seed_requires_completed_native_bytes"
+            )
+            raise OSError("shared file migration requires completed native bytes and documents")
+        if prior is not None and prior != record.sha256:
+            progress.emit("repair_required", reason="chunked_model_file_receipt_changed")
+        hasher = hashlib.sha256()
+        content = bytearray() if wants_document else None
+        for chunk in item.chunks:
+            raw = await self._chunk(chunk, heads)
+            hasher.update(raw)
+            if content is not None:
+                content.extend(raw)
+            progress.advance(len(raw))
+            progress.advance_operations(2)
+        if hasher.hexdigest() != record.sha256:
+            raise ValueError("chunked model file differs from its signed manifest")
+        document = None if content is None else bytes(content)
+        if document is not None:
+            saved._write(path, document)
+        saved.remember(record.path, source, record.sha256)
+        shared.remember_verified(document)
+        return document
 
     async def export_completed(self, *, report=None):
         """Export complete native results without fetching or repairing model bytes.

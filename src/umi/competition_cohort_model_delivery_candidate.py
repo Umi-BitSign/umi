@@ -209,7 +209,11 @@ class ModelDeliveryAdoptionCandidate:
         """
         return await self._run(history, transition, export_only=True)
 
-    async def _run(self, history, transition, *, export_only=False):
+    async def seed_shared_completed(self, history, transition):
+        """Migrate authenticated completed file facts without payload GETs."""
+        return await self._run(history, transition, completed_only=True)
+
+    async def _run(self, history, transition, *, export_only=False, completed_only=False):
         await run_owned_thread(qualify_shared_byte_stores, (self.config.source,))
         value = await run_owned_thread(self.authenticate, history, transition)
         if self.multipart is None:
@@ -256,7 +260,7 @@ class ModelDeliveryAdoptionCandidate:
                 )
                 reader = readers.reader(resolution)
                 if export_only:
-                    exports.append(await reader.export_completed())
+                    exports.append(await reader.export_completed(report=progress.child_report()))
                     progress.advance(1)
                     continue
                 documents = tuple(
@@ -275,7 +279,11 @@ class ModelDeliveryAdoptionCandidate:
                     > 16 * 1024**2
                 ):
                     documents = ()
-                snapshot = await reader.verify(document_paths=documents)
+                snapshot = await reader.verify(
+                    document_paths=documents,
+                    report=progress.child_report(),
+                    completed_only=completed_only,
+                )
                 await run_owned_thread(reader.require_verified, snapshot)
                 progress.advance(1)
         return (
