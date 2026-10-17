@@ -194,6 +194,27 @@ async def test_replay_survives_outage_restart_and_missing_historical_rpc(retaine
     assert {p.name: p.read_bytes() for p in h.archive.iterdir()} == h.before
 
 
+@pytest.mark.parametrize("copied", ["control", "metadata"])
+async def test_owned_control_reuse_requires_the_original_selected_bytes(
+    retained, monkeypatch, copied
+):
+    h = retained
+    reviewed = await h.review()
+    original = reviewed.control
+    selected = {"control": original.evidence, "metadata": original.metadata}
+    raw = selected[copied]
+    selected[copied] = memoryview(raw).tobytes()
+    assert selected[copied] == raw and selected[copied] is not raw
+
+    async def no_reuse(*args):
+        pytest.fail("a copied archive cannot borrow the original control capability")
+
+    monkeypatch.setattr(h.t.provider, "_runtime_for_owned_control_locked", no_reuse)
+    with pytest.raises(ValueError, match="owned control differs from selected eligibility archive"):
+        await h.review(**selected, _owned_control=original)
+    assert {p.name: p.read_bytes() for p in h.archive.iterdir()} == h.before
+
+
 @pytest.mark.parametrize(
     "change",
     [

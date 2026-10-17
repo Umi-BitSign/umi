@@ -2303,9 +2303,14 @@ async def test_native_coverage_retention_retries_and_offline_restart(
 
 
 @pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
-async def test_native_historical_coverage_capture(complete_preparation_case):
+async def test_native_historical_coverage_capture(
+    complete_preparation_case, monkeypatch, record_property
+):
+    from time import perf_counter
+
     from umi.competition_reward_coverage import review_reward_coverage
     from umi.competition_reward_coverage_capture import capture_reward_eligibility
+    from umi.competition_reward_eligibility_archive import review_reward_eligibility
 
     h = complete_preparation_case
     p, c = h.package_case, h.c
@@ -2325,14 +2330,54 @@ async def test_native_historical_coverage_capture(complete_preparation_case):
     )
     for height in (h.end - 1, h.end):
         control = await h.item.provider.capture_control_at(c.series.control_hotkey, height)
-        captured = await capture_reward_eligibility(
-            h.item.provider,
-            control,
+
+        # Measure the predecessor's two full control/runtime replays against the
+        # same native proof inputs. This is an offline fixture measurement, not
+        # a claim about production RPC throughput.
+        replays = 0
+        original_review = h.item.provider._review_control_runtime_locked
+
+        async def replay_control(original, review=original_review):
+            nonlocal replays
+            replays += 1
+            return await review(original.evidence, original.metadata)
+
+        arguments = dict(
             validator_hotkey=h.validator_hotkey,
             control_hotkey=c.series.control_hotkey,
             profile=h.item.profile,
             expected_runtime_profile_sha256=digest(h.item.profile),
         )
+        started = perf_counter()
+        with monkeypatch.context() as patch:
+            patch.setattr(h.item.provider, "_runtime_for_owned_control_locked", replay_control)
+            baseline = await capture_reward_eligibility(h.item.provider, control, **arguments)
+        record_property(f"block_{height}_predecessor_capture_seconds", perf_counter() - started)
+        assert replays == 2
+
+        async def no_duplicate_control_replay(*args):
+            pytest.fail("this owner's already proved control cannot repeat native replay")
+
+        started = perf_counter()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                h.item.provider, "_review_control_runtime_locked", no_duplicate_control_replay
+            )
+            captured = await capture_reward_eligibility(h.item.provider, control, **arguments)
+        record_property(f"block_{height}_reused_capture_seconds", perf_counter() - started)
+        assert captured == baseline
+
+        # Retained wire bytes get no owner-local capability. Their independent
+        # replay must still establish exactly the same result.
+        restarted = await review_reward_eligibility(
+            h.item.provider,
+            control=control.evidence,
+            metadata=control.metadata,
+            chain=captured.chain_evidence,
+            eligibility=captured.eligibility_evidence,
+            **arguments,
+        )
+        assert restarted == captured
         assert captured.eligible
         endpoint = await review_reward_coverage(
             owner,
@@ -2352,7 +2397,10 @@ async def test_automatic_coverage_capture_lost_ack_and_offline_restart(
 ):
     from umi.competition_reward_coverage_collector import RewardCoverageCollector
     from umi.competition_reward_coverage_journal import RewardCoverageJournal
-    from umi.competition_reward_coverage_source import NativeRewardCoverageSource
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
     from umi.competition_reward_opportunity import opportunity_rule
     from umi.competition_reward_opportunity_review import review_opportunity_certificate
 
@@ -2428,6 +2476,8 @@ async def test_automatic_coverage_capture_lost_ack_and_offline_restart(
     assert lost.certificate is None
     assert lost.credited_ms == ((h.validator_hotkey, 0),)
     assert len(await journal.interval_keys()) == 1
+    retained_interval = await journal.retained_interval((await journal.interval_keys())[0])
+    original_completion = journal.checkpoints.load(retained_interval.left)
 
     # A fresh process trusts neither summaries nor totals. All historical state
     # and block body RPCs are unavailable; only owned ancestry is still served.
@@ -2435,6 +2485,30 @@ async def test_automatic_coverage_capture_lost_ack_and_offline_restart(
     h.offline_through = h.end
     c.reader = c.reopen()
     journal, source, collector = setup()
+
+    # The same capture API now discovers this completed block from owned history
+    # and restores its original durable verdict. It must not ask RPC to capture
+    # the already verified proofs again, including after an offline restart.
+    async def no_recapture(*args, **kwargs):
+        pytest.fail("completed historical endpoint repeated native capture")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(h.item.provider, "capture_control_at", no_recapture)
+        patch.setattr(
+            "umi.competition_reward_coverage_source.capture_reward_eligibility", no_recapture
+        )
+        for _ in range(100):
+            try:
+                restored = await source.capture(h.validator_hotkey, h.end - 1)
+                break
+            except CoverageHistoryPending:
+                continue
+        else:
+            pytest.fail("completed endpoint restoration did not converge")
+    from umi.competition_reward_coverage_intervals import OwnedRetainedCoverageEndpoint
+
+    assert type(restored) is OwnedRetainedCoverageEndpoint
+    assert journal.checkpoints.load(retained_interval.left) == original_completion
     assert (
         await journal.verified_ms(
             activation_sha256=digest(terms["activation"]), validator_hotkey=h.validator_hotkey
@@ -5946,7 +6020,10 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
         m.setattr(coverage_module, "review_reward_eligibility", prohibit)
         m.setattr(coverage_module, "review_reward_coverage", prohibit)
         m.setattr(fresh, "_load", prohibit)
-        restored = [await restarted.replay(key) for key in keys]
+        m.setattr("umi.competition_reward_coverage_source.capture_reward_eligibility", prohibit)
+        restored = [
+            await restarted.capture(h.validator_hotkey, height) for height in (h.end - 1, h.end)
+        ]
         assert await fresh.credit(*restored) == interval
         assert all(endpoint.covered for endpoint in restored)
     assert not loads and not server.calls

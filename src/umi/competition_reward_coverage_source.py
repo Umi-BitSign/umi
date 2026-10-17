@@ -26,7 +26,7 @@ from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryPending
 from .host_memory_runtime import memory_operation, selected_memory
-from .open_competition import digest
+from .open_competition import digest, identity
 
 
 class CoverageHistoryPending(Exception):
@@ -111,7 +111,7 @@ class NativeRewardCoverageSource:
             self._cache.popitem(last=False)
         return endpoint
 
-    async def capture(self, validator_hotkey: str, height: int) -> OwnedRewardCoverageEndpoint:
+    async def capture(self, validator_hotkey: str, height: int) -> CoverageEndpoint:
         try:
             # RPCs/proof executors bound their individual operations. A total
             # timer here would repeatedly discard slow immutable package replay.
@@ -122,6 +122,21 @@ class NativeRewardCoverageSource:
 
     async def _capture(self, validator_hotkey, height):
         history = await self._history(height)
+        if history.tip.block_number != height:
+            raise ValueError("coverage capture history changes the requested finalized block")
+        # Owned history supplies the exact immutable block identity. The private
+        # checkpoint load detects lost/damaged completion metadata; it must not
+        # become a routine recapture of already verified evidence. Restoration
+        # rechecks policy, history, model dependencies and source generations.
+        key = digest(
+            {
+                "series": self.journal.rule.series_sha256,
+                "validator": identity(validator_hotkey),
+                "block_hash": history.tip.block_hash,
+            }
+        )
+        if await run_owned_thread(self.journal.checkpoints.load, key) is not None:
+            return await self._replay(key)
         control = await self.provider.capture_control_at(self.history.hotkey, height)
         effective_profile = self.profile
         if self.runtime_selection is not None:

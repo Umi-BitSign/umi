@@ -981,19 +981,42 @@ stored total or interval cannot substitute for native replay. The selected rule
 digest must match on reopening, and damaged evidence holds without replacement.
 
 `RewardCoverageCollector` drives bounded pages of retained-interval replay and
-new capture for each designated validator. `NativeRewardCoverageSource` captures
+new capture for each designated validator. Every pass checks recent blocks for
+all validators first, then advances a separate bounded historical lane from the
+original effective block. The default limits are four recent captures and four
+historical captures per validator per pass; an explicit zero historical limit
+disables backfill. The historical lane includes the first recent block so that
+the interval joining the lanes is independently proved. A moving recent window
+never discards the historical frontier. Failed retention or credit leaves that
+lane's cursor and preceding endpoint unchanged.
+
+`NativeRewardCoverageSource` captures
 complete registration, stored weight and eligibility proofs at the same owned
 historical root, then passes them through the existing native consumers. Its
-control-history reader reuses only prefixes verified in the current process;
-restart replays the original blocks before those prefixes become available.
+control-history prefixes must be established by the current owner. Supported
+completed checkpoints restore unchanged native facts and their owned dependencies
+without repeating payload proof verification. Older retained inputs without a
+completed result need a first native pass; lost or damaged completed records
+require explicit repair.
 RPC/proof operations retain their individual bounds. There is no aggregate timer
 around historical capture or immutable package replay that could repeatedly
-discard slow work. Failed attempts preserve progress and the capture cursor. The service retries
-without a cumulative deadline and logs verified totals plus error types.
+discard slow work. Before capturing a block, it uses the owned history's exact
+block hash to find an existing private completion. An unchanged completed endpoint
+is restored through the normal policy, history, model-dependency and source checks;
+missing or damaged completion metadata requires explicit repair. No discovery
+hint can replace those checks or confer current-observation authority. This uses
+the existing checkpoint schema and preserves old signed inputs and journals.
+
+Each capture page reports progress, elapsed time, an ETA basis and retry/stall
+status. Gap-frontier logs separate restored and new endpoints from credited reward
+time. Their process-local catch-up estimate subtracts observed chain growth and
+is withdrawn on retry or a nonconverging frontier; it is not a whole-cohort ETA.
+Available bounded replay/backfill work yields to other tasks and continues
+without the idle poll delay. Dependency failures retain normal backoff.
 
 Unavailable retained proofs are retried on later pages while fresh capture can
-continue. A bounded catch-up window limits new historical queries; it neither
-deletes earned intervals nor credits the elapsed outage. Only adjacent proved
+continue. Bounded capture pages limit each pass; they neither delete earned
+intervals nor credit the elapsed outage. Only adjacent proved
 endpoints contribute time. Every validator must meet the selected minimum before
 the collector retains a completion certificate and its witnesses. Successful
 retries cannot double-count an interval. Installing this collector and qualifying
@@ -1009,11 +1032,13 @@ readable but carries no minimum-opportunity terms.
 interval references for every designated validator. Missing or insufficient
 coverage holds completion. The certificate digest is bound by the successor's
 signed `prior_opportunity_sha256`; a later candidate cannot replace those bytes.
-`review_opportunity_certificate` replays the original native endpoint proofs,
+`review_opportunity_certificate` reviews the original endpoints through the native
+restore/replay boundary,
 checks the interval order and recomputes each contribution. Stored totals,
 signatures and content hashes alone cannot establish completed opportunity.
-Restart requires replay, and unavailable evidence remains retryable without an
-age deadline. Retries cannot increase credited time.
+Restart re-establishes owner-local facts from the durable verification records and
+unchanged sources; unavailable evidence remains retryable without an age deadline.
+Retries cannot increase credited time.
 
 For a version 2 manifest, reward projection and transaction preparation require
 that reviewed certificate for the exact preceding activation. Evidence must end

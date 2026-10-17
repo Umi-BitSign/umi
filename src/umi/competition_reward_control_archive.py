@@ -56,10 +56,21 @@ from .historical_header_recovery import (
 )
 from .open_competition import digest
 from .sqlite_contention import is_sqlite_full
-from .validator_chain import StorageReadSpec, ValidatorChainError
+from .validator_chain import PinnedRuntimeContext, StorageReadSpec, ValidatorChainError
 from .validator_plans import VerifiedFinalizedBlock
 
 _ISSUER = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedControlRuntime:
+    owner: HistoricalRewardControlProvider
+    runtime: PinnedRuntimeContext
+    evidence: bytes = field(repr=False)
+    metadata: bytes = field(repr=False)
+    binding: str
+    encoded_header: str
+    issuer: object = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +86,7 @@ class OwnedHistoricalRewardControl:
     metadata: bytes = field(repr=False)
     _issuer: object = field(default=None, repr=False, compare=False)
     _binding: str = field(default="", repr=False, compare=False)
+    _runtime_context: _OwnedControlRuntime | None = field(default=None, repr=False, compare=False)
 
 
 def _binding(value: OwnedHistoricalRewardControl) -> str:
@@ -108,11 +120,30 @@ def validate_historical_reward_control(
         or observation._binding != _binding(observation)
         or type(observation.evidence) is not bytes
         or type(observation.metadata) is not bytes
-        or hashlib.sha256(observation.evidence).hexdigest() != observation.evidence_sha256
-        or hashlib.sha256(observation.metadata).hexdigest() != observation.metadata_sha256
         or account_id32(observation.control_hotkey) != account_id32(expected_control_hotkey)
         or observation.chain_config_sha256 != expected_chain_config_sha256
     ):
+        raise ValueError("historical reward control lacks the selected owned proof")
+    context = observation._runtime_context
+    if context is not None:
+        if (
+            type(context) is not _OwnedControlRuntime
+            or context.issuer is not _ISSUER
+            or not isinstance(context.owner, HistoricalRewardControlProvider)
+            or not isinstance(context.runtime, PinnedRuntimeContext)
+            or context.binding != observation._binding
+            or context.evidence is not observation.evidence
+            or context.metadata is not observation.metadata
+            or context.runtime.snapshot != observation.snapshot
+            or context.runtime.metadata_sha256 != observation.metadata_sha256
+        ):
+            raise ValueError("historical reward control runtime context changed")
+    elif (
+        hashlib.sha256(observation.evidence).hexdigest() != observation.evidence_sha256
+        or hashlib.sha256(observation.metadata).hexdigest() != observation.metadata_sha256
+    ):
+        # Older in-process observations lack the private reuse capability.
+        # Wire archives still take the ordinary native verification path.
         raise ValueError("historical reward control lacks the selected owned proof")
 
 
@@ -246,6 +277,38 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
         return self._issue_control(archive, runtime, raw, metadata, control, committed), runtime
 
+    async def _runtime_for_owned_control_locked(
+        self, observation: OwnedHistoricalRewardControl
+    ) -> tuple[OwnedHistoricalRewardControl, PinnedRuntimeContext]:
+        """Reuse this owner's checked immutable control; recheck owned ancestry.
+
+        The codec remains under the same provider lock. A different provider or
+        older observation must independently replay the original archive. This
+        does not create a current observation, refresh a clock, or confer any
+        authority through a serialized verification summary.
+        """
+        if self._closed or not self._lock.locked():
+            raise ValueError("owned control runtime requires the running locked provider")
+        if type(observation) is not OwnedHistoricalRewardControl:
+            raise ValueError("owned control runtime requires the original native observation")
+        if digest(self.policy) != self.config.policy_sha256:
+            raise ValueError("owned control runtime policy differs from its configuration")
+        validate_historical_reward_control(
+            observation,
+            expected_control_hotkey=observation.control_hotkey,
+            expected_chain_config_sha256=digest(self.config),
+        )
+        context = observation._runtime_context
+        if context is None or context.owner is not self:
+            return await self._review_control_runtime_locked(
+                observation.evidence, observation.metadata
+            )
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        self._validate_runtime_context(context.runtime, observation.snapshot)
+        await self._resolve_control_header(observation.snapshot, context.encoded_header)
+        _cache_usage(self._cache_root, self.config.maximum_cache_bytes)
+        return observation, context.runtime
+
     def _history_proof_tools(self):
         return HistoryProofTools(
             self._proofs,
@@ -271,6 +334,13 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
             _issuer=_ISSUER,
         )
         object.__setattr__(result, "_binding", _binding(result))
+        object.__setattr__(
+            result,
+            "_runtime_context",
+            _OwnedControlRuntime(
+                self, runtime, raw, metadata, result._binding, archive.encoded, _ISSUER
+            ),
+        )
         return result
 
     async def _resolve_control_header(self, ref, encoded):

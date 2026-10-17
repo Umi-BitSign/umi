@@ -406,8 +406,15 @@ Historical control capture also retains the runtime and storage proofs verified
 within that capture. Encoding their archive does not immediately replay those
 same proofs or rebuild the codec. The archive's size and format, current owned
 ancestry and timestamp bounds remain checked before issuing a historical result.
-Reading an archive later or receiving one from another process still requires
-the complete native replay; this reuse cannot authorize a current weight write.
+The same provider also reuses that checked control and codec during historical
+eligibility capture. Reuse requires the original immutable evidence objects,
+native issuer, provider, chain configuration and metadata binding, with the
+provider lock held. It rechecks current owned finalized ancestry and cache bounds.
+Damaged bindings fail explicitly. An older in-process result without that private
+capability, another provider, or a serialized archive takes independent native
+replay; no portable success flag grants reuse. Eligibility storage proofs still
+pass their normal consumer checks. This reuse cannot authorize a current weight
+write or credit an unproved interval, and it changes no receipt or signed clock.
 
 Within one process, the proof archive reuses up to 32 MiB of verified immutable
 object bytes across at most 4,096 objects. Each read checks the current private
