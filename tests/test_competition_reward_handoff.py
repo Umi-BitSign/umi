@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_reward_handoff as handoff
+from umi import competition_supervisor_adapters as adapters
 from umi.competition_reward_control_archive import HistoricalRewardControlProvider
 from umi.competition_reward_decisions import RewardActivation
 from umi.competition_reward_handoff_models import (
@@ -280,6 +281,23 @@ async def test_live_attempt_cannot_be_skipped_and_later_retry_uses_same_intent(m
     ):
         c.validate(result)
         assert runtime._standing_handoff_intent() == intent
+
+
+async def test_handoff_reuses_shared_retained_continuations(migration, monkeypatch):
+    c = migration
+    await signed_attempt(c)
+
+    def independently_expand(*_, **__):
+        pytest.fail("handoff must use the checked shared history replay")
+
+    monkeypatch.setattr(adapters, "restore_history", independently_expand)
+    async with (
+        c.reopen() as runtime,
+        handoff.hold_legacy_reward_handoff(runtime, **c.args) as result,
+    ):
+        c.validate(result)
+        assert_locked(c.item.worker.lock_path)
+    assert len(c.reviews) == len(c.validations) == 1
 
 
 @pytest.mark.parametrize("state", ["empty", "intent", "unknown"])

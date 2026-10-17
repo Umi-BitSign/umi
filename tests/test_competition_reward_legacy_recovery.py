@@ -21,6 +21,11 @@ from umi.competition_reward_legacy_recovery import (
     validate_legacy_weight_expiry,
 )
 from umi.competition_weights import _WeightAttempt
+from umi.historical_header_recovery import (
+    HistoricalHeaderRecovery,
+    HistoricalHeaderRecoveryPending,
+    HistoricalHeaderRecoveryProgress,
+)
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.runtime_metadata import RuntimeMetadataExecutor
@@ -31,6 +36,7 @@ from .test_competition_reward_transaction_recovery import chain_config as chain_
 from .test_competition_reward_transaction_recovery import native_encoding as native_encoding
 from .test_competition_reward_transaction_recovery import original as original
 from .test_competition_reward_transaction_recovery import policy as policy
+from .test_historical_header_recovery import walk as walk
 
 
 def inputs(t, phase="signed"):
@@ -58,6 +64,86 @@ def inputs(t, phase="signed"):
         metadata=t.chain.runtime.metadata_bytes,
         validator_hotkey=t.hotkey,
     )
+
+
+async def test_expiry_continues_owned_ancestry_without_restarting_inventory(original, monkeypatch):
+    t = original
+    at(t, 3000)
+    args = inputs(t)
+    before = t.journal.recovery_inputs()
+    resolve = t.provider._resolve_control_header
+    calls = []
+
+    async def bounded(ref, encoded):
+        assert t.provider._lock.locked()
+        calls.append((ref, encoded))
+        if len(calls) < 3:
+            raise HistoricalHeaderRecoveryProgress("bounded ancestry advanced")
+        return await resolve(ref, encoded)
+
+    monkeypatch.setattr(t.provider, "_resolve_control_header", bounded)
+    result = await review_legacy_weight_expiry(t.provider, **args)
+    validate_legacy_weight_expiry(
+        result,
+        attempt=args["attempt"],
+        chain_config_sha256=digest(t.provider.config),
+        validator_hotkey=t.hotkey,
+    )
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+    assert len(t.checked) == len(json.loads(t.chain.evidence)["storage_batches"])
+    assert t.journal.recovery_inputs() == before
+    assert not t.provider._lock.locked()
+
+
+async def test_expiry_continues_real_bounded_walk_before_original_signature_checks(
+    original, walk, monkeypatch
+):
+    # The ancestry fixture is a separate synthetic finalized port. Its real
+    # multi-pass native walker must complete before the original signed-input
+    # fixture's own header, runtime, trie and signature checks can run.
+    t, w = original, walk
+    at(t, 3000)
+    resolver = t.provider._resolve_control_header
+    ancestry = HistoricalHeaderRecovery(w.connect, batch_size=8)
+    calls = []
+
+    async def resumed(ref, encoded):
+        calls.append((ref, encoded))
+        await ancestry.recover(w.anchor, w.target, w.request)
+        return await resolver(ref, encoded)
+
+    monkeypatch.setattr(t.provider, "_resolve_control_header", resumed)
+    args = inputs(t)
+    result = await review_legacy_weight_expiry(t.provider, **args)
+    validate_legacy_weight_expiry(
+        result,
+        attempt=args["attempt"],
+        chain_config_sha256=digest(t.provider.config),
+        validator_hotkey=t.hotkey,
+    )
+    assert len(calls) == 5 and len(set(w.calls)) == len(w.calls) == 40
+    assert all(call == calls[0] for call in calls)
+    assert len(t.checked) == len(json.loads(t.chain.evidence)["storage_batches"])
+    assert ancestry.telemetry.latest["state"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "failure", [HistoricalHeaderRecoveryPending, ValueError, asyncio.CancelledError]
+)
+async def test_expiry_ancestry_nonprogress_and_cancellation_still_refuse(
+    original, monkeypatch, failure
+):
+    t = original
+    calls = []
+
+    async def refused(*_):
+        calls.append(True)
+        raise failure("no ancestry progress")
+
+    monkeypatch.setattr(t.provider, "_resolve_control_header", refused)
+    with pytest.raises(failure, match="no ancestry progress"):
+        await review_legacy_weight_expiry(t.provider, **inputs(t))
+    assert calls == [True] and not t.provider._lock.locked()
 
 
 @pytest.mark.parametrize(
