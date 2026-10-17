@@ -2303,9 +2303,14 @@ async def test_native_coverage_retention_retries_and_offline_restart(
 
 
 @pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
-async def test_native_historical_coverage_capture(complete_preparation_case):
+async def test_native_historical_coverage_capture(
+    complete_preparation_case, monkeypatch, record_property
+):
+    from time import perf_counter
+
     from umi.competition_reward_coverage import review_reward_coverage
     from umi.competition_reward_coverage_capture import capture_reward_eligibility
+    from umi.competition_reward_eligibility_archive import review_reward_eligibility
 
     h = complete_preparation_case
     p, c = h.package_case, h.c
@@ -2325,14 +2330,54 @@ async def test_native_historical_coverage_capture(complete_preparation_case):
     )
     for height in (h.end - 1, h.end):
         control = await h.item.provider.capture_control_at(c.series.control_hotkey, height)
-        captured = await capture_reward_eligibility(
-            h.item.provider,
-            control,
+
+        # Measure the predecessor's two full control/runtime replays against the
+        # same native proof inputs. This is an offline fixture measurement, not
+        # a claim about production RPC throughput.
+        replays = 0
+        original_review = h.item.provider._review_control_runtime_locked
+
+        async def replay_control(original, review=original_review):
+            nonlocal replays
+            replays += 1
+            return await review(original.evidence, original.metadata)
+
+        arguments = dict(
             validator_hotkey=h.validator_hotkey,
             control_hotkey=c.series.control_hotkey,
             profile=h.item.profile,
             expected_runtime_profile_sha256=digest(h.item.profile),
         )
+        started = perf_counter()
+        with monkeypatch.context() as patch:
+            patch.setattr(h.item.provider, "_runtime_for_owned_control_locked", replay_control)
+            baseline = await capture_reward_eligibility(h.item.provider, control, **arguments)
+        record_property(f"block_{height}_predecessor_capture_seconds", perf_counter() - started)
+        assert replays == 2
+
+        async def no_duplicate_control_replay(*args):
+            pytest.fail("this owner's already proved control cannot repeat native replay")
+
+        started = perf_counter()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                h.item.provider, "_review_control_runtime_locked", no_duplicate_control_replay
+            )
+            captured = await capture_reward_eligibility(h.item.provider, control, **arguments)
+        record_property(f"block_{height}_reused_capture_seconds", perf_counter() - started)
+        assert captured == baseline
+
+        # Retained wire bytes get no owner-local capability. Their independent
+        # replay must still establish exactly the same result.
+        restarted = await review_reward_eligibility(
+            h.item.provider,
+            control=control.evidence,
+            metadata=control.metadata,
+            chain=captured.chain_evidence,
+            eligibility=captured.eligibility_evidence,
+            **arguments,
+        )
+        assert restarted == captured
         assert captured.eligible
         endpoint = await review_reward_coverage(
             owner,

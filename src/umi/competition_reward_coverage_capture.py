@@ -88,9 +88,7 @@ async def capture_reward_eligibility(
 
 async def _capture(provider, control, hotkey, control_hotkey, profile, maximum_parent_hotkeys):
     async with provider._lock:
-        observed, runtime = await provider._review_control_runtime_locked(
-            control.evidence, control.metadata
-        )
+        observed, runtime = await provider._runtime_for_owned_control_locked(control)
         if (
             observed.snapshot != control.snapshot
             or type(runtime) is not ExecutedRuntimeContext
@@ -178,4 +176,5 @@ async def _capture(provider, control, hotkey, control_hotkey, profile, maximum_p
         profile=profile,
         expected_runtime_profile_sha256=digest(profile),
         maximum_parent_hotkeys=maximum_parent_hotkeys,
+        _owned_control=observed,
     )

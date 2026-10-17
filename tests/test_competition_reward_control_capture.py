@@ -140,6 +140,118 @@ async def test_capture_without_retained_archive_and_replay_without_historical_rp
     assert h.blocks.get(h.old.height) is None
 
 
+async def test_owned_control_runtime_reuse_checks_ancestry_without_replay_or_payload_hash(
+    historical, monkeypatch
+):
+    import umi.competition_reward_control_archive as module
+
+    h = historical
+    await capture_source(h, monkeypatch)
+    control = await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    resolves = []
+    original = h.item.provider._resolve_control_header
+
+    async def resolve(ref, encoded):
+        resolves.append(ref)
+        return await original(ref, encoded)
+
+    async def no_replay(*args):
+        pytest.fail("unchanged control repeated native slot verification")
+
+    def no_hash(*args):
+        pytest.fail("immutable native control payload was rehashed")
+
+    monkeypatch.setattr(h.item.provider, "_resolve_control_header", resolve)
+    monkeypatch.setattr(module, "verify_slot_archive", no_replay)
+    monkeypatch.setattr(module, "hashlib", SimpleNamespace(sha256=no_hash))
+    for _ in range(2):
+        async with h.item.provider._lock:
+            observed, runtime = await h.item.provider._runtime_for_owned_control_locked(control)
+        assert observed is control and runtime is control._runtime_context.runtime
+    assert resolves == [control.snapshot, control.snapshot]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_other_owner_or_legacy_observation_requires_independent_replay(
+    historical, monkeypatch, legacy
+):
+    h = historical
+    source = await capture_source(h, monkeypatch)
+    control = await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    if legacy:
+        control = replace(control, _runtime_context=None)
+    else:
+        await h.item.provider.aclose()
+        h.item.provider = source.own(h.reopen())
+    provider = h.item.provider
+    original = provider._review_control_runtime_locked
+    calls = []
+
+    async def replay(raw, metadata):
+        calls.append((raw, metadata))
+        return await original(raw, metadata)
+
+    monkeypatch.setattr(provider, "_review_control_runtime_locked", replay)
+    async with provider._lock:
+        observed, runtime = await provider._runtime_for_owned_control_locked(control)
+        reused, again = await provider._runtime_for_owned_control_locked(observed)
+    assert len(calls) == 1
+    assert calls[0] == (control.evidence, control.metadata)
+    assert observed is reused and runtime is again and observed == control
+
+
+@pytest.mark.parametrize(
+    "change", ["evidence", "metadata", "binding", "issuer", "owner", "runtime"]
+)
+async def test_changed_owned_control_context_is_refused_before_reuse(
+    historical, monkeypatch, change
+):
+    import umi.competition_reward_control_archive as module
+
+    h = historical
+    await capture_source(h, monkeypatch)
+    control = await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    if change == "evidence":
+        altered = replace(control, evidence=control.evidence + b" ")
+    elif change == "metadata":
+        altered = replace(control, metadata=control.metadata + b" ")
+    else:
+        values = {change: "0" * 64 if change == "binding" else object()}
+        altered = replace(control, _runtime_context=replace(control._runtime_context, **values))
+
+    async def no_replay(*args):
+        pytest.fail("damaged native context became a routine replay/cache miss")
+
+    monkeypatch.setattr(module, "verify_slot_archive", no_replay)
+    with pytest.raises(ValueError):
+        async with h.item.provider._lock:
+            await h.item.provider._runtime_for_owned_control_locked(altered)
+
+
+async def test_owned_control_reuse_requires_running_locked_provider_and_owned_head(
+    historical, monkeypatch
+):
+    h = historical
+    await capture_source(h, monkeypatch)
+    control = await h.item.provider.capture_control_at(h.item.hotkey, h.old.height)
+    with pytest.raises(ValueError, match="running locked provider"):
+        await h.item.provider._runtime_for_owned_control_locked(control)
+    original = h.item.provider._finality.verified_finalized_snapshot
+
+    async def unavailable():
+        raise ValueError("owned observer unavailable")
+
+    monkeypatch.setattr(h.item.provider._finality, "verified_finalized_snapshot", unavailable)
+    with pytest.raises(ValidatorChainError, match="owned_finality_unavailable"):
+        async with h.item.provider._lock:
+            await h.item.provider._runtime_for_owned_control_locked(control)
+    monkeypatch.setattr(h.item.provider._finality, "verified_finalized_snapshot", original)
+    await h.item.provider.aclose()
+    with pytest.raises(ValueError, match="running locked provider"):
+        async with h.item.provider._lock:
+            await h.item.provider._runtime_for_owned_control_locked(control)
+
+
 async def test_retained_owned_header_capture_avoids_target_rpc_across_restart(
     historical, monkeypatch
 ):

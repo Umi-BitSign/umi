@@ -241,6 +241,7 @@ async def review_reward_eligibility(
     profile: RewardEligibilityRuntime,
     expected_runtime_profile_sha256: str,
     maximum_parent_hotkeys: int = 4096,
+    _owned_control: OwnedHistoricalRewardControl | None = None,
 ) -> OwnedHistoricalRewardEligibility:
     """Replay without a wall-clock expiry or a current-observation capability.
 
@@ -259,7 +260,16 @@ async def review_reward_eligibility(
         validate_qualified_reward_runtime(profile)
     hotkey = _hotkey(validator_hotkey)
     async with provider._lock:
-        observed, runtime = await provider._review_control_runtime_locked(control, metadata)
+        if _owned_control is None:
+            observed, runtime = await provider._review_control_runtime_locked(control, metadata)
+        else:
+            if (
+                type(_owned_control) is not OwnedHistoricalRewardControl
+                or _owned_control.evidence is not control
+                or _owned_control.metadata is not metadata
+            ):
+                raise ValueError("owned control differs from selected eligibility archive")
+            observed, runtime = await provider._runtime_for_owned_control_locked(_owned_control)
         validate_historical_reward_control(
             observed,
             expected_control_hotkey=control_hotkey,
