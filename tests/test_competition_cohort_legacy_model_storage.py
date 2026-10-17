@@ -219,6 +219,38 @@ def resolve(case, auth, **kwargs):
     )
 
 
+def test_preserved_namespace_prefix_is_authenticated_and_resolved_without_rewriting_originals(case):
+    original = canonical_json_bytes(case.preservation)
+    assert b"object_key_prefix" not in original
+    assert (
+        canonical_json_bytes(LegacyModelPreservationInventory.model_validate_json(original))
+        == original
+    )
+    preservation = case.preservation.model_copy(
+        update={
+            "models": tuple(
+                model.model_copy(update={"object_key_prefix": "preservation/v1/"})
+                for model in case.preservation.models
+            )
+        }
+    )
+    auth = authenticated(case, preservation=preservation)
+    result = resolve(case, auth, baseline=True)
+    assert result.selection.binding.object_key_prefix == "preservation/v1/"
+    assert (
+        canonical_json_bytes(result.selection.bundle)
+        == case.objects[
+            next(
+                model.manifest_raw_sha256
+                for model in preservation.models
+                if model.model_sha256 == digest(case.baseline)
+            )
+        ]
+    )
+    with pytest.raises(ValueError):
+        authenticated(case, preservation=preservation, selection=adoption(case))
+
+
 def test_original_native_intents_certificates_and_signed_bytes_survive_adoption(case):
     originals = dict(case.objects)
     auth = authenticated(case)

@@ -125,6 +125,7 @@ class LegacyModelStorageReaders:
             selection.association.package_sha256,
             binding.endpoint,
             binding.bucket,
+            binding.object_key_prefix,
         )
         matches = [
             cohort
@@ -140,6 +141,7 @@ class LegacyModelStorageReaders:
                         model.package_raw_sha256,
                         model.endpoint,
                         model.bucket,
+                        model.object_key_prefix,
                     )
                     for model in value.preservation.models
                 }

@@ -17,11 +17,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chunked_model_backup import (
     ChunkedBackupBinding,
     ChunkedBackupSelection,
+    ObjectKeyPrefix,
     validate_chunked_backup,
 )
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
@@ -126,6 +127,14 @@ class LegacyModelPreservation(StrictProtocolModel):
     package_raw_sha256: Hex32
     endpoint: Annotated[str, Field(pattern=r"^https://[0-9a-f]{32}\.r2\.cloudflarestorage\.com$")]
     bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
+    object_key_prefix: ObjectKeyPrefix = ""
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if not self.object_key_prefix:
+            value.pop("object_key_prefix", None)
+        return value
 
 
 class LegacyModelPreservationInventory(StrictProtocolModel):
@@ -495,6 +504,7 @@ def resolve_legacy_model_storage(
         provenance_sha256=digest(authenticated.preservation),
         endpoint=preserved.endpoint,
         bucket=preserved.bucket,
+        object_key_prefix=preserved.object_key_prefix,
     )
     selected = validate_chunked_backup(
         _original(load_original, preserved.association_raw_sha256),

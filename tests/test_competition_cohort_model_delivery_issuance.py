@@ -76,8 +76,18 @@ pytestmark = [
 
 
 @pytest.fixture
-def issuance(case, tmp_path):
+def issuance(case, tmp_path, request):
     c = case
+    prefix = getattr(request, "param", "")
+    if prefix:
+        c.preservation = c.preservation.model_copy(
+            update={
+                "models": tuple(
+                    model.model_copy(update={"object_key_prefix": prefix})
+                    for model in c.preservation.models
+                )
+            }
+        )
     root = tmp_path / "adoption-originals"
     ensure_private_directory(root)
     ensure_private_directory(root / "objects")
@@ -93,7 +103,10 @@ def issuance(case, tmp_path):
         (c.baseline, tmp_path / "separate-baseline"),
     ):
         objects.update(
-            {"chunks/sha256/" + f.sha256: (path / f.path).read_bytes() for f in bundle.files}
+            {
+                prefix + "chunks/sha256/" + f.sha256: (path / f.path).read_bytes()
+                for f in bundle.files
+            }
         )
     remote = Remote(objects)
     config = ModelDeliveryAdoptionCandidateConfig(
@@ -202,6 +215,7 @@ def test_late_acceptance_publication_stops_at_fence_but_old_retry_survives(issua
     assert census(i).legacy == c.legacy
 
 
+@pytest.mark.parametrize("issuance", ["", "preservation/v1/"], indirect=True)
 async def test_r2_review_is_checkpointed_across_restart_and_detects_changed_bytes(issuance):
     i = issuance
     await i.candidate.verify(i.case.history, i.transition)
@@ -294,6 +308,7 @@ def owner_api(issuance, tmp_path):
     db.close()
 
 
+@pytest.mark.parametrize("issuance", ["", "preservation/v1/"], indirect=True)
 async def test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tmp_path):
     a, i = owner_api, owner_api.i
     async with httpx.AsyncClient(

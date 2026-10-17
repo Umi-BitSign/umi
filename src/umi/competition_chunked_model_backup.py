@@ -26,7 +26,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_artifacts import (
     _artifact,
@@ -56,6 +56,9 @@ from .r2_multipart import R2MultipartClient
 CHUNK_BYTES = 8 * 1024**2
 METADATA_BYTES = 64 * 1024**2
 BYTE_ABI = "umi-chunked-model-backup-bytes/1"
+ObjectKeyPrefix = Annotated[
+    str, Field(max_length=128, pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*$")
+]
 
 
 class ChunkedBackupBinding(StrictProtocolModel):
@@ -68,6 +71,14 @@ class ChunkedBackupBinding(StrictProtocolModel):
     provenance_sha256: Hex32
     endpoint: Annotated[str, Field(pattern=r"^https://[0-9a-f]{32}\.r2\.cloudflarestorage\.com$")]
     bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
+    object_key_prefix: ObjectKeyPrefix = ""
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy(self, handler):
+        value = handler(self)
+        if not self.object_key_prefix:
+            value.pop("object_key_prefix", None)
+        return value
 
     @model_validator(mode="after")
     def present_provenance(self):
@@ -283,7 +294,12 @@ class ChunkedModelBackupReader:
         }
         if actual != {"endpoint": binding.endpoint, "bucket": binding.bucket}:
             raise ValueError("chunked model provider namespace differs")
+        if binding.object_key_prefix:
+            actual["object_key_prefix"] = binding.object_key_prefix
         return actual
+
+    def _key(self, chunk):
+        return self.selection.binding.object_key_prefix + chunk.key
 
     def _context(self):
         return {
@@ -318,14 +334,15 @@ class ChunkedModelBackupReader:
             async def worker():
                 for key, chunk in pending:
                     self._namespace()
-                    head = await self.multipart.head(chunk.key)
+                    object_key = self._key(chunk)
+                    head = await self.multipart.head(object_key)
                     if head is None:
                         raise OSError("retained model chunk is unavailable")
                     if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
                         progress.emit("repair_required", reason="chunked_model_generation_changed")
                         raise ValueError("retained model chunk metadata differs")
                     value = ChunkedObjectGeneration(
-                        key=chunk.key, sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
+                        key=object_key, sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
                     )
                     if expected is not None and value != expected[key]:
                         progress.emit("repair_required", reason="chunked_model_generation_changed")
@@ -351,11 +368,12 @@ class ChunkedModelBackupReader:
 
     async def _chunk(self, chunk, heads):
         self._namespace()
-        raw = await self.multipart.read_range(chunk.key, offset=0, size_bytes=chunk.size_bytes)
+        object_key = self._key(chunk)
+        raw = await self.multipart.read_range(object_key, offset=0, size_bytes=chunk.size_bytes)
         if len(raw) != chunk.size_bytes or sha256_hex(raw) != chunk.sha256:
             raise ValueError("retained model chunk bytes differ")
         self._namespace()
-        head = await self.multipart.head(chunk.key)
+        head = await self.multipart.head(object_key)
         expected = heads[chunk.sha256]
         if head is None or (head.size_bytes, head.etag) != (expected.size_bytes, expected.etag):
             raise ValueError("retained model chunk changed during transfer")
@@ -586,7 +604,7 @@ class ChunkedModelBackupReader:
             or len(heads) != len(snapshot.objects)
             or set(heads) != set(self.chunks)
             or any(
-                (heads[key].key, heads[key].size_bytes) != (chunk.key, chunk.size_bytes)
+                (heads[key].key, heads[key].size_bytes) != (self._key(chunk), chunk.size_bytes)
                 for key, chunk in self.chunks.items()
             )
         ):
