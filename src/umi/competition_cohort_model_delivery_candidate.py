@@ -31,7 +31,7 @@ from .concurrency import run_owned_thread
 from .open_competition import digest
 from .private_files import Directory, _read_private_bytes
 from .protocol import StrictProtocolModel, canonical_json_bytes, sha256_hex
-from .r2_multipart import R2MultipartClient
+from .r2_multipart import R2MultipartClient, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 
@@ -224,6 +224,12 @@ class ModelDeliveryAdoptionCandidate:
                 R2SigV4(loaded.endpoint, self.config.r2_bucket, loaded.credentials),
                 timeout_seconds=self.config.r2_timeout_seconds,
             )
+        async with r2_connection_scope(self.multipart):
+            return await self._verify_selected(
+                transition, value, export_only=export_only, completed_only=completed_only
+            )
+
+    async def _verify_selected(self, transition, value, *, export_only, completed_only):
         readers = LegacyModelStorageReaders(
             {transition.cohort_sha256: value},
             policy=self.policy,

@@ -3002,6 +3002,18 @@ so partial import completion does not authorize removal of another selected root
 self-contained for ordinary reuse, but removal of old import roots requires
 checking recovery dependencies and replacing obsolete import selections.
 
+Native R2 clients reuse bounded HTTP connections during authenticated candidate
+review/export batches, direct review/materialization and the direct-upload
+service's owned lifetime. Each exchange keeps its original signature, response
+limits, generation checks and timeout. No response caching or write retry is
+added. Overlapping scopes share the same client on one event loop; shutdown
+waits for active requests to release their responses before closing it, including
+when the owner is cancelled repeatedly. Standalone requests and independently
+supplied providers retain their previous transport ownership. A runtime upgrade
+must preserve the selected byte stores and compatible verifier ABI; connection
+reuse does not authenticate a transport adoption, restore missing facts or
+establish that blocked uploads have recovered.
+
 Supported older installations may retain selection-bound receipts under the
 model's `remote` directory. Keep that directory while any deployed reader or
 recovery consumer uses the older layout. The current reader migrates successful

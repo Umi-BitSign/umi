@@ -76,7 +76,7 @@ from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
 from .private_files import Directory, lock_private_file, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
-from .r2_multipart import R2MultipartClient
+from .r2_multipart import R2MultipartClient, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 logger = logging.getLogger(__name__)
@@ -598,6 +598,7 @@ class ServiceAdmissionHost:
                 model_delivery_adoptions=selections,
             )
         self.payloads = None
+        self.r2_multipart = None
         self.direct_uploads = None
         self.legacy_payloads = None
         self.continued_payloads = None
@@ -623,6 +624,7 @@ class ServiceAdmissionHost:
             loaded = load_r2_credentials(Path(direct.r2_credentials_file))
             signer = R2SigV4(loaded.endpoint, direct.r2_bucket, loaded.credentials)
             multipart = R2MultipartClient(signer, timeout_seconds=direct.r2_timeout_seconds)
+            self.r2_multipart = multipart
             legacy_readers = selected_legacy_model_readers(
                 prepared_legacy,
                 multipart=multipart,
@@ -905,11 +907,14 @@ class ServiceAdmissionHost:
             )
         )
         try:
-            async with httpx.AsyncClient(
-                trust_env=False,
-                follow_redirects=False,
-                limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
-            ) as client:
+            async with (
+                r2_connection_scope(self.r2_multipart),
+                httpx.AsyncClient(
+                    trust_env=False,
+                    follow_redirects=False,
+                    limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
+                ) as client,
+            ):
                 if self.models is not None and self.config.model_review_peers:
                     peers = []
                     for p in self.config.model_review_peers:

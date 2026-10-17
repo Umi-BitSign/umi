@@ -55,6 +55,8 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_cohort_model_upload_replay.py",
         "competition_cohort_direct_model_owner.py",
         "competition_remote_model_verification.py",
+        "r2_connection_pool.py",
+        "r2_multipart.py",
         "endpoint_response_recovery.py",
         "open_competition.py",
         "protocol.py",
