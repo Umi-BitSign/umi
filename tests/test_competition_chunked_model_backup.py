@@ -58,7 +58,7 @@ class Remote:
         return self.objects[key][offset : offset + size_bytes]
 
 
-def selected(policy, *, weights=b"weights", mutation=None):
+def selected(policy, *, weights=b"weights", mutation=None, object_key_prefix=""):
     contents = {
         role + ".txt": weights if role == "weights" else role.encode()
         for role in (
@@ -91,7 +91,7 @@ def selected(policy, *, weights=b"weights", mutation=None):
         for offset in range(0, len(raw), CHUNK_BYTES):
             part = raw[offset : offset + CHUNK_BYTES]
             key = sha256_hex(part)
-            objects["chunks/sha256/" + key] = part
+            objects[object_key_prefix + "chunks/sha256/" + key] = part
             chunks.append({"sha256": key, "size_bytes": len(part)})
         files.append({"path": record.path, "chunks": chunks})
     package = {
@@ -128,6 +128,7 @@ def selected(policy, *, weights=b"weights", mutation=None):
         provenance_sha256="12" * 32,
         endpoint=remote.signer.endpoint,
         bucket=remote.signer.bucket,
+        object_key_prefix=object_key_prefix,
     )
     return SimpleNamespace(
         bundle=bundle,

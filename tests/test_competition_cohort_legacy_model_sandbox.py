@@ -56,6 +56,7 @@ pytestmark = [
 
 @pytest.fixture
 def installed(case, tmp_path, receipt_scenario, runtime, request):
+    prefix = "preservation/v1/" if getattr(request, "param", None) == "prefixed" else ""
     incumbent = bundle_at(tmp_path / "execution-incumbent", "different-certified-winner")
     incumbent_pin = LegacyModelIncumbent(
         model_sha256=digest(incumbent),
@@ -89,6 +90,15 @@ def installed(case, tmp_path, receipt_scenario, runtime, request):
             ),
         }
     )
+    if prefix:
+        preservation = preservation.model_copy(
+            update={
+                "models": tuple(
+                    model.model_copy(update={"object_key_prefix": prefix})
+                    for model in preservation.models
+                )
+            }
+        )
     auth = authenticated(
         case, legacy=legacy, preservation=preservation, incumbents=(digest(incumbent),)
     )
@@ -100,7 +110,9 @@ def installed(case, tmp_path, receipt_scenario, runtime, request):
         (incumbent, tmp_path / "execution-incumbent"),
     ):
         for file in bundle.files:
-            remote_objects["chunks/sha256/" + file.sha256] = (root / file.path).read_bytes()
+            remote_objects[prefix + "chunks/sha256/" + file.sha256] = (
+                root / file.path
+            ).read_bytes()
     remote = Remote(remote_objects)
     verification = tmp_path / "durable-byte-results"
     sources = LegacyModelStorageReaders(
@@ -162,6 +174,7 @@ def installed(case, tmp_path, receipt_scenario, runtime, request):
         artifacts=artifacts,
         sources=sources,
         remote=remote,
+        object_key_prefix=prefix,
         verification=verification,
         root=tmp_path,
         request=request,
@@ -204,7 +217,7 @@ def cpu_readback(port, installed, monkeypatch):
         root = archive / digest(bundle) / "model"
         for file in bundle.files:
             assert (root / file.path).read_bytes() == installed.remote.objects[
-                "chunks/sha256/" + file.sha256
+                installed.object_key_prefix + "chunks/sha256/" + file.sha256
             ]
         seen.append((role, digest(bundle)))
         return "inert-cpu-result"
@@ -213,6 +226,7 @@ def cpu_readback(port, installed, monkeypatch):
     return seen
 
 
+@pytest.mark.parametrize("installed", [None, "prefixed"], indirect=True)
 async def test_candidate_baseline_and_explicit_incumbent_use_actual_bounded_sandbox(
     installed, monkeypatch, caplog
 ):
@@ -394,12 +408,13 @@ async def test_legacy_receipts_must_remain_outside_disposable_boot_cache(install
     assert not installed.remote.reads
 
 
-def test_reader_rejects_unselected_inventory_provenance(installed):
+@pytest.mark.parametrize(
+    "field,value", [("provenance_sha256", "ff" * 32), ("object_key_prefix", "preservation/v1/")]
+)
+def test_reader_rejects_unselected_inventory_provenance(installed, field, value):
     source = installed.sources.resolve(installed.case.cohort, baseline=True)
     changed = source.selection.model_copy(
-        update={
-            "binding": source.selection.binding.model_copy(update={"provenance_sha256": "ff" * 32})
-        }
+        update={"binding": source.selection.binding.model_copy(update={field: value})}
     )
     with pytest.raises(ValueError, match="outside its authenticated inventories"):
         installed.sources.reader(replace(source, selection=changed))

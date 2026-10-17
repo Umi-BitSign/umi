@@ -2847,6 +2847,22 @@ signing keys, then binds the source to the actual R2 credential namespace.
 Missing or damaged metadata requires repair. Empty older configurations retain
 their native archive behavior; they do not establish an R2 storage migration.
 
+Each model in `preservation-inventory.json` also selects its actual R2
+`object_key_prefix`. Backups written by the supported preservation service use
+`"preservation/v1/"`; their package chunk keys remain relative to that prefix.
+The native binding carries this authenticated value through candidate review,
+intake, independent reviewers, settlement and reward readers. Verification,
+unchanged retry ranges and cache restoration all use the selected full key.
+There is no fallback search of other prefixes. Omitted fields retain the older
+bucket-root behavior and exact canonical bytes. For an uncommitted migration,
+prepare a new inventory with the actual prefix before adoption; preserve its
+original signed requests and backup metadata. An already committed inventory
+must retain its authenticated namespace until a supported new selection adopts
+the replacement. Do not relabel its byte receipts: prefixes are part of the
+remote verification context, and unchanged results are reusable only within that
+same namespace. Retain this compatibility reader while supported retained
+inventories use bucket-root storage.
+
 On the intake host, also set `legacy_model_verification_directory` to private
 durable state outside the upload journals, archive, metadata sources and disposable
 caches. The host derives adoption selections from its own committed native history
