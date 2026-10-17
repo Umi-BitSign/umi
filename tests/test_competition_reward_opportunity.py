@@ -434,7 +434,9 @@ async def test_coverage_scheduler_retries_each_validator_without_expiry(opportun
     head += 3000  # A ten-hour gap supplies no coverage and does not expire work.
     result = await collector.step()
     assert result.certificate is None
-    assert calls[-len(c.series.validators) :] == [(k, head - 1) for k in c.series.validators]
+    count = len(c.series.validators)
+    assert calls[-2 * count : -count] == [(k, head - 1) for k in c.series.validators]
+    assert calls[-count:] == [(k, 99) for k in c.series.validators]
     assert not await journal.interval_keys()
 
 
@@ -448,7 +450,9 @@ async def test_default_capture_window_tracks_the_head_after_slow_or_interrupted_
 
     c = opportunity_case
     rule = opportunity_rule(c.manifest, c.series, c.policy)
-    journal = RewardCoverageJournal(tmp_path / "fresh-tail", rule, expected_rule_sha256=digest(rule))
+    journal = RewardCoverageJournal(
+        tmp_path / "fresh-tail", rule, expected_rule_sha256=digest(rule)
+    )
     head = 10_000
     calls = []
 
@@ -474,7 +478,10 @@ async def test_default_capture_window_tracks_the_head_after_slow_or_interrupted_
         for _ in range(3):
             before = len(calls)
             result = await collector.step()
-            assert calls[before:] == [(hotkey, head - 3) for hotkey in c.series.validators]
+            assert calls[before:] == (
+                [(hotkey, head - 3) for hotkey in c.series.validators]
+                + [(hotkey, 99) for hotkey in c.series.validators]
+            )
             assert not any(total for _, total in result.credited_ms)
             assert result.certificate is None
             head += 20  # Slow proofs must not pin subsequent capture to an old page.
@@ -490,7 +497,9 @@ async def test_explicit_capture_window_preserves_historical_operator_selection(
 
     c = opportunity_case
     rule = opportunity_rule(c.manifest, c.series, c.policy)
-    journal = RewardCoverageJournal(tmp_path / "explicit-window", rule, expected_rule_sha256=digest(rule))
+    journal = RewardCoverageJournal(
+        tmp_path / "explicit-window", rule, expected_rule_sha256=digest(rule)
+    )
     calls = []
 
     class Source:
@@ -505,7 +514,12 @@ async def test_explicit_capture_window_preserves_historical_operator_selection(
             pytest.fail("empty journal has no retained intervals")
 
     collector = RewardCoverageCollector(
-        journal, Source(), **c.terms, first_block=99, capture_window_blocks=128
+        journal,
+        Source(),
+        **c.terms,
+        first_block=99,
+        capture_window_blocks=128,
+        maximum_backfill_endpoints_per_validator=0,
     )
     await collector.step()
     assert calls == [(hotkey, 10_000 - 127) for hotkey in c.series.validators]

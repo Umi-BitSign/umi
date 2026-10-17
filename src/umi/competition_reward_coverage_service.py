@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 from contextlib import suppress
+from dataclasses import dataclass
 from functools import partial
 from typing import Annotated, Literal
 
@@ -54,6 +55,12 @@ class CoverageWork(StrictProtocolModel):
 class CoverageCompletion(StrictProtocolModel):
     schema_: Literal["umi-reward-coverage-completion/1"] = Field(alias="schema")
     certificate_sha256: Hex32
+
+
+@dataclass(frozen=True)
+class _CollectionOutcome:
+    immediate: bool
+    retrying: bool
 
 
 def coverage_work_key(activation: RewardActivation) -> str:
@@ -249,7 +256,10 @@ class StandingRewardCoverageService:
                 progress.errors,
             )
             if progress.certificate is None:
-                return
+                return _CollectionOutcome(
+                    bool(getattr(progress, "immediate", False)),
+                    any(reason != "history_pending" for _, reason in progress.errors),
+                )
             completion = CoverageCompletion(
                 schema="umi-reward-coverage-completion/1",
                 certificate_sha256=digest(progress.certificate),
@@ -278,7 +288,10 @@ class StandingRewardCoverageService:
             # or the coordinator is unavailable. Failures are independent.
             for name, operation in (("collection", self._collect), ("discovery", self._discover)):
                 try:
-                    await operation()
+                    outcome = await operation()
+                    if type(outcome) is _CollectionOutcome:
+                        progressed = outcome.immediate or progressed
+                        failed = outcome.retrying or failed
                 except HistoricalHeaderRecoveryProgress:
                     progressed = True
                     logger.info("coverage_header_progress phase=%s", name)
