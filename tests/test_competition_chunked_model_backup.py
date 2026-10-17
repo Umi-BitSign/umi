@@ -254,6 +254,9 @@ async def legacy_receipts(case, tmp_path):
     )
     actual._migrate_remote_receipts = lambda *args, **kwargs: None
     await actual.verify(document_paths=("license.txt",))
+    # A real pre-file-sharing release could not have produced these facts.
+    for name in ("shared-file-bytes-v1", "shared-file-index-v1"):
+        shutil.rmtree(actual.root / name, ignore_errors=True)
     return actual.root / digest(case.bundle) / "remote"
 
 
@@ -583,7 +586,7 @@ async def test_remote_replacement_or_wrong_bytes_refuses(backup, tmp_path, chang
 
 
 @pytest.mark.asyncio
-async def test_missing_completed_receipt_repairs_only_affected_file(backup, tmp_path):
+async def test_missing_completed_receipt_repairs_from_exact_shared_file_fact(backup, tmp_path):
     actual = reader(backup, tmp_path)
     await actual.verify()
     root = remote_receipt_root(backup, tmp_path)
@@ -592,7 +595,7 @@ async def test_missing_completed_receipt_repairs_only_affected_file(backup, tmp_
     backup.remote.reads.clear()
     events = []
     await reader(backup, tmp_path).verify(report=events.append)
-    assert backup.remote.reads == ["chunks/sha256/" + sha256_hex(b"weights")]
+    assert backup.remote.reads == []
     assert any(e.get("status") == "repair_required" for e in events)
 
 
@@ -605,7 +608,7 @@ async def test_document_repair_is_bounded_and_unsafe_metadata_is_refused(backup,
     backup.remote.reads.clear()
     events = []
     await reader(backup, tmp_path).verify(document_paths=("license.txt",), report=events.append)
-    assert backup.remote.reads == ["chunks/sha256/" + sha256_hex(b"license")]
+    assert backup.remote.reads == []
     assert any(e.get("status") == "repair_required" for e in events)
     document.unlink()
     document.symlink_to(tmp_path / "unrelated")

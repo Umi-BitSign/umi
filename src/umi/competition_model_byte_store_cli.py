@@ -34,14 +34,17 @@ class ModelByteStoreExportRequest(StrictProtocolModel):
     transition: CohortRecoveryTransition
 
 
-async def export_request(request):
+async def export_request(request, *, seed_shared=False):
     candidate = ModelDeliveryAdoptionCandidate(request.candidate, request.policy)
+    if seed_shared:
+        await candidate.seed_shared_completed(request.history, request.transition)
+        return ()
     return await candidate.export_completed(request.history, request.transition)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["export"])
+    parser.add_argument("operation", choices=["export", "seed-shared"])
     parser.add_argument("--request", type=Path, required=True)
     args = parser.parse_args(argv)
     raw = _read_root_control_path(args.request, 64 * 1024**2, modes={0o444})
@@ -49,12 +52,13 @@ def main(argv=None):
     if canonical_json_bytes(request) != raw:
         raise ValueError("model byte export request must retain canonical selected inputs")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    exports = asyncio.run(export_request(request))
+    exports = asyncio.run(export_request(request, seed_shared=args.operation == "seed-shared"))
     print(
         canonical_json_bytes(
             {
                 "imports": [v.model_dump(mode="json") for v in exports],
                 "certification_authority": False,
+                "shared_file_seed_completed": args.operation == "seed-shared",
             }
         ).decode()
     )

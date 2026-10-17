@@ -296,3 +296,100 @@ def test_child_failed_progress_withdraws_parent_eta(monkeypatch, state, failed_c
     assert events[-1]["status"] == state
     assert events[-1]["eta_seconds"] is None
     assert events[-1]["completed_units"] == 10
+
+
+def test_operation_tail_prevents_zero_eta_after_last_large_payload(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    with transport.TransferProgress("bytes", 1000, events.append, total_operations=10) as progress:
+        now[0] += 10
+        progress.advance(1000)
+        progress.advance_operations(2)
+        progress.emit("running")
+        assert events[-1]["eta_seconds"] == 40
+        assert events[-1]["operation_eta_seconds"] == 40
+        now[0] += 10
+        progress.advance_operations(8)
+    assert events[-1]["status"] == "completed"
+    assert events[-1]["eta_seconds"] == 0
+
+
+def test_restored_operations_do_not_inflate_rate_and_incomplete_exit_retries(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    with transport.TransferProgress("bytes", 1000, events.append, total_operations=10) as progress:
+        now[0] += 10
+        progress.advance(1000, restored=True)
+        progress.advance_operations(8, restored=True)
+        progress.emit("running")
+        assert events[-1]["eta_seconds"] is None
+        assert events[-1]["native_operations"] == 0
+    assert events[-1]["status"] == "retrying"
+
+
+def test_alternating_child_scopes_preserve_liveness_without_heartbeat_refresh(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    parent = transport.TransferProgress("models", 10, events.append, unit="models")
+    child = parent.child_report()
+
+    def send(stage, count, total=1000, **kwargs):
+        child(
+            dict(
+                stage=stage,
+                status="running",
+                completed_units=count,
+                total_units=total,
+                unit="bytes",
+                **kwargs,
+            )
+        )
+
+    send("bytes", 900)
+    now[0] += 50
+    send("metadata", 1, total=10)
+    assert events[-1]["status"] == "running"
+    now[0] += 50
+    send("bytes", 901)
+    assert events[-1]["status"] == "running"
+    now[0] += 61
+    send("bytes", 901)
+    parent.emit("running")
+    assert events[-1]["status"] == "stalled"
+    send("bytes", 0, elapsed_seconds=0)
+    parent.emit("running")
+    assert events[-1]["status"] == "stalled"
+    # A genuinely restarted stage has an explicit zero-start, then new work.
+    child(
+        dict(
+            stage="bytes",
+            status="started",
+            completed_units=0,
+            total_units=1000,
+            unit="bytes",
+            elapsed_seconds=0,
+        )
+    )
+    now[0] += 1
+    send("bytes", 1, elapsed_seconds=1)
+    assert events[-1]["status"] == "running"
+    assert events[-1]["completed_units"] == 0
+
+
+def test_required_child_withdraws_parent_zero_eta(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    parent = transport.TransferProgress("bytes", 100, events.append)
+    now[0] += 10
+    parent.advance(100)
+    child = parent.child_report()
+    child(
+        dict(stage="confirm", status="started", completed_units=0, total_units=10, unit="objects")
+    )
+    parent.emit("running")
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["eta_basis"] == "required_child_scope_incomplete"
