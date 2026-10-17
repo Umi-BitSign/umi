@@ -60,7 +60,10 @@ class RewardCoverageCollector:
         first_block: int,
         maximum_replay_intervals: int = 8,
         maximum_endpoints_per_validator: int = 4,
-        capture_window_blocks: int = 128,
+        # Capture recent points even when a slow endpoint cannot fill a long
+        # historical page. Retained intervals have their own replay cursor;
+        # this window neither deletes them nor credits gaps between captures.
+        capture_window_blocks: int = 4,
         maximum_witness_bytes: int = DEFAULT_WITNESS_BYTES,
     ):
         if journal.rule != opportunity_rule(manifest, series, policy):

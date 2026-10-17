@@ -3343,6 +3343,17 @@ a portable point or another owner's receipt cannot establish coverage. R2 cache
 eviction and acknowledged SQL externalization preserve these facts. New endpoints
 and changed dependencies still require their affected native checks.
 
+New coverage capture starts within the latest four finalized blocks by default,
+so a slow or restarted collector does not work through an old 128-block page
+before observing the active allocation. An explicit `capture_window_blocks`
+selection remains supported by the collector API. This schedules new capture;
+it does not alter signed opportunity terms, endpoint timestamps, eligibility,
+whole-row comparison or freshness requirements. Retained intervals still replay
+through their independent cursor. Gaps never earn interval credit, and narrowing
+the capture window does not delete older evidence or truncate retained block
+history. A source update requires the supported runtime upgrade; it does not
+change the scheduling of an already running collector.
+
 For direct models, compact dependency receipts bind the selected native verifier,
 standing review policy, original receipt owner and authenticated R2 object
 generation. Restore checks those small receipts and object HEADs without loading
