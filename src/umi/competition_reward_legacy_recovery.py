@@ -7,6 +7,7 @@ transaction inventory. Local outcome flags never establish an expiry.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
@@ -26,6 +27,7 @@ from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_HEADER_BYTES
 from .grandpa_finality import _decode_header
+from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
 from .protocol import canonical_json_bytes
 from .runtime_metadata import collect_executed_runtime
@@ -220,7 +222,17 @@ async def review_legacy_weight_expiry(
             "genesis_hash"
         ) != "0x" + provider.config.chain_pin.genesis_block_hash:
             raise ValueError("legacy attempt differs from original signing finality")
-        timestamp, ceiling = await provider._resolve_control_header(ref, inputs.encoded)
+        while True:
+            try:
+                timestamp, ceiling = await provider._resolve_control_header(ref, inputs.encoded)
+                break
+            except HistoricalHeaderRecoveryProgress:
+                # The original owner retained more authenticated ancestry.
+                # Continue this exact signing input under its existing lease;
+                # unwinding here would replay the entire handoff inventory.
+                # Capacity, corruption, RPC failures and cancellation still
+                # propagate. Each bounded pass remains cooperatively stoppable.
+                await asyncio.sleep(0)
         if provider._runtime_executor is not None:
             execution = inputs.body.get("runtime_execution")
             if (

@@ -638,6 +638,17 @@ signer/executor startup. A
 exception text or credentials. A stage entry records attempted work; use the
 retained journal and finalized chain update to confirm completion.
 
+Legacy handoff reports separate `legacy_handoff_packages` and
+`legacy_handoff_expiry` work inventories, elapsed time and stage ETAs. Retained
+successor continuations use the shared checked history reader rather than
+independently expanding every prefix. Long native ancestry walks continue the
+same signing input across bounded progress passes while the original provider
+and stopped-writer leases remain held. Capacity, invalid evidence, RPC failures
+and cancellation still refuse or interrupt the handoff. Ancestry progress and
+its ETA exclude the later signature, transaction and reward checks; no progress
+record authorizes a new writer. Restart preserves the original journals and
+signed inputs and follows the ordinary native validation path.
+
 Legacy configurations retain their original bytes and digests. Each selects
 host-local `CompetitionChainResources` for tools, chain specification, optional
 metadata and a separate cache; all verification hashes still come from the

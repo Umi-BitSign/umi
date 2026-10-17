@@ -26,6 +26,23 @@ from .test_historical_header_recovery import (  # noqa: F401
 from .test_historical_header_recovery import walk as walk
 
 
+def test_supervisor_exposes_handoff_and_ancestry_status_and_restores_loggers(capsys):
+    from umi.competition_supervisor_cli import _standing_logs
+
+    names = ("umi.competition_reward_handoff", "umi.historical_header_progress")
+    loggers = [logging.getLogger(name) for name in names]
+    before = [(logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers]
+    with _standing_logs():
+        loggers[0].info("legacy_handoff_inventory attempts=449")
+        loggers[1].info("historical_header_recovery_progress bounded_native_pass")
+    output = capsys.readouterr().err
+    assert "legacy_handoff_inventory attempts=449" in output
+    assert "historical_header_recovery_progress bounded_native_pass" in output
+    assert [
+        (logger.level, logger.propagate, tuple(logger.handlers)) for logger in loggers
+    ] == before
+
+
 @pytest.fixture
 def measured_clock(monkeypatch):
     now = [1000.0]
