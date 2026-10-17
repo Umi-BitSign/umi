@@ -409,6 +409,8 @@ def _standing_logs():
     selected = []
     for name in (
         "umi.competition_reward_service",
+        "umi.competition_reward_handoff",
+        "umi.historical_header_progress",
         "umi.competition_reward_executor",
         "umi.competition_reward_coverage_service",
         "umi.competition_reward_history_progress",

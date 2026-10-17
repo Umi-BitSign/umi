@@ -38,6 +38,7 @@ from .competition_weights import (
     _WeightAttempt,
     competition_weight_authorization_digest,
 )
+from .competition_work_progress import WorkProgress, work_heartbeats
 from .encoding import account_id32
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -182,69 +183,88 @@ async def hold_legacy_reward_handoff(
                 _LOG.info("legacy_handoff_inventory attempts=%d", len(attempts))
                 targets, packages = {}, {}
                 replay = RecoveryPackageReplay()
-                for selection, files in adapter._records().values():
-                    snapshot = _recovery_package_snapshot(files.package_path)
-                    checked = adapter._verify(selection, files, recovery_packages=replay)
-                    if _recovery_package_snapshot(files.package_path) != snapshot:
-                        raise ValueError("legacy package changed during handoff replay")
-                    packages[files.package_path] = snapshot
-                    if checked.authorization is not None:
-                        auth = checked.authorization.authorization
-                        authority = (
-                            competition_weight_authorization_digest(auth),
-                            digest(checked.execution.weights.chain),
-                            auth.mortality_period,
+                records = adapter._records()
+                with (
+                    work_heartbeats(),
+                    WorkProgress("legacy_handoff_packages", len(records), unit="runs") as progress,
+                ):
+                    for selection, files, restored in records.recovery_values():
+                        snapshot = _recovery_package_snapshot(files.package_path)
+                        checked = adapter._verify(
+                            selection, files, recovery_packages=replay, recovery_history=restored
                         )
-                        prior = targets.setdefault(auth.authorization_id, authority)
-                        if prior != authority:
-                            raise ValueError("legacy handoff changes a retained authorization")
+                        if _recovery_package_snapshot(files.package_path) != snapshot:
+                            raise ValueError("legacy package changed during handoff replay")
+                        packages[files.package_path] = snapshot
+                        if checked.authorization is not None:
+                            auth = checked.authorization.authorization
+                            authority = (
+                                competition_weight_authorization_digest(auth),
+                                digest(checked.execution.weights.chain),
+                                auth.mortality_period,
+                            )
+                            prior = targets.setdefault(auth.authorization_id, authority)
+                            if prior != authority:
+                                raise ValueError("legacy handoff changes a retained authorization")
+                        progress.advance()
                 receipts = []
-                for index, (raw, item) in enumerate(attempts, 1):
-                    if (
-                        targets.get(item.authorization_id)
-                        != (
-                            item.authorization_sha256,
-                            item.chain_config_sha256,
-                            item.era_death - item.preflight_block,
+                with (
+                    work_heartbeats(),
+                    WorkProgress(
+                        "legacy_handoff_expiry", len(attempts), unit="attempts"
+                    ) as progress,
+                ):
+                    for index, (raw, item) in enumerate(attempts, 1):
+                        if (
+                            targets.get(item.authorization_id)
+                            != (
+                                item.authorization_sha256,
+                                item.chain_config_sha256,
+                                item.era_death - item.preflight_block,
+                            )
+                            or item.recovery_checkpoint_sha256
+                            != adapter.installation.checkpoint_sha256
+                        ):
+                            raise ValueError("legacy attempt lacks its exact retained authority")
+                        chain = read(item.chain_evidence_sha256)
+                        metadata = read(json.loads(chain)["runtime_metadata_sha256"])
+                        if item.signed_extrinsic is None:
+                            # The original worker durably saves exact signed bytes
+                            # before broadcasting. Under its continuously held lock,
+                            # an unsigned intention cannot create a future effect.
+                            # Recovery may have changed its local phase to unknown
+                            # or expired; neither label is used as an expiry proof.
+                            recheck()
+                            _LOG.info(
+                                "legacy_handoff_unsigned index=%d total=%d", index, len(attempts)
+                            )
+                            progress.advance()
+                            continue
+                        provider = providers.get(item.chain_config_sha256)
+                        if (
+                            not isinstance(provider, HistoricalRewardControlProvider)
+                            or digest(provider.config) != item.chain_config_sha256
+                        ):
+                            raise ValueError("legacy handoff lacks the original chain provider")
+                        result = await review_legacy_weight_expiry(
+                            provider,
+                            attempt=raw,
+                            chain=chain,
+                            metadata=metadata,
+                            validator_hotkey=runtime.config.validator_hotkey,
                         )
-                        or item.recovery_checkpoint_sha256 != adapter.installation.checkpoint_sha256
-                    ):
-                        raise ValueError("legacy attempt lacks its exact retained authority")
-                    chain = read(item.chain_evidence_sha256)
-                    metadata = read(json.loads(chain)["runtime_metadata_sha256"])
-                    if item.signed_extrinsic is None:
-                        # The original worker durably saves exact signed bytes
-                        # before broadcasting. Under its continuously held lock,
-                        # an unsigned intention cannot create a future effect.
-                        # Recovery may have changed its local phase to unknown
-                        # or expired; neither label is used as an expiry proof.
+                        if result is None:
+                            raise ValueError("legacy transaction remains live; handoff is pending")
+                        validate_legacy_weight_expiry(
+                            result,
+                            attempt=raw,
+                            chain_config_sha256=item.chain_config_sha256,
+                            validator_hotkey=runtime.config.validator_hotkey,
+                        )
                         recheck()
-                        _LOG.info("legacy_handoff_unsigned index=%d total=%d", index, len(attempts))
-                        continue
-                    provider = providers.get(item.chain_config_sha256)
-                    if (
-                        not isinstance(provider, HistoricalRewardControlProvider)
-                        or digest(provider.config) != item.chain_config_sha256
-                    ):
-                        raise ValueError("legacy handoff lacks the original chain provider")
-                    result = await review_legacy_weight_expiry(
-                        provider,
-                        attempt=raw,
-                        chain=chain,
-                        metadata=metadata,
-                        validator_hotkey=runtime.config.validator_hotkey,
-                    )
-                    if result is None:
-                        raise ValueError("legacy transaction remains live; handoff is pending")
-                    validate_legacy_weight_expiry(
-                        result,
-                        attempt=raw,
-                        chain_config_sha256=item.chain_config_sha256,
-                        validator_hotkey=runtime.config.validator_hotkey,
-                    )
-                    recheck()
-                    receipts.append(result)
-                    _LOG.info("legacy_handoff_expired index=%d total=%d", index, len(attempts))
+                        receipts.append(result)
+                        _LOG.info("legacy_handoff_expired index=%d total=%d", index, len(attempts))
+                        progress.advance()
                 if (await adapter.container.status()).phase == "running":
                     raise ValueError("legacy worker restarted during handoff review")
                 for package, snapshot in packages.items():
