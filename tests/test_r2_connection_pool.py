@@ -169,3 +169,56 @@ async def test_real_http_keepalive_reuse_and_peer_close(monkeypatch, peer_closes
             writer.close()
         if tasks:
             await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_shared_pool_does_not_add_an_independent_active_request_ceiling(monkeypatch):
+    waiting, arrived = asyncio.Event(), []
+    server_tasks = set()
+    connections = []
+
+    async def serve(reader, writer):
+        task = asyncio.current_task()
+        server_tasks.add(task)
+        connections.append(writer)
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            arrived.append(True)
+            if len(arrived) == 105:
+                waiting.set()
+            await waiting.wait()
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 7\r\nETag: "generation"\r\n\r\n')
+            await writer.drain()
+        except asyncio.IncompleteReadError:
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            server_tasks.discard(task)
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0, backlog=256)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(
+        type(signer()), "object_url", lambda *_a, **_k: f"http://127.0.0.1:{port}/object"
+    )
+    requests = []
+    try:
+        client = R2MultipartClient(signer())
+        async with client.connection_scope():
+            requests = [asyncio.create_task(client.head(KEY, at=AT)) for _ in range(105)]
+            try:
+                result = await asyncio.wait_for(asyncio.gather(*requests), timeout=5)
+                assert len(result) == len(arrived) == 105
+            finally:
+                waiting.set()
+                for task in requests:
+                    task.cancel()
+                await asyncio.gather(*requests, return_exceptions=True)
+    finally:
+        waiting.set()
+        server.close()
+        await server.wait_closed()
+        for writer in connections:
+            writer.close()
+        if server_tasks:
+            await asyncio.gather(*server_tasks)

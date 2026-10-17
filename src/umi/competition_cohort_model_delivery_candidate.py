@@ -5,6 +5,7 @@ owner census, exact reservation and independent byte review precede any vote.
 """
 
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -21,6 +22,8 @@ from .competition_cohort_legacy_model_storage import (
 )
 from .competition_cohort_model_transport import prepare_model_delivery_adoption
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_forecast import forecast_subscope
+from .competition_model_batch_progress import ModelBatchProgress, ModelWorkInventory
 from .competition_model_byte_store import (
     qualify_shared_byte_stores,
     shared_byte_store_paths,
@@ -249,25 +252,61 @@ class ModelDeliveryAdoptionCandidate:
                 if e.payload_state == "preserved"
             }
         )
-        exports = []
+        work = []
+        inventory = ModelWorkInventory()
+        models = sorted(selectors)
         with TransferProgress(
-            "model_byte_store_authenticated_export"
-            if export_only
-            else "model_delivery_adoption_remote_review",
-            len(selectors),
+            "model_delivery_work_inventory",
+            len(models),
             unit="models",
-            planning_unit_seconds=(1, 3600),
-        ) as progress:
-            for model in sorted(selectors):
+            planning_unit_seconds=(0.01, 1),
+        ) as preparation:
+            for model in models:
+                # Only bounded signed metadata is revisited for planning; no
+                # payload or successful byte verdict is read or reconstructed.
+                resolution = await run_owned_thread(
+                    lambda model=model: readers.resolve(
+                        transition.cohort_sha256, **selectors[model]
+                    )
+                )
+                work.append(
+                    inventory.add(resolution.selection, metadata_only=export_only or completed_only)
+                )
+                preparation.advance(1)
+        exports = []
+        with (
+            forecast_subscope(
+                cohort=transition.cohort_sha256,
+                work_sha256=digest(
+                    {
+                        "legacy": digest(value.legacy),
+                        "preservation": digest(value.preservation),
+                        "policy": digest(self.policy),
+                        "export_only": export_only,
+                        "completed_only": completed_only,
+                    }
+                ),
+                operation="model_delivery_byte_batch",
+            ),
+            ModelBatchProgress(
+                "model_byte_store_authenticated_export"
+                if export_only
+                else "model_delivery_adoption_remote_review",
+                tuple(work),
+            ) as progress,
+        ):
+            for index, model in enumerate(models):
+                started = monotonic()
                 resolution = await run_owned_thread(
                     lambda model=model: readers.resolve(
                         transition.cohort_sha256, **selectors[model]
                     )
                 )
                 reader = readers.reader(resolution)
+                report = progress.child_report(index)
                 if export_only:
-                    exports.append(await reader.export_completed(report=progress.child_report()))
-                    progress.advance(1)
+                    exports.append(await reader.export_completed(report=report))
+                    progress.advance(index, monotonic() - started)
                     continue
                 documents = tuple(
                     r.path
@@ -287,11 +326,11 @@ class ModelDeliveryAdoptionCandidate:
                     documents = ()
                 snapshot = await reader.verify(
                     document_paths=documents,
-                    report=progress.child_report(),
+                    report=report,
                     completed_only=completed_only,
                 )
                 await run_owned_thread(reader.require_verified, snapshot)
-                progress.advance(1)
+                progress.advance(index, monotonic() - started)
         return (
             tuple(sorted(exports, key=lambda v: (v.directory, v.export_sha256)))
             if export_only

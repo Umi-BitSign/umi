@@ -46,6 +46,7 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_cohort_service_host.py",
         "competition_shared_file_bytes.py",
         "competition_model_byte_store.py",
+        "competition_model_batch_progress.py",
         "competition_model_byte_store_cli.py",
         "competition_cohort_endpoint_archive.py",
         "competition_cohort_service_closure.py",

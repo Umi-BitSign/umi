@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -668,6 +669,22 @@ class ForecastAttempt:
 
     def observe(self, body):
         now = body["observed_unix_ms"]
+        classification = body.get(
+            "forecast_classification",
+            "measured_substage" if body["eta_seconds"] is not None else "unknown",
+        )
+        if classification not in {"measured_substage", "planning_scenario", "unknown"}:
+            raise ValueError("forecast classification differs")
+        finish_range = body.get("forecast_finish_range_seconds")
+        if finish_range is not None:
+            if (
+                not isinstance(finish_range, (tuple, list))
+                or len(finish_range) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in finish_range)
+                or not 0 <= finish_range[0] <= finish_range[1]
+            ):
+                raise ValueError("forecast planning range differs")
+            finish_range = [now + round(v * 1000) for v in finish_range]
         common = {
             **self.identity,
             "attempt": self.attempt,
@@ -686,6 +703,11 @@ class ForecastAttempt:
                 "eta_seconds": eta,
                 "finish_unix_ms": None if eta is None else now + round(eta * 1000),
             }
+            if "forecast_classification" in body:
+                forecast["forecast_classification"] = classification
+                forecast["forecast_finish_range_seconds"] = body.get(
+                    "forecast_finish_range_seconds"
+                )
             if forecast != self.last_forecast:
                 self.revision += 1
                 self.ledger.append(
@@ -697,9 +719,9 @@ class ForecastAttempt:
                         **forecast,
                         "revision": self.revision,
                         "forecast_origin": "prospective",
-                        "finish_range_unix_ms": None,
-                        "range_basis": "not_yet_calibrated",
-                        "classification": "measured_substage" if eta is not None else "unknown",
+                        "finish_range_unix_ms": finish_range,
+                        "range_basis": body.get("forecast_range_basis", "not_yet_calibrated"),
+                        "classification": classification,
                         "elapsed_seconds": body["elapsed_seconds"],
                         "raw_sample_seconds": body.get("eta_raw_sample_seconds", []),
                         "samples": body["eta_samples"],
@@ -715,7 +737,9 @@ class ForecastAttempt:
                             if forecast["completed"] != self.last_forecast["completed"]
                             else "new_owner_observation"
                         ),
-                        "rate_semantics": "umi-work-recent-active-duration/1",
+                        "rate_semantics": body.get(
+                            "forecast_rate_semantics", "umi-work-recent-active-duration/1"
+                        ),
                     },
                 )
                 self.last_forecast = forecast

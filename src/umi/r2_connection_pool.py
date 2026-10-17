@@ -33,6 +33,11 @@ class R2ConnectionPool:
         return httpx.AsyncClient(
             transport=self.transport,
             timeout=self.timeout,
+            # Native owners already bound their own active work. Preserve that
+            # allowance: one shared pool must not introduce httpx's implicit
+            # 100-connection queue and consume its configured request timeout there.
+            # Only idle retention is bounded at this transport layer.
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
             follow_redirects=False,
             trust_env=False,
         )

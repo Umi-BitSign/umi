@@ -3008,11 +3008,37 @@ service's owned lifetime. Each exchange keeps its original signature, response
 limits, generation checks and timeout. No response caching or write retry is
 added. Overlapping scopes share the same client on one event loop; shutdown
 waits for active requests to release their responses before closing it, including
-when the owner is cancelled repeatedly. Standalone requests and independently
+when the owner is cancelled repeatedly. Active concurrency stays with the
+existing native caller's allowance; shared pooling adds no independent request
+queue or timeout budget. Idle connection retention remains bounded.
+Standalone requests and independently
 supplied providers retain their previous transport ownership. A runtime upgrade
 must preserve the selected byte stores and compatible verifier ABI; connection
 reuse does not authenticate a transport adoption, restore missing facts or
 establish that blocked uploads have recovered.
+
+Candidate review and authenticated export first inventory their selected metadata.
+Batch progress separates declared model bytes, potential distinct-file bytes,
+native/restored bytes, generation HEAD operations and local file work. Potential
+reuse depends on exact ordered chunks, policy and provider namespace; only the
+native byte stores establish successful reuse. The planning inventory bounds its
+file-identity memory; if that fills, it exposes incomplete reuse accounting and
+conservatively counts untracked files again without refusing execution.
+
+The batch ETA uses completed native payload, metadata and local-file components
+instead of treating every model as equally expensive. It labels initial rate
+assumptions, excludes active partial work and later boot/adoption/upload recovery,
+and reports an absolute UTC finish and a planning sensitivity range. That range
+has no calibrated probability coverage. Stalls and active repairs withdraw the
+estimate; completed native repairs revise the work plan visibly. The original
+model-count estimate remains available for comparison. A bounded 64-model rate
+window keeps reporting cost independent of the full roster; cumulative work
+counts remain intact. When the consuming owner
+selects durable forecast accounting, immutable input identities bind these batch
+revisions and outcomes across restart; unselected, full or damaged accounting is
+explicit in the progress event. Existing diagnostic ledgers remain readable, and
+repeated successful execution counts one completed scope rather than adding
+independent outcomes.
 
 Supported older installations may retain selection-bound receipts under the
 model's `remote` directory. Keep that directory while any deployed reader or
