@@ -3002,6 +3002,66 @@ so partial import completion does not authorize removal of another selected root
 self-contained for ordinary reuse, but removal of old import roots requires
 checking recovery dependencies and replacing obsolete import selections.
 
+For recovery onto a replacement filesystem, use portable byte snapshots instead
+of attempting to recreate the old directory inode or file timestamps. Preserve
+the original service UID: importing another account's results or silently mapping
+UIDs is unsupported and refused before native target state is created. The
+existing local `imports` format and its identity checks remain unchanged. The
+portable path preserves each original native export verbatim, binds the exact
+original receipt and completion-marker digests, and stores retained bounded
+documents separately by content hash. It copies no model weights and grants no
+new authority. A protected operator must select pins returned by the authenticated
+native export above; a miner-supplied digest is not a verification result.
+
+The same `umi.competition_model_byte_store_cli` entry point supports four
+operations, each with a mode0444 root-controlled canonical `--request PATH`:
+
+- `portable-export`: request schema `umi-model-byte-portable-export-request/1`,
+  the original native import pin as `source`, and a separate private `directory`.
+  It checks the intact original private results and returns a `snapshot` pin
+  containing the portable directory, snapshot/export/model/context digests.
+- `portable-upload`: schema `umi-model-byte-portable-upload-request/1`, that
+  `source` snapshot pin, private `credentials_file`, `bucket`, and an explicit
+  R2 `prefix` ending in `/`. It publishes immutable document and export objects
+  before the snapshot manifest, and returns a `remote_snapshot` pin bound to
+  the exact endpoint, bucket, prefix and original digests.
+- `portable-download`: schema `umi-model-byte-portable-download-request/1`, the
+  protected remote pin as `source`, private `credentials_file`, and a private
+  local `directory`. It retrieves one selected model's metadata and bounded
+  documents, atomically checkpoints each object, and returns a local snapshot
+  pin. Exact repeats reuse intact local members without network requests.
+  Damaged local copies require an explicitly selected `repair: true`; repair
+  retrieves only affected objects and refuses changed remote content.
+- `portable-restore`: schema `umi-model-byte-portable-restore-request/1`, the
+  local snapshot pin as `source`, and the replacement private byte-store
+  `directory`. It refuses unsupported semantics and changed snapshot/model/context
+  bindings before creating target state, checkpoints each completed file, and
+  preserves intact target facts. It refuses to overwrite an intact fact for
+  another object generation. Interruption resumes the same completed prefix;
+  damaged target results and documents receive explicit repair progress.
+
+Use the native request models and `canonical_json_bytes` to include canonical
+defaults. Upload/download requests select `timeout_seconds` (default60, within
+the existing R2 transport profile); this is a request allowance, not a cohort
+clock or completion estimate. Keep stage progress/ETA and repair telemetry.
+R2 uses separate `snapshots/`, `exports/` and `documents/` objects beneath the
+selected prefix, with two hash-prefix directory levels to bound local directory
+fan-out, so a consumer fetches the active model's pieces. Zero-length
+bounded documents retain their supported semantics through a nonempty canonical
+transport envelope. Credentials and signed model/cohort inputs are never included.
+
+Restore into a disjoint account-private store and qualify its actual service
+namespace and protected-state disjointness before selecting it in candidate,
+reviewer, coordinator or writer configuration. Ordinary native consumers still
+authenticate their own signed inputs, file coverage, policy and authority and
+check remote generations before and after verification. Restoration neither
+renews freshness nor bypasses changed-file verification, rights, scoring or
+certification. Fully restored consumers do not require the old filesystem or
+portable cache for ordinary reuse; retain R2 snapshots and explicit repair
+references while recovery depends on them. Successful replication alone never
+authorizes local deletion: prove independent restoration, required consumer
+coverage and consumer release first. No automatic eviction is introduced here.
+
 Native R2 clients reuse bounded HTTP connections during authenticated candidate
 review/export batches, direct review/materialization and the direct-upload
 service's owned lifetime. Each exchange keeps its original signature, response
