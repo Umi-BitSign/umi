@@ -438,6 +438,79 @@ async def test_coverage_scheduler_retries_each_validator_without_expiry(opportun
     assert not await journal.interval_keys()
 
 
+@pytest.mark.parametrize("maximum_endpoints", [1, 4])
+async def test_default_capture_window_tracks_the_head_after_slow_or_interrupted_work(
+    opportunity_case, tmp_path, maximum_endpoints
+):
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import CoverageHistoryPending
+
+    c = opportunity_case
+    rule = opportunity_rule(c.manifest, c.series, c.policy)
+    journal = RewardCoverageJournal(tmp_path / "fresh-tail", rule, expected_rule_sha256=digest(rule))
+    head = 10_000
+    calls = []
+
+    class Source:
+        async def finalized_height(self):
+            return head
+
+        async def capture(self, hotkey, height):
+            calls.append((hotkey, height))
+            raise CoverageHistoryPending
+
+        async def replay(self, key):
+            pytest.fail("a missing capture cannot create an interval to replay")
+
+    for _ in range(2):  # A supported restart has no volatile capture cursor.
+        collector = RewardCoverageCollector(
+            journal,
+            Source(),
+            **c.terms,
+            first_block=99,
+            maximum_endpoints_per_validator=maximum_endpoints,
+        )
+        for _ in range(3):
+            before = len(calls)
+            result = await collector.step()
+            assert calls[before:] == [(hotkey, head - 3) for hotkey in c.series.validators]
+            assert not any(total for _, total in result.credited_ms)
+            assert result.certificate is None
+            head += 20  # Slow proofs must not pin subsequent capture to an old page.
+    assert not await journal.interval_keys()
+
+
+async def test_explicit_capture_window_preserves_historical_operator_selection(
+    opportunity_case, tmp_path
+):
+    from umi.competition_reward_coverage_collector import RewardCoverageCollector
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import CoverageHistoryPending
+
+    c = opportunity_case
+    rule = opportunity_rule(c.manifest, c.series, c.policy)
+    journal = RewardCoverageJournal(tmp_path / "explicit-window", rule, expected_rule_sha256=digest(rule))
+    calls = []
+
+    class Source:
+        async def finalized_height(self):
+            return 10_000
+
+        async def capture(self, hotkey, height):
+            calls.append((hotkey, height))
+            raise CoverageHistoryPending
+
+        async def replay(self, key):
+            pytest.fail("empty journal has no retained intervals")
+
+    collector = RewardCoverageCollector(
+        journal, Source(), **c.terms, first_block=99, capture_window_blocks=128
+    )
+    await collector.step()
+    assert calls == [(hotkey, 10_000 - 127) for hotkey in c.series.validators]
+
+
 async def test_coverage_service_retries_head_and_stops_without_leaking_errors(
     opportunity_case, tmp_path, caplog
 ):
