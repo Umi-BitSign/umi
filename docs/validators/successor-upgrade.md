@@ -112,8 +112,26 @@ explicit native resources and cache/journal budgets, the public R2 endpoint and
 bucket, an existing private JSON S3 credential export, and the common-authority
 wallet name/path/hotkey. Each channel selects its existing supervisor config and
 qualified immutable release target. Explicit cohort horizons and a digest-to-path
-map of compact allocations complete the selection. New adopted allocations must
-be replicated before their activation; a missing input waits with progress.
+map of compact allocations complete the selection. An empty allocation map uses
+automatic discovery under the selected coordinator's protected
+`files_directory/allocations/{digest}.json`; explicit map entries retain their
+original precedence and file ownership contract. The coordinator, reviewer and
+writer boot paths export the compact original and authenticated effective
+allocations during their existing native preparation. The publisher reads only
+these compact files and checks their identity against the current signed/native
+selection; it does not reopen reward packages. Export/discovery grants no reward
+authority by itself.
+
+Existing configuration versions and signed inputs retain their exact bytes.
+After an upgrade, ordinary preparation also exports already completed native
+results: interrupted or missing compact delivery retries without repeating the
+unchanged successful package replay. Export errors retain native completion and
+report `reward_allocation_export` progress/elapsed/ETA and failure. Damaged
+existing files refuse rather than being replaced. Restore a damaged delivery
+copy from its immutable source before resuming; never reset native verification
+or publication journals to repair discovery. A missing producer export waits
+with progress; an older coordinator must select the supported export-capable
+upgrade or keep its existing explicit allocation map until that upgrade.
 
 An explicit compatible transport selection uses schema
 `umi-reference-publisher-config/2`, `gateway_origin` set to

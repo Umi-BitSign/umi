@@ -10,6 +10,7 @@ from pathlib import Path
 from .competition_cohort_aggregate_files import publish_aggregate_model, read_aggregate_model
 from .competition_cohort_aggregate_replica import replicate_verified_aggregate
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
+from .competition_cohort_reward_allocation import CohortRewardAllocation
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_digest
 from .competition_reward_adoption import MAX_REWARD_ADOPTION_BYTES, SignedRewardModelAdoption
@@ -60,6 +61,19 @@ class StandingRewardFiles:
 
     def adoption(self, sha: str) -> SignedRewardModelAdoption:
         return self._read("adoptions", sha, SignedRewardModelAdoption, MAX_REWARD_ADOPTION_BYTES)
+
+    def allocation(self, sha: str) -> CohortRewardAllocation:
+        """Compact discovery input; current native control still authenticates it."""
+        return self._read("allocations", sha, CohortRewardAllocation, 1024**2)
+
+    def retain_allocation(self, allocation: CohortRewardAllocation) -> None:
+        if type(allocation) is not CohortRewardAllocation:
+            raise TypeError("allocation export requires a typed compact allocation")
+        publish_private_model(
+            self.root / "allocations" / (digest(allocation) + ".json"),
+            allocation,
+            maximum_bytes=1024**2,
+        )
 
     def retain_adoption(self, value: SignedRewardModelAdoption) -> None:
         publish_private_model(

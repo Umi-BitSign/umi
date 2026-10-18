@@ -330,6 +330,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         collector_lifecycle.append("started")
         try:
             selected_series = self.preparation.reader.series
+            assert self.preparation.allocation_sink.__self__.root == Path(config.files_directory)
             predecessor = selected_series != config.series
             assert not predecessor or selected_series == config.predecessor_series
             assert self.journal.runtime_selection == boot.select_boot_runtime(

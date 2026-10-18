@@ -118,8 +118,10 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     files.retain_package(p.package)
     package_sha = digest(p.package)
     snapshot = files.verified_package(package_sha)
+    p.preparation = p.reopen(allocation_sink=files.retain_allocation)
     observations = await p.observations()
     original = await p.preparation.prepare(snapshot, **replay_args(observations))
+    assert files.allocation(digest(original.allocation)) == original.allocation
     reads = NativeContextReads(monkeypatch, p.package, snapshot)
     forbid_expensive_native_replay(monkeypatch)
     selected = p.reader.select_history(**replay_args(observations))
@@ -147,6 +149,8 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     monkeypatch.setattr(p.reader, "review_history", historical)
     adopted = await p.preparation.prepare(snapshot, **replay_args(observations))
     assert adopted.allocation == effective
+    assert files.allocation(digest(effective)) == effective
+    assert files.allocation(digest(original.allocation)) == original.allocation
     assert reads.check()["objects"] > 0
     assert adopted.allocation.model_award.parameters.schema_.endswith(f"/{parameter_version}")
     assert adopted.allocation.model_award.parameters.score_duplicate_tolerance_bps == (
@@ -195,10 +199,11 @@ async def test_native_preparation_preserves_package_and_isolates_adopted_revisio
     )
     with pytest.raises(ValueError, match="current standing selection"):
         await p.preparation.project(adopted, **observations)
-    reopened = p.reopen()
+    reopened = p.reopen(allocation_sink=files.retain_allocation)
     snapshot = files.verified_package(package_sha)
     restored = await reopened.prepare(snapshot, **replay_args(observations))
     assert restored.allocation == revised.allocation
+    assert files.allocation(digest(restored.allocation)) == restored.allocation
     reads.check()
     chosen.activation = original.activation
     assert await p.preparation.prepare(snapshot, **replay_args(observations)) is original

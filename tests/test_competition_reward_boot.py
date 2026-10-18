@@ -521,6 +521,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert kwargs["history"].config_sha256 == digest(i.value.chain)
         assert kwargs["history"].journal.maximum_bytes == selected.maximum_history_bytes
         assert kwargs["preparation"].policy_sha256 == digest(i.value.policy)
+        assert kwargs["preparation"].allocation_sink.__self__ is kwargs["packages"].__self__
         collection = kwargs["coverage"]
         assert collection.journal.runtime_selection == boot.select_boot_runtime(selected)
         assert collection.provider is kwargs["provider"]
@@ -595,6 +596,8 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert predecessor.plan == candidate.handoff
         assert coverage.provider is providers[0]
         assert coverage.preparation.reader.series == i.value.series
+        assert coverage.preparation.allocation_sink.__self__ is kwargs["packages"].__self__
+        assert kwargs["preparation"].allocation_sink.__self__ is kwargs["packages"].__self__
         assert coverage.preparation.manifest == i.value.manifest
         assert coverage.profile == i.value.eligibility
         assert coverage.history.verification_profile == history_profile
