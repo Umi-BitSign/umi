@@ -65,6 +65,8 @@ def _migration_progress(state, total, completed, started):
 class HistoryCheckpointRepairRequired(ValueError):
     """A previously successful result changed; explicit scoped repair is required."""
 
+    height: int | None = None
+
 
 def source_triggers():
     kinds = ",".join("'" + k + "'" for k in SOURCE_KINDS)
@@ -288,37 +290,120 @@ class HistoryCheckpoints:
                 "history checkpoint result is damaged; scoped native repair required"
             ) from error
 
+    def load_many(self, first: int, last: int) -> list[dict]:
+        """Read a bounded contiguous prefix under one fresh read-only snapshot.
+
+        Every result keeps the single-item owner, schema, source-generation and
+        origin checks. A missing new item ends the prefix; damaged completed work
+        still raises and identifies its height. No snapshot survives this call.
+        """
+        self._batch_bounds(first, last)
+        height = first
+        try:
+            with self.journal.read_transaction() as db:
+                values = []
+                for height in range(first, last + 1):
+                    value = self._load_snapshot(height, db)
+                    if value is None:
+                        break
+                    values.append(value)
+                return values
+        except HistoryCheckpointRepairRequired as error:
+            error.height = height
+            raise
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            sqlite3.DatabaseError,
+        ) as error:
+            failure = HistoryCheckpointRepairRequired(
+                "history checkpoint result is damaged; scoped native repair required"
+            )
+            failure.height = height
+            raise failure from error
+
+    @staticmethod
+    def _batch_bounds(first, last):
+        if (
+            type(first) is not int
+            or type(last) is not int
+            or not 1 <= first <= last <= 2**53 - 1
+            or last - first + 1 > 4096
+        ):
+            raise ValueError("history checkpoint batch must contain 1 to 4096 blocks")
+
+    def recheck_many(self, values: list[dict]) -> None:
+        """Recheck a retained batch after finality without a second batch copy."""
+        if not 1 <= len(values) <= 4096:
+            raise ValueError("history checkpoint recheck must contain 1 to 4096 blocks")
+        first = values[0]["snapshot"]["block_number"]
+        last = values[-1]["snapshot"]["block_number"]
+        self._batch_bounds(first, last)
+        if last - first + 1 != len(values):
+            raise ValueError("history checkpoint recheck must be contiguous")
+        height = first
+        try:
+            with self.journal.read_transaction() as db:
+                for height, saved in zip(range(first, last + 1), values, strict=True):
+                    if (
+                        saved["snapshot"]["block_number"] != height
+                        or self._load_snapshot(height, db) != saved
+                    ):
+                        raise HistoryCheckpointRepairRequired(
+                            "checkpoint changed during owned restore"
+                        )
+        except HistoryCheckpointRepairRequired as error:
+            error.height = height
+            raise
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            sqlite3.DatabaseError,
+        ) as error:
+            failure = HistoryCheckpointRepairRequired(
+                "history checkpoint recheck needs scoped native repair"
+            )
+            failure.height = height
+            raise failure from error
+
     def _load(self, height):
         with self.journal.read_transaction() as db:
-            self.check_schema(db)
-            row = db.execute(
-                "SELECT key FROM history_checkpoint_index WHERE height=?", (height,)
-            ).fetchone()
-            done = self.journal.get("control_history_checkpoint_done", str(height), db=db)
-            if row is None:
-                if done is not None:
-                    raise HistoryCheckpointRepairRequired("completed history checkpoint is missing")
-                return None
-            if done != {"height": height, "owner": self.owner}:
-                raise HistoryCheckpointRepairRequired(
-                    "history checkpoint completion marker is missing"
-                )
-            value = self.journal.get("control_history_verified", row[0], db=db)
-            if (
-                not isinstance(value, dict)
-                or digest(value) != row[0]
-                or value.get("schema") != ABI
-                or value.get("owner") != self.owner
-                or value.get("semantics") != self.semantics
-                or value.get("snapshot", {}).get("block_number") != height
-            ):
-                raise HistoryCheckpointRepairRequired(
-                    "history checkpoint result or verifier semantics changed"
-                )
-            self.validate(value)
-            self.check_sources(value["sources"], db)
-            check_checkpoint_origin(self.journal, value, db, self._original_export_origins)
-            return value
+            return self._load_snapshot(height, db)
+
+    def _load_snapshot(self, height, db):
+        self.check_schema(db)
+        row = db.execute(
+            "SELECT key FROM history_checkpoint_index WHERE height=?", (height,)
+        ).fetchone()
+        done = self.journal.get("control_history_checkpoint_done", str(height), db=db)
+        if row is None:
+            if done is not None:
+                raise HistoryCheckpointRepairRequired("completed history checkpoint is missing")
+            return None
+        if done != {"height": height, "owner": self.owner}:
+            raise HistoryCheckpointRepairRequired("history checkpoint completion marker is missing")
+        value = self.journal.get("control_history_verified", row[0], db=db)
+        if (
+            not isinstance(value, dict)
+            or digest(value) != row[0]
+            or value.get("schema") != ABI
+            or value.get("owner") != self.owner
+            or value.get("semantics") != self.semantics
+            or value.get("snapshot", {}).get("block_number") != height
+        ):
+            raise HistoryCheckpointRepairRequired(
+                "history checkpoint result or verifier semantics changed"
+            )
+        self.validate(value)
+        self.check_sources(value["sources"], db)
+        check_checkpoint_origin(self.journal, value, db, self._original_export_origins)
+        return value
 
     def validate(self, value):
         fields = {
