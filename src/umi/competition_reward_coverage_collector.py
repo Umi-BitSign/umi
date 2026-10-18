@@ -13,11 +13,11 @@ import math
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 from .competition_chain import _uint
 from .competition_evidence_codec import checked_size
+from .competition_progress import _failure_details
 from .competition_reward_coverage_intervals import (
     CoverageEndpoint,
     OwnedRetainedCoverageEndpoint,
@@ -43,15 +43,10 @@ logger = logging.getLogger(__name__)
 def _log_retry(error, *, phase, operation, hotkey=None, block=None):
     # Exception text and full tracebacks can include RPC URLs or credentials.
     # Report only source coordinates inside this installed package, never locals.
-    origin = {}
-    trace = error.__traceback__
-    package = Path(__file__).parent
-    while trace is not None:
-        code = trace.tb_frame.f_code
-        source = Path(code.co_filename)
-        if source.parent == package:
-            origin = {"module": source.stem, "function": code.co_name, "line": trace.tb_lineno}
-        trace = trace.tb_next
+    details = _failure_details(error)
+    origin = next(
+        (cause["source_frames"][-1] for cause in reversed(details) if cause["source_frames"]), {}
+    )
     logger.info(
         "coverage_retry %s",
         {
@@ -156,6 +151,26 @@ class RewardCoverageCollector:
                 self.journal, **self.terms, maximum_witness_bytes=self.maximum_witness_bytes
             )
         return self._certificate
+
+    def _report_credit(self, phase, before, after, started, *, retrying):
+        # These are actual native credited-total deltas, not endpoint counts or
+        # an assumption that every capture is eligible. Saved replay is finite
+        # and must not be mixed into the fresh lane's sustained-rate forecast.
+        previous = dict(before)
+        logger.info(
+            "coverage_credit_progress %s",
+            {
+                "phase": phase,
+                "credited_delta_ms": {k: n - previous[k] for k, n in after},
+                "credited_total_ms": dict(after),
+                "elapsed_seconds": max(0.0, time.monotonic() - started),
+                "status": "retrying" if retrying else "completed",
+                "eta_seconds": None if retrying else 0,
+                "eta_basis": "withdrawn_retrying" if retrying else "completed_credit_phase",
+                "eta_scope": "this_pass_and_phase_only_not_remaining_opportunity",
+                "certification_authority": False,
+            },
+        )
 
     async def step(self) -> CoverageProgress:
         async with self._lock:
@@ -306,6 +321,8 @@ class RewardCoverageCollector:
         replayed = 0
         if self._certificate is not None:
             return CoverageProgress(await self._totals(), (), self._certificate)
+        before_replay = await self._totals()
+        phase_started = time.monotonic()
         # Cycling, rather than a terminal retry count, revisits unavailable old
         # evidence. New coverage collection still runs after each bounded page.
         keys = await self.journal.interval_keys(
@@ -334,6 +351,9 @@ class RewardCoverageCollector:
         if len(keys) < self.maximum_replay_intervals:
             self._cursor = None
         totals = await self._totals()
+        self._report_credit(
+            "retained_interval_replay", before_replay, totals, phase_started, retrying=bool(errors)
+        )
         if await self._complete(totals) is not None:
             return CoverageProgress(totals, tuple(errors), self._certificate)
         try:
@@ -347,6 +367,7 @@ class RewardCoverageCollector:
             self._initial_head = head
         # Fresh checks always run before the bounded historical lane, for every
         # validator. Advancing the recent floor does not discard the old lane.
+        before_fresh, phase_started, prior_errors = totals, time.monotonic(), len(errors)
         for hotkey, total in totals:
             if total >= self.minimum_ms:
                 continue
@@ -363,6 +384,14 @@ class RewardCoverageCollector:
             )
         backfilled = 0
         totals = await self._totals()
+        self._report_credit(
+            "recent_block_capture",
+            before_fresh,
+            totals,
+            phase_started,
+            retrying=len(errors) > prior_errors,
+        )
+        before_backfill, phase_started, prior_errors = totals, time.monotonic(), len(errors)
         if self.maximum_backfill and floor > self.first_block:
             for hotkey, total in totals:
                 if total >= self.minimum_ms:
@@ -378,6 +407,13 @@ class RewardCoverageCollector:
                     "backfill",
                 )
         totals = await self._totals()
+        self._report_credit(
+            "historical_gap_capture",
+            before_backfill,
+            totals,
+            phase_started,
+            retrying=len(errors) > prior_errors,
+        )
         await self._complete(totals)
         self._report_backfill(floor, head, totals, errors)
         pending_gap = self.maximum_backfill and any(

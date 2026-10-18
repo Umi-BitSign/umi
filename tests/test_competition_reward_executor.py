@@ -19,6 +19,7 @@ from umi import competition_reward_executor as execution
 from umi.competition_reward_decisions import RewardActivation
 from umi.competition_reward_executor import StandingRewardExecutor
 from umi.competition_reward_transactions import _issue_standing_end
+from umi.competition_weight_timing import WeightRateLimitWait
 from umi.open_competition import digest
 from umi.private_files import PrivateStateBusyError
 from umi.signed_extrinsic import verify_mortal_call
@@ -383,6 +384,83 @@ async def test_loop_retries_without_leaking_exception_details(executing, caplog)
     assert len(calls) == 3 and e._descriptor is None
     assert "secret-url-do-not-log" not in caplog.text
     assert "standing_retry reason=ConnectionError" in caplog.text
+
+
+async def test_rate_wait_never_reserves_or_signs_and_retry_collects_new_state(executing):
+    t, e = executing, executing.executor
+    original = t.chain.weights_rate_limit
+    t.chain.weights_rate_limit = t.chain.block - t.chain.validator_last_update + 1
+    with e.hold_writer():
+        with pytest.raises(WeightRateLimitWait) as held:
+            await e.step()
+        assert held.value.next_eligible_block == t.chain.block + 1
+        assert t.journal.pending() is None and not t.signed and not t.sent
+        captured_before = len(t.captures)
+        # A later native snapshot may change the rate. No old wait is authority
+        # or an execution clock; the full ordinary path must run again.
+        t.chain.weights_rate_limit = original
+        assert (await e.step()).status == "submitted_unconfirmed"
+    assert len(t.captures) > captured_before
+    assert len(t.signed) == len(t.sent) == 1
+
+
+async def test_loop_bounds_rate_wait_backoff_and_keeps_stop_responsive(
+    executing, monkeypatch, caplog
+):
+    e = executing.executor
+    stop, calls, delays = asyncio.Event(), [], []
+    original_wait = asyncio.wait_for
+
+    async def step():
+        assert e._descriptor is not None
+        calls.append(1)
+        if len(calls) == 1:
+            raise WeightRateLimitWait(100, 200)
+        stop.set()
+        return execution.StandingExecutionProgress("selection_pending")
+
+    async def wait(awaitable, *, timeout):
+        frame = getattr(awaitable, "cr_frame", None)
+        if frame is not None and frame.f_locals.get("self") is stop:
+            delays.append(timeout)
+            awaitable.close()
+            if stop.is_set():
+                return True
+            raise asyncio.TimeoutError
+        return await original_wait(awaitable, timeout=timeout)
+
+    e.step = step
+    monkeypatch.setattr(execution.asyncio, "wait_for", wait)
+    with caplog.at_level("INFO", logger="umi.competition_reward_executor"):
+        await e.run(stop, poll_seconds=12)
+    assert delays == [60, 12] and len(calls) == 2
+    assert e._descriptor is None and not executing.signed and not executing.sent
+    messages = [json.loads(r.message) for r in caplog.records if r.message.startswith('{"')]
+    report = next(m for m in messages if m.get("schema") == "umi-standing-weight-rate-wait/1")
+    assert report["remaining_blocks"] == 100
+    assert report["eta_scope"] == "current_rate_limit_only_not_rewards_or_opportunity"
+    assert report["planning_eta_seconds"] == [600, 2400]
+
+
+async def test_rate_wait_withdraws_eta_when_native_height_stalls(executing, monkeypatch, caplog):
+    e = executing.executor
+    stop, calls, times = asyncio.Event(), [], iter((0.0, 61.0))
+
+    async def step():
+        calls.append(1)
+        if len(calls) == 2:
+            stop.set()
+        raise WeightRateLimitWait(100, 200)
+
+    e.step = step
+    monkeypatch.setattr(execution, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    with caplog.at_level("INFO", logger="umi.competition_reward_executor"):
+        await e.run(stop, poll_seconds=0.001)
+    reports = [json.loads(r.message) for r in caplog.records if r.message.startswith('{"')]
+    assert reports[0]["status"] == "waiting" and reports[1]["status"] == "stalled"
+    assert reports[1]["planning_eta_seconds"] is None
+    assert reports[1]["percent"] == 0 and reports[1]["elapsed_seconds"] == 61
+    assert e._descriptor is None and not executing.sent
 
 
 async def test_concurrent_steps_do_not_duplicate_signing(executing):

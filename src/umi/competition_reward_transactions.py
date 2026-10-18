@@ -19,6 +19,7 @@ from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain_state import OwnedCompetitionChainObservation
 from .competition_cohort_reward_allocation import CohortRewardProjection
 from .competition_round_journal import RecordReservation, RoundJournal
+from .competition_weight_timing import require_weight_interval
 from .open_competition import Hotkey, digest, identity
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 from .signed_extrinsic import MAX_SIGNED_EXTRINSIC_BYTES, exact_signed_extrinsic
@@ -44,9 +45,9 @@ def standing_weight_call(
         or chain.mechanism_count != 1
         or chain.commit_reveal_enabled is not False
         or not 1 <= count <= chain.max_allowed_uids <= 256
-        or chain.validator_last_update + chain.weights_rate_limit > chain.block
     ):
         raise ValueError("standing transaction is held by current validator or chain constraints")
+    require_weight_interval(chain)
     pairs = tuple(zip(projection.uids, projection.weights, strict=True))
     if (
         tuple(uid for uid, _ in pairs) != tuple(sorted({uid for uid, _ in pairs}))
