@@ -105,6 +105,7 @@ BOOTSTRAP_OWNER_FENCE_RECEIPT = BOOTSTRAP_INPUT_ROOT / "owner-fence-receipt.json
 MAX_WORKER_INPUT_BYTES = 4 * 1024 * 1024
 MAX_WORKER_JOURNAL_BYTES = 1024 * 1024
 OWNED_FINALITY_TIMEOUT_SECONDS = 30.0
+TRANSLATION_OBSERVER_RECOVERY_SECONDS = 120.0
 WORKER_INITIAL_HEAD_TIMEOUT_SECONDS = 120.0
 WORKER_FINALITY_FRESHNESS_SECONDS = 30.0
 BOOTSTRAP_DIRECTIVE_HEADROOM_BLOCKS = 16
@@ -1479,7 +1480,9 @@ def _require_wallet_identity(wallet: Any, expected_hotkey: str) -> None:
         raise SupervisorWorkerError("worker_wallet_hotkey_mismatch")
 
 
-def _production_finality_reader() -> FinneyFinalizedBlockReader:
+def _production_finality_reader(
+    *, observation_timeout_seconds: float = OWNED_FINALITY_TIMEOUT_SECONDS
+) -> FinneyFinalizedBlockReader:
     binary_sha256 = _sha256_regular_file(WORKER_FINALITY_BINARY, executable=True)
     chain_sha256 = _sha256_regular_file(WORKER_FINALITY_CHAIN_SPEC, executable=False)
     if chain_sha256 != FINNEY_CHAIN_SPEC_SHA256:
@@ -1495,16 +1498,25 @@ def _production_finality_reader() -> FinneyFinalizedBlockReader:
             expected_genesis_hash=f"0x{FINNEY_GENESIS_HASH}",
             bootstrap_block_number=FINNEY_BOOTSTRAP_BLOCK_NUMBER,
             bootstrap_block_hash=f"0x{FINNEY_BOOTSTRAP_BLOCK_HASH}",
-            record_timeout_seconds=OWNED_FINALITY_TIMEOUT_SECONDS,
+            record_timeout_seconds=observation_timeout_seconds,
             staging_directory=staging,
         )
         return FinneyFinalizedBlockReader(
             SimpleNamespace(),
             observer=observer,
-            timeout_seconds=OWNED_FINALITY_TIMEOUT_SECONDS,
+            timeout_seconds=observation_timeout_seconds,
         )
     except Exception as error:
         raise SupervisorWorkerError("worker_finality_unavailable") from error
+
+
+def _production_translation_finality_reader() -> FinneyFinalizedBlockReader:
+    # A slow peer or timestamp request must not kill the observer before its
+    # bounded recovery can finish. OwnedFinalityLease independently refuses
+    # stale signing heads after WORKER_FINALITY_FRESHNESS_SECONDS (30 seconds).
+    return _production_finality_reader(
+        observation_timeout_seconds=TRANSLATION_OBSERVER_RECOVERY_SECONDS
+    )
 
 
 def _require_fixed_environment(values: Mapping[str, str]) -> None:
@@ -1726,7 +1738,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
                 WORKER_IMAGE_REVISION,
                 expected_profile="umi-translation-validator/1",
             )
-            reader = _production_finality_reader()
+            reader = _production_translation_finality_reader()
             lease = OwnedFinalityLease(
                 reader,
                 valid_from_block=environment.valid_from_block,

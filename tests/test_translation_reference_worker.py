@@ -29,6 +29,52 @@ from umi.validator_supervisor_worker import OwnedFinalityLease
 __all__ = ["execution_case", "reference_case", "signing_case"]
 
 
+def test_translation_observer_wait_is_separate_from_legacy_timeout_and_signing_freshness(
+    monkeypatch, tmp_path
+):
+    import umi.validator_supervisor_worker as supervisor
+
+    monkeypatch.setattr(supervisor, "Path", lambda _value: tmp_path / "staging")
+    monkeypatch.setattr(
+        supervisor,
+        "_sha256_regular_file",
+        lambda _path, *, executable: (
+            "a" * 64 if executable else supervisor.FINNEY_CHAIN_SPEC_SHA256
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor, "GrandpaFinalityObserver", lambda **options: SimpleNamespace(**options)
+    )
+    legacy = supervisor._production_finality_reader()
+    translation = supervisor._production_translation_finality_reader()
+    assert legacy.timeout_seconds == legacy.observer.record_timeout_seconds == 30
+    assert translation.timeout_seconds == translation.observer.record_timeout_seconds == 120
+    assert supervisor.WORKER_FINALITY_FRESHNESS_SECONDS == 30
+
+
+@pytest.mark.asyncio
+async def test_longer_observer_recovery_never_authorizes_a_stale_signing_head():
+    from umi.validator_supervisor_worker import SupervisorWorkerError
+
+    reader = _FinalityReader()
+    now = [0.0]
+    lease = OwnedFinalityLease(
+        reader, valid_from_block=120, valid_through_block=1000, monotonic=lambda: now[0]
+    )
+    task = asyncio.create_task(lease.run())
+    try:
+        await lease.wait_ready(timeout_seconds=1)
+        now[0] = 45.0
+        with pytest.raises(SupervisorWorkerError, match="worker_finality_stale"):
+            lease.require_headroom(0)
+        reader.blocks.put_nowait(OwnedFinalizedBlock(126, "0x" + "a" * 64))
+        await asyncio.sleep(0)
+        assert lease.require_headroom(0).number == 126
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def signed_http(policy, monkeypatch):
     import umi.translation_reference_worker as worker
 
@@ -167,8 +213,9 @@ async def test_container_sigterm_drains_once_and_exits_cleanly(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lost_reply", [False, True])
+@pytest.mark.parametrize("retry_reason", [None, "proof_rpc_rate_limited", "worker_finality_stale"])
 async def test_fixed_session_keeps_original_lock_and_signed_bytes_across_restart(
-    execution_case, monkeypatch, tmp_path, lost_reply
+    execution_case, monkeypatch, tmp_path, lost_reply, retry_reason
 ):
     import umi.translation_reference_worker as worker
 
@@ -190,6 +237,16 @@ async def test_fixed_session_keeps_original_lock_and_signed_bytes_across_restart
     completed = asyncio.Event()
     calls, progress, wallets = [], [], []
     original_journal = worker.ReferenceWeightJournal
+    failed_once = False
+    original_sleep = asyncio.sleep
+
+    async def retry_clock(delay, *args, **kwargs):
+        # Advance only this test's twelve-second scheduler pause. Native proof
+        # and transaction ownership still run through the real fixed driver.
+        return await original_sleep(0 if delay == 12 else delay, *args, **kwargs)
+
+    if retry_reason:
+        monkeypatch.setattr(worker.asyncio, "sleep", retry_clock)
 
     def journal_factory(*args, **kwargs):
         journal = original_journal(*args, **kwargs)
@@ -222,6 +279,19 @@ async def test_fixed_session_keeps_original_lock_and_signed_bytes_across_restart
 
     def readers(**_):
         async def state(*_):
+            nonlocal failed_once
+            if retry_reason and not failed_once:
+                from umi.validator_chain import ValidatorChainError
+                from umi.validator_supervisor_worker import SupervisorWorkerError
+
+                failed_once = True
+                assert not wallets and not calls
+                error = (
+                    ValidatorChainError
+                    if retry_reason == "proof_rpc_rate_limited"
+                    else SupervisorWorkerError
+                )
+                raise error(retry_reason)
             return await read(case)
 
         async def signing(*_):
@@ -288,5 +358,8 @@ async def test_fixed_session_keeps_original_lock_and_signed_bytes_across_restart
     assert case.journal.pending() == pending
     assert len(calls) == len(wallets) == 1  # Retained unknown attempt never retransmits.
     assert (root / "service.lock").stat().st_ino == lock
+    if retry_reason:
+        retries = [event for event in progress if event["stage"] == "reference_native_retry"]
+        assert len(retries) == 1 and retries[0]["reason_code"] == retry_reason
     assert "private endpoint diagnostic" not in str(progress)
     assert all("elapsed_seconds" in e and "eta_basis" in e for e in progress)

@@ -56,6 +56,13 @@ def reference_case(signing_case, monkeypatch):  # noqa: F811
         )
 
     case.set_value = set_value
+
+    def read_many(*, state_root, storage_keys, proof, **limits):
+        assert state_root == bytes.fromhex(case.header["stateRoot"][2:])
+        assert proof == (b"synthetic-proof",)
+        return tuple((key, case.values.get(key)) for key in storage_keys)
+
+    case.verifier.read_many = read_many
     case.row = [[uid, 65535 if uid == 104 else 0] for uid in range(256)]
     case.permits = [uid in (54, 200) for uid in range(256)]
     case.active = case.permits.copy()
@@ -108,9 +115,30 @@ async def test_proves_exact_reference_and_own_state_at_one_owned_root(reference_
     assert decision.row == tuple(map(tuple, case.row))
     assert state.signing.nonce == 7
     assert case.heads == 3 and len(case.proofs) == 4
+    # Only runtime code and signing account/timestamp still use value RPCs.
+    # Selection and complete rows are extracted from native multiproofs.
+    assert sum(method == "state_getStorageAt" for method, _ in case.calls) == 3
     assert not any(
         method in {"state_getMetadata", "author_submitExtrinsic"} for method, _ in case.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_proof_extraction_rejects_substituted_values_without_rpc_fallback(reference_case):
+    from umi.validator_chain import ValidatorChainError
+
+    case = reference_case
+    original = case.verifier.read_many
+
+    def changed(**arguments):
+        values = list(original(**arguments))
+        values[0] = (values[0][0], b"substituted value")
+        return tuple(values)
+
+    case.verifier.read_many = changed
+    with pytest.raises(ValidatorChainError, match="storage_proof_verification_failed"):
+        await read(case)
+    assert sum(method == "state_getStorageAt" for method, _ in case.calls) == 3
 
 
 @pytest.mark.asyncio

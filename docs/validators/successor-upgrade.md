@@ -68,6 +68,14 @@ publication separately. The process continuously owns one finality stream, so
 multiple signing guards reuse its fresh accepted head. Container SIGTERM drains
 the operation before releasing the original lock.
 
+The translation reader extracts selection values and complete rows directly
+from the native multiproof at the owned root, then verifies the extracted
+claims. It does not fetch each value separately or fall back to RPC claims
+when proof extraction fails. Its observer can wait up to 120 seconds for recovery;
+the independent 30-second signing-head freshness gate remains enforced. A stale
+head holds the iteration until a newly accepted native head arrives. The older
+bootstrap profile retains its own 30-second observation timeout.
+
 Missing completed receipt metadata requires explicit repair. With the worker
 stopped, run `python -m umi.translation_reference_repair --state-root STATE_ROOT
 --validator-hotkey HOTKEY` under its original account and runtime. This restores

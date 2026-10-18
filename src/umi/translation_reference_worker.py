@@ -51,6 +51,7 @@ _LOG = logging.getLogger(__name__)
 _RETRYABLE_NATIVE_REASONS = frozenset(
     {
         "proof_rpc_failed",
+        "proof_rpc_rate_limited",
         "finalized_snapshot_rpc_failed",
         "runtime_metadata_rpc_failed",
         "storage_proof_rpc_failed",
@@ -65,6 +66,7 @@ _RETRYABLE_NATIVE_REASONS = frozenset(
         "reference_row_not_approved_by_release_authority",
         "reference_legacy_native_observation_behind_completed_proofs",
         "reference_legacy_native_receipt_pending",
+        "worker_finality_stale",
         "bridge_receipt_not_yet_finalized",
         "bridge_expiry_not_finalized",
         "mortal_receipt_not_yet_finalized",

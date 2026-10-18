@@ -160,8 +160,8 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
             --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777 \
             --entrypoint /opt/umi/.venv/bin/python \
-            "${IMAGE_TAG}" -c 'import os, subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; from umi.validator_supervisor_worker import _production_finality_reader
-          reader = _production_finality_reader() if os.environ["UMI_RELEASE_TEST_PROFILE"] == "umi-translation-validator/1" else BittensorRegistrationBridgeChain().finality
+            "${IMAGE_TAG}" -c 'import os, subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; from umi.validator_supervisor_worker import _production_translation_finality_reader
+          reader = _production_translation_finality_reader() if os.environ["UMI_RELEASE_TEST_PROFILE"] == "umi-translation-validator/1" else BittensorRegistrationBridgeChain().finality
           with reader.observer._staged_inputs() as staged:
               subprocess.run([str(staged["binary"]), "--conformance-self-test"], check=True)'
           docker run --rm --interactive --platform "${PLATFORM}" \

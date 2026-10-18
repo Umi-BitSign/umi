@@ -313,7 +313,11 @@ class TranslationReferenceStateReader:
         self._emit("reference_identity_and_epoch", 1, started)
         runtime, ref = signing.runtime, signing.runtime.snapshot
         specs = _base_specs(writer, policy.reference_hotkey)
-        base = await self._proofs.storage_reads(runtime, specs)
+        # The native multiproof already contains these values. Separate RPC
+        # reads add handshakes and can time out before the proof is collected.
+        # Extract at the same owned root, then verify the complete claims as
+        # usual; an invalid or unsupported proof never falls back to RPC data.
+        base = await self._proofs.storage_reads(runtime, specs, proof_values=True)
         values = _values(base, runtime, specs)
         writer_uid = _uint(values[_spec("Uids", 78, writer)], 255)
         reference_uid = _uint(values[_spec("Uids", 78, policy.reference_hotkey)], 255)
@@ -327,6 +331,7 @@ class TranslationReferenceStateReader:
                 _spec("Weights", 78, writer_uid),
                 _spec("Weights", 78, reference_uid),
             ),
+            proof_values=True,
         )
         state = TranslationReferenceState(signing, policy.reference_hotkey, base, rows)
         state.decision(policy, now=self._clock())
