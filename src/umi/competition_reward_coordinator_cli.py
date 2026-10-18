@@ -31,6 +31,7 @@ def _logs():
                 "exchange",
                 "control_publisher",
                 "coverage_service",
+                "coverage_collector",
                 "history_progress",
                 "history_checkpoint",
                 "history_repair",

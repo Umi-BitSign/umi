@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_reward_coordinator_cli, competition_supervisor_cli
 from umi.competition_reward_coverage_collector import RewardCoverageCollector
 from umi.competition_reward_coverage_intervals import (
     CoveragePoint,
@@ -196,6 +197,41 @@ async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lan
     assert "withdrawn_retrying" in caplog.text
     assert "reward_opportunity_percent" in caplog.text
     assert "successor_activation_eta_seconds" in caplog.text
+
+
+@pytest.mark.parametrize("role", ["writer", "coordinator"])
+async def test_actual_cli_reports_failed_gap_without_exception_secrets(
+    lanes, monkeypatch, capsys, role
+):
+    h = lanes
+    owner, journal = h.owner()
+    credit = journal.credit
+    hotkey = h.validators[0]
+
+    async def failed_credit(left, right):
+        if coverage_point(right, h.rule).block == 100:
+            raise OSError("https://rpc.invalid/?token=private-diagnostic-value")
+        return await credit(left, right)
+
+    monkeypatch.setattr(journal, "credit", failed_credit)
+    logs = (
+        competition_supervisor_cli._standing_logs
+        if role == "writer"
+        else competition_reward_coordinator_cli._logs
+    )
+    with logs():
+        result = await owner.step()
+    emitted = capsys.readouterr().err
+    assert "coverage_backfill_progress" in emitted
+    assert "coverage_retry" in emitted
+    assert "'phase': 'backfill'" in emitted
+    assert "'operation': 'credit_interval'" in emitted
+    assert "'block': 100" in emitted and "'error_type': 'OSError'" in emitted
+    assert "competition_reward_coverage_collector" in emitted
+    assert "private-diagnostic-value" not in emitted and "rpc.invalid" not in emitted
+    assert (hotkey, "OSError") in result.errors
+    assert owner._backfill_next[hotkey] == 100
+    assert coverage_point(owner._backfill_left[hotkey], h.rule).block == 99
 
 
 async def test_source_capture_restores_exact_owned_history_before_attempting_rpc(monkeypatch):

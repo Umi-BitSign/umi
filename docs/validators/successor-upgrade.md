@@ -25,6 +25,16 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+Running writer and coordinator logs expose `coverage_backfill_progress` with
+separate historical-gap and credited-opportunity counts, elapsed time, ETA basis
+and retry/stall status. A failed capture, retention or credit operation emits
+`coverage_retry` with its phase, block, operation, exception class and the last
+source coordinate inside the installed UMI package. Exception text, local values
+and full tracebacks are excluded because they can contain RPC credentials.
+These diagnostics do not alter coverage predicates, signed clocks or retained
+proofs. Keep a healthy writer running while diagnosing; qualify any executable
+transition through the supported maintenance path before selecting it.
+
 A supervisor fix can retain the installed worker release, reward package,
 signed directive history and original recovery journals. Stage the replacement
 under its own revision and signed host manifest. A root-owned
