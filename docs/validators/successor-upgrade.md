@@ -25,6 +25,15 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+The wallet-free successor feed reports `successor_delivery_retry` when its
+native reader cannot deliver a retained object. The service log includes the
+exception class and bounded UMI source coordinates, elapsed time and retry
+state. It excludes exception text, request URLs, credentials and local values.
+The HTTP response remains a generic503; a running feed process does not prove
+that automatic updates are being delivered. Inspect both the publisher and feed
+when a shared retained-history lock is busy. Completed history reuse must be
+carried through both installed consumers, including older supported publishers.
+
 Running writer and coordinator logs expose `coverage_backfill_progress` with
 separate historical-gap and credited-opportunity counts, elapsed time, ETA basis
 and retry/stall status. A failed capture, retention or credit operation emits
