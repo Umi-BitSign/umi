@@ -115,6 +115,25 @@ qualified immutable release target. Explicit cohort horizons and a digest-to-pat
 map of compact allocations complete the selection. New adopted allocations must
 be replicated before their activation; a missing input waits with progress.
 
+An explicit compatible transport selection uses schema
+`umi-reference-publisher-config/2`, `gateway_origin` set to
+`https://umi-reference-control.sam-sn78.workers.dev`, and a private JSON
+credential with the single field `token`. The selected endpoint and bucket still
+identify public R2 storage. `R2ReferenceGatewayClient` sends only typed common
+channel/approval operations to this exact HTTPS origin, without redirects. The
+deployed `reference-control-store` Worker checks authentication, namespace, body
+bounds and mandatory conditions before using the R2 binding's atomic `onlyIf`.
+It never signs or deletes objects. Keep the transport credential separate from
+the common-authority wallet. Do not use the administrative Cloudflare object API
+for mutable cursors: its upload endpoint does not preserve stale If-Match checks.
+
+Version1 retains its original canonical bytes and S3 credential format. Transport
+selection changes neither the original source files nor the publication journal,
+signed policy/directive bytes or horizons. Preserve existing state in place when
+adopting version2. The local `check` still does not open credentials or establish
+network readiness; qualify conditional creation, updates, stale rejection,
+competing writers, immutable retries and independent readback on actual R2.
+
 The `check` action validates these bindings without opening credentials, loading
 the wallet, creating journals or contacting the chain. It does not establish
 runtime readiness. The `run` action preserves the original signed source files,

@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "umi-reference-control",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-18",
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": { "enabled": false },
+  "r2_buckets": [{ "binding": "CONTROL", "bucket_name": "umi-public-evidence" }]
+}
