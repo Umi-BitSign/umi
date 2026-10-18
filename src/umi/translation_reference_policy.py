@@ -18,10 +18,11 @@ from .crypto import verify_response_signature
 from .encoding import account_id32
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .open_competition import Hotkey
-from .protocol import StrictProtocolModel, canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_REFERENCE_POLICY_BYTES = 16 * 1024
 REFERENCE_POLICY_DOMAIN = b"umi-translation-reference-policy-v1\0"
+APPROVED_REFERENCE_POLICY_DOMAIN = b"umi-translation-reference-policy-v2\0"
 
 
 class TranslationReferencePolicy(StrictProtocolModel):
@@ -46,22 +47,50 @@ class TranslationReferencePolicy(StrictProtocolModel):
     independent_cohort_certification_claimed: Literal[False] = False
 
 
+class ApprovedTranslationReferencePolicy(TranslationReferencePolicy):
+    """The fixed writer requires an authority-approved allocation as well.
+
+    A proven on-chain reference row establishes what that hotkey wrote, not
+    independent cohort certification. The existing release authority separately
+    approves its exact UID allocation. A successor cohort gets another signed
+    policy through the same automatic directive channel, without a new image.
+    """
+
+    schema_: Literal["umi-translation-reference-policy/2"] = Field(alias="schema")
+    row_rule: Literal["exact_proven_and_authority_approved_reference_row/1"]
+    expected_row_sha256: Hex32
+
+
+def _reparse_policy(policy):
+    if type(policy) not in (TranslationReferencePolicy, ApprovedTranslationReferencePolicy):
+        raise ValueError("reference policy has an unsupported native type")
+    return type(policy).model_validate_json(canonical_json_bytes(policy))
+
+
 class SignedTranslationReferencePolicy(StrictProtocolModel):
     schema_: Literal["umi-signed-translation-reference-policy/1"] = Field(alias="schema")
-    policy: TranslationReferencePolicy
+    policy: Annotated[
+        TranslationReferencePolicy | ApprovedTranslationReferencePolicy,
+        Field(discriminator="schema_"),
+    ]
     authority_hotkey: Hotkey
     signature_scheme: Literal["sr25519", "ed25519"]
     signature: str
 
 
 def reference_policy_sha256(policy: TranslationReferencePolicy) -> str:
-    policy = TranslationReferencePolicy.model_validate_json(canonical_json_bytes(policy))
+    policy = _reparse_policy(policy)
     return hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
 
 
 def reference_policy_signature_digest(policy: TranslationReferencePolicy) -> bytes:
-    policy = TranslationReferencePolicy.model_validate_json(canonical_json_bytes(policy))
-    return hashlib.sha256(REFERENCE_POLICY_DOMAIN + canonical_json_bytes(policy)).digest()
+    policy = _reparse_policy(policy)
+    domain = (
+        APPROVED_REFERENCE_POLICY_DOMAIN
+        if type(policy) is ApprovedTranslationReferencePolicy
+        else REFERENCE_POLICY_DOMAIN
+    )
+    return hashlib.sha256(domain + canonical_json_bytes(policy)).digest()
 
 
 def parse_reference_policy(payload: bytes) -> SignedTranslationReferencePolicy:

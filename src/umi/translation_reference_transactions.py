@@ -185,6 +185,23 @@ class ReferenceWeightJournal:
                     self._create_head(db, None, 0)
             if repair_head_index:
                 self._repair_head(db)
+            receipts = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_receipt_index'"
+            ).fetchone()
+            if not receipts:
+                if not repair_head_index and (
+                    db.execute(
+                        "SELECT 1 FROM records WHERE kind IN (?,?) LIMIT 1",
+                        ("reference_native_receipt", "reference_native_receipt_acceptance"),
+                    ).fetchone()
+                ):
+                    raise ValueError("reference receipt index repair required")
+                db.execute(
+                    "CREATE TABLE reference_receipt_index "
+                    "(intent TEXT PRIMARY KEY, receipt_sha256 TEXT NOT NULL)"
+                )
+            if repair_head_index:
+                self._repair_receipt_index(db)
             self._pending(db)
 
     @staticmethod
@@ -299,6 +316,9 @@ class ReferenceWeightJournal:
             raise
 
     def _intent_count(self, db):
+        return self._record_counts(db).get(_INTENT, 0)
+
+    def _record_counts(self, db):
         # Native reservation adoption replaces v1's derived capacity tables.
         # Use the owning journal's corresponding counted metadata in each format.
         capacity = (
@@ -306,7 +326,134 @@ class ReferenceWeightJournal:
             if self.journal._version(db) == 2
             else self.journal._record_capacity
         )
-        return capacity(db)[2].get(_INTENT, 0)
+        return capacity(db)[2]
+
+    def native_receipt(self, key):
+        """A completed index entry prevents lost verdicts becoming cache misses."""
+        with self.journal.read_transaction() as db:
+            saved = self.journal.get("reference_native_receipt", key, db=db)
+            accepted = self.journal.get("reference_native_receipt_acceptance", key, db=db)
+            index = db.execute(
+                "SELECT receipt_sha256 FROM reference_receipt_index WHERE intent=?", (key,)
+            ).fetchone()
+            if saved is None and accepted is None and index is None:
+                return None, None
+            if (
+                saved is None
+                or accepted is None
+                or index is None
+                or index[0] != sha256_hex(canonical_json_bytes(saved))
+                or accepted.get("receipt_sha256") != index[0]
+            ):
+                raise TranslationReferenceError("reference_receipt_verification_repair_required")
+            return saved, accepted
+
+    def retain_native_receipt(self, key, receipt, acceptance):
+        expected = sha256_hex(canonical_json_bytes(receipt))
+        if acceptance.get("receipt_sha256") != expected:
+            raise ValueError("reference receipt acceptance differs from its native result")
+
+        def index(db):
+            old = db.execute(
+                "SELECT receipt_sha256 FROM reference_receipt_index WHERE intent=?", (key,)
+            ).fetchone()
+            if old is not None and old[0] != expected:
+                raise ValueError("reference completed receipt cannot be replaced")
+            db.execute(
+                "INSERT OR IGNORE INTO reference_receipt_index VALUES (?,?)", (key, expected)
+            )
+
+        self.journal.put_many(
+            [
+                ("reference_native_receipt", key, receipt),
+                ("reference_native_receipt_acceptance", key, acceptance),
+            ],
+            index=index,
+        )
+
+    def _repair_receipt_index(self, db):
+        """Rebuild derived completion indexes, never missing native verdicts."""
+        started, done = time.monotonic(), 0
+        # Repair counts committed records, not reserved future receipt slots.
+        counts = self.journal._record_capacity(db)[2]
+        total = counts.get("reference_native_receipt", 0)
+        if not total and not counts.get("reference_native_receipt_acceptance", 0):
+            if db.execute("SELECT 1 FROM reference_receipt_index LIMIT 1").fetchone():
+                raise ValueError("reference receipt verdict restoration required")
+            return
+
+        def emit(status):
+            elapsed = time.monotonic() - started
+            event = {
+                "stage": "reference_receipt_index_repair",
+                "status": status,
+                "completed": done,
+                "total": total,
+                "percent": 100 * done / total if total else 100,
+                "elapsed_seconds": elapsed,
+                "eta_seconds": 0
+                if status == "completed"
+                else (elapsed * (total - done) / done if done and status == "running" else None),
+                "planning_seconds": [1, 300] if not done and status == "running" else None,
+                "eta_basis": "compact original receipt pairs; no native proof replay",
+                "stalled": status == "repair_required",
+                "retrying": status == "repair_required",
+            }
+            if self._progress is not None:
+                self._progress(event)
+            _LOG.info("reference_journal_progress %s", event)
+
+        emit("running")
+        try:
+            if counts.get("reference_native_receipt_acceptance", 0) != total:
+                raise ValueError("reference receipt verdict restoration required")
+            if db.execute(
+                "SELECT 1 FROM reference_receipt_index i LEFT JOIN records r "
+                "ON r.kind='reference_native_receipt' AND r.id=i.intent "
+                "WHERE r.id IS NULL LIMIT 1"
+            ).fetchone():
+                raise ValueError("reference receipt verdict restoration required")
+            db.execute("DELETE FROM reference_receipt_index")
+            for (key,) in db.execute(
+                "SELECT id FROM records WHERE kind='reference_native_receipt' ORDER BY id"
+            ):
+                receipt = self.journal.get("reference_native_receipt", key, db=db)
+                acceptance = self.journal.get("reference_native_receipt_acceptance", key, db=db)
+                attempt = self._attempt(db, key)
+                expected = sha256_hex(canonical_json_bytes(receipt))
+                if (
+                    not isinstance(receipt, dict)
+                    or not isinstance(acceptance, dict)
+                    or attempt.signed is None
+                    or receipt.get("schema") != "umi-reference-native-receipt/1"
+                    or receipt.get("intent_sha256") != key
+                    or receipt.get("policy_sha256") != attempt.intent.policy_sha256
+                    or receipt.get("signed_extrinsic_hash") != attempt.signed.extrinsic_hash
+                    or acceptance
+                    != {
+                        "schema": "umi-reference-native-receipt-acceptance/1",
+                        "intent_sha256": key,
+                        "receipt_sha256": expected,
+                        "verifier_semantics_sha256": receipt.get("verifier_semantics_sha256"),
+                    }
+                ):
+                    raise ValueError("reference receipt verdict restoration required")
+                db.execute("INSERT INTO reference_receipt_index VALUES (?,?)", (key, expected))
+                done += 1
+                emit("running")
+            if (
+                done != total
+                or db.execute(
+                    "SELECT 1 FROM records r LEFT JOIN reference_receipt_index i ON i.intent=r.id "
+                    "WHERE r.kind='reference_native_receipt_acceptance' "
+                    "AND i.intent IS NULL LIMIT 1"
+                ).fetchone()
+            ):
+                raise ValueError("reference receipt verdict restoration required")
+            emit("completed")
+        except BaseException:
+            emit("repair_required")
+            raise
 
     def _pending(self, db):
         head = db.execute("SELECT intent,number FROM reference_head WHERE id=1").fetchall()
@@ -370,6 +517,8 @@ class ReferenceWeightJournal:
             ),
             RecordReservation(_SIGNED, key, _MAX_RECORD_BYTES),
             RecordReservation(_END, key, 4096),
+            RecordReservation("reference_native_receipt", key, 8192),
+            RecordReservation("reference_native_receipt_acceptance", key, 1024),
         ]
         with self.journal.locked():
             old = self.pending()

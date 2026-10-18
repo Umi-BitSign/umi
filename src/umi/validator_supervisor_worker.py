@@ -6,9 +6,8 @@ inputs have fixed names beneath the read-only operator-input mount, and every
 chain-capable attempt is fenced by a separately owned GRANDPA stream plus a
 durable intent journal.
 
-Only the temporary bootstrap mode is implemented in this release.  Hold remains
-an absence of a worker container.  Shadow and translation modes fail closed until
-their complete signed worker profiles are released.
+The translation profile follows a separately approved native reward row. Hold
+remains an absence of a worker container. Shadow mode remains unavailable.
 """
 
 from __future__ import annotations
@@ -63,6 +62,7 @@ from .grandpa_finality import (
 )
 from .protocol import BlockHash, Hex32, StrictProtocolModel, canonical_json_bytes
 from .public_pilot_upload import load_hex_secret, upload_validator_bootstrap_result
+from .translation_reference_worker import run_translation_service
 from .validator_supervisor import MAX_JSON_SAFE_INTEGER
 from .validator_supervisor_adapters import (
     FinneyFinalizedBlockReader,
@@ -1440,10 +1440,12 @@ def _verify_release(
     release: SupervisorReleaseManifest,
     release_manifest_bytes: bytes,
     image_revision_path: Path,
+    *,
+    expected_profile: str = "umi-bootstrap-weight-validator/2",
 ) -> None:
     if hashlib.sha256(release_manifest_bytes).hexdigest() != environment.release_manifest_sha256:
         raise SupervisorWorkerError("worker_release_manifest_mismatch")
-    if release.entrypoint_profile != "umi-bootstrap-weight-validator/2":
+    if release.entrypoint_profile != expected_profile:
         raise SupervisorWorkerError("worker_release_profile_mismatch")
     if (
         not release.state_schema_minimum
@@ -1483,6 +1485,8 @@ def _production_finality_reader() -> FinneyFinalizedBlockReader:
     if chain_sha256 != FINNEY_CHAIN_SPEC_SHA256:
         raise SupervisorWorkerError("worker_finality_chain_spec_mismatch")
     try:
+        staging = Path("/run/umi-finality/stage")
+        staging.mkdir(mode=0o700, exist_ok=True)
         observer = GrandpaFinalityObserver(
             binary_path=WORKER_FINALITY_BINARY,
             expected_binary_sha256=binary_sha256,
@@ -1492,6 +1496,7 @@ def _production_finality_reader() -> FinneyFinalizedBlockReader:
             bootstrap_block_number=FINNEY_BOOTSTRAP_BLOCK_NUMBER,
             bootstrap_block_hash=f"0x{FINNEY_BOOTSTRAP_BLOCK_HASH}",
             record_timeout_seconds=OWNED_FINALITY_TIMEOUT_SECONDS,
+            staging_directory=staging,
         )
         return FinneyFinalizedBlockReader(
             SimpleNamespace(),
@@ -1710,6 +1715,36 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         environment = SupervisorWorkerEnvironment.from_environ(args.mode)
         if environment.mode == "hold":
             raise SupervisorWorkerError("worker_hold_must_be_host_inert")
+        if environment.mode == "translation_weights":
+            release_bytes, release = _read_canonical(
+                WORKER_RELEASE_MANIFEST, SupervisorReleaseManifest
+            )
+            _verify_release(
+                environment,
+                release,
+                release_bytes,
+                WORKER_IMAGE_REVISION,
+                expected_profile="umi-translation-validator/1",
+            )
+            reader = _production_finality_reader()
+            lease = OwnedFinalityLease(
+                reader,
+                valid_from_block=environment.valid_from_block,
+                valid_through_block=environment.valid_through_block,
+            )
+            asyncio.run(
+                run_translation_service(
+                    environment,
+                    state_root=WORKER_STATE_ROOT,
+                    lease=lease,
+                    finality_reader=reader,
+                    wallet_loader=_load_bound_wallet,
+                    progress=lambda value: print(
+                        canonical_json_bytes(value).decode("utf-8"), flush=True
+                    ),
+                )
+            )
+            return 0
         if environment.mode != "bootstrap_service_weights":
             raise SupervisorWorkerError("worker_mode_unimplemented")
         journal = asyncio.run(run_bootstrap_worker(environment))

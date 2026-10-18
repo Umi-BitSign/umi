@@ -3,6 +3,7 @@
 No production policy, wallet, chain transaction or external adoption is involved.
 """
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import timedelta
@@ -13,6 +14,7 @@ from tests.test_bridge_signing import case as signing_case  # noqa: F401
 from tests.test_registration_bridge import BLOCK, hotkey
 from tests.test_translation_reference_policy import case as policy_case
 from umi.protocol import canonical_json_bytes
+from umi.translation_reference_policy import ApprovedTranslationReferencePolicy
 from umi.translation_reference_state import (
     TranslationReferenceError,
     TranslationReferenceStateReader,
@@ -272,3 +274,26 @@ async def test_success_and_retry_telemetry_separate_capture_from_full_rollout(re
     assert events[-1]["retrying"] and events[-1]["stalled"]
     assert events[-1]["eta_seconds"] is None
     assert events[-1]["planning_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_proven_new_reference_row_is_not_itself_a_new_authority_approval(reference_case):
+    case = reference_case
+    fields = case.policy.model_dump(mode="python", by_alias=True)
+    fields.update(
+        schema="umi-translation-reference-policy/2",
+        row_rule="exact_proven_and_authority_approved_reference_row/1",
+        expected_row_sha256=hashlib.sha256(canonical_json_bytes(case.row)).hexdigest(),
+    )
+    case.policy = ApprovedTranslationReferencePolicy.model_validate(fields)
+    assert (await read(case)).decision(case.policy, now=case.now).row == tuple(map(tuple, case.row))
+    changed = [[uid, 65535 if uid == 119 else 0] for uid in range(256)]
+    case.set_value("Weights", changed, 78, 200)
+    with pytest.raises(TranslationReferenceError, match="not_approved_by_release_authority"):
+        await read(case)
+    # Only a separately authenticated successor policy can approve this row.
+    successor = case.policy.model_copy(
+        update={"expected_row_sha256": hashlib.sha256(canonical_json_bytes(changed)).hexdigest()}
+    )
+    case.policy = successor
+    assert (await read(case)).decision(successor, now=case.now).row == tuple(map(tuple, changed))

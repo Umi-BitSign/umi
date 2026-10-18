@@ -25,6 +25,58 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+### Automatic translation reference releases
+
+The fixed `umi-translation-validator/1` worker uses the supervisor's existing
+`translation_weights` mode, wallet mount, state path and signed directive cursor.
+Its directive selects a separately signed, content-addressed reference policy
+from the public R2 distribution origin. Production requires policy schema
+`umi-translation-reference-policy/2`: the release authority approves an exact
+complete UID reward row, and native proofs must independently establish the
+reference's current identity, permit, epoch activity and matching row. A reference
+validator's on-chain row alone is insufficient approval. This follower does not
+claim independent cohort certification or standing-series membership.
+
+A new approved row or cohort uses a successor signed policy/directive with the
+same worker image. Preserve the directive history, existing signed cohort clocks
+and original state paths. The server publication owner must distribute the new
+approval; successful image polling alone does not establish cohort adoption.
+Check finalized rows after distribution to establish which validators adopted it.
+Installed R2-only transport and independent certification are separate boundaries.
+
+The worker holds the original `service.lock` across native checks, signing,
+transmission and cancellation. Terminal version-1 bridge history is audited in
+place and bound to native current storage; successful unchanged audit results
+survive restart without rereading source payloads. A fresh state directory is
+accepted only when native LastUpdate is zero. Unknown effects, missing original
+records, explicit bootstrap layouts and version-2 bridge recovery remain held
+until their supported native reconciliation is qualified. Do not reset journals,
+remove locks, change state paths or infer recovery from row equality. Retain
+these migration readers while any installed validator still consumes old state.
+
+Each new attempt reserves its original intent before loading the signer and
+retains its exact native-verified signed bytes before transmission. Restart never
+rebroadcasts a retained attempt. Owned finalized nonce/mortality proofs fence an
+expired attempt before another can be signed; an SDK reply never proves success.
+Exact native receipt verification and a fresh entire own-row check establish the
+publication separately. The process continuously owns one finality stream, so
+multiple signing guards reuse its fresh accepted head. Container SIGTERM drains
+the operation before releasing the original lock.
+
+Missing completed receipt metadata requires explicit repair. With the worker
+stopped, run `python -m umi.translation_reference_repair --state-root STATE_ROOT
+--validator-hotkey HOTKEY` under its original account and runtime. This restores
+derived intent/receipt indexes from retained original records under the original
+service lock and reports counted progress, elapsed time and ETA basis. It never
+signs, submits, rewrites signed inputs or recreates missing native verdicts. A
+lost verdict requires restoration of the original records. Interrupted repairs
+roll back atomically and can be repeated. This command must remain available
+while supported followers retain these indexes.
+
+Qualification of the fixed worker, historical layout migration, both platform
+images, authenticated publication and actual installed submissions is required
+before selecting a translation release. Source tests are not an installed rollout.
+
 The wallet-free successor feed reports `successor_delivery_retry` when its
 native reader cannot deliver a retained object. The service log includes the
 exception class and bounded UMI source coordinates, elapsed time and retry

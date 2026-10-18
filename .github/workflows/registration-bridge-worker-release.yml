@@ -1,4 +1,4 @@
-name: Registration bridge worker OCI release artifacts
+name: Native validator worker OCI release artifacts
 
 on:
   workflow_dispatch:
@@ -7,12 +7,20 @@ on:
         description: Exact 40-character commit to build
         required: true
         type: string
+      profile:
+        description: Fixed worker profile to authenticate in the release
+        required: true
+        default: umi-registration-bridge-validator/1
+        type: choice
+        options:
+          - umi-registration-bridge-validator/1
+          - umi-translation-validator/1
 
 permissions:
   contents: read
 
 concurrency:
-  group: registration-bridge-worker-release-${{ inputs.revision }}
+  group: native-validator-worker-release-${{ inputs.revision }}-${{ inputs.profile }}
   cancel-in-progress: false
 
 jobs:
@@ -35,6 +43,7 @@ jobs:
       OCI_REPOSITORY: ghcr.io/umi-bitsign/umi-validator
       PLATFORM: ${{ matrix.platform }}
       REVISION: ${{ inputs.revision }}
+      WORKER_PROFILE: ${{ inputs.profile }}
 
     steps:
       - name: Require one exact commit
@@ -45,6 +54,10 @@ jobs:
             echo "revision must be one 40-character lowercase commit" >&2
             exit 2
           fi
+          case "${WORKER_PROFILE}" in
+            umi-registration-bridge-validator/1|umi-translation-validator/1) ;;
+            *) echo "unsupported worker profile" >&2; exit 2 ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,7 +88,12 @@ jobs:
           print(digest.hexdigest())
           PY
           )"
-          artifact_base="umi-registration-bridge-worker-${REVISION}-linux-${ARCHITECTURE}"
+          if [[ "${WORKER_PROFILE}" == "umi-translation-validator/1" ]]; then
+            worker_kind="translation-reference"
+          else
+            worker_kind="registration-bridge"
+          fi
+          artifact_base="umi-${worker_kind}-worker-${REVISION}-linux-${ARCHITECTURE}"
           finality_base="umi-grandpa-finality-observer-${REVISION}-linux-${ARCHITECTURE}"
           image_tag="${OCI_REPOSITORY}:supervisor-worker-${REVISION}-${ARCHITECTURE}"
           {
@@ -99,6 +117,7 @@ jobs:
             --build-arg "TARGETARCH=${ARCHITECTURE}" \
             --build-arg "UMI_GIT_REVISION=${REVISION}" \
             --build-arg "UMI_SOURCE_TREE_SHA256=${SOURCE_TREE_SHA256}" \
+            --build-arg "UMI_WORKER_PROFILE=${WORKER_PROFILE}" \
             --tag "${IMAGE_TAG}" \
             --provenance=false \
             --metadata-file "out/${ARTIFACT_BASE}.build-metadata.json" \
@@ -113,7 +132,7 @@ jobs:
           set -euo pipefail
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE_TAG}")" = "${REVISION}"
           test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.source-tree-sha256" }}' "${IMAGE_TAG}")" = "${SOURCE_TREE_SHA256}"
-          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "umi-registration-bridge-validator/1"
+          test "$(docker image inspect --format '{{ index .Config.Labels "vision.umi.entrypoint-profile" }}' "${IMAGE_TAG}")" = "${WORKER_PROFILE}"
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "${IMAGE_TAG}")" = "${PLATFORM}"
           test "$(docker image inspect --format '{{ .Config.User }}' "${IMAGE_TAG}")" = "65532:65532"
           docker run --rm --platform "${PLATFORM}" \
@@ -126,6 +145,10 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777 \
             "${IMAGE_TAG}" --help
           docker run --rm --platform "${PLATFORM}" \
+            --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --entrypoint /usr/local/bin/umi-validator-supervisor-worker \
+            "${IMAGE_TAG}" --help
+          docker run --rm --platform "${PLATFORM}" \
             --read-only \
             --cap-drop ALL \
             --security-opt no-new-privileges \
@@ -133,11 +156,13 @@ jobs:
             "${IMAGE_TAG}" --conformance-self-test
           docker run --rm --platform "${PLATFORM}" \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env "UMI_RELEASE_TEST_PROFILE=${WORKER_PROFILE}" \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
             --tmpfs /run/umi-finality:rw,exec,nosuid,nodev,size=67108864,mode=1777 \
             --entrypoint /opt/umi/.venv/bin/python \
-            "${IMAGE_TAG}" -c 'import subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; chain = BittensorRegistrationBridgeChain()
-          with chain.finality.observer._staged_inputs() as staged:
+            "${IMAGE_TAG}" -c 'import os, subprocess; from umi.registration_bridge import BittensorRegistrationBridgeChain; from umi.validator_supervisor_worker import _production_finality_reader
+          reader = _production_finality_reader() if os.environ["UMI_RELEASE_TEST_PROFILE"] == "umi-translation-validator/1" else BittensorRegistrationBridgeChain().finality
+          with reader.observer._staged_inputs() as staged:
               subprocess.run([str(staged["binary"]), "--conformance-self-test"], check=True)'
           docker run --rm --interactive --platform "${PLATFORM}" \
             --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
@@ -258,13 +283,14 @@ jobs:
             --arg architecture "${ARCHITECTURE}" \
             --arg revision "${REVISION}" \
             --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
+            --arg worker_profile "${WORKER_PROFILE}" \
             '.os == "linux" and
              .architecture == $architecture and
              .config.User == "65532:65532" and
              .config.Entrypoint == ["/usr/local/bin/umi-registration-bridge"] and
              .config.Labels["org.opencontainers.image.revision"] == $revision and
              .config.Labels["vision.umi.source-tree-sha256"] == $source_tree_sha256 and
-             .config.Labels["vision.umi.entrypoint-profile"] == "umi-registration-bridge-validator/1"' \
+             .config.Labels["vision.umi.entrypoint-profile"] == $worker_profile' \
             <<<"${config_json}" >/dev/null
           archive_sha256="$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)"
           archive_size_bytes="$(stat -c '%s' "${ARCHIVE}")"
@@ -273,6 +299,7 @@ jobs:
           printf '%s\n' "${archive_size_bytes}" > "${ARCHIVE}.size"
           jq -cn \
             --arg archive "$(basename "${ARCHIVE}")" \
+            --arg worker_profile "${WORKER_PROFILE}" \
             --arg archive_sha256 "${archive_sha256}" \
             --argjson archive_size_bytes "${archive_size_bytes}" \
             --arg manifest_sha256 "${manifest_digest#sha256:}" \
@@ -281,6 +308,7 @@ jobs:
             --arg source_tree_sha256 "${SOURCE_TREE_SHA256}" \
             --arg target_platform "${PLATFORM}" \
             '{archive:$archive,
+              entrypoint_profile:$worker_profile,
               oci_archive_sha256:$archive_sha256,
               oci_archive_size_bytes:$archive_size_bytes,
               oci_manifest_sha256:$manifest_sha256,

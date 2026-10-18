@@ -8,6 +8,7 @@ does not independently certify the cohort, reconcile old effects or submit.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -16,7 +17,11 @@ from datetime import datetime, timezone
 from .bridge.signing import BridgeSigningState, BridgeSigningStateReader, _SnapshotPort
 from .concurrency import await_owned_task
 from .encoding import account_id32, datetime_to_unix_ms
-from .translation_reference_policy import TranslationReferencePolicy
+from .protocol import canonical_json_bytes
+from .translation_reference_policy import (
+    ApprovedTranslationReferencePolicy,
+    TranslationReferencePolicy,
+)
 from .validator_chain import (
     FinalizedProofCollector,
     ProofCollectionLimits,
@@ -213,6 +218,11 @@ class TranslationReferenceState:
         )
         _require(ref.block_number - update < cutoff, "reference_update_stale")
         row = _row(rows[_spec("Weights", 78, reference)])
+        if isinstance(policy, ApprovedTranslationReferencePolicy):
+            _require(
+                hashlib.sha256(canonical_json_bytes(row)).hexdigest() == policy.expected_row_sha256,
+                "reference_row_not_approved_by_release_authority",
+            )
         own_row = rows[_spec("Weights", 78, writer)]
         last = value("LastUpdate")[writer]
         # A row change must respect the chain's own rate; an unchanged row is
