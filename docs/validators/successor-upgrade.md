@@ -104,6 +104,27 @@ and verification mode. Keep its proof cache and journals separate from existing
 writer/coordinator ownership. Qualify the installed entrypoint, public namespace,
 legacy journal handoff and finalized adoption; these APIs alone do not deploy it.
 
+The supported entrypoint is `umi-reference-publisher check --config CONFIG`, then
+`umi-reference-publisher run --config CONFIG` under the publication account. Its
+canonical private configuration uses schema `umi-reference-publisher-config/1`.
+It selects the existing coordinator configuration, a separate private state root,
+explicit native resources and cache/journal budgets, the public R2 endpoint and
+bucket, an existing private JSON S3 credential export, and the common-authority
+wallet name/path/hotkey. Each channel selects its existing supervisor config and
+qualified immutable release target. Explicit cohort horizons and a digest-to-path
+map of compact allocations complete the selection. New adopted allocations must
+be replicated before their activation; a missing input waits with progress.
+
+The `check` action validates these bindings without opening credentials, loading
+the wallet, creating journals or contacting the chain. It does not establish
+runtime readiness. The `run` action preserves the original signed source files,
+creates only its own state, rejects state overlap with existing owners and inputs,
+and opens the signer lazily after native approval checks and durable intent.
+Keep the state directory and its `proofs` child separate from production chain
+state. Supply actual pinned executable paths through `resources` rather than
+changing another service's mount namespace. SIGINT/SIGTERM drain owned work;
+restore damaged records in place instead of resetting the publication journal.
+
 The worker holds the original `service.lock` across native checks, signing,
 transmission and cancellation. Terminal version-1 bridge history is audited in
 place and bound to native current storage; successful unchanged audit results
