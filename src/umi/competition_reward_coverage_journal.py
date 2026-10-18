@@ -35,6 +35,7 @@ from .competition_reward_coverage_checkpoint import (
     CoverageCheckpointRepairRequired,
     CoverageCheckpoints,
 )
+from .competition_reward_coverage_export import export_completed_endpoint
 from .competition_reward_coverage_intervals import (
     CoverageEndpoint,
     CoveragePoint,
@@ -411,22 +412,27 @@ class RewardCoverageJournal:
             if receipt is not None:
                 remote.validate_reference(receipt)
                 return
-        point, frame, blobs = self._load(key)
-        archive.write(
-            "endpoint",
-            key,
-            context={
-                "point": point.model_dump(mode="json"),
-                "package": frame["package"],
-                "validator_hotkey": frame["validator_hotkey"],
-            },
-            fields=blobs,
-        )
-        if export_key is not None:
-            receipt = remote.reference_for_path("frames/endpoint/" + key)
-            if receipt is None:
-                raise ValueError("coverage export lost its durable R2 acknowledgement")
-            self.journal.put("coverage_remote_export", export_key, receipt)
+        with TransferProgress(
+            "coverage_endpoint_export", 1, unit="endpoints", planning_unit_seconds=(1, 300)
+        ) as progress:
+            if not export_completed_endpoint(self, key, archive, field_kinds=_FIELDS):
+                point, frame, blobs = self._load(key)
+                archive.write(
+                    "endpoint",
+                    key,
+                    context={
+                        "point": point.model_dump(mode="json"),
+                        "package": frame["package"],
+                        "validator_hotkey": frame["validator_hotkey"],
+                    },
+                    fields=blobs,
+                )
+            if export_key is not None:
+                receipt = remote.reference_for_path("frames/endpoint/" + key)
+                if receipt is None:
+                    raise ValueError("coverage export lost its durable R2 acknowledgement")
+                self.journal.put("coverage_remote_export", export_key, receipt)
+            progress.advance(1)
 
     async def retain_endpoint(self, endpoint: CoverageEndpoint) -> str:
         async with self._lock:

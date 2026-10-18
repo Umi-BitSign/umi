@@ -382,6 +382,23 @@ rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
 require a fresh owned finalized-chain check. A raw archive frame or a progress
 log is not a successful-verification receipt.
 
+Coverage exports reuse the endpoint's completed native checkpoint and exact
+source revisions to copy its encoded proof pieces without expanding and encoding
+the complete evidence again. Existing destination frames with another valid
+encoding retain the original export path and bytes. Transfer completion remains
+separate from native acceptance and interval credit; damaged completion or source
+records require repair. The `coverage_endpoint_export` meter includes either
+compatible path and reports retries without resetting signed clocks.
+
+Within one archive process, repeated compact transfers can also reuse completed
+publication records for unchanged destination objects. Every use checks the exact
+private directory, object inode metadata and byte length. An inherited process,
+changed or missing object, fresh archive owner or unqualified initial timestamp
+takes the ordinary resolver and publication checks. The archive retains at most
+8,192 publication records and 8,192 read entries; read payloads still share a
+32 MiB byte budget. Saturation falls back to ordinary I/O. These transport caches
+do not replace durable native verification or grant proof authority.
+
 Checkpoint metadata reads use one read-only SQLite snapshot per bounded history
 batch, within the selected history batch budget (at most 4,096 blocks). Each block
 still checks its original owner, verifier semantics, source generations, conflict

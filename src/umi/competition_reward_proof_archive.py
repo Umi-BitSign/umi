@@ -44,8 +44,11 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
-_MAX_PUBLISHED_OBJECTS = 4096
-_MAX_READ_OBJECTS = 4096
+# A complete native endpoint can contain more than 4,096 distinct proof pieces.
+# Keep its working receipts together; saturation still uses ordinary I/O rather
+# than rejecting evidence. The independent payload-byte budget is unchanged.
+_MAX_PUBLISHED_OBJECTS = 8192
+_MAX_READ_OBJECTS = 8192
 _MAX_READ_BYTES = 32 * 1024**2
 Kind = Literal["history", "endpoint", "interval", "registration"]
 
@@ -327,6 +330,28 @@ class RewardProofArchive:
                 maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
             )
 
+    def _published_object_present(self, sha: str, size: int) -> bool:
+        """Reuse only this process's completed, clock-qualified publication.
+
+        This is transport presence, never native evidence acceptance. A fresh
+        process, different destination, changed inode or unqualified clock takes
+        the ordinary resolver/digest/publication path.
+        """
+        if self.remote is not None or os.getpid() != self._pid:
+            return False
+        with self._publication_lock:
+            prior = self._published.pop(sha, None)
+            if prior is not None:
+                with suppress(OSError, ValueError):
+                    path = self.root / "objects" / (sha + ".json")
+                    if (
+                        prior[-3] == 2 * size + len(b'{"hex":""}')
+                        and self._object_stamp(path) == prior
+                    ):
+                        self._published[sha] = prior
+                        return True
+        return False
+
     def _bytes(self, sha: str, maximum: int) -> bytes:
         return self._verified_bytes(sha, maximum)[0]
 
@@ -538,6 +563,9 @@ class RewardProofArchive:
                 if sha in retained:
                     if retained[sha] != size:
                         raise ValueError("encoded transport object length differs")
+                    continue
+                if self._published_object_present(sha, size):
+                    retained[sha] = size
                     continue
                 raw = resolve(sha, size)
                 if type(raw) is not bytes or len(raw) != size:
