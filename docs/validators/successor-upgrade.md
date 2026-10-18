@@ -44,6 +44,23 @@ approval; successful image polling alone does not establish cohort adoption.
 Check finalized rows after distribution to establish which validators adopted it.
 Installed R2-only transport and independent certification are separate boundaries.
 
+`preflight-common-switch` accepts the supported bootstrap/registration profiles
+and the fixed `umi-translation-validator/1` profile. It authenticates the complete
+retained directive prefix, verifies translation's content-addressed version2
+authority approval, stages the signed image and refreshes native finality against
+the original horizon. Its progress separates history, approval, staging and the
+finality refresh. It does not start a writer, settle old transactions or claim
+that another validator has adopted the row.
+
+The fresh installer's `--legacy-unit` path does not import foreign transaction
+journals. If translation is selected, that retirement path refuses before stopping
+the legacy process. Upgrade an existing standard supervisor through the supported
+preserving host maintenance path below; other state layouts need a qualified
+migration. The installer's result reader retains compatibility with the exact
+older bootstrap-only pinned release. Changing source alone does not update the
+installer's signed release/artifact pins; qualify both target platforms and the
+actual service environment before changing those pins.
+
 The host supervisor waits for container readiness rather than assuming creation
 finishes within one second. Its default local startup allowance is 30 seconds,
 with readiness checked as the container appears. A dead foreground process,

@@ -14,6 +14,7 @@ import signal
 import stat
 import struct
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -71,9 +72,9 @@ from .validator_supervisor_adapters import (
     ValidatorSupervisorAdapterError,
     parse_canonical_signed_supervisor_host_artifact_manifest,
 )
+from .validator_supervisor_preflight import CommonPreflightProgress, prepare_common_activation
 from .validator_supervisor_runtime import (
     DIRECTIVE_STATE_FILENAME,
-    SupervisorWorkerActivation,
     ValidatorSupervisorRuntime,
     ValidatorSupervisorRuntimeError,
 )
@@ -601,6 +602,8 @@ async def _preflight_initial_hold(config_path: Path) -> dict[str, object]:
 async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
     """Verify the complete common chain and stage its current worker without executing it."""
 
+    started = time.monotonic()
+    progress = CommonPreflightProgress(started=started)
     config = load_validator_supervisor_config(config_path)
     _validate_linux_systemd_profile(config)
     adapter = RootlessPodmanWorkerAdapter(config)
@@ -618,7 +621,10 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
     current_signed: SignedSupervisorDirective | None = None
     directive_count = 0
     try:
+        progress("common_switch_owned_finality", 0, 1)
         finalized_block = await finality.read_finalized_block()
+        progress("common_switch_owned_finality", 1, 1)
+        progress("common_switch_directive_history", 0, None)
         while True:
             payload = await fetcher.fetch_directive_page(
                 after_sequence=cursor_sequence,
@@ -665,6 +671,8 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
                     raise ValidatorSupervisorAdapterError(
                         "common_switch_directive_rejected"
                     ) from error
+                if directive_count % 8 == 0:
+                    progress("common_switch_directive_history", directive_count, None)
 
             if page.more:
                 cursor_sequence = page.directives[-1].directive.sequence
@@ -697,38 +705,15 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
                 raise ValidatorSupervisorAdapterError("common_switch_directive_rejected") from error
             break
 
+        progress("common_switch_directive_history", directive_count, directive_count)
         directive = current_signed.directive
-        release = directive.release
-        operator_inputs = directive.operator_inputs
-        supported_profiles = {
-            (
-                "umi-simple-bootstrap-validator/1",
-                SUPERVISOR_SIMPLE_BOOTSTRAP_INPUT_PROFILE,
-            ),
-            (
-                "umi-registration-bridge-validator/1",
-                SUPERVISOR_REGISTRATION_BRIDGE_INPUT_PROFILE,
-            ),
-        }
-        if (
-            directive.mode != "bootstrap_service_weights"
-            or release is None
-            or operator_inputs is None
-            or (release.entrypoint_profile, operator_inputs.profile) not in supported_profiles
-            or directive.policy_sha256 is None
-        ):
-            raise ValidatorSupervisorAdapterError("common_switch_release_required")
-        activation = SupervisorWorkerActivation(
-            mode=directive.mode,
-            sequence=directive.sequence,
-            directive_sha256=current_signed.directive_sha256,
-            policy_sha256=directive.policy_sha256,
-            valid_from_block=directive.valid_from_block,
-            valid_through_block=directive.valid_through_block,
-            release=release,
-            operator_inputs=operator_inputs,
-        )
+        progress("common_switch_release_profile_and_approval", 0, 1)
+        activation = await prepare_common_activation(current_signed, https=adapter.https)
+        progress("common_switch_release_profile_and_approval", 1, 1)
+        progress("common_switch_release_staging", 0, 1)
         await adapter.preflight_activation(activation=activation)
+        progress("common_switch_release_staging", 1, 1)
+        progress("common_switch_finality_refresh", 0, 1)
         refreshed_finalized_block = await finality.read_finalized_block()
         if (
             refreshed_finalized_block <= finalized_block
@@ -736,6 +721,10 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
             or directive.valid_through_block - refreshed_finalized_block < 2
         ):
             raise ValidatorSupervisorAdapterError("common_switch_release_headroom_invalid")
+        progress("common_switch_finality_refresh", 1, 1)
+    except Exception:
+        progress("common_switch_preflight", 0, 1, status="refused")
+        raise
     finally:
         await finality.stop()
 
@@ -743,6 +732,7 @@ async def _preflight_common_switch(config_path: Path) -> dict[str, object]:
         "directive_sha256": state.accepted_directive_sha256,
         "finalized_block": refreshed_finalized_block,
         "initial_hold_verified": True,
+        "mode": directive.mode,
         "sequence": state.accepted_sequence,
         "status": "common_switch_preflight_ok",
         "target_platform": config.target_platform,
