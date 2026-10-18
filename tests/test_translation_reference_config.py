@@ -10,6 +10,11 @@ from umi.competition_chain_resources import CompetitionChainResources
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.translation_reference_cli import main
+from umi.translation_reference_gateway import (
+    REFERENCE_GATEWAY_ORIGIN,
+    REFERENCE_GATEWAY_R2_ENDPOINT,
+    R2ReferenceGatewayClient,
+)
 
 from .test_translation_reference_channel import (
     base_policy as base_policy,
@@ -188,3 +193,32 @@ def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):
     link.symlink_to(source)
     with pytest.raises(OSError):
         wiring.read_input(link, 128)
+
+
+async def test_gateway_configuration_adopts_transport_without_rebinding_signed_inputs(installed):
+    item = installed
+    before = canonical_json_bytes(item.config)
+    assert b"gateway_origin" not in before
+    assert (
+        canonical_json_bytes(wiring.ReferencePublisherConfig.model_validate_json(before)) == before
+    )
+    updated = item.config.model_dump(mode="json", by_alias=True)
+    updated.update(
+        schema="umi-reference-publisher-config/2",
+        gateway_origin=REFERENCE_GATEWAY_ORIGIN,
+        endpoint=REFERENCE_GATEWAY_R2_ENDPOINT,
+    )
+    config = wiring.ReferencePublisherConfig.model_validate(updated)
+    item.credentials.write_text(json.dumps({"token": "a" * 64}, indent=2))
+    service = wiring.build_reference_service(config)
+    assert isinstance(service.channels[0].store.client, R2ReferenceGatewayClient)
+    assert service.reader.series == item.selected.series
+    assert service.horizons == item.config.horizons
+    assert service.provider.resources == item.config.resources
+    await service.provider.aclose()
+    wrong = dict(updated, endpoint="https://" + "b" * 32 + ".r2.cloudflarestorage.com")
+    with pytest.raises(ValueError, match="different R2 binding"):
+        wiring.ReferencePublisherConfig.model_validate(wrong)
+    updated["schema"] = "umi-reference-publisher-config/1"
+    with pytest.raises(ValueError, match="explicit configuration version"):
+        wiring.ReferencePublisherConfig.model_validate(updated)

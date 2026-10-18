@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import bittensor as bt
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain_resources import CompetitionChainResources
 from .competition_cohort_reward_allocation import CohortRewardAllocation
@@ -22,6 +22,11 @@ from .r2_evidence import R2EvidenceClient
 from .r2_sigv4 import R2Credentials, R2SigV4
 from .translation_reference_channel import TranslationReferenceChannelPublisher, channel_page_key
 from .translation_reference_channel_store import R2ReferenceChannelStore
+from .translation_reference_gateway import (
+    REFERENCE_GATEWAY_R2_ENDPOINT,
+    R2ReferenceGatewayClient,
+    validate_gateway_origin,
+)
 from .translation_reference_publication import TranslationReferenceApprovalPublisher
 from .translation_reference_service import TranslationReferencePublisherService
 from .validator_supervisor import (
@@ -41,8 +46,14 @@ class ReferencePublisherCredentials(StrictProtocolModel):
     secret_access_key: str = Field(repr=False)
 
 
+class ReferenceGatewayCredentials(StrictProtocolModel):
+    token: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", repr=False)]
+
+
 class ReferencePublisherConfig(StrictProtocolModel):
-    schema_: Literal["umi-reference-publisher-config/1"] = Field(alias="schema")
+    schema_: Literal["umi-reference-publisher-config/1", "umi-reference-publisher-config/2"] = (
+        Field(alias="schema")
+    )
     coordinator_config: Directory
     state_directory: Directory
     resources: CompetitionChainResources
@@ -51,6 +62,7 @@ class ReferencePublisherConfig(StrictProtocolModel):
     credentials_file: Directory
     endpoint: str
     bucket: str
+    gateway_origin: str | None = None
     wallet_path: Directory
     wallet_name: Annotated[str, Field(min_length=1, max_length=256)]
     wallet_hotkey: Annotated[str, Field(min_length=1, max_length=256)]
@@ -59,6 +71,13 @@ class ReferencePublisherConfig(StrictProtocolModel):
     allocations: dict[Hex32, Directory]
     horizons: dict[Hex32, Annotated[int, Field(ge=1, le=2**53 - 1)]]
     poll_seconds: Annotated[int, Field(ge=1, le=3600)] = 30
+
+    @model_serializer(mode="wrap")
+    def preserve_s3_configuration(self, handler):
+        value = handler(self)
+        if self.gateway_origin is None:
+            value.pop("gateway_origin", None)
+        return value
 
     @model_validator(mode="after")
     def local_bindings(self):
@@ -80,6 +99,19 @@ class ReferencePublisherConfig(StrictProtocolModel):
                 raise ValueError("reference channel differs from the common authority/profile")
         # Validate the account endpoint/bucket without opening credentials.
         R2SigV4(self.endpoint, self.bucket, R2Credentials("a" * 32, "b" * 64))
+        if (self.schema_ == "umi-reference-publisher-config/2") != (
+            self.gateway_origin is not None
+        ):
+            raise ValueError(
+                "reference gateway transport requires its explicit configuration version"
+            )
+        if self.gateway_origin is not None:
+            validate_gateway_origin(self.gateway_origin)
+            if (
+                self.bucket != "umi-public-evidence"
+                or self.endpoint != REFERENCE_GATEWAY_R2_ENDPOINT
+            ):
+                raise ValueError("reference gateway cannot select a different R2 binding")
         return self
 
 
@@ -146,16 +178,19 @@ def selected_inputs(config: ReferencePublisherConfig):
 def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
     selected, chain = selected_inputs(config)
     root = Path(config.state_directory)
-    values = ReferencePublisherCredentials.model_validate_json(
-        _read_private_bytes(Path(config.credentials_file), maximum_bytes=16 * 1024)
-    )
-    client = R2EvidenceClient(
-        R2SigV4(
-            config.endpoint,
-            config.bucket,
-            R2Credentials(values.access_key_id, values.secret_access_key),
+    raw_credentials = _read_private_bytes(Path(config.credentials_file), maximum_bytes=16 * 1024)
+    if config.gateway_origin is None:
+        values = ReferencePublisherCredentials.model_validate_json(raw_credentials)
+        client = R2EvidenceClient(
+            R2SigV4(
+                config.endpoint,
+                config.bucket,
+                R2Credentials(values.access_key_id, values.secret_access_key),
+            )
         )
-    )
+    else:
+        gateway = ReferenceGatewayCredentials.model_validate_json(raw_credentials)
+        client = R2ReferenceGatewayClient(config.gateway_origin, gateway.token)
 
     def signer():
         wallet = bt.Wallet(
