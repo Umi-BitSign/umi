@@ -19,6 +19,7 @@ from pathlib import Path
 import bittensor as bt
 
 from .bridge.native import read_image_artifacts
+from .bridge.receipts import BridgeReceiptReader
 from .bridge.signing import BridgeSigningStateReader
 from .concurrency import await_owned_task, run_owned_thread
 from .mortal_receipts import MortalReceiptReader
@@ -27,6 +28,7 @@ from .runtime_metadata import RuntimeMetadataExecutor
 from .signed_extrinsic import exact_signed_extrinsic
 from .substrate_proof import SubprocessStorageProofVerifier
 from .translation_reference_execution import run_reference_iteration
+from .translation_reference_legacy_native import approve_native_legacy
 from .translation_reference_legacy_state import ReferenceLegacyState
 from .translation_reference_policy import (
     MAX_REFERENCE_POLICY_BYTES,
@@ -61,6 +63,11 @@ _RETRYABLE_NATIVE_REASONS = frozenset(
         "reference_update_stale",
         "reference_cutover_not_reached",
         "reference_row_not_approved_by_release_authority",
+        "reference_legacy_native_observation_behind_completed_proofs",
+        "reference_legacy_native_receipt_pending",
+        "bridge_receipt_not_yet_finalized",
+        "bridge_expiry_not_finalized",
+        "mortal_receipt_not_yet_finalized",
     }
 )
 
@@ -98,6 +105,15 @@ class LeaseFinality:
         return self.lease.require_headroom(0)
 
 
+class _ReferenceReceiptPorts:
+    def __init__(self, *, finality, rpc, tools):
+        self.current = MortalReceiptReader(finality=finality, rpc=rpc, **tools)
+        self.legacy = BridgeReceiptReader(finality=finality, rpc=rpc, **tools)
+
+    async def find(self, query):
+        return await self.current.find(query)
+
+
 def production_readers(*, client, finality, clock, progress):
     artifacts = read_image_artifacts()
     tools = dict(
@@ -121,7 +137,7 @@ def production_readers(*, client, finality, clock, progress):
             finality=finality, rpc=rpc, clock=clock, progress=progress, **tools
         ),
         BridgeSigningStateReader(finality=finality, rpc=rpc, clock=clock, **tools),
-        MortalReceiptReader(finality=finality, rpc=rpc, **tools),
+        _ReferenceReceiptPorts(finality=finality, rpc=rpc, tools=tools),
         semantics,
     )
 
@@ -174,15 +190,14 @@ class ReferenceWorkerPorts:
         return await self._signing.read(self.expected_validator_hotkey)
 
     async def legacy_gate(self, state):
-        await run_owned_thread(
-            partial(
-                self.legacy.approve,
-                state,
-                self.policy,
-                self.journal,
-                verifier_semantics_sha256=self.verifier_semantics_sha256,
-                now=self.clock(),
-            )
+        await approve_native_legacy(
+            self.legacy,
+            state,
+            self.policy,
+            self.journal,
+            receipts=getattr(self._receipt, "legacy", None),
+            verifier_semantics_sha256=self.verifier_semantics_sha256,
+            now=self.clock(),
         )
 
     async def guard(self, intent):

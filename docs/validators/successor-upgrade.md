@@ -48,9 +48,14 @@ The worker holds the original `service.lock` across native checks, signing,
 transmission and cancellation. Terminal version-1 bridge history is audited in
 place and bound to native current storage; successful unchanged audit results
 survive restart without rereading source payloads. A fresh state directory is
-accepted only when native LastUpdate is zero. Unknown effects, missing original
-records, explicit bootstrap layouts and version-2 bridge recovery remain held
-until their supported native reconciliation is qualified. Do not reset journals,
+accepted only when native LastUpdate is zero. Version-2 bridge history uses its
+original exact signed-byte receipt or native expiry reader. Each completed
+attempt is checkpointed against its original file identity, signed bytes and
+verifier semantics before the next attempt. Restart resumes those completed
+checks; fresh native current-row and LastUpdate proofs still bind the complete
+original history before adoption. An unresolved version-1 effect, missing original
+records or explicit bootstrap layout remains held until its supported native
+reconciliation is qualified. Do not reset journals,
 remove locks, change state paths or infer recovery from row equality. Retain
 these migration readers while any installed validator still consumes old state.
 
@@ -72,6 +77,15 @@ signs, submits, rewrites signed inputs or recreates missing native verdicts. A
 lost verdict requires restoration of the original records. Interrupted repairs
 roll back atomically and can be repeated. This command must remain available
 while supported followers retain these indexes.
+
+For an interrupted version-2 legacy verification, the same command accepts
+`--repair-legacy-outcome-completions`. It checks the original files and the
+checksummed native verdicts before atomically restoring their small completion
+markers under `reference-weights/legacy-native-verification`. It preserves the
+original verdict bytes and timestamps, and refuses a lost or damaged verdict.
+Repeated repair resumes completed items. The command removes only bounded
+`.pending-complete-` temporary files from this dedicated directory while holding
+the original service mutex. Original journals and signed inputs are untouched.
 
 Qualification of the fixed worker, historical layout migration, both platform
 images, authenticated publication and actual installed submissions is required

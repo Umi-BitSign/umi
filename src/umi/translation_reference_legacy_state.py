@@ -12,6 +12,7 @@ import os
 import stat
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 from .bridge.journal_history import MAX_HISTORY_FILES
 from .bridge.state import MAX_HISTORY_BYTES, _read_bytes
@@ -22,6 +23,7 @@ from .translation_reference_state import TranslationReferenceError
 
 FOLLOWER_STATE_DIRECTORY = "reference-weights"
 _RULE = "umi-reference-terminal-v1-legacy-adoption/1"
+NATIVE_V2_RULE = "umi-reference-native-v2-legacy-adoption/1"
 _ADOPTION = "reference_legacy_adoption"
 _CHUNK = "reference_legacy_file_identities"
 _FILES = {
@@ -65,6 +67,7 @@ class ReferenceLegacyState:
         self._root_identity = None
         self._initial = None
         self.payload_reads = 0
+        self._files = None
 
     def __enter__(self):
         private_path(str(self.root))
@@ -135,7 +138,7 @@ class ReferenceLegacyState:
         if self._capture() != self._initial:
             raise TranslationReferenceError("reference_legacy_immutable_inputs_changed")
 
-    def _emit(self, stage, completed, total, started, *, retrying=False):
+    def _emit(self, stage, completed, total, started, *, retrying=False, **telemetry):
         if self._progress is not None:
             elapsed = time.monotonic() - started
             self._progress(
@@ -145,28 +148,43 @@ class ReferenceLegacyState:
                     "total": total,
                     "percent": 100 * completed / total if total else 100,
                     "elapsed_seconds": elapsed,
-                    "eta_seconds": (total - completed) * elapsed / completed
-                    if completed and not retrying
+                    "eta_seconds": 0
+                    if completed == total and not retrying
+                    else (
+                        (total - completed) * elapsed / completed
+                        if completed and not retrying
+                        else None
+                    ),
+                    "planning_seconds": [5, 300]
+                    if not completed and total and not retrying
                     else None,
-                    "planning_seconds": [5, 300] if not completed and not retrying else None,
                     "eta_basis": "legacy input items; semantic audit forecast separate",
                     "stalled": retrying,
                     "retrying": retrying,
+                    **telemetry,
                 }
             )
 
-    def approve(self, state, policy, journal, *, verifier_semantics_sha256, now):
+    def _expected(self, state, journal, verifier_semantics_sha256, rule):
         self.require_owner()
         if identity(journal.hotkey) != identity(state.signing.validator_hotkey):
             raise TranslationReferenceError("reference_legacy_signer_binding_invalid")
-        expected = {
-            "schema": _RULE,
+        return {
+            "schema": rule,
             "validator_account": identity(journal.hotkey),
             "root_identity": self._root_identity,
             "verifier_semantics_sha256": verifier_semantics_sha256,
         }
+
+    def cached_approval(self, state, journal, *, verifier_semantics_sha256):
         retained = journal.journal.get(_ADOPTION, "accepted")
         if retained is not None:
+            if not isinstance(retained, dict) or retained.get("schema") not in {
+                _RULE,
+                NATIVE_V2_RULE,
+            }:
+                raise TranslationReferenceError("reference_legacy_verification_repair_required")
+            expected = self._expected(state, journal, verifier_semantics_sha256, retained["schema"])
             if not isinstance(retained, dict) or set(retained) != set(expected) | {
                 "chunks",
                 "inspection",
@@ -195,30 +213,67 @@ class ReferenceLegacyState:
                 not in {
                     "fresh_registered_writer_without_prior_weight_effect",
                     "terminal_v1_bridge_bound_to_native_current_state",
+                    "native_v2_bridge_bound_to_current_state",
                 }
                 or not isinstance(inspection.get("retained_files_sha256"), str)
                 or len(inspection["retained_files_sha256"]) != 64
+                or (
+                    (retained["schema"] == NATIVE_V2_RULE)
+                    != (inspection.get("status") == "native_v2_bridge_bound_to_current_state")
+                )
             ):
                 raise TranslationReferenceError("reference_legacy_verification_repair_required")
             self.require_owner()
             return inspection
-        if journal.pending() is not None:
+        if journal.pending() is not None or journal.journal.keys(_CHUNK):
             # This publication precedes the very first follower intent. Losing
             # it after that point is a repair, never a fresh empty installation.
             raise TranslationReferenceError("reference_legacy_verification_repair_required")
+        return None
+
+    def capture_files(self):
+        self.require_owner()
+        if self._files is not None:
+            return self._files
         started = time.monotonic()
         paths = [name for name in sorted(self._initial) if name != _HISTORY]
         files = {}
         self._emit("reference_legacy_input_capture", 0, len(paths), started)
+        for index, name in enumerate(paths, 1):
+            if name == "service.lock":
+                files[name] = b""
+            else:
+                files[name] = _read_bytes(self.root / name, private=True)
+                self.payload_reads += 1
+            self._emit("reference_legacy_input_capture", index, len(paths), started)
+        self.require_owner()
+        self._files = MappingProxyType(files)
+        return self._files
+
+    def retain_approval(self, state, journal, inspection, *, verifier_semantics_sha256, rule=_RULE):
+        expected = self._expected(state, journal, verifier_semantics_sha256, rule)
+        names, records, keys = sorted(self._initial), [], []
+        for offset in range(0, len(names), 128):
+            chunk = {name: self._initial[name] for name in names[offset : offset + 128]}
+            key = digest(chunk)
+            keys.append(key)
+            records.append((_CHUNK, key, chunk))
+        records.append(
+            (_ADOPTION, "accepted", {**expected, "chunks": keys, "inspection": inspection})
+        )
+        self.require_owner()
+        journal.journal.put_many(records)
+        self._files = None
+
+    def approve(self, state, policy, journal, *, verifier_semantics_sha256, now):
+        cached = self.cached_approval(
+            state, journal, verifier_semantics_sha256=verifier_semantics_sha256
+        )
+        if cached is not None:
+            return cached
+        files = self.capture_files()
+        started = time.monotonic()
         try:
-            for index, name in enumerate(paths, 1):
-                if name == "service.lock":
-                    files[name] = b""
-                else:
-                    files[name] = _read_bytes(self.root / name, private=True)
-                    self.payload_reads += 1
-                self._emit("reference_legacy_input_capture", index, len(paths), started)
-            self.require_owner()
             self._emit("reference_legacy_semantic_audit", 0, 1, time.monotonic())
             if set(files) == {"service.lock"}:
                 decision = state.decision(policy, now=now)
@@ -241,17 +296,12 @@ class ReferenceLegacyState:
                     "last_weight_update": value.last_weight_update,
                     "observed_block": value.observed_block,
                 }
-            names, records, keys = sorted(self._initial), [], []
-            for offset in range(0, len(names), 128):
-                chunk = {name: self._initial[name] for name in names[offset : offset + 128]}
-                key = digest(chunk)
-                keys.append(key)
-                records.append((_CHUNK, key, chunk))
-            records.append(
-                (_ADOPTION, "accepted", {**expected, "chunks": keys, "inspection": inspection})
+            self.retain_approval(
+                state,
+                journal,
+                inspection,
+                verifier_semantics_sha256=verifier_semantics_sha256,
             )
-            self.require_owner()
-            journal.journal.put_many(records)
             self._emit("reference_legacy_semantic_audit", 1, 1, started)
             return inspection
         except BaseException:
