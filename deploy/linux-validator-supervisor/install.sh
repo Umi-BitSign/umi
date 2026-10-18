@@ -638,7 +638,14 @@ supervisor check-config --config "$config_stage" --profile linux-systemd-v1
 # This stages and verifies the current signed worker without starting it or
 # writing supervisor state. The signed sequence-1 hold is checked as history.
 # No legacy process is stopped until this command succeeds.
-supervisor preflight-common-switch --config "$config_stage"
+common_preflight_receipt="$temporary_root/common-preflight.json"
+supervisor preflight-common-switch --config "$config_stage" > "$common_preflight_receipt"
+"$supervisor_root/.venv/bin/python" \
+  "$source_root/deploy/linux-validator-supervisor/preflight-cutover.py" \
+  --preflight "$common_preflight_receipt" --release-revision "$release_revision" \
+  --legacy-unit "$legacy_unit" \
+  || fail "legacy translation retirement needs a qualified preserving migration; no legacy process was stopped"
+cat "$common_preflight_receipt"
 
 # Rehearse the exact production unit name and sandbox before any legacy writer
 # is touched. The checked-in drop-in keeps only ExecStartPre live and replaces

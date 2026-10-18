@@ -30,19 +30,20 @@ from .substrate_proof import SubprocessStorageProofVerifier
 from .translation_reference_execution import run_reference_iteration
 from .translation_reference_legacy_native import approve_native_legacy
 from .translation_reference_legacy_state import ReferenceLegacyState
-from .translation_reference_policy import (
-    MAX_REFERENCE_POLICY_BYTES,
-    ApprovedTranslationReferencePolicy,
-    verify_reference_policy,
+from .translation_reference_policy_io import (
+    REFERENCE_POLICY_ORIGIN as REFERENCE_POLICY_ORIGIN,
+)
+from .translation_reference_policy_io import (
+    REFERENCE_POLICY_PREFIX as REFERENCE_POLICY_PREFIX,
+)
+from .translation_reference_policy_io import (
+    fetch_approved_reference_policy,
 )
 from .translation_reference_state import TranslationReferenceError, TranslationReferenceStateReader
 from .translation_reference_transactions import ReferenceWeightJournal
 from .validator_chain import BittensorRawJsonRpc
 from .validator_supervisor import COMMON_SUPERVISOR_AUTHORITY_HOTKEY
-from .validator_supervisor_adapters import PinnedHTTPSClient
 
-REFERENCE_POLICY_ORIGIN = "https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev"
-REFERENCE_POLICY_PREFIX = "/validator-supervisor/translation-reference-policies/"
 REFERENCE_VERIFIER_RULE = "umi-approved-reference-worker-native-verification/1"
 # Local durable metadata only; model, evidence and block payloads do not belong
 # here. Capacity exhaustion is explicit and never deletes an unresolved attempt.
@@ -79,18 +80,11 @@ async def load_reference_policy(environment, *, http=None):
     environment.validate()
     if environment.mode != "translation_weights":
         raise TranslationReferenceError("reference_worker_mode_invalid")
-    payload = await (http or PinnedHTTPSClient()).fetch_bytes(
-        f"{REFERENCE_POLICY_ORIGIN}{REFERENCE_POLICY_PREFIX}{environment.policy_sha256}.json",
-        maximum_bytes=MAX_REFERENCE_POLICY_BYTES,
-    )
-    policy = verify_reference_policy(
-        payload,
-        expected_policy_sha256=environment.policy_sha256,
+    return await fetch_approved_reference_policy(
+        environment.policy_sha256,
         expected_authority_hotkey=COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
+        http=http,
     )
-    if type(policy) is not ApprovedTranslationReferencePolicy:
-        raise TranslationReferenceError("reference_authority_approved_row_required")
-    return policy
 
 
 class LeaseFinality:
