@@ -67,6 +67,43 @@ distribution and retry progress describe their own stages, separately from
 channel selection and finalized external adoption. This producer is not selected
 by an existing installation merely because its source is present.
 
+`TranslationReferenceChannelPublisher` appends the successor through the
+existing supervisor schema and cursor URLs. It authenticates retained history,
+retains its intent before signing, and retains exact signature bytes before
+distribution. It creates the successor's empty cursor page before conditionally
+advancing the predecessor page. R2 generation checks prevent overwriting another
+publication; exact readback settles a lost acknowledgement. Initial discovery
+retains the original signed prefix while it fits. A full initial page continues
+through its cursor edges. Long catch-up checkpoints the authenticated head so
+restart does not repeat the whole discovery walk. Retrying a retained proposal
+preserves its signed block interval; a conflicting pending proposal requires
+reconciliation. Do not reset its journal or silently sign another body in that slot.
+
+`R2ReferenceChannelStore` restricts mutable writes to the selected channel's cursor
+namespace and immutable writes to typed reference approvals. Content type, cache
+control and generation conditions are included in SigV4. Use one publication
+owner per configured channel and qualify its actual public bucket credentials;
+private evidence-bucket tests do not establish public distribution access.
+
+`TranslationReferencePublisherService` polls native current control and complete
+registration, loads the compact allocation named by the signed current decision,
+and calls the approval and channel owners in owned I/O workers. Configure every
+admitted cohort's publication horizon explicitly; retained signed clocks remain
+unchanged. Admission and activation drain wait without replacing the current
+directive. A signed suspension or revocation publishes a hold through the same
+cursor, without requiring model data or another registration pass. Shutdown drains
+started I/O and native finality before releasing its service mutex. Missing
+replicated inputs and transient transport conflicts expose waiting/retry progress;
+invalid authority or damaged retained state remains a repair, without a reset.
+
+Before selecting this publication owner, resolve its actual native resource
+bindings and account/state paths. A verifier path inside an installed service's
+mount namespace may be a host placeholder. Use `CompetitionChainResources` to
+resolve the actual pinned artifacts while retaining their configuration hashes
+and verification mode. Keep its proof cache and journals separate from existing
+writer/coordinator ownership. Qualify the installed entrypoint, public namespace,
+legacy journal handoff and finalized adoption; these APIs alone do not deploy it.
+
 The worker holds the original `service.lock` across native checks, signing,
 transmission and cancellation. Terminal version-1 bridge history is audited in
 place and bound to native current storage; successful unchanged audit results

@@ -10,6 +10,7 @@ import pytest
 
 from umi.competition_reward_decisions import RewardActivation
 from umi.open_competition import digest
+from umi.protocol import canonical_json_bytes, sha256_hex
 from umi.translation_reference_policy import reference_policy_sha256, verify_reference_policy
 from umi.translation_reference_publication import TranslationReferenceApprovalPublisher
 from umi.weight_storage import subtensor_stored_weights
@@ -20,8 +21,24 @@ from .test_competition_reward_control import control
 from .test_competition_reward_decisions import series_case
 from .test_competition_reward_registrations import base_policy, policy, set_members
 from .test_open_competition import wallet
+from .test_registration_bridge import hotkey
+from .test_translation_reference_state import (
+    reference_case as reference_case,
+)
+from .test_translation_reference_state import (
+    signing_case as signing_case,
+)
 
-__all__ = ["base_policy", "chain", "chain_config", "control", "policy", "series_case"]
+__all__ = [
+    "base_policy",
+    "chain",
+    "chain_config",
+    "control",
+    "policy",
+    "reference_case",
+    "series_case",
+    "signing_case",
+]
 
 
 @pytest.fixture
@@ -36,11 +53,13 @@ async def publication_case(series_case, tmp_path):
         prior_opportunity_sha256="cd" * 32,
     )
     tip = c.decision(c.genesis, 5, activation=activation)
-    set_members(item, [key(n) for n in ("Burn", "Alice", "Bob")])
-    stored = list(enumerate(subtensor_stored_weights((19661, 20000, 25874))))
+    set_members(
+        item, [key(n) for n in ("Burn", "Alice", "Bob")] + [hotkey(i) for i in range(3, 256)]
+    )
+    stored = list(enumerate(subtensor_stored_weights((19661, 20000, 25874, *([0] * 253)))))
     values = dict(
-        ValidatorPermit=[False, True, False],
-        LastUpdate=[0, item.finality.ref.block_number - 5, 0],
+        ValidatorPermit=[False, True] + [False] * 254,
+        LastUpdate=[0, item.finality.ref.block_number - 5] + [0] * 254,
         MechanismCountCurrent=1,
         CommitRevealWeightsEnabled=False,
         WeightsVersionKey=2**32,
@@ -110,7 +129,7 @@ async def test_signed_current_allocation_and_native_projection_approve_exact_ent
     c = publication_case
     publisher = c.reopen()
     body = publisher.step(**await c.inputs())
-    assert body.expected_row_sha256 == digest(c.stored)
+    assert body.expected_row_sha256 == sha256_hex(canonical_json_bytes(c.stored))
     raw = next(iter(c.objects.values()))
     assert (
         verify_reference_policy(
@@ -290,5 +309,25 @@ async def test_signed_forward_adoption_uses_effective_allocation(publication_cas
     inputs = await c.inputs(tip)
     inputs["control"] = await c.c.observe(tip, block=210)
     approved = c.reopen().step(**inputs)
-    assert approved.expected_row_sha256 == digest(c.stored)
+    assert approved.expected_row_sha256 == sha256_hex(canonical_json_bytes(c.stored))
+
+
+async def test_published_approval_is_consumed_by_the_actual_worker_row_gate(
+    publication_case, reference_case, monkeypatch
+):
+    from .test_competition_chain import _Runtime
+    from .test_translation_reference_state import read
+
+    c, worker = publication_case, reference_case
+    # The two synthetic native backends use distinct codec ports. Restore the
+    # worker's codec after collecting/signing through the real producer path.
+    with monkeypatch.context() as selected:
+        selected.setattr("umi.validator_chain.bittensor_core.Runtime", _Runtime)
+        body = c.reopen().step(**await c.inputs())
+    worker.policy = body
+    worker.set_value("Uids", 200, 78, body.reference_hotkey)
+    worker.set_value("Keys", body.reference_hotkey, 78, 200)
+    worker.set_value("Weights", c.stored, 78, 200)
+    decision = (await read(worker)).decision(body, now=worker.now)
+    assert decision.row == c.stored and decision.reference_uid == 200
     assert c.calls.count("signer") == 1

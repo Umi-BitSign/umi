@@ -28,7 +28,7 @@ from .competition_reward_decisions import DecisionSource, StandingRewardControlR
 from .competition_round_journal import RoundJournal
 from .grandpa_finality import FINNEY_GENESIS_HASH
 from .open_competition import digest, identity
-from .protocol import canonical_json_bytes
+from .protocol import canonical_json_bytes, sha256_hex
 from .translation_reference_policy import (
     ApprovedTranslationReferencePolicy,
     SignedTranslationReferencePolicy,
@@ -122,6 +122,7 @@ class TranslationReferenceApprovalPublisher:
             or selected.effective_at_block is None
             or chain.snapshot != control.snapshot
             or digest(chain_config) != self.reader.chain_config_sha256
+            or chain.registered_uid_count != 256
             or identity(chain.validator_hotkey) != identity(self.reference_hotkey)
             or not chain.validator_permit
         ):
@@ -164,7 +165,7 @@ class TranslationReferenceApprovalPublisher:
             reference_activity_rule="owned_finalized_epoch_activity/1",
             legacy_recovery_rule="native_reconcile_before_first_new_write/1",
             row_rule="exact_proven_and_authority_approved_reference_row/1",
-            expected_row_sha256=digest(row),
+            expected_row_sha256=sha256_hex(canonical_json_bytes(row)),
         )
         validate_owned_weight_observation(chain)
         validate_owned_reward_control(
@@ -177,6 +178,23 @@ class TranslationReferenceApprovalPublisher:
     def step(self, **inputs):
         with self.journal.locked():
             return self._step(**inputs)
+
+    def published_payload(self, policy: ApprovedTranslationReferencePolicy) -> bytes:
+        """Return the retained exact signature only after immutable distribution."""
+        key = reference_policy_sha256(policy)
+        retained = self.journal.get("reference_approval", key)
+        receipt = self.journal.get("reference_approval_published", key)
+        if retained is None or receipt != {
+            "schema": "umi-reference-approval-distributed/1",
+            "policy_sha256": key,
+            "signed_sha256": digest(retained),
+        }:
+            raise ValueError("reference approval distribution needs completion or restoration")
+        raw = canonical_json_bytes(retained)
+        verify_reference_policy(
+            raw, expected_policy_sha256=key, expected_authority_hotkey=self.authority_hotkey
+        )
+        return raw
 
     def _step(self, **inputs):
         started = time.monotonic()

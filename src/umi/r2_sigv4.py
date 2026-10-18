@@ -250,6 +250,8 @@ class R2SigV4:
                     "if-match",
                     "if-none-match",
                     "content-md5",
+                    "content-type",
+                    "cache-control",
                     "x-amz-meta-sha256",
                 }
                 or canonical_name in headers
