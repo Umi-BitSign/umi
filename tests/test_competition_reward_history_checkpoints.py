@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 
 import pytest
 
@@ -121,6 +122,86 @@ def prohibit_proof_replay(monkeypatch, reader):
     monkeypatch.setattr(reader, "_load", forbidden)
     monkeypatch.setattr(module, "review_control_writes", forbidden)
     monkeypatch.setattr(module, "capture_control_writes", forbidden)
+
+
+async def test_checkpoint_batch_is_one_fresh_read_only_snapshot(history_case, monkeypatch):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    checkpoint = h.reader.checkpoints
+    expected = [checkpoint.load(height) for height in range(h.old.height, h.end + 1)]
+    before = h.reader.journal.path.stat()
+    read = h.reader.journal.read_transaction
+    snapshots = []
+
+    @contextmanager
+    def counted():
+        with read() as db:
+            assert db.execute("PRAGMA query_only").fetchone() == (1,)
+            snapshots.append(db)
+            yield db
+
+    monkeypatch.setattr(h.reader.journal, "read_transaction", counted)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert checkpoint.load_many(h.old.height, h.end + 1) == expected
+    assert len(snapshots) == 1
+    after = h.reader.journal.path.stat()
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+
+
+async def test_batched_restore_rechecks_changes_after_owned_finality(history_case, monkeypatch):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    h.reader = await h.restart()
+    prohibit_proof_replay(monkeypatch, h.reader)
+    validate = h.reader._validate_checkpoint_tip
+    affected = h.old.height + 1
+
+    async def changed_during_finality(provider, value):
+        await validate(provider, value)
+        with h.reader.journal.transaction() as db:
+            db.execute(
+                "UPDATE records SET body=body WHERE kind='control_history_block' AND id=?",
+                (str(affected),),
+            )
+
+    monkeypatch.setattr(h.reader, "_validate_checkpoint_tip", changed_during_finality)
+    with pytest.raises(HistoryCheckpointRepairRequired, match="source changed") as caught:
+        await h.reader.advance(h.item.provider, through_block=h.end)
+    assert caught.value.height == affected
+    assert h.reader._next == h.old.height
+    assert h.reader.progress.native_completed == 0
+
+
+async def test_checkpoint_batch_identifies_damaged_completed_item(history_case):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    affected = h.old.height + 1
+    with h.reader.journal.transaction() as db:
+        key = db.execute(
+            "SELECT key FROM history_checkpoint_index WHERE height=?", (affected,)
+        ).fetchone()[0]
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='control_history_verified' AND id=?",
+            (b"{}", key),
+        )
+    with pytest.raises(HistoryCheckpointRepairRequired) as caught:
+        h.reader.checkpoints.load_many(h.old.height, h.end)
+    assert caught.value.height == affected
+    assert len(h.reader.checkpoints.load_many(h.old.height, affected - 1)) == 1
+
+
+@pytest.mark.parametrize("first,last", [(0, 1), (1, 0), (1, 4097), (True, 3), (1, 2**53)])
+async def test_checkpoint_batch_bounds_refuse_before_database_open(
+    history_case, monkeypatch, first, last
+):
+    h = history_case
+
+    def forbidden():
+        pytest.fail("invalid batch opened a journal")
+
+    monkeypatch.setattr(h.reader.journal, "read_transaction", forbidden)
+    with pytest.raises(ValueError, match="batch"):
+        h.reader.checkpoints.load_many(first, last)
 
 
 async def test_larger_capacity_restart_preserves_native_results_without_proof_reads(

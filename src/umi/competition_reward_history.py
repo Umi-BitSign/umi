@@ -807,6 +807,8 @@ class RewardControlHistoryReader:
 
     async def _restore_prefix(self, provider, last):
         self.progress.native_stop()
+        if self._next > last:
+            return
         batch, self._pending_checkpoint_restore = self._pending_checkpoint_restore, None
         if (
             batch is not None
@@ -815,19 +817,23 @@ class RewardControlHistoryReader:
             and batch.checkpoints is self.checkpoints
         ):
             values = batch.values
-        else:
+        elif self._repair_reason:
             values = []
             for height in range(self._next, last + 1):
                 try:
                     value = await run_owned_thread(self.checkpoints.load, height)
                 except HistoryCheckpointRepairRequired:
                     self.progress.invalidate(height)
-                    if not self._repair_reason:
-                        raise
                     break
                 if value is None:
                     break
                 values.append(value)
+        else:
+            try:
+                values = await run_owned_thread(self.checkpoints.load_many, self._next, last)
+            except HistoryCheckpointRepairRequired as error:
+                self.progress.invalidate(error.height if error.height is not None else self._next)
+                raise
         if not values:
             return
         self.progress.restore_start(self._next, len(values))
@@ -846,12 +852,7 @@ class RewardControlHistoryReader:
         self.progress.restore_start(self._next, len(values))
         # Recheck source identities after asynchronous finality, before issuing
         # any prefix. Unchanged proof payloads are never read or hashed here.
-        for value in values:
-            current = await run_owned_thread(
-                self.checkpoints.load, value["snapshot"]["block_number"]
-            )
-            if current != value:
-                raise HistoryCheckpointRepairRequired("checkpoint changed during owned restore")
+        await run_owned_thread(self.checkpoints.recheck_many, values)
         for value in values:
             value = await self._ensure_checkpoint_export(value)
             self.progress.restored_completed += 1
