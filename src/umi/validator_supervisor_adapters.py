@@ -73,6 +73,11 @@ from .validator_supervisor import (
     SupervisorReleaseTarget,
     ValidatorSupervisorConfig,
 )
+from .validator_supervisor_readiness import (
+    WorkerReadiness,
+    emit_startup_progress,
+    wait_for_worker_readiness,
+)
 from .validator_supervisor_runtime import SupervisorWorkerActivation
 
 SUPERVISOR_RELEASE_MANIFEST_SCHEMA = "umi-validator-supervisor-release-manifest/1"
@@ -98,7 +103,7 @@ MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 DEFAULT_NETWORK_TIMEOUT_SECONDS = 30.0
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 300.0
 DEFAULT_STOP_TIMEOUT_SECONDS = 30.0
-DEFAULT_START_GRACE_SECONDS = 1.0
+DEFAULT_START_GRACE_SECONDS = 30.0
 MAX_FINALIZED_HEAD_AGE_SECONDS = 120.0
 MAX_FINALIZED_FUTURE_SKEW_SECONDS = 30.0
 
@@ -817,6 +822,7 @@ class RootlessPodmanWorkerAdapter:
         command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
         start_grace_seconds: float = DEFAULT_START_GRACE_SECONDS,
+        progress: Callable[[dict[str, object]], None] = emit_startup_progress,
     ) -> None:
         self.config = config
         self.https = https or PinnedHTTPSClient()
@@ -825,6 +831,7 @@ class RootlessPodmanWorkerAdapter:
         self.command_timeout_seconds = _bounded_timeout(command_timeout_seconds, 900.0)
         self.stop_timeout_seconds = _bounded_timeout(stop_timeout_seconds, 120.0)
         self.start_grace_seconds = _bounded_timeout(start_grace_seconds, 30.0)
+        self.progress = progress
         self._process: SpawnedProcess | None = None
         self._hold = False
         self._expected_activation: SupervisorWorkerActivation | None = None
@@ -969,9 +976,12 @@ class RootlessPodmanWorkerAdapter:
     async def worker_is_healthy(self) -> bool:
         if self._hold:
             return self._process is None and not await self._container_exists()
+        return await self._worker_readiness() == "healthy"
+
+    async def _worker_readiness(self) -> WorkerReadiness:
         activation = self._expected_activation
         if activation is None or self._process is None or self._process.returncode is not None:
-            return False
+            return "unhealthy"
         try:
             raw = await self._command(
                 (
@@ -987,20 +997,34 @@ class RootlessPodmanWorkerAdapter:
             value = json.loads(raw)
             record = value[0] if isinstance(value, list) and len(value) == 1 else None
             if not isinstance(record, Mapping):
-                return False
+                return "unhealthy"
             state = record.get("State") or record.get("state")
             config = record.get("Config") or record.get("config")
             labels = config.get("Labels") if isinstance(config, Mapping) else None
-            return bool(
+            matches = bool(
                 isinstance(state, Mapping)
-                and state.get("Running") is True
                 and isinstance(labels, Mapping)
                 and labels.get("vision.umi.supervisor.directive-sha256")
                 == activation.directive_sha256
                 and labels.get("vision.umi.supervisor.mode") == activation.mode
             )
+            if not matches:
+                return "unhealthy"
+            if state.get("Running") is True:
+                return "healthy"
+            if state.get("Status") in {"configured", "created", "initialized"}:
+                return "starting"
+            return "unhealthy"
+        except ValidatorSupervisorAdapterError as error:
+            if error.reason_code == "podman_command_failed":
+                try:
+                    if not await self._container_exists():
+                        return "starting"
+                except Exception:
+                    pass
+            return "unhealthy"
         except Exception:
-            return False
+            return "unhealthy"
 
     async def start_hold(self, *, reason_code: str) -> None:
         if not isinstance(reason_code, str) or not reason_code or len(reason_code) > 256:
@@ -1062,8 +1086,13 @@ class RootlessPodmanWorkerAdapter:
         self._process = process
         self._expected_activation = activation
         self._hold = False
-        await asyncio.sleep(self.start_grace_seconds)
-        if process.returncode is not None or not await self.worker_is_healthy():
+        ready = await wait_for_worker_readiness(
+            probe=self._worker_readiness,
+            process_exited=lambda: process.returncode is not None,
+            budget_seconds=self.start_grace_seconds,
+            progress=self.progress,
+        )
+        if not ready:
             raise ValidatorSupervisorAdapterError("podman_worker_start_failed")
 
     def _worker_arguments(

@@ -44,6 +44,21 @@ approval; successful image polling alone does not establish cohort adoption.
 Check finalized rows after distribution to establish which validators adopted it.
 Installed R2-only transport and independent certification are separate boundaries.
 
+The host supervisor waits for container readiness rather than assuming creation
+finishes within one second. Its default local startup allowance is 30 seconds,
+with readiness checked as the container appears. A dead foreground process,
+wrong directive/mode labels or a failed container refuses immediately. Matching
+created containers may finish starting within that allowance. The
+`supervisor_worker_startup` log reports elapsed time, progress, a labeled planning
+range and refusal/retry status. This is a host readiness allowance, not a cohort
+execution deadline or permission to exceed signed block clocks. Already installed
+older hosts require the supported signed host maintenance path below; publishing
+a new worker image alone does not replace their host supervisor.
+Qualify the selected host source and its native observer together before cutover.
+An older retained observer requires its exact policy-bound constructor; pairing
+that binary with a newer generic record parser correctly refuses. File-hash
+validation alone does not qualify that native startup boundary.
+
 The server approval producer is `TranslationReferenceApprovalPublisher`. It
 uses the independently selected standing series and current native control,
 authenticates the complete signed decision prefix, and requires the exact signed
