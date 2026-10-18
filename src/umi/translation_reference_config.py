@@ -16,7 +16,7 @@ from .competition_reward_control import FinalizedRewardControlProvider
 from .competition_reward_coordinator_boot import load_reward_coordinator_config
 from .competition_reward_decisions import StandingRewardControlReader
 from .open_competition import digest
-from .private_files import Directory, _read_private_bytes
+from .private_files import Directory, _read_private_bytes, private_path
 from .protocol import Hex32, StrictProtocolModel
 from .r2_evidence import R2EvidenceClient
 from .r2_sigv4 import R2Credentials, R2SigV4
@@ -115,15 +115,21 @@ class ReferencePublisherConfig(StrictProtocolModel):
         return self
 
 
-def read_input(path: Path, maximum: int) -> bytes:
+def read_input(path: Path, maximum: int, *, producer_uid: int | None = None) -> bytes:
     """Stable, bounded, read-only access to original decision/allocation files."""
+    private_path(str(path))
+    owners = {0, os.geteuid()}
+    if producer_uid is not None:
+        if type(producer_uid) is not int or not 0 <= producer_uid < 2**32:
+            raise ValueError("reference input producer identity is invalid")
+        owners.add(producer_uid)
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         before = os.fstat(stream.fileno())
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or before.st_uid not in {0, os.geteuid()}
+            or before.st_uid not in owners
             or before.st_mode & 0o022
             or not 0 < before.st_size <= maximum
         ):
@@ -201,8 +207,15 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
     def decisions(sha):
         if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
             raise ValueError("invalid reference decision identity")
+        source = Path(selected.files_directory)
+        producer = source.lstat()
+        if not stat.S_ISDIR(producer.st_mode) or producer.st_mode & 0o022:
+            raise ValueError("configured decision producer directory must be protected")
+        # A coordinator and its publication owner normally use different
+        # service accounts. The root-controlled source selection identifies the
+        # producer; native commitments and signatures still authenticate bytes.
         return read_input(
-            Path(selected.files_directory) / "decisions" / (sha + ".json"), 128 * 1024
+            source / "decisions" / (sha + ".json"), 128 * 1024, producer_uid=producer.st_uid
         )
 
     def allocations(sha):
