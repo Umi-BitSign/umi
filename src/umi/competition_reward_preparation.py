@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Literal
@@ -122,6 +123,7 @@ class StandingRewardPreparation:
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
         model_artifacts: DirectModelSettlementVerifier | None = None,
+        allocation_sink: Callable[[CohortRewardAllocation], None] | None = None,
     ):
         check_aggregate_evidence_bytes(maximum_package_bytes)
         if (
@@ -137,6 +139,9 @@ class StandingRewardPreparation:
         self.maximum_promotion_bytes = maximum_promotion_bytes
         self.maximum_package_bytes = maximum_package_bytes
         self.model_artifacts = model_artifacts
+        if allocation_sink is not None and not callable(allocation_sink):
+            raise TypeError("reward allocation export requires an explicit owner sink")
+        self.allocation_sink = allocation_sink
         self.verification_reuse = VerificationReuse(
             promotion_store.directory / "verification" / self.series_sha256 / "native",
             owner={
@@ -303,6 +308,7 @@ class StandingRewardPreparation:
             # certification and artifacts were valid by that block. A later
             # successful review cannot backdate their validity.
             if block >= retained.reviewed_at_block:
+                self._export_allocations(package.allocation, retained.allocation)
                 return retained
         allocation = _replay_detached_reward_package(
             package,
@@ -344,7 +350,24 @@ class StandingRewardPreparation:
         # Retain completion inside the owned thread, even if its waiter was
         # cancelled. Proof expiry during replay never discards immutable work.
         self._prepared[digest(activation)] = prepared
+        self._export_allocations(package.allocation, prepared.allocation)
         return prepared
+
+    def _export_allocations(self, original, effective):
+        if self.allocation_sink is None:
+            return
+        allocations = (
+            (original,) if digest(original) == digest(effective) else (original, effective)
+        )
+        with TransferProgress(
+            "reward_allocation_export",
+            len(allocations),
+            unit="allocations",
+            planning_unit_seconds=(0.001, 1),
+        ) as progress:
+            for allocation in allocations:
+                self.allocation_sink(allocation)
+                progress.advance(1)
 
     async def _ensure_model_artifacts(self, package: CohortRewardPackage) -> None:
         award = package.allocation.model_award

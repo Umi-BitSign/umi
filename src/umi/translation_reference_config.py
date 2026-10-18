@@ -219,11 +219,26 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
         )
 
     def allocations(sha):
-        if sha not in config.allocations:
-            raise FileNotFoundError("current signed allocation has not been replicated")
-        allocation = CohortRewardAllocation.model_validate_json(
-            read_input(Path(config.allocations[sha]), 1024 * 1024)
-        )
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            raise ValueError("invalid reference allocation identity")
+        if sha in config.allocations:
+            path, owner = Path(config.allocations[sha]), None
+        else:
+            source = Path(selected.files_directory)
+            try:
+                producer = source.lstat()
+            except FileNotFoundError as error:
+                raise FileNotFoundError(
+                    "current signed allocation has not been replicated"
+                ) from error
+            if not stat.S_ISDIR(producer.st_mode) or producer.st_mode & 0o022:
+                raise ValueError("configured allocation producer directory must be protected")
+            path, owner = source / "allocations" / (sha + ".json"), producer.st_uid
+        try:
+            raw = read_input(path, 1024 * 1024, producer_uid=owner)
+        except FileNotFoundError as error:
+            raise FileNotFoundError("current signed allocation has not been replicated") from error
+        allocation = CohortRewardAllocation.model_validate_json(raw)
         if digest(allocation) != sha:
             raise ValueError("replicated allocation differs from signed selection")
         return allocation

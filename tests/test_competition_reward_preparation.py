@@ -6600,3 +6600,50 @@ async def test_runtime_adoption_retains_old_facts_and_new_native_archive_after_r
     absent = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
     with pytest.raises(ValueError, match="not independently selected"):
         await source(absent).replay(new_point.key())
+
+
+async def test_native_allocation_export_repairs_partial_delivery_without_replay(
+    preparation_case, tmp_path, monkeypatch, caplog
+):
+    from umi import competition_reward_preparation as preparation_module
+    from umi.competition_reward_files import StandingRewardFiles
+
+    p = preparation_case
+    files = StandingRewardFiles(
+        tmp_path / "compact-allocation-export",
+        maximum_package_bytes=1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    attempts = []
+
+    def interrupted(allocation):
+        attempts.append(digest(allocation))
+        if len(attempts) == 1:
+            raise OSError("interrupted compact export")
+        files.retain_allocation(allocation)
+
+    owner = p.reopen(allocation_sink=interrupted)
+    observations = await p.observations()
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        with pytest.raises(OSError, match="interrupted compact export"):
+            await owner.prepare(p.package, **replay_args(observations))
+
+        def no_replay(*args, **kwargs):
+            pytest.fail("compact export retry repeated completed native package replay")
+
+        with monkeypatch.context() as completed_native:
+            completed_native.setattr(
+                preparation_module, "_replay_detached_reward_package", no_replay
+            )
+            prepared = await owner.prepare(p.package, **replay_args(observations))
+            assert files.allocation(digest(prepared.allocation)) == prepared.allocation
+            path = files.root / "allocations" / (digest(prepared.allocation) + ".json")
+            identity = path.stat()
+            assert await owner.prepare(p.package, **replay_args(observations)) is prepared
+            assert path.stat() == identity
+            # Repair the delivery copy, preserving completed native verification.
+            path.unlink()
+            assert await owner.prepare(p.package, **replay_args(observations)) is prepared
+            assert files.allocation(digest(prepared.allocation)) == prepared.allocation
+    assert "reward_allocation_export" in caplog.text
+    assert digest(prepared.allocation) == p.active.decision.activation.allocation_sha256

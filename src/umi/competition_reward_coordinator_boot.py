@@ -390,6 +390,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_package_bytes=config.maximum_package_bytes,
             model_artifacts=model_artifacts,
+            allocation_sink=files.retain_allocation,
         )
         provider = HistoricalRewardControlProvider(
             config.chain,
@@ -458,6 +459,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 config.predecessor_manifest,
                 maximum_promotion_bytes=config.maximum_promotion_bytes,
                 maximum_package_bytes=config.maximum_package_bytes,
+                allocation_sink=files.retain_allocation,
             )
             old_rule = opportunity_rule(config.predecessor_manifest, old, config.policy)
             predecessor_coverage = StandingRewardCoverageService(

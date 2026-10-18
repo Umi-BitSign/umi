@@ -443,6 +443,7 @@ async def run_installed_standing_rewards(
         maximum_promotion_bytes=config.maximum_promotion_bytes,
         maximum_package_bytes=config.maximum_package_bytes,
         model_artifacts=model_artifacts,
+        allocation_sink=files.retain_allocation,
     )
     imported, exported = await run_owned_thread(
         selected_proof_archives,
@@ -552,6 +553,7 @@ async def run_installed_standing_rewards(
                 config.predecessor_manifest,
                 maximum_promotion_bytes=config.maximum_promotion_bytes,
                 maximum_package_bytes=config.maximum_package_bytes,
+                allocation_sink=files.retain_allocation,
             )
             old_rule = opportunity_rule(config.predecessor_manifest, old, config.policy)
             predecessor_coverage = StandingRewardCoverageService(

@@ -250,3 +250,69 @@ async def test_coordinator_account_inputs_use_the_configured_protected_producer(
     with pytest.raises(ValueError, match="protected"):
         service.decisions(key)
     await service.provider.aclose()
+
+
+async def test_allocation_discovery_uses_the_protected_producer_across_restart(
+    installed, monkeypatch
+):
+    from umi.competition_reward_files import StandingRewardFiles
+
+    item = installed
+    config = item.config.model_copy(update={"allocations": {}})
+    before = canonical_json_bytes(config)
+    files = StandingRewardFiles(
+        Path(item.selected.files_directory),
+        maximum_package_bytes=1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    allocation = item.c.native.reward
+    sha = digest(allocation)
+    service = wiring.build_reference_service(config)
+    with pytest.raises(FileNotFoundError, match="not been replicated"):
+        service.allocations(sha)
+    files.retain_allocation(allocation)
+    path = files.root / "allocations" / (sha + ".json")
+    identity = path.stat()
+    uid = os.geteuid()
+    with monkeypatch.context() as separate_account:
+        separate_account.setattr(wiring.os, "geteuid", lambda: uid + 123)
+        assert service.allocations(sha) == allocation
+    await service.provider.aclose()
+    reopened = wiring.build_reference_service(config)
+    assert reopened.allocations(sha) == files.allocation(sha) == allocation
+    files.retain_allocation(allocation)
+    assert path.stat() == identity
+    assert (
+        canonical_json_bytes(wiring.ReferencePublisherConfig.model_validate_json(before)) == before
+    )
+    await reopened.provider.aclose()
+
+
+@pytest.mark.parametrize("damage", ["wrong_identity", "symlink", "writable_directory"])
+async def test_discovered_allocation_damage_refuses_without_replacing_originals(installed, damage):
+    from umi.competition_reward_files import StandingRewardFiles
+
+    item = installed
+    files = StandingRewardFiles(
+        Path(item.selected.files_directory),
+        maximum_package_bytes=1024**2,
+        maximum_witness_bytes=1024**2,
+    )
+    files.retain_allocation(item.c.native.reward)
+    sha = digest(item.c.native.reward)
+    path = files.root / "allocations" / (sha + ".json")
+    expected = path.read_bytes()
+    service = wiring.build_reference_service(item.config.model_copy(update={"allocations": {}}))
+    requested = sha
+    if damage == "wrong_identity":
+        requested = "f" * 64
+        (path.parent / (requested + ".json")).write_bytes(expected)
+    elif damage == "symlink":
+        path.rename(path.with_suffix(".original"))
+        path.symlink_to(path.with_suffix(".original"))
+    else:
+        files.root.chmod(0o777)
+    with pytest.raises((ValueError, OSError)):
+        service.allocations(requested)
+    assert path.read_bytes() == expected
+    await service.provider.aclose()
