@@ -1,6 +1,8 @@
 """Installed owner wiring with real parsers/journals and no wallet/network access."""
 
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -191,7 +193,7 @@ def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):
     source.chmod(0o600)
     link = tmp_path / "link.json"
     link.symlink_to(source)
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, ValueError)):
         wiring.read_input(link, 128)
 
 
@@ -222,3 +224,29 @@ async def test_gateway_configuration_adopts_transport_without_rebinding_signed_i
     updated["schema"] = "umi-reference-publisher-config/1"
     with pytest.raises(ValueError, match="explicit configuration version"):
         wiring.ReferencePublisherConfig.model_validate(updated)
+
+
+async def test_coordinator_account_inputs_use_the_configured_protected_producer(
+    installed, monkeypatch
+):
+    item = installed
+    source = Path(item.selected.files_directory)
+    (source / "decisions").mkdir(parents=True, mode=0o700)
+    source.chmod(0o700)
+    key = "a" * 64
+    path = source / "decisions" / (key + ".json")
+    path.write_bytes(b"original signed producer bytes")
+    path.chmod(0o600)
+    service = wiring.build_reference_service(item.config)
+    uid = os.geteuid()
+    with monkeypatch.context() as context:
+        context.setattr(wiring.os, "geteuid", lambda: uid + 123)
+        with pytest.raises(ValueError):
+            wiring.read_input(path, 1024)
+        assert service.decisions(key) == b"original signed producer bytes"
+        with pytest.raises(ValueError):
+            wiring.read_input(path, 1024, producer_uid=uid + 456)
+    source.chmod(0o777)
+    with pytest.raises(ValueError, match="protected"):
+        service.decisions(key)
+    await service.provider.aclose()

@@ -127,6 +127,13 @@ It never signs or deletes objects. Keep the transport credential separate from
 the common-authority wallet. Do not use the administrative Cloudflare object API
 for mutable cursors: its upload endpoint does not preserve stale If-Match checks.
 
+The configured coordinator decision directory identifies its producing service
+account. The publication owner may read that account's protected regular decision
+files without changing their ownership or copying a live database. Group/world
+writable source directories, symlinks, unstable files and other unselected file
+owners refuse. Current native commitments and signed-prefix verification remain
+required; filesystem ownership does not confer reward authority.
+
 Version1 retains its original canonical bytes and S3 credential format. Transport
 selection changes neither the original source files nor the publication journal,
 signed policy/directive bytes or horizons. Preserve existing state in place when
