@@ -170,7 +170,11 @@ class PreparedRecoveryCheckpoint(StrictProtocolModel):
 
 
 class BridgeRecoveryOutcome(StrictProtocolModel):
-    """A retained result summary, never a substitute for fresh proof collection."""
+    """Portable summaries alone cannot replace native collection authority.
+
+    A private owner may reuse its completed verification bound to the original
+    immutable files and verifier semantics. Current state remains a fresh proof.
+    """
 
     path: Annotated[str, Field(min_length=1, max_length=2048)]
     attempt_id: Hex32

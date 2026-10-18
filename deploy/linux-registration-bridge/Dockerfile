@@ -11,9 +11,13 @@ ADD https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/validator-supervisor/hos
   /umi-grandpa-finality-observer
 FROM finality-${TARGETARCH} AS finality
 FROM docker.io/library/rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS native-builder
+ARG UMI_WORKER_PROFILE=umi-registration-bridge-validator/1
 COPY rust /build/rust
 COPY deploy/native-verifiers/build.sh /build/build-native-verifiers.sh
-RUN sh /build/build-native-verifiers.sh substrate-proof-verifier runtime-metadata
+RUN sh /build/build-native-verifiers.sh substrate-proof-verifier runtime-metadata \
+    && if test "${UMI_WORKER_PROFILE}" = umi-translation-validator/1; then \
+         sh /build/build-native-verifiers.sh grandpa-finality-observer; \
+       fi
 
 FROM ghcr.io/astral-sh/uv:0.12.9@sha256:8b940d3a9d65bed080436972241af2e21c84b5e8c9193f7014ed71479ee795ff AS uv
 FROM docker.io/library/python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
@@ -21,10 +25,12 @@ FROM docker.io/library/python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c2
 ARG TARGETPLATFORM
 ARG UMI_GIT_REVISION
 ARG UMI_SOURCE_TREE_SHA256
+ARG UMI_WORKER_PROFILE=umi-registration-bridge-validator/1
 RUN case "${TARGETPLATFORM}" in linux/amd64|linux/arm64) ;; *) exit 2 ;; esac \
     && test "${#UMI_GIT_REVISION}" -eq 40 \
     && test "${#UMI_SOURCE_TREE_SHA256}" -eq 64 \
-    && case "${UMI_GIT_REVISION}${UMI_SOURCE_TREE_SHA256}" in *[!0-9a-f]*) exit 2 ;; *) ;; esac
+    && case "${UMI_GIT_REVISION}${UMI_SOURCE_TREE_SHA256}" in *[!0-9a-f]*) exit 2 ;; *) ;; esac \
+    && case "${UMI_WORKER_PROFILE}" in umi-registration-bridge-validator/1|umi-translation-validator/1) ;; *) exit 2 ;; esac
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -48,11 +54,13 @@ RUN uv sync --locked --no-dev \
     && chmod 0444 /opt/umi-image-revision \
     && install -d -o 65532 -g 65532 -m 0700 /home/umi \
     && install -d -o 65532 -g 65532 -m 0700 /run/umi-finality \
-    && ln -s /opt/umi/.venv/bin/umi-registration-bridge /usr/local/bin/umi-registration-bridge
+    && ln -s /opt/umi/.venv/bin/umi-registration-bridge /usr/local/bin/umi-registration-bridge \
+    && ln -s /opt/umi/.venv/bin/umi-validator-supervisor-worker /usr/local/bin/umi-validator-supervisor-worker
 
 COPY --from=finality /umi-grandpa-finality-observer /opt/umi/bin/umi-grandpa-finality-observer
-COPY --from=native-builder /build/bin/umi-substrate-proof-verifier /opt/umi/bin/umi-substrate-proof-verifier
-COPY --from=native-builder /build/bin/umi-runtime-metadata /opt/umi/bin/umi-runtime-metadata
+# Translation uses the finality build from this release's reviewed source.
+# The legacy bridge retains its exact older binary and compatibility profile.
+COPY --from=native-builder /build/bin/ /opt/umi/bin/
 # Verify downloaded bytes before execution. This also works with Podman 4.9,
 # whose builder does not support ADD --checksum.
 ADD https://pub-bfe43425f6564cc98cb3ad43b9662ae3.r2.dev/validator-supervisor/host-artifacts/f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105/raw_spec_finney.json \
@@ -63,19 +71,22 @@ RUN case "${TARGETPLATFORM}" in \
       linux/arm64) finality_sha256=b263758fb273aed83868e986f4738ff14008996b200226e34c14633a863e5587 ;; \
       *) exit 2 ;; \
     esac \
-    && printf '%s  %s\n' "$finality_sha256" /opt/umi/bin/umi-grandpa-finality-observer | sha256sum --check \
+    && if test "${UMI_WORKER_PROFILE}" = umi-registration-bridge-validator/1; then \
+         printf '%s  %s\n' "$finality_sha256" /opt/umi/bin/umi-grandpa-finality-observer | sha256sum --check; \
+       fi \
     && printf '%s  %s\n' f280b687a838ad73bf4e825a03f2807ee4363c3d13a5cb55a1f7f5c876b7f105 /opt/umi/finney.json | sha256sum --check \
     && chmod 0555 /opt/umi/bin/umi-grandpa-finality-observer /opt/umi/bin/umi-substrate-proof-verifier /opt/umi/bin/umi-runtime-metadata \
     && chmod 0444 /opt/umi/finney.json \
     && python /build/seal-native.py \
     && /opt/umi/bin/umi-grandpa-finality-observer --conformance-self-test \
     && printf '' | /opt/umi/bin/umi-substrate-proof-verifier \
-    && /usr/local/bin/umi-registration-bridge --help >/dev/null
+    && /usr/local/bin/umi-registration-bridge --help >/dev/null \
+    && /usr/local/bin/umi-validator-supervisor-worker --help >/dev/null
 
 LABEL org.opencontainers.image.source="https://github.com/Umi-BitSign/umi" \
       org.opencontainers.image.revision="${UMI_GIT_REVISION}" \
       vision.umi.source-tree-sha256="${UMI_SOURCE_TREE_SHA256}" \
-      vision.umi.entrypoint-profile="umi-registration-bridge-validator/1" \
+      vision.umi.entrypoint-profile="${UMI_WORKER_PROFILE}" \
       vision.umi.role="validator-supervisor-registration-bridge-worker"
 
 USER 65532:65532

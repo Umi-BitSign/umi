@@ -25,6 +25,161 @@ and completed work after startup; `systemctl start` alone is insufficient.
 
 ## Supervisor maintenance for an installed successor
 
+### Automatic translation reference releases
+
+The fixed `umi-translation-validator/1` worker uses the supervisor's existing
+`translation_weights` mode, wallet mount, state path and signed directive cursor.
+Its directive selects a separately signed, content-addressed reference policy
+from the public R2 distribution origin. Production requires policy schema
+`umi-translation-reference-policy/2`: the release authority approves an exact
+complete UID reward row, and native proofs must independently establish the
+reference's current identity, permit, epoch activity and matching row. A reference
+validator's on-chain row alone is insufficient approval. This follower does not
+claim independent cohort certification or standing-series membership.
+
+A new approved row or cohort uses a successor signed policy/directive with the
+same worker image. Preserve the directive history, existing signed cohort clocks
+and original state paths. The server publication owner must distribute the new
+approval; successful image polling alone does not establish cohort adoption.
+Check finalized rows after distribution to establish which validators adopted it.
+Installed R2-only transport and independent certification are separate boundaries.
+
+The server approval producer is `TranslationReferenceApprovalPublisher`. It
+uses the independently selected standing series and current native control,
+authenticates the complete signed decision prefix, and requires the exact signed
+effective allocation. Complete native registration and reference-row proofs must
+share that control snapshot and selected chain configuration. It projects fixed
+entitlements, including absent recipients' burn allocation, and checks Subtensor's
+stored-weight scaling against the entire reference row before loading the common
+authority signer. It does not replay a large reward package or claim independent
+certification. Publication of this delegation remains a separate authority act.
+
+Run its synchronous `step` in an owned I/O worker. The supplied immutable sink
+must create the exact content-addressed policy or verify its existing bytes.
+The producer retains signed bytes before upload and serializes the compound
+operation under its journal mutex. A lost acknowledgement retries those same
+bytes; unchanged reference refreshes reuse the existing approval. A lost signed
+record with a retained delivery receipt requires restoration. A new cohort,
+effective allocation or registration projection produces a new policy. The
+authenticated channel publisher must then select its successor directive;
+approval distribution alone does not change a running validator. Preparation,
+distribution and retry progress describe their own stages, separately from
+channel selection and finalized external adoption. This producer is not selected
+by an existing installation merely because its source is present.
+
+`TranslationReferenceChannelPublisher` appends the successor through the
+existing supervisor schema and cursor URLs. It authenticates retained history,
+retains its intent before signing, and retains exact signature bytes before
+distribution. It creates the successor's empty cursor page before conditionally
+advancing the predecessor page. R2 generation checks prevent overwriting another
+publication; exact readback settles a lost acknowledgement. Initial discovery
+retains the original signed prefix while it fits. A full initial page continues
+through its cursor edges. Long catch-up checkpoints the authenticated head so
+restart does not repeat the whole discovery walk. Retrying a retained proposal
+preserves its signed block interval; a conflicting pending proposal requires
+reconciliation. Do not reset its journal or silently sign another body in that slot.
+
+`R2ReferenceChannelStore` restricts mutable writes to the selected channel's cursor
+namespace and immutable writes to typed reference approvals. Content type, cache
+control and generation conditions are included in SigV4. Use one publication
+owner per configured channel and qualify its actual public bucket credentials;
+private evidence-bucket tests do not establish public distribution access.
+
+`TranslationReferencePublisherService` polls native current control and complete
+registration, loads the compact allocation named by the signed current decision,
+and calls the approval and channel owners in owned I/O workers. Configure every
+admitted cohort's publication horizon explicitly; retained signed clocks remain
+unchanged. Admission and activation drain wait without replacing the current
+directive. A signed suspension or revocation publishes a hold through the same
+cursor, without requiring model data or another registration pass. Shutdown drains
+started I/O and native finality before releasing its service mutex. Missing
+replicated inputs and transient transport conflicts expose waiting/retry progress;
+invalid authority or damaged retained state remains a repair, without a reset.
+
+Before selecting this publication owner, resolve its actual native resource
+bindings and account/state paths. A verifier path inside an installed service's
+mount namespace may be a host placeholder. Use `CompetitionChainResources` to
+resolve the actual pinned artifacts while retaining their configuration hashes
+and verification mode. Keep its proof cache and journals separate from existing
+writer/coordinator ownership. Qualify the installed entrypoint, public namespace,
+legacy journal handoff and finalized adoption; these APIs alone do not deploy it.
+
+The supported entrypoint is `umi-reference-publisher check --config CONFIG`, then
+`umi-reference-publisher run --config CONFIG` under the publication account. Its
+canonical private configuration uses schema `umi-reference-publisher-config/1`.
+It selects the existing coordinator configuration, a separate private state root,
+explicit native resources and cache/journal budgets, the public R2 endpoint and
+bucket, an existing private JSON S3 credential export, and the common-authority
+wallet name/path/hotkey. Each channel selects its existing supervisor config and
+qualified immutable release target. Explicit cohort horizons and a digest-to-path
+map of compact allocations complete the selection. New adopted allocations must
+be replicated before their activation; a missing input waits with progress.
+
+The `check` action validates these bindings without opening credentials, loading
+the wallet, creating journals or contacting the chain. It does not establish
+runtime readiness. The `run` action preserves the original signed source files,
+creates only its own state, rejects state overlap with existing owners and inputs,
+and opens the signer lazily after native approval checks and durable intent.
+Keep the state directory and its `proofs` child separate from production chain
+state. Supply actual pinned executable paths through `resources` rather than
+changing another service's mount namespace. SIGINT/SIGTERM drain owned work;
+restore damaged records in place instead of resetting the publication journal.
+
+The worker holds the original `service.lock` across native checks, signing,
+transmission and cancellation. Terminal version-1 bridge history is audited in
+place and bound to native current storage; successful unchanged audit results
+survive restart without rereading source payloads. A fresh state directory is
+accepted only when native LastUpdate is zero. Version-2 bridge history uses its
+original exact signed-byte receipt or native expiry reader. Each completed
+attempt is checkpointed against its original file identity, signed bytes and
+verifier semantics before the next attempt. Restart resumes those completed
+checks; fresh native current-row and LastUpdate proofs still bind the complete
+original history before adoption. An unresolved version-1 effect, missing original
+records or explicit bootstrap layout remains held until its supported native
+reconciliation is qualified. Do not reset journals,
+remove locks, change state paths or infer recovery from row equality. Retain
+these migration readers while any installed validator still consumes old state.
+
+Each new attempt reserves its original intent before loading the signer and
+retains its exact native-verified signed bytes before transmission. Restart never
+rebroadcasts a retained attempt. Owned finalized nonce/mortality proofs fence an
+expired attempt before another can be signed; an SDK reply never proves success.
+Exact native receipt verification and a fresh entire own-row check establish the
+publication separately. The process continuously owns one finality stream, so
+multiple signing guards reuse its fresh accepted head. Container SIGTERM drains
+the operation before releasing the original lock.
+
+The translation reader extracts selection values and complete rows directly
+from the native multiproof at the owned root, then verifies the extracted
+claims. It does not fetch each value separately or fall back to RPC claims
+when proof extraction fails. Its observer can wait up to 120 seconds for recovery;
+the independent 30-second signing-head freshness gate remains enforced. A stale
+head holds the iteration until a newly accepted native head arrives. The older
+bootstrap profile retains its own 30-second observation timeout.
+
+Missing completed receipt metadata requires explicit repair. With the worker
+stopped, run `python -m umi.translation_reference_repair --state-root STATE_ROOT
+--validator-hotkey HOTKEY` under its original account and runtime. This restores
+derived intent/receipt indexes from retained original records under the original
+service lock and reports counted progress, elapsed time and ETA basis. It never
+signs, submits, rewrites signed inputs or recreates missing native verdicts. A
+lost verdict requires restoration of the original records. Interrupted repairs
+roll back atomically and can be repeated. This command must remain available
+while supported followers retain these indexes.
+
+For an interrupted version-2 legacy verification, the same command accepts
+`--repair-legacy-outcome-completions`. It checks the original files and the
+checksummed native verdicts before atomically restoring their small completion
+markers under `reference-weights/legacy-native-verification`. It preserves the
+original verdict bytes and timestamps, and refuses a lost or damaged verdict.
+Repeated repair resumes completed items. The command removes only bounded
+`.pending-complete-` temporary files from this dedicated directory while holding
+the original service mutex. Original journals and signed inputs are untouched.
+
+Qualification of the fixed worker, historical layout migration, both platform
+images, authenticated publication and actual installed submissions is required
+before selecting a translation release. Source tests are not an installed rollout.
+
 The wallet-free successor feed reports `successor_delivery_retry` when its
 native reader cannot deliver a retained object. The service log includes the
 exception class and bounded UMI source coordinates, elapsed time and retry
