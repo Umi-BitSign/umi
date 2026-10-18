@@ -44,6 +44,29 @@ approval; successful image polling alone does not establish cohort adoption.
 Check finalized rows after distribution to establish which validators adopted it.
 Installed R2-only transport and independent certification are separate boundaries.
 
+The server approval producer is `TranslationReferenceApprovalPublisher`. It
+uses the independently selected standing series and current native control,
+authenticates the complete signed decision prefix, and requires the exact signed
+effective allocation. Complete native registration and reference-row proofs must
+share that control snapshot and selected chain configuration. It projects fixed
+entitlements, including absent recipients' burn allocation, and checks Subtensor's
+stored-weight scaling against the entire reference row before loading the common
+authority signer. It does not replay a large reward package or claim independent
+certification. Publication of this delegation remains a separate authority act.
+
+Run its synchronous `step` in an owned I/O worker. The supplied immutable sink
+must create the exact content-addressed policy or verify its existing bytes.
+The producer retains signed bytes before upload and serializes the compound
+operation under its journal mutex. A lost acknowledgement retries those same
+bytes; unchanged reference refreshes reuse the existing approval. A lost signed
+record with a retained delivery receipt requires restoration. A new cohort,
+effective allocation or registration projection produces a new policy. The
+authenticated channel publisher must then select its successor directive;
+approval distribution alone does not change a running validator. Preparation,
+distribution and retry progress describe their own stages, separately from
+channel selection and finalized external adoption. This producer is not selected
+by an existing installation merely because its source is present.
+
 The worker holds the original `service.lock` across native checks, signing,
 transmission and cancellation. Terminal version-1 bridge history is audited in
 place and bound to native current storage; successful unchanged audit results
