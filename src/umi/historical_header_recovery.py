@@ -59,6 +59,8 @@ class HistoricalHeaderRecovery:
         self._anchor = None
         self._verified = OrderedDict()
         self._verified_bytes = 0
+        self._retained_hints = None
+        self._hint_read_limit = 0
         self.telemetry = HeaderRecoveryTelemetry()
 
     def _remember(self, height, encoded):
@@ -101,12 +103,49 @@ class HistoricalHeaderRecovery:
             raise
 
     def _load(self, block_hash):
+        # A cold restart may need tens of thousands of retained links. Read one
+        # bounded raw path per fresh SQLite snapshot instead of reopening the
+        # database for each link. These bytes are still untrusted: the caller
+        # checks every hash/height against its current owned anchor before it
+        # remembers progress. No connection survives this worker call or await.
+        hints = self._retained_hints
+        if hints is not None and block_hash in hints:
+            return hints.pop(block_hash)
         with closing(self._open()) as db:
-            row = db.execute(
-                "SELECT substr(encoded,1,?) FROM historical_header_hints WHERE hash=?",
-                (2 * MAXIMUM_HEADER_BYTES + 3, block_hash),
-            ).fetchone()
-        return None if row is None else row[0]
+            if hints is None:
+                row = db.execute(
+                    "SELECT substr(encoded,1,?) FROM historical_header_hints WHERE hash=?",
+                    (2 * MAXIMUM_HEADER_BYTES + 3, block_hash),
+                ).fetchone()
+                return None if row is None else row[0]
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            key, used = block_hash, 0
+            limit = min(self.maximum_bytes, 2 * MAXIMUM_PATH_BYTES)
+            for _ in range(self._hint_read_limit):
+                if key in hints:
+                    break
+                row = db.execute(
+                    "SELECT substr(encoded,1,?) FROM historical_header_hints WHERE hash=?",
+                    (2 * MAXIMUM_HEADER_BYTES + 3, key),
+                ).fetchone()
+                encoded = None if row is None else row[0]
+                if type(encoded) is not str:
+                    hints[key] = encoded
+                    break
+                size = len(encoded)
+                if hints and used + size > limit:
+                    break
+                used += size
+                hints[key] = encoded
+                if not encoded.startswith("0x") or len(encoded) < 66 or used >= limit:
+                    break
+                # SCALE headers start with the parent hash. This is a bounded
+                # lookup hint only, never a header decoder or an acceptance
+                # shortcut. Corruption is returned at its original position so
+                # earlier valid links can checkpoint before native refusal.
+                key = "0x" + encoded[2:66]
+        return hints.pop(block_hash)
 
     def _save(self, block_hash, encoded):
         with closing(self._open()) as db:
@@ -234,44 +273,55 @@ class HistoricalHeaderRecovery:
             anchor.finality_evidence_sha256, anchor.height, height, current["number"]
         )
         used = 0
-        for _ in range(self.batch_size):
-            if current["number"] == height:
-                break
-            block_hash = current["parent_hash"]
-            self.telemetry.phase("load_retained_hint")
-            next_encoded = await run_owned_thread(self._load, block_hash)
-            missing = next_encoded is None
-            source = "retained"
-            if missing:
-                # Presence in an archive establishes no ancestry. Supply the
-                # target bytes only when the walk reaches its committed edge;
-                # the same hash/height checks below authenticate that link.
-                # Existing durable hints must still be checked, including
-                # corruption; an archive must not silently replace them.
-                supplied = target_header is not None and current["number"] - 1 == height
-                source = "supplied" if supplied else "rpc"
-                self.telemetry.phase("supplied_target_hint" if supplied else "fetch_archive_header")
-                next_encoded = (
-                    target_header
-                    if supplied
-                    else encode_rpc_header(await request("chain_getHeader", (block_hash,)))
-                )
-            next_header = _decode_header(next_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
-            if (next_header["number"], next_header["hash"]) != (current["number"] - 1, block_hash):
-                raise ValueError("historical header is not the committed parent")
-            if missing:
-                self.telemetry.phase("persist_verified_hint")
-                await run_owned_thread(self._save, block_hash, next_encoded)
-            # Advance only after the exact hint is durable. Cancellation during
-            # persistence leaves the old cursor; retry rechecks the stored hint.
-            self._remember(next_header["number"], next_encoded)
-            self._remember_progress(key, next_encoded)
-            encoded = next_encoded
-            current = next_header
-            self.telemetry.advance(current["number"], source)
-            used += (len(encoded) - 2) // 2
-            if used >= MAXIMUM_PATH_BYTES:
-                break
+        self._retained_hints = {}
+        try:
+            for index in range(self.batch_size):
+                if current["number"] == height:
+                    break
+                block_hash = current["parent_hash"]
+                self._hint_read_limit = min(self.batch_size - index, current["number"] - height)
+                self.telemetry.phase("load_retained_hint")
+                next_encoded = await run_owned_thread(self._load, block_hash)
+                missing = next_encoded is None
+                source = "retained"
+                if missing:
+                    # Presence in an archive establishes no ancestry. Supply the
+                    # target bytes only when the walk reaches its committed edge;
+                    # the same hash/height checks below authenticate that link.
+                    # Existing durable hints must still be checked, including
+                    # corruption; an archive must not silently replace them.
+                    supplied = target_header is not None and current["number"] - 1 == height
+                    source = "supplied" if supplied else "rpc"
+                    self.telemetry.phase(
+                        "supplied_target_hint" if supplied else "fetch_archive_header"
+                    )
+                    next_encoded = (
+                        target_header
+                        if supplied
+                        else encode_rpc_header(await request("chain_getHeader", (block_hash,)))
+                    )
+                next_header = _decode_header(next_encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+                if (next_header["number"], next_header["hash"]) != (
+                    current["number"] - 1,
+                    block_hash,
+                ):
+                    raise ValueError("historical header is not the committed parent")
+                if missing:
+                    self.telemetry.phase("persist_verified_hint")
+                    await run_owned_thread(self._save, block_hash, next_encoded)
+                # Advance only after the exact hint is durable. Cancellation during
+                # persistence leaves the old cursor; retry rechecks the stored hint.
+                self._remember(next_header["number"], next_encoded)
+                self._remember_progress(key, next_encoded)
+                encoded = next_encoded
+                current = next_header
+                self.telemetry.advance(current["number"], source)
+                used += (len(encoded) - 2) // 2
+                if used >= MAXIMUM_PATH_BYTES:
+                    break
+        finally:
+            self._retained_hints = None
+            self._hint_read_limit = 0
         if current["number"] != height:
             raise HistoricalHeaderRecoveryProgress("historical header recovery in progress")
         recovered = FinalizedSnapshotRef(
