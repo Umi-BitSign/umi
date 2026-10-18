@@ -1,6 +1,7 @@
 """Wallet-free feed routes, with synthetic signatures and real fixture replay."""
 
 import asyncio
+import json
 import sys
 import threading
 from pathlib import Path
@@ -460,4 +461,41 @@ async def test_canceled_http_read_drains_before_accepting_another(feed_case, mon
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert (await client.get("next")).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", [ValueError, PermissionError, RuntimeError])
+async def test_delivery_failure_reports_safe_owner_coordinates(
+    feed_case, monkeypatch, caplog, error_kind
+):
+    private_value = "credential=private-value&signed-request=secret"
+
+    def unavailable(route):
+        raise error_kind(private_value)
+
+    monkeypatch.setattr(feed_case.feed, "read", unavailable)
+    app = create_successor_feed_app(feed_case.feed)
+    base = feed_case.config.plan.supervisor.directive_url + "/successor/"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base) as client:
+        response = await client.get("test")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "successor delivery unavailable"}
+    records = [r for r in caplog.records if r.name == "umi.competition_successor_feed"]
+    assert len(records) == 1
+    event = json.loads(records[0].getMessage().split(" ", 1)[1])
+    assert event["retrying"] and event["state"] == "retrying"
+    assert event["completed"] == 0 and event["total"] == 1
+    assert event["elapsed_seconds"] >= 0 and event["eta_seconds"] is None
+    assert event["details"][0]["error_type"] == "builtins." + error_kind.__name__
+    assert any(
+        f["module"] == "umi.competition_successor_feed"
+        for f in event["details"][0]["source_frames"]
+    )
+    assert private_value not in caplog.text
+    assert private_value not in response.text
+
+    # A recovered source remains usable; observation never wedges its owner lock.
+    monkeypatch.setattr(feed_case.feed, "read", lambda route: (b"{}", False))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base) as client:
         assert (await client.get("next")).status_code == 200

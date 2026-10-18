@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
+import logging
 import re
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -33,6 +36,7 @@ from .competition_package import (
     _opened_sealed_directory,
     _read_sealed_file,
 )
+from .competition_progress import _failure_details
 from .competition_round_journal import RoundJournal
 from .competition_successor_publication import (
     SignedSuccessorRoundPublication,
@@ -57,6 +61,7 @@ _CURSOR = re.compile(rf"after/(3|4)/([1-9][0-9]{{0,15}})/({_HEX})\.json")
 _CONTROL = re.compile(rf"directives/({_HEX})/(page|execution)\.json")
 _AUTH = re.compile(rf"authorizations/({_HEX})\.json")
 _PACKAGE = re.compile(rf"packages/({_HEX})/([a-z-]+\.json)")
+_LOG = logging.getLogger(__name__)
 
 
 class SuccessorFeedConfig(StrictProtocolModel):
@@ -301,6 +306,7 @@ def create_successor_feed_app(feed):
 
     @app.get(prefix + "/{route:path}")
     async def get(route: str):
+        started = time.monotonic()
         if serial.locked():
             raise HTTPException(503, "successor delivery busy", headers={"Retry-After": "1"})
         async with serial:
@@ -308,7 +314,28 @@ def create_successor_feed_app(feed):
                 body, immutable = await run_owned_thread(feed.read, route)
             except KeyError:
                 raise HTTPException(404, "successor object unavailable") from None
-            except (OSError, ValueError, RuntimeError):
+            except (OSError, ValueError, RuntimeError) as error:
+                # Preserve the owning service's failure coordinates without
+                # disclosing URLs, credentials, exception text or local values.
+                # A live HTTP listener is not successful successor delivery.
+                _LOG.warning(
+                    "successor_delivery_retry %s",
+                    json.dumps(
+                        {
+                            "stage": "successor_delivery",
+                            "state": "retrying",
+                            "completed": 0,
+                            "total": 1,
+                            "elapsed_seconds": time.monotonic() - started,
+                            "eta_seconds": None,
+                            "eta_basis": "owning_service_failure_requires_repair",
+                            "stalled": False,
+                            "retrying": True,
+                            "details": _failure_details(error),
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
                 raise HTTPException(503, "successor delivery unavailable") from None
             return Response(
                 body,
