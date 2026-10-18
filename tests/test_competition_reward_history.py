@@ -852,6 +852,7 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
     # Exercise native preparation, rather than the independently tested durable
     # result restore path, so the injected wrong native height is actually used.
     monkeypatch.setattr(h.reader.checkpoints, "load", lambda height: None)
+    monkeypatch.setattr(h.reader.checkpoints, "load_many", lambda first, last: [])
     prepare = h.reader._prepare
     requested = []
 

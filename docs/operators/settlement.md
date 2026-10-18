@@ -217,6 +217,16 @@ rehashing unchanged proof payloads. Ordered ancestry and the restored tip still
 require a fresh owned finalized-chain check. A raw archive frame or a progress
 log is not a successful-verification receipt.
 
+Checkpoint metadata reads use one read-only SQLite snapshot per bounded history
+batch, within the selected history batch budget (at most 4,096 blocks). Each block
+still checks its original owner, verifier semantics, source generations, conflict
+holds and export origin. After the owned-finality check, a second fresh snapshot
+rechecks every result before effects apply in block order. This recheck retains
+one current item alongside the existing batch, rather than duplicating the batch
+in memory. Missing completed results require explicit repair; missing new work
+ends the retained prefix. Existing journal formats and verification receipts are
+unchanged, so older supported installations use the same restoration path.
+
 When a bounded ancestry pass advances without reaching the restored tip, the
 reader retains one compact checkpoint batch for that exact interval and provider.
 Retries continue the fresh owned-finality check without repeatedly loading the
