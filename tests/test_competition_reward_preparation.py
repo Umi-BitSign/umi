@@ -6414,8 +6414,9 @@ def runtime_consensus(request):
 
 @pytest.mark.parametrize("runtime_consensus", ["Yuma"], indirect=True)
 @pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+@pytest.mark.parametrize("runtime_scope", ["forward", "historical_gap"])
 async def test_runtime_adoption_retains_old_facts_and_new_native_archive_after_restart(
-    complete_preparation_case, tmp_path, monkeypatch, runtime_consensus
+    complete_preparation_case, tmp_path, monkeypatch, runtime_consensus, runtime_scope
 ):
     from umi import competition_reward_coverage_journal as coverage_module
     from umi.competition_reward_coverage_intervals import coverage_point
@@ -6499,11 +6500,24 @@ async def test_runtime_adoption_retains_old_facts_and_new_native_archive_after_r
         predecessor_adoption_sha256=None,
         original_signed_inputs_unchanged=True,
     )
+    signed = SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body))
+    scopes, schema = (signed,), "umi-standing-reward-runtime-adoption-selection/1"
+    if runtime_scope == "historical_gap":
+        forward = body.model_copy(update={"first_block": h.end + 10})
+        body = body.model_copy(
+            update={
+                "last_block": h.end + 1,
+                "revision": 2,
+                "predecessor_adoption_sha256": digest(forward),
+            }
+        )
+        scopes = (
+            SignedRewardRuntimeAdoption(adoption=forward, signatures=signatures(forward)),
+            SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),
+        )
+        schema = "umi-standing-reward-runtime-adoption-selection/2"
     selection = select_reward_runtime(
-        RewardRuntimeAdoptionSelection(
-            schema="umi-standing-reward-runtime-adoption-selection/1",
-            adoptions=(SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),),
-        ),
+        RewardRuntimeAdoptionSelection(schema=schema, adoptions=scopes),
         series=c.series,
         manifest=p.manifest,
         policy=c.reader.policy,

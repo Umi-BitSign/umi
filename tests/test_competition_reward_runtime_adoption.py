@@ -233,9 +233,13 @@ def test_upgrade_preparation_is_additive_repeatable_and_reports_progress(inputs,
         extend_boot_runtime_adoptions(inputs.value, adopted.runtime_adoptions, predecessor=True)
 
 
-def test_successor_boot_preserves_original_runtime_adoption_for_predecessor(inputs, adopted):
+@pytest.mark.parametrize("layout", ["forward", "historical_gap"])
+def test_successor_boot_preserves_original_runtime_adoption_for_predecessor(
+    inputs, adopted, gap_repaired, layout
+):
     from .test_competition_reward_boot import successor_boot
 
+    adopted = gap_repaired if layout == "historical_gap" else adopted
     successor, _ = successor_boot(inputs)
     candidate = extend_boot_runtime_adoptions(
         successor, adopted.runtime_adoptions, predecessor=True
@@ -248,30 +252,203 @@ def test_successor_boot_preserves_original_runtime_adoption_for_predecessor(inpu
     )
 
 
+@pytest.fixture
+def gap_repaired(adopted):
+    original = adopted.runtime_adoptions.adoptions[0]
+    body = original.adoption.model_copy(
+        update={
+            "first_block": original.adoption.first_block - 5,
+            "last_block": original.adoption.first_block - 1,
+            "issued_at_block": original.adoption.issued_at_block + 1,
+            "revision": 2,
+            "predecessor_adoption_sha256": digest(original.adoption),
+        }
+    )
+    selection = RewardRuntimeAdoptionSelection(
+        schema="umi-standing-reward-runtime-adoption-selection/2",
+        adoptions=(
+            original,
+            SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),
+        ),
+    )
+    return extend_boot_runtime_adoptions(adopted, selection)
+
+
+def test_gap_repair_is_explicit_additive_and_preserves_earlier_signed_bytes(adopted, gap_repaired):
+    selection = gap_repaired.runtime_adoptions
+    original, repair = selection.adoptions
+    assert canonical_json_bytes(original) == canonical_json_bytes(
+        adopted.runtime_adoptions.adoptions[0]
+    )
+    assert canonical_json_bytes(extend_boot_runtime_adoptions(gap_repaired, selection)) == (
+        canonical_json_bytes(gap_repaired)
+    )
+    context, before = select_boot_runtime(gap_repaired), select_boot_runtime(adopted)
+    assert before.selected(repair.adoption.first_block) == (adopted.eligibility, None)
+    for height in (repair.adoption.first_block, repair.adoption.last_block):
+        assert context.selected(height) == (
+            repair.adoption.effective_profile,
+            digest(repair.adoption),
+        )
+    for height in (original.adoption.first_block, original.adoption.last_block):
+        assert context.selected(height) == before.selected(height)
+    assert context.selected(repair.adoption.first_block - 1) == (adopted.eligibility, None)
+    # An old reader must refuse /2 rather than silently interpret it as /1.
+    with pytest.raises(ValueError, match="lineage"):
+        RewardRuntimeAdoptionSelection.model_validate_json(
+            canonical_json_bytes(
+                selection.model_copy(
+                    update={"schema_": "umi-standing-reward-runtime-adoption-selection/1"}
+                )
+            )
+        )
+
+
+@pytest.mark.parametrize("damage", ["overlap", "parent", "revision", "authority", "signature"])
+def test_gap_repair_never_overrides_scope_or_bypasses_quorum(adopted, gap_repaired, damage):
+    selection = gap_repaired.runtime_adoptions
+    original, repair = selection.adoptions
+    updates = {
+        "overlap": {"last_block": original.adoption.first_block},
+        "parent": {"predecessor_adoption_sha256": "ff" * 32},
+        "revision": {"revision": 4},
+        "authority": {"authority_sha256": "ff" * 32},
+        "signature": {"last_block": repair.adoption.last_block - 1},
+    }[damage]
+    body = repair.adoption.model_copy(update=updates)
+    changed = SignedRewardRuntimeAdoption(
+        adoption=body, signatures=repair.signatures if damage == "signature" else signatures(body)
+    )
+    candidate = selection.model_copy(update={"adoptions": (original, changed)})
+    with pytest.raises(ValueError):
+        extend_boot_runtime_adoptions(adopted, candidate)
+
+
+def test_gap_selection_still_refuses_replacing_a_retained_contract(gap_repaired):
+    original, repair = gap_repaired.runtime_adoptions.adoptions
+    changed = original.adoption.model_copy(update={"last_block": original.adoption.last_block + 1})
+    resigned = SignedRewardRuntimeAdoption(adoption=changed, signatures=signatures(changed))
+    updated_repair = repair.adoption.model_copy(
+        update={"predecessor_adoption_sha256": digest(changed)}
+    )
+    selection = gap_repaired.runtime_adoptions.model_copy(
+        update={
+            "adoptions": (
+                resigned,
+                SignedRewardRuntimeAdoption(
+                    adoption=updated_repair, signatures=signatures(updated_repair)
+                ),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="retained signed adoption lineage"):
+        extend_boot_runtime_adoptions(gap_repaired, selection)
+
+
+def test_gap_selection_checks_overlap_with_every_earlier_revision(gap_repaired):
+    original, repair = gap_repaired.runtime_adoptions.adoptions
+    body = repair.adoption.model_copy(
+        update={
+            "first_block": original.adoption.first_block + 1,
+            "last_block": original.adoption.first_block + 3,
+            "issued_at_block": repair.adoption.issued_at_block + 1,
+            "revision": 3,
+            "predecessor_adoption_sha256": digest(repair.adoption),
+        }
+    )
+    selection = gap_repaired.runtime_adoptions.model_copy(
+        update={
+            "adoptions": (
+                original,
+                repair,
+                SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="overlaps a retained"):
+        extend_boot_runtime_adoptions(gap_repaired, selection)
+
+
+@pytest.mark.parametrize("layout", ["forward", "historical_gap"])
 async def test_writer_native_assembly_receives_authenticated_runtime_selection(
-    inputs, adopted, monkeypatch
+    inputs, adopted, gap_repaired, monkeypatch, layout
 ):
     from .test_competition_reward_boot import (
         test_native_assembly_preserves_configuration_and_closes_owned_providers,
     )
 
-    inputs.value = adopted
+    inputs.value = gap_repaired if layout == "historical_gap" else adopted
     await test_native_assembly_preserves_configuration_and_closes_owned_providers(
         inputs, monkeypatch, None, False
     )
 
 
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+@pytest.mark.parametrize("layout", ["forward", "historical_gap"])
 async def test_coordinator_and_reviewer_assembly_receive_runtime_selection(
-    config_case, adopted, monkeypatch, role
+    config_case, adopted, gap_repaired, monkeypatch, role, layout
 ):
     from .test_competition_reward_coordinator_boot import (
         test_boot_loads_only_role_keys_and_closes_provider_on_every_exit,
     )
 
+    adopted = gap_repaired if layout == "historical_gap" else adopted
     config_case.config = extend_boot_runtime_adoptions(
         config_case.config, adopted.runtime_adoptions
     )
     await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
         config_case, monkeypatch, role, None, False, successor=False
     )
+
+
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+async def test_successor_roles_retain_gap_selection_for_predecessor(
+    config_case, gap_repaired, monkeypatch, role
+):
+    from .test_competition_reward_coordinator_boot import (
+        successor_configuration,
+        test_boot_loads_only_role_keys_and_closes_provider_on_every_exit,
+    )
+
+    config_case.config = extend_boot_runtime_adoptions(
+        successor_configuration(config_case.config),
+        gap_repaired.runtime_adoptions,
+        predecessor=True,
+    )
+    await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
+        config_case, monkeypatch, role, None, False, successor=False
+    )
+
+
+async def test_successor_writer_assembly_receives_the_same_gap_contract(
+    inputs, gap_repaired, monkeypatch
+):
+    from umi import competition_reward_boot as boot
+
+    from . import test_competition_reward_boot as native
+
+    original_successor = native.successor_boot
+    original_coverage = boot.StandingRewardCoverageService
+    observed = []
+
+    def candidate(selected):
+        config, approval = original_successor(selected)
+        return extend_boot_runtime_adoptions(
+            config, gap_repaired.runtime_adoptions, predecessor=True
+        ), approval
+
+    def coverage(**kwargs):
+        context = kwargs["journal"].runtime_selection
+        if context is not None:
+            repair = gap_repaired.runtime_adoptions.adoptions[-1].adoption
+            assert context.selected(repair.first_block) == (
+                repair.effective_profile,
+                digest(repair),
+            )
+            observed.append(context)
+        return original_coverage(**kwargs)
+
+    monkeypatch.setattr(native, "successor_boot", candidate)
+    monkeypatch.setattr(boot, "StandingRewardCoverageService", coverage)
+    await native.test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch)
+    assert len(observed) == 1

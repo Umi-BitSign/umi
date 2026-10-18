@@ -199,6 +199,28 @@ async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lan
     assert "successor_activation_eta_seconds" in caplog.text
 
 
+async def test_credit_progress_separates_finite_saved_replay_after_restart(lanes, caplog):
+    h = lanes
+    owner, _ = h.owner()
+    original = await owner.step()
+    expected = dict(original.credited_ms)
+    restarted, _ = h.owner()
+    with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
+        restored = await restarted.step()
+    phases = {
+        r.args["phase"]: r.args for r in caplog.records if r.msg == "coverage_credit_progress %s"
+    }
+    assert phases["retained_interval_replay"]["credited_delta_ms"] == expected
+    zero = {k: 0 for k in h.validators}
+    assert phases["recent_block_capture"]["credited_delta_ms"] == zero
+    assert phases["historical_gap_capture"]["credited_delta_ms"] == zero
+    assert dict(restored.credited_ms) == expected
+    assert all(
+        p["eta_scope"] == "this_pass_and_phase_only_not_remaining_opportunity"
+        for p in phases.values()
+    )
+
+
 @pytest.mark.parametrize("role", ["writer", "coordinator"])
 async def test_actual_cli_reports_failed_gap_without_exception_secrets(
     lanes, monkeypatch, capsys, role

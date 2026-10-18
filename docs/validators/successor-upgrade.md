@@ -585,7 +585,16 @@ signed series, manifest, policy, reward allocation and clocks unchanged. Each
 the recovery authority, an exact effective eligibility profile, a bounded block
 range and its immutable revision predecessor. The original policy quorum must
 sign it. Later selections append complete signed revisions; they cannot replace
-an earlier range. The `extend_boot_runtime_adoptions` preparation API validates
+an earlier range. Selection format `/1` retains forward block ordering. Format
+`umi-standing-reward-runtime-adoption-selection/2` may append a contract for an
+earlier uncovered gap, preserving the exact earlier signed prefix, monotonically
+issued revision chain and nonoverlap with every retained range. Revision order
+is signing order; use the minimum and maximum block bounds across all contracts
+when preparing capacity, not the last revision's block range. Older readers
+refuse `/2` before execution: qualify and select a supporting runtime before
+adopting such a configuration. Original `/1` bytes and completed proofs keep
+their original semantics and validity. No old signature or clock is rewritten.
+The `extend_boot_runtime_adoptions` preparation API validates
 the existing supported boot, authenticates the additive selection and reports
 three counted checks before returning a candidate. It does not write a control,
 stop a service, change a capacity approval or authorize a transaction.
@@ -604,6 +613,19 @@ after an already proved new-runtime block. A wrongly scoped old-runtime endpoint
 refuses capture rather than falling back to another profile. Keep the final
 adopted block within the separately selected operating horizon; extending that
 scope does not extend a capacity approval or signed cohort clock.
+
+Coverage logs separate credited deltas from finite retained-interval replay,
+recent capture and historical-gap capture as `coverage_credit_progress`.
+Restored credit is not a sustainable fresh-capture rate. Do not extrapolate its
+combined delta as an overall opportunity or successor activation ETA.
+
+A native weight rate-limit refusal emits `standing_weight_rate_limit` progress
+with remaining blocks, elapsed time and an explicitly assumed block-time range.
+The writer uses a bounded retry pause, up to60seconds at the standard poll
+interval, to leave proof capacity for coverage. Stop remains responsive. Every
+retry recollects native state and checks the complete signing path; this pause
+does not cache submission authority or change a signed clock. A stale block
+frontier withdraws the timing range. Other failures retain their normal retry.
 
 Coverage keeps the original manifest profile as its anchor and records the
 effective profile and adoption digest separately for new endpoints. Existing

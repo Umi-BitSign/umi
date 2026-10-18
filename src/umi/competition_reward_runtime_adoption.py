@@ -10,6 +10,7 @@ the native eligibility consumer; signatures are never a substitute for them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -61,7 +62,13 @@ class SignedRewardRuntimeAdoption(StrictProtocolModel):
 
 
 class RewardRuntimeAdoptionSelection(StrictProtocolModel):
-    schema_: Literal["umi-standing-reward-runtime-adoption-selection/1"] = Field(alias="schema")
+    # /1 retains its forward-only block ordering. /2 keeps the same signed
+    # revision chain but can append a disjoint historical gap. Earlier signed
+    # records are never edited, reordered or replaced to backdate a profile.
+    schema_: Literal[
+        "umi-standing-reward-runtime-adoption-selection/1",
+        "umi-standing-reward-runtime-adoption-selection/2",
+    ] = Field(alias="schema")
     adoptions: Annotated[
         tuple[SignedRewardRuntimeAdoption, ...], Field(min_length=1, max_length=4096)
     ]
@@ -84,12 +91,19 @@ class RewardRuntimeAdoptionSelection(StrictProtocolModel):
             elif (
                 body.revision != previous.revision + 1
                 or body.predecessor_adoption_sha256 != digest(previous)
-                or body.first_block <= previous.last_block
+                or (
+                    self.schema_ == "umi-standing-reward-runtime-adoption-selection/1"
+                    and body.first_block <= previous.last_block
+                )
                 or body.issued_at_block < previous.issued_at_block
                 or any(getattr(body, name) != getattr(previous, name) for name in immutable)
             ):
                 raise ValueError("runtime adoption changes lineage or overlaps an earlier scope")
             previous = body
+        if self.schema_ == "umi-standing-reward-runtime-adoption-selection/2":
+            scopes = sorted((v.adoption.first_block, v.adoption.last_block) for v in self.adoptions)
+            if any(right[0] <= left[1] for left, right in pairwise(scopes)):
+                raise ValueError("runtime gap adoption overlaps a retained signed scope")
         return self
 
 

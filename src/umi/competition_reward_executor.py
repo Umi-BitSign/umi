@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 import os
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from .competition_reward_transactions import (
     StandingWeightJournal,
     standing_weight_call,
 )
+from .competition_weight_timing import WeightRateLimitWait
 from .competition_weights import BittensorCompetitionWeightTransport
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_runtime import memory_operation
@@ -336,13 +338,16 @@ class StandingRewardExecutor:
     async def run(self, stop: asyncio.Event, *, poll_seconds: float = 12) -> None:
         if not math.isfinite(poll_seconds) or not 0 < poll_seconds <= 3600:
             raise ValueError("standing poll interval is outside its host bound")
+        weight_wait = None
         with self.hold_writer():
             while not stop.is_set():
                 # A dead observer needs a new owner from service startup. A
                 # stale but running observer remains an ordinary retry below.
                 self.provider.ensure_observer_running()
+                delay = poll_seconds
                 try:
                     result = await self.step()
+                    weight_wait = None
                     logger.info(
                         canonical_json_bytes(
                             {
@@ -352,11 +357,60 @@ class StandingRewardExecutor:
                             }
                         ).decode()
                     )
+                except WeightRateLimitWait as error:
+                    # This is scheduling only. Every later attempt recollects
+                    # native state and rechecks every signing predicate. Never
+                    # cache permission to submit or sleep to a guessed deadline.
+                    delay = max(poll_seconds, min(60.0, poll_seconds * 5))
+                    now = time.monotonic()
+                    if weight_wait is None or weight_wait["target"] != error.next_eligible_block:
+                        weight_wait = {
+                            "target": error.next_eligible_block,
+                            "first": error.observed_block,
+                            "last": error.observed_block,
+                            "started": now,
+                            "changed": now,
+                        }
+                    if error.observed_block > weight_wait["last"]:
+                        weight_wait.update(last=error.observed_block, changed=now)
+                    remaining = max(0, error.next_eligible_block - error.observed_block)
+                    completed = max(0, error.observed_block - weight_wait["first"])
+                    total = max(1, error.next_eligible_block - weight_wait["first"])
+                    stalled = now - weight_wait["changed"] >= 60
+                    logger.info(
+                        canonical_json_bytes(
+                            {
+                                "schema": "umi-standing-weight-rate-wait/1",
+                                "stage": "standing_weight_rate_limit",
+                                "status": "stalled" if stalled else "waiting",
+                                "reason_code": error.reason_code,
+                                "observed_block": error.observed_block,
+                                "next_eligible_block": error.next_eligible_block,
+                                "remaining_blocks": remaining,
+                                "completed_blocks": completed,
+                                "total_blocks": total,
+                                "percent": 100 * min(completed, total) / total,
+                                "elapsed_seconds": now - weight_wait["started"],
+                                "eta_seconds": None,
+                                "planning_eta_seconds": None
+                                if stalled
+                                else [remaining * 6, remaining * 24],
+                                "eta_basis": "withdrawn_stalled"
+                                if stalled
+                                else "planning_assumption_6_to_24_seconds_per_block_not_a_deadline",
+                                "eta_scope": "current_rate_limit_only_not_rewards_or_opportunity",
+                                "retry_after_seconds": delay,
+                                "stalled": stalled,
+                                "retrying": True,
+                            }
+                        ).decode()
+                    )
                 except Exception as error:
+                    weight_wait = None
                     # Error text can contain RPC credentials or response data.
                     logger.warning("standing_retry reason=%s", type(error).__name__)
                 with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
 
 
 def _check_transmission(pending: PendingStandingWeight, *, original, fresh, projection) -> None:
