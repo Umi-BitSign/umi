@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
@@ -20,6 +21,12 @@ from .protocol import canonical_json_bytes
 ALIAS_KIND = "control_history_remote_source"
 MARKER_TABLE = "round_generation_history_remote"
 SCHEMA = "umi-journal-remote-source/1"
+
+
+@dataclass(frozen=True)
+class _SourceSnapshotToken:
+    token: tuple[str, str, int]
+    remote_reference: dict | None
 
 
 def _name(value):
@@ -144,15 +151,32 @@ class JournalSourceExternalizer:
 
     def source_token(self, kind, key, db):
         """Resolve only compact owner metadata; never read a payload or use RPC."""
+        return list(self.snapshot_token(kind, key, db).token)
+
+    def snapshot_token(self, kind, key, db):
+        """Separate the SQL snapshot's fact from independently mutable R2 state."""
         row = self._identity(kind, key, db)
         alias = self._alias(kind, key, db)
         if alias is None:
             if row[1] != 1:
                 raise self.repair_error("remote source alias missing; explicit repair required")
-            return [kind, key, row[0]]
+            return _SourceSnapshotToken((kind, key, row[0]), None)
         if row != (alias["revision"] + 1, 0):
             raise self.repair_error("externalized source was mutated; explicit repair required")
-        return [kind, key, alias["revision"]]
+        return _SourceSnapshotToken((kind, key, alias["revision"]), alias["remote"])
+
+    def recheck_snapshot_token(self, fact: _SourceSnapshotToken):
+        """The remote index is outside the source SQL snapshot; never memoize it."""
+        if fact.remote_reference is not None:
+            try:
+                if self.remote is None:
+                    raise ValueError("remote source owner is unavailable")
+                self.remote.validate_reference(fact.remote_reference)
+            except (TypeError, KeyError, ValueError) as error:
+                raise self.repair_error(
+                    "remote source alias or receipt damaged; repair required"
+                ) from error
+        return list(fact.token)
 
     def get_raw(self, kind, key, *, db):
         alias = self._alias(kind, key, db)

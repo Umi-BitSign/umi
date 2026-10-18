@@ -51,9 +51,9 @@ async def retained(history_case, monkeypatch):
     # retries reuse one batch or revalidate every dependency before applying it.
     loads, native_load = [], h.reader.checkpoints._load_snapshot
 
-    def load(height, db):
+    def load(height, db, source_snapshot=None):
         loads.append(height)
-        return native_load(height, db)
+        return native_load(height, db, source_snapshot)
 
     monkeypatch.setattr(h.reader.checkpoints, "_load_snapshot", load)
     return h, expected, loads
