@@ -234,6 +234,7 @@ async def test_standing_cli_checks_approval_before_stop_and_uses_original_lease(
         "service",
         "executor",
         "coverage_service",
+        "coverage_collector",
         "history_progress",
         "history_checkpoint",
         "history_repair",

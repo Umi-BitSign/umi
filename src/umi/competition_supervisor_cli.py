@@ -413,6 +413,7 @@ def _standing_logs():
         "umi.historical_header_progress",
         "umi.competition_reward_executor",
         "umi.competition_reward_coverage_service",
+        "umi.competition_reward_coverage_collector",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
         "umi.competition_reward_history_repair",

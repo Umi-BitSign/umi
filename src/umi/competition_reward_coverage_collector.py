@@ -13,6 +13,7 @@ import math
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from .competition_chain import _uint
@@ -37,6 +38,31 @@ from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
+
+
+def _log_retry(error, *, phase, operation, hotkey=None, block=None):
+    # Exception text and full tracebacks can include RPC URLs or credentials.
+    # Report only source coordinates inside this installed package, never locals.
+    origin = {}
+    trace = error.__traceback__
+    package = Path(__file__).parent
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        source = Path(code.co_filename)
+        if source.parent == package:
+            origin = {"module": source.stem, "function": code.co_name, "line": trace.tb_lineno}
+        trace = trace.tb_next
+    logger.info(
+        "coverage_retry %s",
+        {
+            "phase": phase,
+            "operation": operation,
+            "validator_hotkey": hotkey,
+            "block": block,
+            "error_type": type(error).__name__,
+            "origin": origin,
+        },
+    )
 
 
 class CoverageSource(Protocol):
@@ -147,8 +173,10 @@ class RewardCoverageCollector:
             planning_unit_seconds=(1, 300),
         ) as progress:
             for _ in range(count):
+                operation = "capture"
                 try:
                     endpoint = await self.source.capture(hotkey, height)
+                    operation = "validate_point"
                     point = coverage_point(endpoint, self.journal.rule)
                     if (
                         point.block != height
@@ -156,11 +184,13 @@ class RewardCoverageCollector:
                         or point.activation_sha256 != self.activation
                     ):
                         raise ValueError("captured endpoint differs from selected coverage")
+                    operation = "retain_endpoint"
                     await self.journal.retain_endpoint(endpoint)
                     left = lefts.get(hotkey)
                     if left is not None and (
                         coverage_point(left, self.journal.rule).block == height - 1
                     ):
+                        operation = "credit_interval"
                         interval = await self.journal.credit(left, endpoint)
                         if interval is not None:
                             self._replayed.add(interval.key())
@@ -173,6 +203,7 @@ class RewardCoverageCollector:
                     # Preserve both lane cursors and their preceding endpoints
                     # until retention and adjacent credit are acknowledged.
                     errors.append((hotkey, type(error).__name__))
+                    _log_retry(error, phase=phase, operation=operation, hotkey=hotkey, block=height)
                     progress.emit("retrying", reason=type(error).__name__)
                     break
                 height += 1
@@ -299,6 +330,7 @@ class RewardCoverageCollector:
                 replayed += 1
             except Exception as error:
                 errors.append(("replay", type(error).__name__))
+                _log_retry(error, phase="replay", operation="restore_and_credit_interval")
         if len(keys) < self.maximum_replay_intervals:
             self._cursor = None
         totals = await self._totals()
@@ -308,6 +340,7 @@ class RewardCoverageCollector:
             head = await self.source.finalized_height()
             _uint(head, 2**53 - 1)
         except Exception as error:
+            _log_retry(error, phase="head", operation="finalized_height")
             return CoverageProgress(totals, tuple([*errors, ("head", type(error).__name__)]), None)
         floor = max(self.first_block, head - self.capture_window + 1)
         if self._initial_head is None:
