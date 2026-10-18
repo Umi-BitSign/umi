@@ -65,6 +65,105 @@ async def finish(recovery, w):
     pytest.fail("recovery did not converge")
 
 
+def seed_untrusted_hints(w):
+    with w.connect() as db:
+        db.execute(
+            "CREATE TABLE historical_header_hints (hash TEXT PRIMARY KEY, encoded TEXT NOT NULL)"
+        )
+        db.executemany(
+            "INSERT INTO historical_header_hints VALUES (?,?)",
+            ((key, encode_rpc_header(value)) for key, value in w.headers.items()),
+        )
+
+
+async def test_retained_walk_uses_closed_bounded_read_snapshots(walk, monkeypatch):
+    w = walk
+    seed_untrusted_hints(w)
+    connections, checked = [], set()
+
+    class TrackedConnection:
+        def __init__(self):
+            self.db = w.connect()
+            self.closed = False
+
+        def execute(self, *args):
+            return self.db.execute(*args)
+
+        def close(self):
+            self.db.close()
+            self.closed = True
+
+    def connect():
+        db = TrackedConnection()
+        connections.append(db)
+        return db
+
+    from umi import historical_header_recovery as module
+
+    decode = module._decode_header
+
+    def checked_header(*args, **kwargs):
+        value = decode(*args, **kwargs)
+        checked.add(value["number"])
+        return value
+
+    monkeypatch.setattr(module, "_decode_header", checked_header)
+    service = HistoricalHeaderRecovery(connect, batch_size=7)
+    assert (await finish(service, w)).snapshot == w.target
+    distance = w.anchor.height - w.target.block_number
+    assert len(connections) == (distance + 6) // 7
+    assert checked == set(range(w.target.block_number, w.anchor.height + 1))
+    assert not w.calls and service._retained_hints is None
+    assert all(db.closed for db in connections)
+
+
+@pytest.mark.parametrize("corruption", ["wrong_link", "malformed"])
+async def test_prefetched_damage_preserves_only_prior_verified_links(walk, corruption):
+    w = walk
+    seed_untrusted_hints(w)
+    damaged_height = w.anchor.height - 4
+    key = w.by_height[damaged_height]
+    with w.connect() as db:
+        db.execute(
+            "UPDATE historical_header_hints SET encoded=? WHERE hash=?",
+            (
+                encode_rpc_header(w.headers[w.target.block_hash])
+                if corruption == "wrong_link"
+                else "0x00",
+                key,
+            ),
+        )
+    service = HistoricalHeaderRecovery(w.connect, batch_size=8)
+    with pytest.raises((ValueError, GrandpaFinalityObserverError)):
+        await service.recover(w.anchor, w.target, w.request)
+    assert set(service._verified) == set(range(damaged_height + 1, w.anchor.height))
+    assert service._retained_hints is None
+    with w.connect() as db:
+        db.execute(
+            "UPDATE historical_header_hints SET encoded=? WHERE hash=?",
+            (encode_rpc_header(w.headers[key]), key),
+        )
+    assert (await finish(service, w)).snapshot == w.target
+    assert not w.calls
+
+
+async def test_retained_prefetch_respects_smaller_selected_memory_budget(walk, monkeypatch):
+    w = walk
+    seed_untrusted_hints(w)
+    service = HistoricalHeaderRecovery(w.connect, maximum_bytes=600)
+    original, sizes = service._load, []
+
+    def measured(block_hash):
+        result = original(block_hash)
+        sizes.append(sum(len(raw) for raw in service._retained_hints.values() if raw is not None))
+        return result
+
+    monkeypatch.setattr(service, "_load", measured)
+    assert (await finish(service, w)).snapshot == w.target
+    assert max(sizes) <= 600
+    assert service._retained_hints is None and not w.calls
+
+
 async def test_gap_beyond_2048_resumes_after_restart_without_refetching(walk):
     w = walk
     service = HistoricalHeaderRecovery(w.connect, batch_size=256)

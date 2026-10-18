@@ -1515,6 +1515,18 @@ progress; a completed historical proof is reused across transport views. This
 does not create an observer record, move a signed deadline, or replace the fresh
 current-authority check. Preserve the registration cache and finality history
 during recovery; a missing header is a retryable hold, not a miner failure.
+Retained header hints remain untrusted after restart. Each bounded ancestry pass
+reads a limited raw parent path in a fresh SQLite snapshot, then checks every
+header hash and height against the owned finalized anchor before recording
+progress. The prefetch follows parent bytes only to select lookups; it cannot
+authenticate a link. The selected byte budget, remaining target distance and pass
+link limit bound prefetch. Each database connection closes within its worker
+call, and raw prefetched hints are discarded on completion, failure or
+cancellation. Existing hint databases need no conversion. A damaged later hint
+still permits only the valid earlier links to checkpoint; repair and retry retain
+their original authority and clocks. Recovery telemetry continues to measure
+verified links. An isolated hint-read benchmark is not a whole-startup or reward
+activation forecast; qualify the installed owner transition separately.
 The window's current-head check uses the owned observer directly; it does not
 repeat subnet membership collection. Admission and service review still perform
 their required registration and authority checks.

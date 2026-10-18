@@ -46,13 +46,16 @@ async def retained(history_case, monkeypatch):
     h.offline_through = h.end
     h.reader = await h.restart()
     prohibit_proof_replay(monkeypatch, h.reader)
-    loads, native_load = [], h.reader.checkpoints.load
+    # Observe the per-item checks inside both bounded snapshot reads. Watching
+    # load() would miss load_many()/recheck_many() and no longer establish that
+    # retries reuse one batch or revalidate every dependency before applying it.
+    loads, native_load = [], h.reader.checkpoints._load_snapshot
 
-    def load(height):
+    def load(height, db):
         loads.append(height)
-        return native_load(height)
+        return native_load(height, db)
 
-    monkeypatch.setattr(h.reader.checkpoints, "load", load)
+    monkeypatch.setattr(h.reader.checkpoints, "_load_snapshot", load)
     return h, expected, loads
 
 
