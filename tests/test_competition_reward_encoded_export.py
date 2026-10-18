@@ -343,3 +343,82 @@ def test_remote_compact_transport_multiple_parts(tmp_path):
     assert archive.read("history", "a" * 64, bounds={"evidence": MAX_EVIDENCE_BYTES + 1024})[1][
         "evidence"
     ] == b"".join(values)
+
+
+def test_completed_compact_copy_does_not_resolve_unchanged_published_objects(tmp_path, monkeypatch):
+    from umi import competition_reward_proof_archive as module
+
+    monkeypatch.setattr(module, "_publication_clock_ns", lambda: 2**63 - 1)
+    raw = b'{"proof":"' + b"ab" * 4096 + b'"}'
+    part, objects = encoded(raw)
+    archive = RewardProofArchive(tmp_path / "archive")
+    kwargs = dict(context={}, fields={"evidence": (part,)})
+    assert archive.copy_encoded_transport(
+        "history", "a" * 64, resolve=lambda sha, size: objects[sha], **kwargs
+    )
+    before = {p.relative_to(archive.root): p.read_bytes() for p in archive.root.rglob("*.json")}
+
+    def forbidden(*args):
+        pytest.fail("unchanged completed publication needs no source payload read")
+
+    assert archive.copy_encoded_transport("history", "a" * 64, resolve=forbidden, **kwargs)
+    assert before == {
+        p.relative_to(archive.root): p.read_bytes() for p in archive.root.rglob("*.json")
+    }
+
+
+@pytest.mark.parametrize(
+    "change", ["corrupt", "replace", "delete", "fresh_owner", "fork", "unqualified_tick"]
+)
+def test_compact_copy_cannot_reuse_changed_or_unqualified_transport_presence(
+    tmp_path, monkeypatch, change
+):
+    from umi import competition_reward_proof_archive as module
+
+    monkeypatch.setattr(
+        module, "_publication_clock_ns", lambda: 0 if change == "unqualified_tick" else 2**63 - 1
+    )
+    raw = b"original-object"
+    part, objects = encoded(raw)
+    archive = RewardProofArchive(tmp_path / "archive")
+    kwargs = dict(context={}, fields={"evidence": (part,)})
+    assert archive.copy_encoded_transport(
+        "history", "a" * 64, resolve=lambda sha, size: objects[sha], **kwargs
+    )
+    sha = next(iter(objects))
+    path = archive.root / "objects" / (sha + ".json")
+    if change == "corrupt":
+        path.write_bytes(canonical_json_bytes({"hex": b"modified-object".hex()}))
+    elif change == "replace":
+        original = path.read_bytes()
+        path.unlink()
+        path.write_bytes(original)
+        path.chmod(0o600)
+    elif change == "delete":
+        path.unlink()
+    elif change == "fresh_owner":
+        archive = RewardProofArchive(archive.root)
+    elif change == "fork":
+        monkeypatch.setattr(module.os, "getpid", lambda: archive._pid + 1)
+    resolved = []
+
+    def resolve(sha, size):
+        resolved.append(sha)
+        return objects[sha]
+
+    if change == "corrupt":
+        with pytest.raises(ValueError, match="different bytes"):
+            archive.copy_encoded_transport("history", "a" * 64, resolve=resolve, **kwargs)
+    else:
+        assert archive.copy_encoded_transport("history", "a" * 64, resolve=resolve, **kwargs)
+    assert sha in resolved
+
+
+def test_transport_presence_cannot_alias_another_object_length(tmp_path, monkeypatch):
+    from umi import competition_reward_proof_archive as module
+
+    monkeypatch.setattr(module, "_publication_clock_ns", lambda: 2**63 - 1)
+    archive = RewardProofArchive(tmp_path / "archive")
+    raw = b"original-object"
+    sha = archive._retain_bytes(raw)
+    assert not archive._published_object_present(sha, len(raw) + 1)
