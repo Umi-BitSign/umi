@@ -24,6 +24,22 @@ ABI = "umi-native-control-history-block/1"
 logger = logging.getLogger(__name__)
 
 
+class _CheckpointSourceSnapshot:
+    """Reuse source identities only inside one fresh read-only SQL snapshot."""
+
+    def __init__(self, checkpoints, db):
+        if not db.in_transaction or db.execute("PRAGMA query_only").fetchone() != (1,):
+            raise ValueError("checkpoint source reuse requires a read-only snapshot")
+        checkpoints.check_schema(db)
+        self.checkpoints, self.db, self.tokens = checkpoints, db, {}
+        self.remote_sources = checkpoints.remote_sources
+
+    def sources(self, keys):
+        if self.remote_sources is not self.checkpoints.remote_sources:
+            raise HistoryCheckpointRepairRequired("checkpoint remote source owner changed")
+        return self.checkpoints._sources(keys, self.db, self.tokens)
+
+
 def _migration_progress(state, total, completed, started):
     try:
         elapsed = time.monotonic() - started
@@ -211,16 +227,7 @@ class HistoryCheckpoints:
             _migration_progress("completed", *migration)
 
     def check_schema(self, db):
-        directory = self.journal.root.stat()
-        database = self.journal.path.stat()
-        if (directory.st_dev, directory.st_ino, directory.st_uid) != self.directory_identity or (
-            database.st_dev,
-            database.st_ino,
-            database.st_uid,
-        ) != self.database_identity:
-            raise HistoryCheckpointRepairRequired(
-                "history checkpoint original directory or database changed"
-            )
+        self._check_storage_identity()
         if self.journal.get("control_history_checkpoint_owner", "owner", db=db) != self.marker:
             raise HistoryCheckpointRepairRequired(
                 "history checkpoint owner marker is missing or changed"
@@ -248,23 +255,54 @@ class HistoryCheckpoints:
                 "history checkpoint source identity triggers changed"
             )
 
+    def _check_storage_identity(self):
+        directory = self.journal.root.stat()
+        database = self.journal.path.stat()
+        if (directory.st_dev, directory.st_ino, directory.st_uid) != self.directory_identity or (
+            database.st_dev,
+            database.st_ino,
+            database.st_uid,
+        ) != self.database_identity:
+            raise HistoryCheckpointRepairRequired(
+                "history checkpoint original directory or database changed"
+            )
+
     def sources(self, keys, db):
         self.check_schema(db)
+        return self._sources(keys, db)
+
+    def _sources(self, keys, db, snapshot_tokens=None):
         out = []
         for kind, key in sorted(set(keys)):
-            if self.remote_sources is not None:
-                out.append(self.remote_sources.source_token(kind, key, db))
-                continue
-            row = db.execute(
-                "SELECT revision,present FROM history_source_identity WHERE kind=? AND id=?",
-                (kind, key),
-            ).fetchone()
-            held = db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
-            if row is None or row[1] != 1 or held:
-                raise HistoryCheckpointRepairRequired(
-                    "history checkpoint source missing or conflict held"
+            identity = (kind, key)
+            if snapshot_tokens is not None and identity in snapshot_tokens:
+                cached = snapshot_tokens[identity]
+                out.append(
+                    self.remote_sources.recheck_snapshot_token(cached)
+                    if self.remote_sources is not None
+                    else list(cached)
                 )
-            out.append([kind, key, row[0]])
+                continue
+            if self.remote_sources is not None:
+                fact = self.remote_sources.snapshot_token(kind, key, db)
+                token = list(fact.token)
+            else:
+                row = db.execute(
+                    "SELECT revision,present FROM history_source_identity WHERE kind=? AND id=?",
+                    (kind, key),
+                ).fetchone()
+                held = db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
+                if row is None or row[1] != 1 or held:
+                    raise HistoryCheckpointRepairRequired(
+                        "history checkpoint source missing or conflict held"
+                    )
+                token = [kind, key, row[0]]
+                fact = tuple(token)
+            # Cache saturation changes only performance, never supported work.
+            # Neither this dictionary nor its read-only connection survives a batch.
+            if snapshot_tokens is not None and len(snapshot_tokens) < 8192:
+                snapshot_tokens[identity] = fact
+            out.append(token)
         return out
 
     def check_sources(self, sources, db):
@@ -301,9 +339,10 @@ class HistoryCheckpoints:
         height = first
         try:
             with self.journal.read_transaction() as db:
+                sources = _CheckpointSourceSnapshot(self, db)
                 values = []
                 for height in range(first, last + 1):
-                    value = self._load_snapshot(height, db)
+                    value = self._load_snapshot(height, db, sources)
                     if value is None:
                         break
                     values.append(value)
@@ -347,10 +386,11 @@ class HistoryCheckpoints:
         height = first
         try:
             with self.journal.read_transaction() as db:
+                sources = _CheckpointSourceSnapshot(self, db)
                 for height, saved in zip(range(first, last + 1), values, strict=True):
                     if (
                         saved["snapshot"]["block_number"] != height
-                        or self._load_snapshot(height, db) != saved
+                        or self._load_snapshot(height, db, sources) != saved
                     ):
                         raise HistoryCheckpointRepairRequired(
                             "checkpoint changed during owned restore"
@@ -376,8 +416,13 @@ class HistoryCheckpoints:
         with self.journal.read_transaction() as db:
             return self._load_snapshot(height, db)
 
-    def _load_snapshot(self, height, db):
-        self.check_schema(db)
+    def _load_snapshot(self, height, db, source_snapshot=None):
+        if source_snapshot is None:
+            self.check_schema(db)
+        elif source_snapshot.db is not db or source_snapshot.checkpoints is not self:
+            raise ValueError("checkpoint source snapshot belongs to another reader")
+        else:
+            self._check_storage_identity()
         row = db.execute(
             "SELECT key FROM history_checkpoint_index WHERE height=?", (height,)
         ).fetchone()
@@ -401,7 +446,12 @@ class HistoryCheckpoints:
                 "history checkpoint result or verifier semantics changed"
             )
         self.validate(value)
-        self.check_sources(value["sources"], db)
+        if source_snapshot is None:
+            self.check_sources(value["sources"], db)
+        elif source_snapshot.sources((v[0], v[1]) for v in value["sources"]) != value["sources"]:
+            raise HistoryCheckpointRepairRequired(
+                "history checkpoint source changed; scoped native repair required"
+            )
         check_checkpoint_origin(self.journal, value, db, self._original_export_origins)
         return value
 
