@@ -33,10 +33,14 @@ _ISSUER = object()
 _MAX_EVIDENCE_BYTES = 32 * 1024**2
 # Exact scoped predicate qualification, independently reviewed; this does not
 # claim build or contract-execution equivalence. Retained provenance and limits:
-# tests/fixtures/reward-eligibility/runtime479-qualification.json.
+# tests/fixtures/reward-eligibility/runtime{479,481}-qualification.json.
 # A signed transition still needs this gate and every endpoint's native proofs.
 _QUALIFIED_YUMA_RUNTIMES: frozenset[tuple[str, str]] = frozenset(
     {
+        (
+            "48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
+            "6a972693ae9580541225bd37696ac2fee26b8ae9",
+        ),
         (
             "d0ea4955e6b4366d8561038307d5e47572c1ad67664638402c8253cde26a84be",
             "f4786f9087cac84cfab37cbdf1e01c399042653a",
@@ -49,7 +53,7 @@ class RewardEligibilityRuntime(StrictProtocolModel):
     """Selected code and reviewed pre-consensus semantics, never a code wildcard.
 
     /1 preserves historical c004 evidence exactly. /2 supports the reviewed
-    f4786f Yuma path only: each endpoint must also prove its epoch mode. The
+    f4786f and 6a9726 Yuma paths only: each endpoint must also prove its epoch mode. The
     source revision alone cannot select that mutable subnet state.
     """
 
@@ -62,22 +66,47 @@ class RewardEligibilityRuntime(StrictProtocolModel):
     epoch_source_revision: Literal[
         "c004cebf360f4088187ee49d851dfb1a1eaaf710",
         "f4786f9087cac84cfab37cbdf1e01c399042653a",
+        "6a972693ae9580541225bd37696ac2fee26b8ae9",
     ]
 
     @model_validator(mode="after")
     def selected_semantics(self):
-        expected = (
-            "c004cebf360f4088187ee49d851dfb1a1eaaf710"
+        original = "c004cebf360f4088187ee49d851dfb1a1eaaf710"
+        yuma_sources = {
+            "f4786f9087cac84cfab37cbdf1e01c399042653a",
+            "6a972693ae9580541225bd37696ac2fee26b8ae9",
+        }
+        supported = (
+            self.epoch_source_revision == original
             if self.schema_ == "umi-reward-eligibility-runtime/1"
-            else "f4786f9087cac84cfab37cbdf1e01c399042653a"
+            else self.epoch_source_revision in yuma_sources
         )
-        if self.epoch_source_revision != expected:
+        if not supported:
             raise ValueError("reward eligibility profile schema and source semantics differ")
         return self
 
     @property
     def requires_epoch_consensus_proof(self) -> bool:
         return self.schema_ == "umi-reward-eligibility-runtime/2"
+
+
+class RewardRuntimeCodeMismatch(ValueError):
+    """Expose exact proved code drift without logging provider URLs or credentials."""
+
+    reason_code = "reward_eligibility_runtime_code_mismatch"
+
+    def __init__(self, *, expected: str, observed: str):
+        self.expected_runtime_code_sha256 = expected
+        self.observed_runtime_code_sha256 = observed
+        super().__init__("reward eligibility requires the proved qualified runtime code")
+
+
+def validate_reward_runtime_code(runtime, profile: RewardEligibilityRuntime) -> None:
+    if type(runtime) is not ExecutedRuntimeContext:
+        raise ValueError("reward eligibility requires an owned executed runtime context")
+    observed = hashlib.sha256(runtime.code_evidence.value).hexdigest()
+    if observed != profile.runtime_code_sha256:
+        raise RewardRuntimeCodeMismatch(expected=profile.runtime_code_sha256, observed=observed)
 
 
 class UnsupportedRewardEpochConsensus(ValueError):
@@ -230,12 +259,7 @@ async def _collect(provider, chain, profile, maximum_parent_hotkeys):
             raise ValueError("reward eligibility requires complete state and supported mechanism")
         runtime = chain.runtime
         provider._validate_runtime_context(runtime, chain.snapshot)
-        if (
-            type(runtime) is not ExecutedRuntimeContext
-            or hashlib.sha256(runtime.code_evidence.value).hexdigest()
-            != profile.runtime_code_sha256
-        ):
-            raise ValueError("reward eligibility requires the proved qualified runtime code")
+        validate_reward_runtime_code(runtime, profile)
         block = await provider._finality.verified_block_at(chain.block)
         provider._check_finality(chain.snapshot, block)
         provider._fresh(chain.timestamp_ms)

@@ -452,3 +452,44 @@ async def test_successor_writer_assembly_receives_the_same_gap_contract(
     monkeypatch.setattr(boot, "StandingRewardCoverageService", coverage)
     await native.test_successor_native_assembly_reconstructs_predecessor_owners(inputs, monkeypatch)
     assert len(observed) == 1
+
+
+def test_runtime481_requires_its_actual_signed_scope_and_preserves_boot(inputs):
+    config = inputs.value
+    profile = RewardEligibilityRuntime(
+        schema="umi-reward-eligibility-runtime/2",
+        genesis_hash=config.eligibility.genesis_hash,
+        netuid=78,
+        runtime_code_sha256="48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
+        epoch_source_revision="6a972693ae9580541225bd37696ac2fee26b8ae9",
+    )
+    first = config.series.recovery.authority.issued_at_block + 10
+    body = RewardRuntimeAdoption(
+        schema="umi-standing-reward-runtime-adoption/1",
+        series_sha256=digest(config.series),
+        manifest_sha256=digest(config.manifest),
+        policy_sha256=digest(config.policy),
+        authority_sha256=digest(config.series.recovery.authority),
+        original_runtime_profile_sha256=digest(config.eligibility),
+        effective_profile=profile,
+        first_block=first,
+        last_block=first + 100,
+        issued_at_block=first,
+        revision=1,
+        predecessor_adoption_sha256=None,
+        original_signed_inputs_unchanged=True,
+    )
+    selected = RewardRuntimeAdoptionSelection(
+        schema="umi-standing-reward-runtime-adoption-selection/1",
+        adoptions=(SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),),
+    )
+    candidate = extend_boot_runtime_adoptions(config, selected)
+    parsed = StandingRewardBootConfig.model_validate_json(canonical_json_bytes(candidate))
+    native = select_boot_runtime(parsed)
+    assert native.selected(first) == (profile, digest(body))
+    assert native.selected(first - 1) == (config.eligibility, None)
+    assert native.selected(first + 101) == (config.eligibility, None)
+    for name in ("series", "manifest", "policy", "handoff", "eligibility"):
+        assert canonical_json_bytes(getattr(parsed, name)) == canonical_json_bytes(
+            getattr(config, name)
+        )

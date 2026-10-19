@@ -22,6 +22,7 @@ from .competition_reward_eligibility import (
     _eligibility_inputs,
     _spec,
     validate_qualified_reward_runtime,
+    validate_reward_runtime_code,
 )
 from .competition_reward_eligibility_archive import (
     OwnedHistoricalRewardEligibility,
@@ -30,7 +31,6 @@ from .competition_reward_eligibility_archive import (
 )
 from .open_competition import digest
 from .protocol import canonical_json_bytes
-from .runtime_metadata import ExecutedRuntimeContext
 from .validator_chain import StorageReadSpec
 
 
@@ -89,13 +89,9 @@ async def capture_reward_eligibility(
 async def _capture(provider, control, hotkey, control_hotkey, profile, maximum_parent_hotkeys):
     async with provider._lock:
         observed, runtime = await provider._runtime_for_owned_control_locked(control)
-        if (
-            observed.snapshot != control.snapshot
-            or type(runtime) is not ExecutedRuntimeContext
-            or hashlib.sha256(runtime.code_evidence.value).hexdigest()
-            != profile.runtime_code_sha256
-        ):
-            raise ValueError("historical capture requires the proved qualified runtime")
+        if observed.snapshot != control.snapshot:
+            raise ValueError("historical capture differs from selected native control")
+        validate_reward_runtime_code(runtime, profile)
         batches, values = [], {}
 
         async def read(specs):

@@ -1,0 +1,30 @@
+{
+  "schema": "umi-runtime-scoped-eligibility-qualification/1",
+  "runtime_code_sha256": "48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
+  "epoch_source_revision": "6a972693ae9580541225bd37696ac2fee26b8ae9",
+  "profile_schema": "umi-reward-eligibility-runtime/2",
+  "netuid": 78,
+  "scope": "same-root Yuma pre-consensus row eligibility",
+  "artifact": "https://github.com/RaoFoundation/subtensor/releases/download/v481/subtensor.wasm",
+  "release_manifest": "https://github.com/RaoFoundation/subtensor/releases/download/v481/upgrade-manifest.json",
+  "build_digest": "https://github.com/RaoFoundation/subtensor/releases/download/v481/subtensor-digest.json",
+  "qualification": {
+    "artifact_correspondence": "Independent native code proof exactly matches the official v481 artifact and its srtool SHA256/source revision. No independent reproducible rebuild claimed.",
+    "predicate": "Full run_epoch.rs, epoch/math.rs, safe-math/src/lib.rs and staking/set_children.rs match the previously qualified f4786f source byte for byte. Ten selected stake/activity/owner helpers have identical tokens after comments; get_tao_weight delegates to a pure helper performing the identical U96F32 saturation and u64::MAX safe division.",
+    "source_attribution": "Official immutable release commit and srtool build records; qualification is scoped to the selected predicate, not all runtime behavior.",
+    "source_review_report_sha256": "111c1f048fd2fdd032a76b4ae5e587a7bec59b884e2f4c027ce95ab719969e23",
+    "exact_native_control_proof_sha256": "fa1d325d831542f09079cafcf65a900c0565cfdf2f292b3bce2255aea9450b32",
+    "native_code_proof_block": 9320715,
+    "github_slsa_attestation_available": false
+  },
+  "required_conditions": [
+    "Explicit authenticated selection of this exact code/source profile; keep original signed anchors and clocks.",
+    "Complete independent native same-root state, code and finality proofs.",
+    "SubnetEpochConsensus(78) must prove Yuma at every endpoint, including native metadata Default after proved absence. Null refuses.",
+    "Unknown hashes and the original/479 profiles retain their original rejection and replay behavior."
+  ],
+  "limits": [
+    "No whole-runtime, emission-allocation, consensus or contract-execution equivalence. Runtime481 changes emission split mechanics outside the eligibility predicate.",
+    "An artifact hash, source review or earlier mode sample is not authority to accept a later root or activate rewards."
+  ]
+}

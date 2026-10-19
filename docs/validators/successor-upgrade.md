@@ -844,7 +844,17 @@ requires an explicitly qualified runtime code/source pair and a native proof of
 `SubnetEpochConsensus(78)` at every endpoint's exact state root. Only proved Yuma
 is supported; an absent value uses that runtime's proved metadata default.
 Unknown code, Null or malformed consensus state refuses with an explicit reason.
-A release or source label alone does not establish runtime equivalence.
+A release or source label alone does not establish runtime equivalence. The
+qualified `/2` profiles cover exact runtime479/f4786f and runtime481/6a9726
+code/source pairs; their artifact and predicate scopes are recorded in
+`tests/fixtures/reward-eligibility/runtime479-qualification.json` and
+`tests/fixtures/reward-eligibility/runtime481-qualification.json`. Runtime481's
+emission split changes are outside the unchanged Yuma eligibility predicate;
+this qualification makes no general emission-equivalence claim. Code drift
+refuses current capture and archive review with
+`reward_eligibility_runtime_code_mismatch`; coverage retry logs include only the
+expected and proved code hashes, never provider credentials. Select an
+independently qualified, authenticated profile before retrying that work.
 
 Choose the first adopted block no later than the earliest endpoint still needed
 by the collector, using retained native runtime evidence for that range. Finding
