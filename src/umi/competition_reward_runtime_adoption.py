@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_recovery import Block, verify_recovery_authority, verify_recovery_quorum
 from .competition_reward_eligibility import (
@@ -27,7 +27,10 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
 class RewardRuntimeAdoption(StrictProtocolModel):
-    schema_: Literal["umi-standing-reward-runtime-adoption/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-standing-reward-runtime-adoption/1",
+        "umi-standing-reward-runtime-adoption/2",
+    ] = Field(alias="schema")
     series_sha256: Hex32
     manifest_sha256: Hex32
     policy_sha256: Hex32
@@ -40,9 +43,22 @@ class RewardRuntimeAdoption(StrictProtocolModel):
     revision: Annotated[int, Field(ge=1, le=4096)]
     predecessor_adoption_sha256: Hex32 | None
     original_signed_inputs_unchanged: Literal[True]
+    supersedes_adoption_sha256: Hex32 | None = None
+
+    @model_serializer(mode="wrap")
+    def original_signed_bytes(self, handler):
+        value = handler(self)
+        if self.supersedes_adoption_sha256 is None:
+            value.pop("supersedes_adoption_sha256", None)
+        return value
 
     @model_validator(mode="after")
     def scope(self):
+        supersession = self.schema_ == "umi-standing-reward-runtime-adoption/2"
+        if supersession != (self.supersedes_adoption_sha256 is not None):
+            raise ValueError("runtime supersession requires its explicit versioned target")
+        if supersession and self.revision == 1:
+            raise ValueError("runtime supersession requires a retained predecessor")
         if self.first_block > self.last_block:
             raise ValueError("runtime adoption has an empty block scope")
         if (self.revision == 1) != (self.predecessor_adoption_sha256 is None):
@@ -68,6 +84,7 @@ class RewardRuntimeAdoptionSelection(StrictProtocolModel):
     schema_: Literal[
         "umi-standing-reward-runtime-adoption-selection/1",
         "umi-standing-reward-runtime-adoption-selection/2",
+        "umi-standing-reward-runtime-adoption-selection/3",
     ] = Field(alias="schema")
     adoptions: Annotated[
         tuple[SignedRewardRuntimeAdoption, ...], Field(min_length=1, max_length=4096)
@@ -76,6 +93,7 @@ class RewardRuntimeAdoptionSelection(StrictProtocolModel):
     @model_validator(mode="after")
     def lineage(self):
         previous = None
+        retained = {}
         immutable = (
             "series_sha256",
             "manifest_sha256",
@@ -99,6 +117,39 @@ class RewardRuntimeAdoptionSelection(StrictProtocolModel):
                 or any(getattr(body, name) != getattr(previous, name) for name in immutable)
             ):
                 raise ValueError("runtime adoption changes lineage or overlaps an earlier scope")
+            if body.supersedes_adoption_sha256 is not None:
+                if self.schema_ != "umi-standing-reward-runtime-adoption-selection/3":
+                    raise ValueError("runtime supersession requires selection format3")
+                target = retained.get(body.supersedes_adoption_sha256)
+                if target is None:
+                    raise ValueError("runtime supersession target is not retained")
+                if (
+                    body.first_block < target.first_block
+                    or body.last_block > target.last_block
+                    or body.effective_profile.runtime_code_sha256
+                    == target.effective_profile.runtime_code_sha256
+                ):
+                    raise ValueError("runtime supersession extends its target or keeps its code")
+                ancestors = set()
+                ancestor = target
+                while ancestor is not None:
+                    ancestors.add(digest(ancestor))
+                    ancestor = retained.get(ancestor.supersedes_adoption_sha256)
+                for key, old in retained.items():
+                    overlaps = (
+                        body.first_block <= old.last_block and old.first_block <= body.last_block
+                    )
+                    if overlaps and key not in ancestors:
+                        raise ValueError("runtime supersession overlaps an unrelated signed scope")
+            elif self.schema_ == "umi-standing-reward-runtime-adoption-selection/3":
+                if any(
+                    body.first_block <= old.last_block and old.first_block <= body.last_block
+                    for old in retained.values()
+                ):
+                    raise ValueError(
+                        "runtime overlap requires an explicit authenticated supersession"
+                    )
+            retained[digest(body)] = body
             previous = body
         if self.schema_ == "umi-standing-reward-runtime-adoption-selection/2":
             scopes = sorted((v.adoption.first_block, v.adoption.last_block) for v in self.adoptions)
@@ -146,7 +197,12 @@ class SelectedRewardRuntime:
         if type(block) is not int or block < 0:
             raise ValueError("runtime selection requires a native block height")
         if self.selection is not None:
-            for signed in self.selection.adoptions:
+            records = (
+                reversed(self.selection.adoptions)
+                if self.selection.schema_ == "umi-standing-reward-runtime-adoption-selection/3"
+                else self.selection.adoptions
+            )
+            for signed in records:
                 body = signed.adoption
                 if body.first_block <= block <= body.last_block:
                     return body.effective_profile, digest(body)
@@ -159,6 +215,18 @@ class SelectedRewardRuntime:
         # authorization never relabels those bytes as new-profile evidence.
         if adoption_sha256 is None and profile_sha256 == digest(self.original_profile):
             return self.original_profile
+        if self.selection is not None and self.selection.schema_.endswith("/3"):
+            # Retained native evidence keeps its original authenticated profile.
+            # Replay must still prove that exact code at its own finalized root;
+            # fresh capture always uses selected(), including the supersession.
+            for signed in self.selection.adoptions:
+                body = signed.adoption
+                if (
+                    body.first_block <= block <= body.last_block
+                    and digest(body) == adoption_sha256
+                    and digest(body.effective_profile) == profile_sha256
+                ):
+                    return body.effective_profile
         profile, adoption = self.selected(block)
         if digest(profile) != profile_sha256 or adoption != adoption_sha256:
             raise ValueError("runtime evidence differs from authenticated block selection")

@@ -834,6 +834,21 @@ when preparing capacity, not the last revision's block range. Older readers
 refuse `/2` before execution: qualify and select a supporting runtime before
 adopting such a configuration. Original `/1` bytes and completed proofs keep
 their original semantics and validity. No old signature or clock is rewritten.
+A chain code upgrade inside an already signed window uses an explicit
+`umi-standing-reward-runtime-adoption/2` supersession and selection format
+`umi-standing-reward-runtime-adoption-selection/3`. Append the new signed record
+with its usual revision predecessor and `supersedes_adoption_sha256` naming the
+retained runtime contract. The new code must differ, remain independently
+qualified and stay entirely within the target's original first/last blocks.
+Every overlapping earlier range must be that target or its supersession ancestry;
+an unnamed overlap or extension refuses. The highest signed revision selects the
+fresh profile in the overlap. Historical native proofs retain their exact
+previous authenticated profile/adoption identities and still prove that code at
+their finalized roots. Keep every earlier contract, signature and clock intact.
+The new record does not extend cohort time or local capacity approval. Qualify a
+reader supporting format `/3` before changing a supported installation; older
+readers refuse it before execution, and no journal reset is part of migration.
+
 The `extend_boot_runtime_adoptions` preparation API validates
 the existing supported boot, authenticates the additive selection and reports
 three counted checks before returning a candidate. It does not write a control,
