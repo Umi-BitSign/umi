@@ -29,6 +29,7 @@ from .competition_reward_eligibility import (
     _EligibilitySubject,
     _vector,
     validate_qualified_reward_runtime,
+    validate_reward_runtime_code,
 )
 from .competition_reward_eligibility_math import epoch_eligibility
 from .competition_weight_archive import WeightStateArchive, _hex
@@ -36,7 +37,6 @@ from .concurrency import run_owned_thread
 from .encoding import account_id32
 from .open_competition import BurnDestination, Registration, digest
 from .protocol import canonical_json_bytes
-from .runtime_metadata import ExecutedRuntimeContext
 
 _ISSUER = object()
 
@@ -275,12 +275,7 @@ async def review_reward_eligibility(
             expected_control_hotkey=control_hotkey,
             expected_chain_config_sha256=digest(provider.config),
         )
-        if (
-            type(runtime) is not ExecutedRuntimeContext
-            or hashlib.sha256(runtime.code_evidence.value).hexdigest()
-            != profile.runtime_code_sha256
-        ):
-            raise ValueError("historical eligibility requires the proved qualified runtime")
+        validate_reward_runtime_code(runtime, profile)
         weights = await run_owned_thread(
             WeightStateArchive, chain, runtime, provider.config, control
         )

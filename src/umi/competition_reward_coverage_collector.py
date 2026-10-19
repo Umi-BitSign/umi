@@ -26,6 +26,7 @@ from .competition_reward_coverage_intervals import (
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_source import CoverageHistoryPending
 from .competition_reward_decisions import RewardActivation, StandingRewardSeries
+from .competition_reward_eligibility import RewardRuntimeCodeMismatch
 from .competition_reward_manifest import StandingRewardOpportunityManifest
 from .competition_reward_opportunity import RewardOpportunityCertificate, opportunity_rule
 from .competition_reward_opportunity_review import (
@@ -44,6 +45,24 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
     # Exception text and full tracebacks can include RPC URLs or credentials.
     # Report only source coordinates inside this installed package, never locals.
     details = _failure_details(error)
+    runtime_code = None
+    cause, seen = error, set()
+    while cause is not None and id(cause) not in seen and len(seen) < 6:
+        seen.add(id(cause))
+        if isinstance(cause, RewardRuntimeCodeMismatch):
+            runtime_code = {
+                "expected_sha256": cause.expected_runtime_code_sha256,
+                "observed_sha256": cause.observed_runtime_code_sha256,
+            }
+            if not all(
+                type(value) is str
+                and len(value) == 64
+                and all(char in "0123456789abcdef" for char in value)
+                for value in runtime_code.values()
+            ):
+                runtime_code = None
+            break
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
     origin = next(
         (cause["source_frames"][-1] for cause in reversed(details) if cause["source_frames"]), {}
     )
@@ -55,6 +74,8 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
             "validator_hotkey": hotkey,
             "block": block,
             "error_type": type(error).__name__,
+            "reason_codes": [detail["reason_code"] for detail in details],
+            "runtime_code": runtime_code,
             "origin": origin,
         },
     )

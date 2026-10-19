@@ -72,15 +72,20 @@ def test_reviewed_runtime_pair_is_qualified_without_authorizing_other_code():
         )
 
 
+@pytest.fixture(params=[YUMA_REVISION, "6a972693ae9580541225bd37696ac2fee26b8ae9"])
+def yuma_source(request):
+    return request.param
+
+
 @pytest.fixture
-async def eligibility_case(registered_case, monkeypatch, tmp_path, request):
+async def eligibility_case(registered_case, monkeypatch, tmp_path, request, yuma_source):
     t = await configure_eligibility(registered_case, monkeypatch, tmp_path)
     t.profile = RewardEligibilityRuntime.model_validate_json(
         canonical_json_bytes(
             {
                 **t.profile.model_dump(mode="json", by_alias=True),
                 "schema": "umi-reward-eligibility-runtime/2",
-                "epoch_source_revision": YUMA_REVISION,
+                "epoch_source_revision": yuma_source,
             }
         )
     )
