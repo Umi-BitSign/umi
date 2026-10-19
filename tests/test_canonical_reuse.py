@@ -233,7 +233,8 @@ def test_other_binary_envelopes_keep_exact_rfc_behavior(monkeypatch, budget):
                 assert str(actual.value) == str(error)
             else:
                 assert canonical_json_bytes(value) == expected
-            assert len(calls) > before
+            if budget is not None:
+                assert len(calls) > before
 
 
 def test_binary_envelope_mutation_never_reuses_old_bytes():

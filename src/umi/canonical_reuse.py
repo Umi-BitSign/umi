@@ -21,6 +21,71 @@ import rfc8785
 # it never rejects an input or changes any protocol/transport size limit.
 _MAXIMUM_BYTES = 8 * 1024**2
 _MAXIMUM_ENTRIES = 4096
+_SMALL_JSON_BYTES = 256 * 1024
+_SMALL_JSON_VALUES = 8192
+
+
+class _SmallJSONFallback(Exception):
+    pass
+
+
+def small_ascii_json_bytes(value) -> bytes | None:
+    """Byte-equivalent RFC 8785 encoding for a bounded exact primitive subset.
+
+    ASCII keys have identical UTF-16/Python ordering; safe integers and ASCII
+    strings have identical stdlib/RFC encodings. Floats, Unicode, subclasses,
+    large trees and cycles retain the ordinary RFC path. These budgets only
+    select an encoder: they never reject or shorten supported protocol inputs.
+    """
+    count = ceiling = 0
+
+    def snapshot(item, depth=0):
+        nonlocal count, ceiling
+        count += 1
+        if count > _SMALL_JSON_VALUES or depth > 64:
+            raise _SmallJSONFallback
+        kind = type(item)
+        if kind is str:
+            if len(item) > _SMALL_JSON_BYTES or not item.isascii():
+                raise _SmallJSONFallback
+            ceiling += 6 * len(item) + 3
+        elif kind is int:
+            if not -(2**53 - 1) <= item <= 2**53 - 1:
+                raise _SmallJSONFallback
+            ceiling += 18
+        elif kind in (bool, type(None)):
+            ceiling += 6
+        elif kind is dict:
+            if len(item) + count > _SMALL_JSON_VALUES:
+                raise _SmallJSONFallback
+            ceiling += 2
+            owned = {}
+            for key, child in tuple(item.items()):
+                if type(key) is not str or len(key) > _SMALL_JSON_BYTES or not key.isascii():
+                    raise _SmallJSONFallback
+                ceiling += 6 * len(key) + 4
+                if ceiling > _SMALL_JSON_BYTES:
+                    raise _SmallJSONFallback
+                owned[key] = snapshot(child, depth + 1)
+            return owned
+        elif kind in (list, tuple):
+            if len(item) + count > _SMALL_JSON_VALUES:
+                raise _SmallJSONFallback
+            ceiling += 2
+            return [snapshot(child, depth + 1) for child in tuple(item)]
+        else:
+            raise _SmallJSONFallback
+        if ceiling > _SMALL_JSON_BYTES:
+            raise _SmallJSONFallback
+        return item
+
+    try:
+        owned = snapshot(value)
+    except _SmallJSONFallback:
+        return None
+    return json.dumps(
+        owned, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
 
 
 class _Uncacheable(TypeError):
@@ -139,4 +204,7 @@ def canonical_dumps(value) -> bytes:
         ):
             return b"".join((b'{"hex":"', raw.encode("ascii"), b'"}'))
     cache = _ACTIVE.get()
-    return rfc8785.dumps(value) if cache is None else cache.dumps(value)
+    if cache is not None:
+        return cache.dumps(value)
+    encoded = small_ascii_json_bytes(value)
+    return rfc8785.dumps(value) if encoded is None else encoded

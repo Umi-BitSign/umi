@@ -17,7 +17,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from typing_extensions import Self
 
 from .canonical_aggregate import AggregateStreamModel
-from .canonical_reuse import canonical_dumps
+from .canonical_reuse import canonical_dumps, small_ascii_json_bytes
 from .canonical_stream import aggregate_json_bytes, canonical_json_matches
 from .scoring import grapheme_clusters, normalize_text
 
@@ -348,7 +348,9 @@ def is_canonical_json(raw: bytes) -> bool:
         if key in _CANONICAL_VERIFIED:
             _CANONICAL_VERIFIED.move_to_end(key)
             return True
-    if not canonical_json_matches(json.loads(raw), raw):
+    parsed = json.loads(raw)
+    encoded = small_ascii_json_bytes(parsed) if len(raw) <= 256 * 1024 else None
+    if not (encoded == raw if encoded is not None else canonical_json_matches(parsed, raw)):
         return False
     with _CANONICAL_VERIFIED_LOCK:
         _CANONICAL_VERIFIED[key] = None
