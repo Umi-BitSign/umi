@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import sqlite3
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -809,13 +810,21 @@ class RewardControlHistoryReader:
         self.progress.native_stop()
         if self._next > last:
             return
+        metadata_started = time.monotonic()
         batch, self._pending_checkpoint_restore = self._pending_checkpoint_restore, None
-        if (
+        reuse_batch = (
             batch is not None
             and (batch.first, batch.last, batch.repair_id) == (self._next, last, self._repair_id)
             and batch.provider is provider
             and batch.checkpoints is self.checkpoints
-        ):
+        )
+        if not reuse_batch:
+            self.progress.preparation_start(
+                "checkpoint_metadata_loading", self._next, "load_retained_checkpoint_metadata"
+            )
+            self.progress.report(self, "running", force=True)
+        if reuse_batch:
+            assert batch is not None
             values = batch.values
         elif self._repair_reason:
             values = []
@@ -836,7 +845,7 @@ class RewardControlHistoryReader:
                 raise
         if not values:
             return
-        self.progress.restore_start(self._next, len(values))
+        self.progress.restore_start(self._next, len(values), started=metadata_started)
         self.progress.report(self, "running")
         try:
             await self._validate_checkpoint_tip(provider, values[-1])

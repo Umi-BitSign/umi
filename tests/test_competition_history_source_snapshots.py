@@ -30,13 +30,14 @@ async def test_batch_resolves_each_shared_source_once_then_rechecks_fresh(
     expected = [checkpoints.load(n) for n in range(h.old.height, h.end + 1)]
     unique = {(s[0], s[1]) for value in expected for s in value["sources"]}
     calls = []
-    resolve = checkpoints.remote_sources.snapshot_token
+    resolve = checkpoints.remote_sources.snapshot_tokens
 
-    def counted(kind, key, db):
-        calls.append((kind, key))
-        return resolve(kind, key, db)
+    def counted(keys, db):
+        assert len(keys) <= 256
+        calls.extend(keys)
+        return resolve(keys, db)
 
-    monkeypatch.setattr(checkpoints.remote_sources, "snapshot_token", counted)
+    monkeypatch.setattr(checkpoints.remote_sources, "snapshot_tokens", counted)
     prohibit_proof_replay(monkeypatch, h.reader)
     assert checkpoints.load_many(h.old.height, h.end) == expected
     assert len(calls) == len(unique) and set(calls) == unique

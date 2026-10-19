@@ -166,7 +166,7 @@ class HistoryProgress:
             "finished": None,
         }
 
-    def restore_start(self, first, total, *, admission=False):
+    def restore_start(self, first, total, *, admission=False, started=None):
         self.ancestry_progress = None
         stage = "completed_admission_restore" if admission else "checkpoint_restore"
         if self.restoration is not None and (
@@ -185,6 +185,8 @@ class HistoryProgress:
                 else "restore_completed_checkpoint_batch",
             )
             self.preparation["total"] = total
+            if started is not None:
+                self.preparation["started"] = started
             self.restoration = self.preparation
 
     def native_start(self, *, retained=False, repair=False):

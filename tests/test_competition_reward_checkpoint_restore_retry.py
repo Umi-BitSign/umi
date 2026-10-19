@@ -219,3 +219,33 @@ async def test_writer_owner_failure_during_progress_drops_batch_and_drains_monit
     assert h.reader._next == h.old.height
     assert not h.reader.progress.active
     assert asyncio.all_tasks() <= before
+
+
+async def test_restore_stage_clock_includes_initial_metadata_load(history_case, monkeypatch):
+    from umi import competition_reward_history as history_module
+    from umi import competition_reward_history_progress as progress_module
+
+    h, expected, _ = await retained(history_case, monkeypatch)
+    clock = [1000.0]
+    native_load = h.reader.checkpoints.load_many
+    native_tip = h.reader._validate_checkpoint_tip
+
+    def delayed_load(*args):
+        values = native_load(*args)
+        clock[0] += 5
+        return values
+
+    async def delayed_tip(*args):
+        result = await native_tip(*args)
+        clock[0] += 3
+        return result
+
+    # Do not change asyncio's global clock or a provider's signed clocks.
+    fake_time = SimpleNamespace(monotonic=lambda: clock[0])
+    monkeypatch.setattr(history_module, "time", fake_time)
+    monkeypatch.setattr(progress_module, "time", fake_time)
+    monkeypatch.setattr(h.reader.checkpoints, "load_many", delayed_load)
+    monkeypatch.setattr(h.reader, "_validate_checkpoint_tip", delayed_tip)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert h.reader.progress.latest["stage_elapsed_seconds"] == 8
+    assert h.reader.progress.native_completed == 0
