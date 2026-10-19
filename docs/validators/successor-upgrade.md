@@ -990,6 +990,15 @@ a fresh snapshot rechecks every dependency before history effects apply in order
 This changes neither journal formats nor the verifier ABI; supported retained
 checkpoints keep their original signed bytes, owner and clock bindings.
 
+For bounded retained ASCII JSON, canonicality checking uses the decoder's owned
+builtin values directly. Safe integers retain the exact RFC 8785 encoding;
+floats, Unicode and larger inputs use the ordinary RFC reader. This avoids
+copying an arbitrary caller-owned tree merely to validate retained bytes.
+Checkpoint identity hashes the already canonical, bounded original bytes with
+the original competition domain. Source generations, conflict holds, provenance,
+semantic validation and the fresh check after finality remain required. Neither
+optimization changes the stored checkpoint format or creates a new verdict.
+
 Restore stage elapsed time includes the initial metadata loading pass. Long
 metadata loading and recheck batches separately log completed checks, requested
 work, retained results, elapsed time and their own ETA basis. Those counts grant
