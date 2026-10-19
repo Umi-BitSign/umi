@@ -66,14 +66,30 @@ def identity(hotkey: str) -> str:
     return account_id32(hotkey).hex()
 
 
+_DIGEST_DOMAIN = b"umi-open-competition-v1\0"
+
+
+def digest_canonical_bytes(raw: bytes) -> str:
+    """Hash an already validated canonical body in the competition domain.
+
+    This helper does not validate JSON or confer verification authority. Callers
+    retaining raw bytes must keep their normal canonicality and byte-bound checks.
+    """
+    if not isinstance(raw, bytes):
+        raise TypeError("canonical body must be bytes")
+    result = hashlib.sha256(_DIGEST_DOMAIN)
+    result.update(raw)
+    return result.hexdigest()
+
+
 def digest(value: StrictProtocolModel) -> str:
     """Bind object type, network and all fields through the canonical body."""
     from .canonical_stream import canonical_json_sha256
     from .competition_cohort_aggregate_model import AggregateProtocolModel
 
     if isinstance(value, AggregateProtocolModel):
-        return canonical_json_sha256(value, b"umi-open-competition-v1\0")
-    return hashlib.sha256(b"umi-open-competition-v1\0" + canonical_json_bytes(value)).hexdigest()
+        return canonical_json_sha256(value, _DIGEST_DOMAIN)
+    return digest_canonical_bytes(canonical_json_bytes(value))
 
 
 class Evaluator(StrictProtocolModel):

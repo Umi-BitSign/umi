@@ -9,6 +9,7 @@ reads, and finalized-head collection are never memoized.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -23,10 +24,53 @@ _MAXIMUM_BYTES = 8 * 1024**2
 _MAXIMUM_ENTRIES = 4096
 _SMALL_JSON_BYTES = 256 * 1024
 _SMALL_JSON_VALUES = 8192
+_ASCII_JSON_STRUCTURE = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"|[{}\[\]]')
 
 
 class _SmallJSONFallback(Exception):
     pass
+
+
+def small_ascii_json_roundtrip(raw: bytes) -> bytes | None:
+    """Canonicalize bounded decoded JSON without snapshotting an arbitrary tree.
+
+    The JSON decoder creates only owned builtin values: no subclasses, aliases,
+    concurrent mutations or cycles can enter this path. ASCII text with safe
+    integers uses the same encoding as RFC 8785. Other numbers and non-ASCII
+    input keep the ordinary RFC path; this changes no accepted input limits.
+    """
+    if type(raw) is not bytes or len(raw) > _SMALL_JSON_BYTES or not raw.isascii():
+        return None
+
+    def integer(text):
+        value = int(text)
+        if not -(2**53 - 1) <= value <= 2**53 - 1:
+            raise _SmallJSONFallback
+        return value
+
+    def other_number(_text):
+        raise _SmallJSONFallback
+
+    try:
+        owned = json.loads(
+            raw, parse_int=integer, parse_float=other_number, parse_constant=other_number
+        )
+        # Preserve the existing bounded fast subset. Deeper trees retain the
+        # original RFC reader's recursion behavior as well as its encoding.
+        depth = 0
+        for token in _ASCII_JSON_STRUCTURE.finditer(raw):
+            first = raw[token.start()]
+            if first in b"{[":
+                depth += 1
+                if depth > 64:
+                    return None
+            elif first in b"}]":
+                depth -= 1
+        return json.dumps(
+            owned, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (_SmallJSONFallback, UnicodeEncodeError):
+        return None
 
 
 def small_ascii_json_bytes(value) -> bytes | None:

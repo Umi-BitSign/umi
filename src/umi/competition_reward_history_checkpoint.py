@@ -19,7 +19,7 @@ from .competition_evidence_codec import checked_digest
 from .competition_reward_checkpoint_progress import CheckpointMetadataProgress
 from .competition_reward_history_origin import check_checkpoint_origin
 from .competition_verification_rules import runtime_identity
-from .open_competition import digest
+from .open_competition import digest, digest_canonical_bytes
 
 SOURCE_KINDS = ("control_history_block", "control_history_chunk", "control_history_object")
 ABI = "umi-native-control-history-block/1"
@@ -479,10 +479,15 @@ class HistoryCheckpoints:
             return None
         if done != {"height": height, "owner": self.owner}:
             raise HistoryCheckpointRepairRequired("history checkpoint completion marker is missing")
-        value = self.journal.get("control_history_verified", row[0], db=db)
+        # get_raw retains the ordinary size, canonicality and conflict checks.
+        # Its exact canonical bytes already define digest(value), so avoid a
+        # second full serialization of every completed checkpoint.
+        raw = self.journal.get_raw("control_history_verified", row[0], db=db)
+        value = None if raw is None else json.loads(raw)
         if (
-            not isinstance(value, dict)
-            or digest(value) != row[0]
+            raw is None
+            or not isinstance(value, dict)
+            or digest_canonical_bytes(raw) != row[0]
             or value.get("schema") != ABI
             or value.get("owner") != self.owner
             or value.get("semantics") != self.semantics
