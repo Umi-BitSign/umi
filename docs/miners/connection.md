@@ -425,6 +425,12 @@ this client does not qualify or perform a macOS endpoint upgrade.
 Keep existing signed requests, receipts and model files unchanged when moving to
 the new command. Follow [model delivery](model.md#model-files-for-recoverable-cohorts)
 with the same request, source, wallet and policy to resume an interrupted upload.
+The current client authenticates model-delivery changes from cohort history,
+resumes a retained original through its authenticated continuation when required,
+and uploads new direct-delivery payloads to R2. It signs additional transport
+declarations using the same wallet; do not edit or re-sign the original request.
+Admission review follows byte delivery, so an uploaded payload alone does not
+mean the model has been admitted.
 Always check current intake readiness before creating a new submission.
 
 ## Check the running miner
