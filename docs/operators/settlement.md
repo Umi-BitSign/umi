@@ -2952,6 +2952,12 @@ the affected file needs native verification. Unsafe links, owners or permissions
 remain refusals. Per-file private locks prevent overlapping mutation, and sharding
 bounds each local directory rather than collecting all facts in one flat folder.
 
+Chunked model readers use 32 concurrent metadata HEAD workers by default. The
+reader constructor accepts an explicit `metadata_workers` override from 1 to 32.
+This changes metadata transport only: payload transfer and materialization keep
+their own budgets, and every initial and final object-generation check remains
+required.
+
 Transfer progress keeps byte counts and completed GET/HEAD operation counts
 separate. Restored work contributes to neither native rate. When both rates are
 available, the estimate uses the greater remaining-byte and remaining-operation

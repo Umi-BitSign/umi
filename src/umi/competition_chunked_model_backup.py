@@ -267,7 +267,7 @@ class ChunkedModelBackupReader:
         policy: CompetitionPolicy,
         multipart: R2MultipartClient,
         verification_root: Path,
-        metadata_workers: int = 8,
+        metadata_workers: int = 32,
         byte_store_imports=(),
     ):
         self.selection = ChunkedBackupSelection.model_validate_json(canonical_json_bytes(selection))
