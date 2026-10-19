@@ -31,6 +31,7 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadRestartRequest,
 )
 from .competition_cohort_model_client import (
+    MODEL_DELIVERY_TIMEOUT_SECONDS,
     _admit_model,
     _Fingerprint,
     _fingerprint,
@@ -297,7 +298,9 @@ async def submit_direct_cohort_model(
         ) as intake,
         httpx.AsyncClient(
             transport=object_transport,
-            timeout=httpx.Timeout(None, connect=15),
+            # Bound connection inactivity, not the duration of the model upload.
+            # A stalled PUT must return to the unchanged-part retry loop.
+            timeout=httpx.Timeout(MODEL_DELIVERY_TIMEOUT_SECONDS, connect=15),
             follow_redirects=False,
             trust_env=False,
         ) as objects,

@@ -431,6 +431,14 @@ and uploads new direct-delivery payloads to R2. It signs additional transport
 declarations using the same wallet; do not edit or re-sign the original request.
 Admission review follows byte delivery, so an uploaded payload alone does not
 mean the model has been admitted.
+Direct R2 transfers retry temporary network failures, throttling and expired
+capabilities. A connection with no read/write progress for five minutes returns
+to that retry loop; this is an inactivity timeout, not a deadline for the whole
+model. An interrupted multipart delivery can retransmit parts when rerun with
+the same request. A completed, verified payload is reused without uploading it
+again. Terminal submission errors show a stable reason code and, when available,
+an HTTP status; retain those diagnostics without sharing wallet files or signed
+upload URLs.
 Always check current intake readiness before creating a new submission.
 
 ## Check the running miner
