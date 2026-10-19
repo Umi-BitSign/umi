@@ -117,6 +117,124 @@ def test_workspace_cannot_overlap_archive_or_follow_symlink(cpu, tmp_path):
         )
 
 
+@pytest.mark.parametrize("layout", ("separate", "workspace", "ancestor"))
+def test_explicit_boot_cache_directory_and_restart_preserve_native_files(cpu, tmp_path, layout):
+    from umi.competition_model_cache_space import BootDiskModelCache, BootDiskModelCacheConfig
+
+    _, _, original = cpu
+    parent = tmp_path / "private-invocations"
+    parent.mkdir(mode=0o700)
+    workspace = parent / "work"
+    workspace.mkdir(mode=0o700)
+    boot_root = {
+        "separate": tmp_path / "bounded-models",
+        "workspace": workspace,
+        "ancestor": parent,
+    }[layout]
+    cache_config = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(boot_root),
+        maximum_allocated_bytes=16 * 1024**2,
+    )
+    native = BootDiskModelCache(cache_config, reserve_bytes=0)
+
+    class Artifacts:
+        config = SimpleNamespace(materialization_boot_disk_cache=cache_config)
+
+        def verify_materialization_filesystem(self, root):
+            native.validate_root(root)
+            native.available_bytes()
+
+    def start():
+        return sandbox.DirectCohortCpuSandbox(
+            original.policy,
+            archive=original.archive,
+            videos=original.videos,
+            workspace=workspace,
+            artifacts=Artifacts(),
+            request=lambda _: None,
+        )
+
+    port = start()
+    expected = (
+        boot_root / "direct-model-cache"
+        if layout == "separate"
+        else workspace / "direct-model-cache"
+    )
+    assert port.cache == expected
+    pending = port.cache / "retained-pending-materialization"
+    pending.write_bytes(b"native invocation state must survive restart")
+    pending.chmod(0o600)
+    before = pending.stat()
+    restarted = start()
+    assert restarted.cache == port.cache
+    assert pending.read_bytes() == b"native invocation state must survive restart"
+    after = pending.stat()
+    assert (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if layout == "separate":
+        assert not (workspace / "direct-model-cache").exists()
+
+
+@pytest.mark.parametrize("legacy_kind", ("pending", "symlink", "file"))
+def test_moving_existing_legacy_cache_refuses_before_creating_new_roots(
+    cpu, tmp_path, legacy_kind, caplog
+):
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    _, _, original = cpu
+    workspace = tmp_path / "retained-workspace"
+    workspace.mkdir(mode=0o700)
+    legacy = workspace / "direct-model-cache"
+    if legacy_kind == "pending":
+        legacy.mkdir(mode=0o700)
+        (legacy / "pending").write_bytes(b"must preserve")
+    elif legacy_kind == "symlink":
+        legacy.symlink_to(tmp_path / "unrelated-missing")
+    else:
+        legacy.write_bytes(b"must preserve")
+    boot_root = tmp_path / "new-bounded-models"
+    calls = []
+
+    class Artifacts:
+        config = SimpleNamespace(
+            materialization_boot_disk_cache=SimpleNamespace(directory=str(boot_root))
+        )
+
+        def verify_materialization_filesystem(self, root):
+            calls.append(root)
+            pytest.fail("unsupported relocation created or checked a new cache before refusal")
+
+    with pytest.raises(OSError, match="preserving migration"):
+        sandbox.DirectCohortCpuSandbox(
+            original.policy,
+            archive=original.archive,
+            videos=original.videos,
+            workspace=workspace,
+            artifacts=Artifacts(),
+            request=lambda _: None,
+        )
+    assert not boot_root.exists() and not calls
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+    ]
+    repair = next(event for event in events if event["status"] == "repair_required")
+    assert repair["reason_code"] == "legacy_model_cache_needs_migration"
+    assert repair["completed_units"] == 0 and repair["total_units"] == 1
+    assert repair["elapsed_seconds"] >= 0 and repair["eta_seconds"] is None
+    if legacy_kind == "pending":
+        assert (legacy / "pending").read_bytes() == b"must preserve"
+    elif legacy_kind == "file":
+        assert legacy.read_bytes() == b"must preserve"
+    else:
+        assert legacy.is_symlink()
+
+
 async def test_direct_candidate_cache_materializes_once_and_remains_bounded(
     cpu, tmp_path, monkeypatch
 ):

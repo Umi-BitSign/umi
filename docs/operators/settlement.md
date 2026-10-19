@@ -3222,6 +3222,15 @@ candidate invocation leases still govern replacement and eviction. Capacity
 exhaustion retains completed files for retry. Omitting the option preserves the
 historical configuration bytes and separate-filesystem requirement.
 
+The direct CPU sandbox uses `direct-model-cache` beneath the selected allocation
+root when that root is separate from its invocation workspace. Existing layouts
+whose workspace cache already lies within the allocation root retain their exact
+cache path, including interrupted materializations. If an older cache outside a
+new root contains retained files, is a symlink, or is not a directory, startup
+preflight refuses before creating new cache roots. Keep the previous selection
+until a preserving migration or consumer release is qualified; do not reset the
+workspace or its journals to change the cache location.
+
 Configure a bucket lifecycle rule that aborts incomplete multipart uploads after
 the selected recovery interval. A part-level provider `404` causes the miner to
 sign a restart request. The owner checks that the exact provider upload is

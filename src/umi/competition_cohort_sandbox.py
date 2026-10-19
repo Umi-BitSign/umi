@@ -89,6 +89,29 @@ class CohortCpuSandbox:
         return result
 
 
+def _direct_model_cache_path(workspace: Path, boot) -> Path:
+    legacy = workspace / "direct-model-cache"
+    with TransferProgress(
+        "model_cache_path_selection", 1, unit="paths", planning_unit_seconds=(0.001, 0.1)
+    ) as progress:
+        if boot is None or legacy.is_relative_to(Path(boot.directory)):
+            # Existing supported layouts keep their exact cache and invocation
+            # bindings, including interrupted materializations.
+            selected = legacy
+        else:
+            # A new explicit root must not silently strand an older cache.
+            # Refuse before creating either root; its operator must qualify a
+            # preserving migration or consumer release first.
+            if legacy.is_symlink() or (
+                legacy.exists() and (not legacy.is_dir() or any(legacy.iterdir()))
+            ):
+                progress.emit("repair_required", reason="legacy_model_cache_needs_migration")
+                raise OSError("existing direct model cache requires a preserving migration")
+            selected = Path(boot.directory) / "direct-model-cache"
+        progress.advance(1)
+        return selected
+
+
 class DirectCohortCpuSandbox(CohortCpuSandbox):
     """Materialize at most a bounded number of R2 candidates per invocation."""
 
@@ -104,6 +127,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         legacy_artifacts=None,
     ) -> None:
         boot = getattr(getattr(artifacts, "config", None), "materialization_boot_disk_cache", None)
+        cache = _direct_model_cache_path(workspace, boot)
         if boot is not None:
             # Create the selected private root before mkdir(parents=True) can
             # give an intermediate cache directory the process's ordinary umask.
@@ -114,7 +138,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         self.artifacts, self.request = artifacts, request
         self.legacy_artifacts = legacy_artifacts
         self.materializations = asyncio.Condition()
-        self.cache = workspace / "direct-model-cache"
+        self.cache = cache
         self.cached_request_sha256: str | None = None
         self.active_candidate_invocations = 0
         ensure_private_directory(self.cache)
