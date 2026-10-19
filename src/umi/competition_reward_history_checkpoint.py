@@ -11,10 +11,12 @@ import json
 import logging
 import sqlite3
 import time
+from collections import OrderedDict
 from dataclasses import asdict
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
+from .competition_reward_checkpoint_progress import CheckpointMetadataProgress
 from .competition_reward_history_origin import check_checkpoint_origin
 from .competition_verification_rules import runtime_identity
 from .open_competition import digest
@@ -22,6 +24,19 @@ from .open_competition import digest
 SOURCE_KINDS = ("control_history_block", "control_history_chunk", "control_history_object")
 ABI = "umi-native-control-history-block/1"
 logger = logging.getLogger(__name__)
+_MAX_SNAPSHOT_TOKENS = 8192
+
+
+def _remember_source_token(cache, identity, fact):
+    if cache is None:
+        return
+    if isinstance(cache, OrderedDict):
+        cache[identity] = fact
+        cache.move_to_end(identity)
+        if len(cache) > _MAX_SNAPSHOT_TOKENS:
+            cache.popitem(last=False)
+    elif len(cache) < _MAX_SNAPSHOT_TOKENS:
+        cache[identity] = fact
 
 
 class _CheckpointSourceSnapshot:
@@ -31,7 +46,7 @@ class _CheckpointSourceSnapshot:
         if not db.in_transaction or db.execute("PRAGMA query_only").fetchone() != (1,):
             raise ValueError("checkpoint source reuse requires a read-only snapshot")
         checkpoints.check_schema(db)
-        self.checkpoints, self.db, self.tokens = checkpoints, db, {}
+        self.checkpoints, self.db, self.tokens = checkpoints, db, OrderedDict()
         self.remote_sources = checkpoints.remote_sources
 
     def sources(self, keys):
@@ -272,37 +287,60 @@ class HistoryCheckpoints:
         return self._sources(keys, db)
 
     def _sources(self, keys, db, snapshot_tokens=None):
+        if self.remote_sources is not None:
+            return self._remote_snapshot_sources(keys, db, snapshot_tokens)
         out = []
         for kind, key in sorted(set(keys)):
             identity = (kind, key)
             if snapshot_tokens is not None and identity in snapshot_tokens:
                 cached = snapshot_tokens[identity]
-                out.append(
-                    self.remote_sources.recheck_snapshot_token(cached)
-                    if self.remote_sources is not None
-                    else list(cached)
-                )
+                out.append(list(cached))
+                _remember_source_token(snapshot_tokens, identity, cached)
                 continue
-            if self.remote_sources is not None:
-                fact = self.remote_sources.snapshot_token(kind, key, db)
-                token = list(fact.token)
-            else:
-                row = db.execute(
-                    "SELECT revision,present FROM history_source_identity WHERE kind=? AND id=?",
-                    (kind, key),
-                ).fetchone()
-                held = db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
-                if row is None or row[1] != 1 or held:
-                    raise HistoryCheckpointRepairRequired(
-                        "history checkpoint source missing or conflict held"
-                    )
-                token = [kind, key, row[0]]
-                fact = tuple(token)
+            row = db.execute(
+                "SELECT revision,present FROM history_source_identity WHERE kind=? AND id=?",
+                (kind, key),
+            ).fetchone()
+            held = db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
+            if row is None or row[1] != 1 or held:
+                raise HistoryCheckpointRepairRequired(
+                    "history checkpoint source missing or conflict held"
+                )
+            token = [kind, key, row[0]]
+            fact = tuple(token)
             # Cache saturation changes only performance, never supported work.
             # Neither this dictionary nor its read-only connection survives a batch.
-            if snapshot_tokens is not None and len(snapshot_tokens) < 8192:
-                snapshot_tokens[identity] = fact
+            _remember_source_token(snapshot_tokens, identity, fact)
             out.append(token)
+        return out
+
+    def _remote_snapshot_sources(self, keys, db, snapshot_tokens):
+        ordered = sorted(set(keys))
+        out = []
+        for start in range(0, len(ordered), 256):
+            group = ordered[start : start + 256]
+            reused = {
+                key: snapshot_tokens[key]
+                for key in group
+                if snapshot_tokens is not None and key in snapshot_tokens
+            }
+            missing = [key for key in group if key not in reused]
+            fresh = (
+                dict(zip(missing, self.remote_sources.snapshot_tokens(missing, db), strict=True))
+                if missing
+                else {}
+            )
+            for identity in group:
+                if identity in fresh:
+                    fact = fresh[identity]
+                    token = list(fact.token)
+                else:
+                    # Remote indexes can change independently of this SQL
+                    # snapshot; every reused receipt still receives its check.
+                    fact = reused[identity]
+                    token = self.remote_sources.recheck_snapshot_token(fact)
+                _remember_source_token(snapshot_tokens, identity, fact)
+                out.append(token)
         return out
 
     def check_sources(self, sources, db):
@@ -338,11 +376,15 @@ class HistoryCheckpoints:
         self._batch_bounds(first, last)
         height = first
         try:
-            with self.journal.read_transaction() as db:
+            with (
+                CheckpointMetadataProgress("checkpoint_metadata_loading", first, last) as progress,
+                self.journal.read_transaction() as db,
+            ):
                 sources = _CheckpointSourceSnapshot(self, db)
                 values = []
                 for height in range(first, last + 1):
                     value = self._load_snapshot(height, db, sources)
+                    progress.checked(retained=value is not None)
                     if value is None:
                         break
                     values.append(value)
@@ -385,7 +427,10 @@ class HistoryCheckpoints:
             raise ValueError("history checkpoint recheck must be contiguous")
         height = first
         try:
-            with self.journal.read_transaction() as db:
+            with (
+                CheckpointMetadataProgress("checkpoint_metadata_recheck", first, last) as progress,
+                self.journal.read_transaction() as db,
+            ):
                 sources = _CheckpointSourceSnapshot(self, db)
                 for height, saved in zip(range(first, last + 1), values, strict=True):
                     if (
@@ -395,6 +440,7 @@ class HistoryCheckpoints:
                         raise HistoryCheckpointRepairRequired(
                             "checkpoint changed during owned restore"
                         )
+                    progress.checked()
         except HistoryCheckpointRepairRequired as error:
             error.height = height
             raise

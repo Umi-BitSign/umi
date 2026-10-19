@@ -939,7 +939,9 @@ assets and lineage required by package replay.
 The installed service automatically discovers the effective activation from
 complete finalized control history and collects opportunity evidence for every
 designated validator. Each bounded pass retains progress; failures retry without
-expiring the cohort. Original evidence must be replayed after restart. A durable
+expiring the cohort. History restart restores compatible successful block results
+under their original owner/source bindings and fresh owned tip finality; unfinished
+work still requires native verification. A durable
 completion identity is retained before publishing its immutable certificate and
 witnesses into the delivery directory, so interrupted publication retries the
 same content. Collection and discovery retry independently: retained evidence
@@ -953,7 +955,7 @@ The explicit, disjoint `proof_export_directory` receives original proof objects
 and frames automatically during history replay and interval collection. An
 interrupted write retries the same bytes before advancing the local cursor or
 crediting an interval. Objects are published before their frame. Within one exporter process, successful
-object publications reuse up to 4,096 metadata receipts while the exact content
+object publications reuse up to 8,192 metadata receipts while the exact content
 identity, private parent and file identity/metadata remain unchanged. Changed or
 missing files require ordinary publication again; failed writes are never cached.
 On Linux, a reuse receipt requires successful verification after the inode's
@@ -965,13 +967,34 @@ Readers still validate original objects and proofs independently. The separate
 `proof_import_directory` accepts transferred frames; native readers verify every
 proof before populating a recovery journal or crediting time. An imported block
 number cannot choose the history target before its chain proof is verified.
-Restart requires native replay even when all archive files are already present.
+Archive presence alone does not establish a successful native check. A consumer
+without compatible original-owner checkpoints must replay the proofs. Restoring
+unchanged successful checkpoints does not reread the original proof payloads and
+does not turn those local results into portable proof authority.
 
 Each retained history frame reads its chunk references and proof objects through
 one native query-only database snapshot. It does not reserve the writer slot or
 open a connection per object. The next frame load takes a fresh snapshot and
 observes newly committed conflict holds; byte bounds, content identities and
 native proof verification are unchanged.
+
+Completed history restoration resolves source identities in bounded SQL joins
+inside that same snapshot. Record presence, source revisions and source/alias
+conflict holds remain required. When the snapshot itself proves there are no
+aliases or holds, no alias-key lookup is needed; that absence is checked anew,
+never carried into a later transaction. A bounded 8,192-entry LRU retains hot
+source identities within the snapshot; eviction changes performance only.
+Existing remote aliases still pass the
+canonical alias reader and the current R2 receipt check. After owned tip finality,
+a fresh snapshot rechecks every dependency before history effects apply in order.
+This changes neither journal formats nor the verifier ABI; supported retained
+checkpoints keep their original signed bytes, owner and clock bindings.
+
+Restore stage elapsed time includes the initial metadata loading pass. Long
+metadata loading and recheck batches separately log completed checks, requested
+work, retained results, elapsed time and their own ETA basis. Those counts grant
+no native verification or applied-history credit, and their ETA covers only the
+current bounded batch. A repair refusal withdraws that estimate.
 
 Within that one frame snapshot, repeated byte objects are decoded once, bounded
 by 128 entries and 32 MiB. The next frame load discards that cache so new conflict

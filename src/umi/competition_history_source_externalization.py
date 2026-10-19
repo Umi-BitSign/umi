@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .competition_round_journal import RoundJournal
@@ -156,6 +158,9 @@ class JournalSourceExternalizer:
     def snapshot_token(self, kind, key, db):
         """Separate the SQL snapshot's fact from independently mutable R2 state."""
         row = self._identity(kind, key, db)
+        return self._snapshot_token(kind, key, row, db)
+
+    def _snapshot_token(self, kind, key, row, db):
         alias = self._alias(kind, key, db)
         if alias is None:
             if row[1] != 1:
@@ -164,6 +169,77 @@ class JournalSourceExternalizer:
         if row != (alias["revision"] + 1, 0):
             raise self.repair_error("externalized source was mutated; explicit repair required")
         return _SourceSnapshotToken((kind, key, alias["revision"]), alias["remote"])
+
+    def snapshot_tokens(
+        self, keys: Sequence[tuple[str, str]], db: sqlite3.Connection
+    ) -> list[_SourceSnapshotToken]:
+        """Read compact identities together inside the caller's SQL snapshot.
+
+        No source payload is selected. Aliases and alias conflict holds retain
+        the ordinary canonical reader and independent remote-receipt checks.
+        The batch budget limits working memory/SQLite parameters, never history
+        length or evidence size; callers stream larger source lists in chunks.
+        """
+        if not 1 <= len(keys) <= 256:
+            raise ValueError("source metadata batch requires 1 to 256 keys")
+        keys = tuple(keys)
+        for kind, key in keys:
+            if kind not in self.source_kinds or type(key) is not str:
+                raise self.repair_error("unsupported remote source kind or key")
+        unique = tuple(dict.fromkeys(keys))
+        if not db.in_transaction:
+            raise ValueError("source metadata batch requires one SQL snapshot")
+        # These absence facts are obtained anew inside this exact transaction,
+        # never memoized across calls. In the common local-only journal they
+        # avoid constructing alias keys that cannot name any alias or hold.
+        no_aliases = (
+            db.execute("SELECT 1 FROM records WHERE kind=? LIMIT 1", (self.alias_kind,)).fetchone()
+            is None
+        )
+        no_holds = db.execute("SELECT 1 FROM holds LIMIT 1").fetchone() is None
+        if no_aliases and no_holds:
+            rows = db.execute(
+                "WITH wanted(kind,id) AS (VALUES "
+                + ",".join("(?,?)" for _ in unique)
+                + ") SELECT w.kind,w.id,s.revision,s.present,r.kind,NULL,NULL,NULL "
+                "FROM wanted w "
+                f"LEFT JOIN {self.source_table} s ON s.kind=w.kind AND s.id=w.id "
+                "LEFT JOIN records r ON r.kind=w.kind AND r.id=w.id",
+                [part for key in unique for part in key],
+            ).fetchall()
+        else:
+            arguments = [part for kind, key in unique for part in (kind, key, digest([kind, key]))]
+            rows = db.execute(
+                "WITH wanted(kind,id,alias) AS (VALUES "
+                + ",".join("(?,?,?)" for _ in unique)
+                + ") SELECT w.kind,w.id,s.revision,s.present,r.kind,h.id,a.kind,ah.id "
+                "FROM wanted w "
+                f"LEFT JOIN {self.source_table} s ON s.kind=w.kind AND s.id=w.id "
+                "LEFT JOIN records r ON r.kind=w.kind AND r.id=w.id "
+                "LEFT JOIN holds h ON h.id=w.id "
+                "LEFT JOIN records a ON a.kind=? AND a.id=w.alias "
+                "LEFT JOIN holds ah ON ah.id=w.alias",
+                [*arguments, self.alias_kind],
+            ).fetchall()
+        by_key = {(row[0], row[1]): row[2:] for row in rows}
+        if len(rows) != len(unique) or set(by_key) != set(unique):
+            raise self.repair_error("source identity metadata changed; repair required")
+        results = []
+        for kind, key in keys:
+            revision, present, record, held, alias, alias_held = by_key[kind, key]
+            if (
+                type(revision) is not int
+                or revision < 0
+                or present not in (0, 1)
+                or bool(present) != (record is not None)
+                or held is not None
+            ):
+                raise self.repair_error("source identity missing or conflict held; repair required")
+            if alias is not None or alias_held is not None or present != 1:
+                results.append(self._snapshot_token(kind, key, (revision, present), db))
+            else:
+                results.append(_SourceSnapshotToken((kind, key, revision), None))
+        return results
 
     def recheck_snapshot_token(self, fact: _SourceSnapshotToken):
         """The remote index is outside the source SQL snapshot; never memoize it."""
