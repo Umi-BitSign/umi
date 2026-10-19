@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 
+from .competition_client import CompetitionSubmissionError
 from .competition_commands import COMMAND_HANDLERS
 from .competition_commands.arguments import build_parser as _parser
 from .competition_commands.common import (
@@ -60,6 +62,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         result = execute(args)
+    except CompetitionSubmissionError as error:
+        # Stable diagnostics only: never print response bodies, signed inputs,
+        # wallet paths, exception chains or presigned bearer URLs.
+        reason = error.reason_code
+        if not isinstance(reason, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None:
+            reason = "submission_failed"
+        status = error.status_code
+        detail = f"; HTTP {status}" if type(status) is int and 100 <= status <= 599 else ""
+        parser.exit(2, f"competition command rejected ({reason}{detail}); check inputs\n")
     except (OSError, ValueError, RuntimeError) as error:
         # Pydantic exceptions can contain complete input payloads. Do not print
         # them into public terminal logs or mistake malformed data for success.

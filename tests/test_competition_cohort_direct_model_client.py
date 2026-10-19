@@ -124,7 +124,21 @@ async def test_part_upload_stops_at_response_byte_bound(delivery):
 
 
 @pytest.mark.asyncio
-async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(delivery, monkeypatch):
+@pytest.mark.parametrize(
+    "first_fault",
+    [
+        "expired_generation",
+        "read_timeout",
+        "write_timeout",
+        "rate_limit",
+        "busy",
+        "expired_url",
+        "cancel",
+    ],
+)
+async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(
+    delivery, monkeypatch, first_fault
+):
     h = delivery
     events = []
     profile = ModelDeliveryProfile(
@@ -197,14 +211,27 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
         nonlocal expired_once
         nonlocal put_requests
         put_requests += 1
+        # These are HTTP inactivity limits, not a total model-upload deadline.
+        timeouts = request.extensions["timeout"]
+        assert all(timeouts[name] is not None for name in ("connect", "read", "write", "pool"))
         if not expired_once:
             expired_once = True
-            provider = request.url.params["uploadId"]
-            matching = [entry for entry in multipart.uploads if entry[1] == provider]
-            assert len(matching) == 1
-            multipart.uploads.remove(matching[0])
-            current_time[0] += 31_000
-            return httpx.Response(404)
+            if first_fault == "expired_generation":
+                provider = request.url.params["uploadId"]
+                matching = [entry for entry in multipart.uploads if entry[1] == provider]
+                assert len(matching) == 1
+                multipart.uploads.remove(matching[0])
+                current_time[0] += 31_000
+                return httpx.Response(404)
+            if first_fault == "read_timeout":
+                raise httpx.ReadTimeout("private capability must not be logged", request=request)
+            if first_fault == "write_timeout":
+                raise httpx.WriteTimeout("private capability must not be logged", request=request)
+            if first_fault == "cancel":
+                # The provider accepted a part, but the process lost its response.
+                multipart.parts[int(request.url.params["partNumber"])] = await request.aread()
+                raise asyncio.CancelledError
+            return httpx.Response({"rate_limit": 429, "busy": 503, "expired_url": 403}[first_fault])
         number = int(request.url.params["partNumber"])
         data = await request.aread()
         multipart.parts[number] = data
@@ -220,6 +247,19 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
 
     task = asyncio.create_task(verifier())
     try:
+        if first_fault == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await submit_cohort_model(
+                    origin="https://intake.example",
+                    policy=h.intake.policy,
+                    request=h.request,
+                    source=h.source,
+                    wallet=wallet("Alice"),
+                    transport=httpx.ASGITransport(app),
+                    object_transport=httpx.MockTransport(put_part),
+                    retry_seconds=0.001,
+                    report=events.append,
+                )
         receipt = await asyncio.wait_for(
             submit_cohort_model(
                 origin="https://intake.example",
@@ -256,9 +296,13 @@ async def test_direct_upload_bypasses_coordinator_payload_disk_and_enrolls(deliv
 
     assert receipt.status == "pending_attestation"
     assert retry_receipt == receipt
-    assert multipart.creates == 2
-    assert discovered == [h.cohort, h.cohort]
+    assert multipart.creates == (2 if first_fault == "expired_generation" else 1)
+    assert discovered == [h.cohort] * (3 if first_fault == "cancel" else 2)
     assert put_requests == uploaded_parts
+    assert "private capability must not be logged" not in str(events)
+    assert "X-Amz-Signature" not in str(events)
+    if first_fault not in {"expired_generation", "cancel"}:
+        assert any(event.get("status") == "model_delivery_retry" for event in events)
     assert multipart.complete_bytes == b"".join(
         (h.source / record.path).read_bytes()
         for record in h.request.signed_submission.submission.model_bundle.files
