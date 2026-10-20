@@ -17,6 +17,7 @@ from .competition_reward_decisions import StandingRewardControlReader
 from .competition_round_journal import RoundJournal
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
+from .translation_reference_cursor import repair_forward_cursors
 from .translation_reference_policy import reference_policy_sha256, verify_reference_policy
 from .translation_reference_publication import TranslationReferenceApprovalPublisher
 from .validator_supervisor import (
@@ -325,6 +326,12 @@ class TranslationReferenceChannelPublisher:
         current = self.store.read(key)
         if current is None or current.payload != raw:
             raise ReferenceChannelConflict("reference channel readback differs")
+        return current
+
+    def _repair_cursors(self, head, *, block):
+        repair_forward_cursors(
+            self, head, block=block, key_for=channel_page_key, conflict=ReferenceChannelConflict
+        )
 
     def step(
         self,
@@ -443,6 +450,7 @@ class TranslationReferenceChannelPublisher:
             ):
                 native_check()
                 self._mirror(initial_value, initial, prefix, head)
+                self._repair_cursors(head, block=block)
                 self._event(
                     "reference_channel_selected",
                     started,
@@ -517,7 +525,7 @@ class TranslationReferenceChannelPublisher:
             after_sequence=head.directive.sequence,
             after_directive_sha256=head.directive_sha256,
             directives=[signed],
-            more=False,
+            more=True,
             head=signed,
         )
         self._write(
@@ -530,6 +538,7 @@ class TranslationReferenceChannelPublisher:
         # through their cursor edges on the installed supervisor's next poll.
         if prefix and len(prefix) < MAX_SUPERVISOR_DIRECTIVES_PER_PAGE:
             self._mirror(initial_value, initial, [*prefix, signed], signed)
+        self._repair_cursors(signed, block=block)
         self.journal.put(
             "reference_channel_selected",
             key,

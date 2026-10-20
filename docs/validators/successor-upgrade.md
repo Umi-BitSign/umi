@@ -223,6 +223,23 @@ to refuse. Qualify actual installed old-state inspection and signed successor
 readback before claiming deployment; publication does not establish adoption by
 external validators.
 
+Cursor routing must also remain usable by installations that missed a lease.
+Noninitial pages containing signed directives use `more: true`; the client retains
+them as authenticated history, then follows their terminal cursor before starting
+the current head. This prevents an expired intermediate page from trapping an
+older accepted cursor. A full, older initial prefix is likewise marked for
+continuation. Original signed bytes and intervals are unchanged.
+
+The publication owner automatically repairs older pagination in bounded passes,
+checkpointing each exact conditional-write readback in its original channel
+journal. Progress reports completed/total cursor pages, elapsed time and remaining
+planning work. Restart resumes completed pages without resigning or rereading the
+whole repaired prefix. A missing original edge or damaged checkpoint requires
+explicit restoration; it is not silently recreated. Preserve these records with
+the existing channel state. An installed client may need another polling round
+to reach its terminal page; native activity, freshness, release and own-history
+checks still apply before it can write weights.
+
 The `check` action validates these bindings without opening credentials, loading
 the wallet, creating journals or contacting the chain. It does not establish
 runtime readiness. The `run` action preserves the original signed source files,
