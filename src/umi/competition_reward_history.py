@@ -1009,6 +1009,8 @@ class RewardControlHistoryReader:
             self.remote_store is not None
             and not self.remote_store.config.read_only
             and not self.journal.read_only
+            and not self.remote_store.config.legacy_read_through
+            and not (self.export_archive is not None and self.export_archive.legacy_read_through)
         )
         try:
             if replicate_sources:

@@ -759,7 +759,12 @@ behavior and canonical configuration bytes. Older runtimes reject `/2` before
 selection; qualify the target runtime and all consuming services through their
 supported upgrade boundary before enabling it. Keep local originals until an
 explicitly completed remote migration, restore qualification and consumer release
-allow eviction. Retire this read-through selection only after those retained
+allow eviction. Read-through also suppresses automatic raw SQL source
+externalization during ordinary history advancement: completed local history
+must restore before any separately selected migration. New tail capture still
+writes directly to R2. The explicit bounded `externalize_history_sources()`
+upgrade/repair entrypoint remains available when its dependency and capacity
+checks have been qualified. Retire this read-through selection only after those retained
 local archives and their recovery consumers no longer require it.
 
 Offline `migrate_proof_archive(original, selected, evict=True)` can remove local
