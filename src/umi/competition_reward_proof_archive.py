@@ -225,13 +225,21 @@ class RewardProofArchive:
     """
 
     def __init__(
-        self, root: Path, *, remote=None, physical_budget: ArchivePhysicalBudget | None = None
+        self,
+        root: Path,
+        *,
+        remote=None,
+        physical_budget: ArchivePhysicalBudget | None = None,
+        legacy_read_through: bool = False,
     ):
         if physical_budget is not None and (
             type(physical_budget) is not ArchivePhysicalBudget or remote is not None
         ):
             raise ValueError("physical archive budget requires selected local transport")
         self.physical_budget = physical_budget
+        if type(legacy_read_through) is not bool or (legacy_read_through and remote is None):
+            raise ValueError("retained local proof reads require a selected remote store")
+        self.legacy_read_through = legacy_read_through
         self.root = Path(private_path(str(root)))
         self.remote = remote
         if remote is not None:
@@ -358,7 +366,7 @@ class RewardProofArchive:
     def _verified_bytes(
         self, sha: str, maximum: int, *, directory=None
     ) -> tuple[bytes, tuple | None]:
-        if self.remote is not None:
+        if self.remote is not None and not self._retained_local("objects/" + sha, "objects", sha):
             return self.remote.read_object(checked_digest(sha), maximum=maximum), None
         path = self.root / "objects" / (checked_digest(sha) + ".json")
         checked_size(maximum, MAX_EVIDENCE_BYTES)
@@ -432,7 +440,7 @@ class RewardProofArchive:
         if prepared_encodings is not None and not set(prepared_encodings) <= set(fields):
             raise ValueError("prepared encodings name another archive field")
         existing = None
-        if prepared_encodings:
+        if prepared_encodings or self.legacy_read_through:
             # Decoder-valid legacy recipes need not equal the current encoder's
             # chosen representation. Reuse those only when the already published
             # frame names exactly that recipe; otherwise retain the old encoder
@@ -496,6 +504,8 @@ class RewardProofArchive:
             frame = _Frame(
                 schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
             )
+            if self.legacy_read_through and existing is not None and existing != frame:
+                raise ValueError("retained archive frame differs from selected publication")
             if directory is not None and not directory.unchanged():
                 raise ValueError("reward archive object directory changed during publication")
             if self.remote is None:
@@ -586,13 +596,27 @@ class RewardProofArchive:
 
     def _frame(self, kind: Kind, key: str) -> _Frame:
         path = self._path(kind, key)
-        if self.remote is None:
+        if self.remote is None or self._retained_local("frames/" + kind + "/" + key, kind, key):
             return read_private_model(path, _Frame, maximum_bytes=MAX_FRAME_BYTES)
         raw = self.remote.read_path("frames/" + kind + "/" + key, maximum=MAX_FRAME_BYTES)
         frame = _Frame.model_validate_json(raw)
         if canonical_json_bytes(frame) != raw:
             raise ValueError("remote proof frame does not retain canonical original bytes")
         return frame
+
+    def _retained_local(self, remote_path: str, kind: str, key: str) -> bool:
+        """Use an original only if no completed remote generation owns this name.
+
+        A missing/damaged receipt or previously observed remote loss must still
+        refuse through the normal remote repair fence, even when an old local
+        copy exists. Merely selecting this mode never walks or migrates history.
+        """
+        if not self.legacy_read_through:
+            return False
+        checked_digest(key)
+        if self.remote.reference_for_path(remote_path) is not None:
+            return False
+        return (self.root / kind / (key + ".json")).exists()
 
     def read(
         self, kind: Kind, key: str, *, bounds: dict[str, int]
