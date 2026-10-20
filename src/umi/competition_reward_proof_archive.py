@@ -496,8 +496,11 @@ class RewardProofArchive:
                             or existing.fields[name][number] != part
                         ):
                             encoded = encode_evidence(chunk, kind="proof")
-                    for value in encoded.objects.values():
-                        self._retain_bytes(value, directory=directory)
+                    if self.remote is None:
+                        for value in encoded.objects.values():
+                            self._retain_bytes(value, directory=directory)
+                    else:
+                        self.remote.put_many(encoded.objects)
                     parts.append(
                         _Part(
                             sha256=encoded.sha256,

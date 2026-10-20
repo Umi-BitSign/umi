@@ -751,6 +751,16 @@ history facts remain unchanged. Deleted raw records free logical capacity and
 reusable SQLite pages, not physical database file size. The remote generation
 fence refuses old runtimes and transitions to reservation-only layouts.
 
+Selected R2 proof publication sends independent codec objects through at most four
+owned HTTP workers. Aggregate active publication bytes stay within the existing
+maximum proof-object budget; a maximum supported object waits for admission and
+remains supported. Receipt mutations and same-key publication are serialized.
+Recipes and frames are published only after every child object has a durable
+receipt. A failed graph drains its workers and keeps successful receipts for the
+unchanged retry. Existing frame bytes, signed transport selections and timeout
+budgets are preserved. Qualify sustained native export throughput and the complete
+consumer upgrade/adoption path before selecting this transport for live capture.
+
 An observed missing, replaced or corrupt remote object creates a persistent
 repair hold. Restore its exact original generation and invoke the original
 owner's `RemoteProofStore.repair_reference` under an explicit repair operation;
