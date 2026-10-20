@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from threading import local
 
 import httpx
 
@@ -28,6 +31,45 @@ class R2EvidenceClient:
             raise ValueError("R2 evidence transport timeout differs")
         self.signer, self.transport = signer, transport
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 15))
+        self._connections = local()
+
+    def _new_client(self):
+        return httpx.Client(
+            transport=self.transport,
+            timeout=self.timeout,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    @contextmanager
+    def connection_scope(self):
+        """Reuse one connection within a synchronous owned operation.
+
+        Each worker thread owns its client. Nested publications share that
+        client; the outer scope always closes it, including on a failed frame.
+        No retry, response cache or new operation deadline is introduced.
+        """
+        retained = getattr(self._connections, "owned", None)
+        if retained is not None:
+            if retained[0] != os.getpid():
+                raise RuntimeError("R2 evidence connection scope belongs to another process")
+            yield
+            return
+        with self._new_client() as client:
+            self._connections.owned = (os.getpid(), client)
+            try:
+                yield
+            finally:
+                del self._connections.owned
+
+    def _request_client(self):
+        retained = getattr(self._connections, "owned", None)
+        if retained is None:
+            return self._new_client()
+        if retained[0] != os.getpid():
+            raise RuntimeError("R2 evidence connection scope belongs to another process")
+        return nullcontext(retained[1])
 
     def _exchange(self, method, key, *, body=b"", headers=None, maximum=0, statuses=(200,)):
         signed = self.signer.authorized_headers(
@@ -35,12 +77,7 @@ class R2EvidenceClient:
         ) | {"Accept-Encoding": "identity", "Content-Length": str(len(body))}
         try:
             with (
-                httpx.Client(
-                    transport=self.transport,
-                    timeout=self.timeout,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as client,
+                self._request_client() as client,
                 client.stream(
                     method, self.signer.object_url(key), headers=signed, content=body
                 ) as response,
@@ -83,6 +120,10 @@ class R2EvidenceClient:
         return EvidenceObjectHead(size, etag, sha)
 
     def publish(self, key: str, raw: bytes, sha256: str) -> EvidenceObjectHead:
+        with self.connection_scope():
+            return self._publish(key, raw, sha256)
+
+    def _publish(self, key: str, raw: bytes, sha256: str) -> EvidenceObjectHead:
         md5 = hashlib.md5(raw, usedforsecurity=False).digest()
         expected = EvidenceObjectHead(len(raw), md5.hex(), sha256)
         retained = self.head(key)
@@ -122,3 +163,8 @@ class R2EvidenceClient:
         ):
             raise ValueError("R2 evidence bytes differ from their immutable identity")
         return raw
+
+
+def r2_evidence_connection_scope(client):
+    """Select native transport ownership without changing injected test clients."""
+    return client.connection_scope() if isinstance(client, R2EvidenceClient) else nullcontext()

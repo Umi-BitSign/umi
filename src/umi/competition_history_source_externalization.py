@@ -19,6 +19,7 @@ from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
 from .protocol import canonical_json_bytes
+from .r2_evidence import r2_evidence_connection_scope
 
 ALIAS_KIND = "control_history_remote_source"
 MARKER_TABLE = "round_generation_history_remote"
@@ -403,9 +404,12 @@ class JournalSourceExternalizer:
                 sizes[kind, key] = 0 if row is None else row[0]
         selected.sort(key=lambda item: sizes[item], reverse=True)
         released = restored = 0
-        with TransferProgress(
-            "journal_source_replication", len(selected), unit="records"
-        ) as progress:
+        with (
+            r2_evidence_connection_scope(self.remote.client),
+            TransferProgress(
+                "journal_source_replication", len(selected), unit="records"
+            ) as progress,
+        ):
             try:
                 for kind, key in selected:
                     result = self.externalize(kind, key)
