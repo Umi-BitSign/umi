@@ -457,3 +457,198 @@ async def test_expired_selected_horizon_refuses_before_any_approval_signature(ch
             **inputs,
         )
     assert not c.signatures and not c.store.writes and not c.native.calls
+
+
+async def retained_head_with_window(c, *, remaining):
+    """Authority-signed historical fixture; new publication still needs native approval."""
+    from umi.translation_reference_policy import reference_policy_sha256
+
+    inputs = await c.native.inputs()
+    block = inputs["control"].snapshot.block_number
+    policy = c.native.reopen().prepare_policy(**inputs)
+    old = sign(
+        c.original.directive.model_copy(
+            update={
+                "sequence": 2,
+                "previous_directive_sha256": c.original.directive_sha256,
+                "mode": "translation_weights",
+                "policy_sha256": reference_policy_sha256(policy),
+                "release": c.release,
+                "valid_through_block": block + remaining,
+            }
+        )
+    )
+    terminal = SupervisorDirectivePage(
+        schema="umi-validator-supervisor-directive-page/3",
+        after_sequence=2,
+        after_directive_sha256=old.directive_sha256,
+        directives=[],
+        more=False,
+        head=old,
+    )
+    edge = terminal.model_copy(
+        update={
+            "after_sequence": 1,
+            "after_directive_sha256": c.original.directive_sha256,
+            "directives": [old],
+        }
+    )
+    initial = terminal.model_copy(
+        update={
+            "after_sequence": 0,
+            "after_directive_sha256": None,
+            "directives": [c.original, old],
+        }
+    )
+    for key, page in (
+        (channel_page_key(c.config, 2, old.directive_sha256), terminal),
+        (channel_page_key(c.config, 1, c.original.directive_sha256), edge),
+        (channel_page_key(c.config, 0, None), initial),
+    ):
+        c.store.compare_and_swap(key, c.store.read(key), canonical_json_bytes(page))
+    c.store.writes.clear()
+    return old, inputs
+
+
+async def test_expired_same_policy_renews_without_rewriting_old_signature(channel_case):
+    c = channel_case
+    old, inputs = await retained_head_with_window(c, remaining=-1)
+    result = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    assert result.directive.sequence == 3
+    assert result.directive.previous_directive_sha256 == old.directive_sha256
+    assert result.directive.policy_sha256 == old.directive.policy_sha256
+    assert result.directive.release == old.directive.release
+    assert result.directive.valid_through_block == c.horizon
+    verify_signed_supervisor_directive(
+        result, config=c.config, finalized_block=inputs["control"].snapshot.block_number
+    )
+    page = parse_canonical_supervisor_directive_page(
+        c.store.read(channel_page_key(c.config, 0, None)).payload
+    )
+    assert page.directives == [c.original, old, result]
+    assert len(c.signatures) == 1
+
+
+async def test_early_renewal_does_not_resign_on_every_poll(channel_case):
+    c = channel_case
+    old, inputs = await retained_head_with_window(c, remaining=10)
+    result = c.reopen().step(
+        c.native.reopen(), valid_through_block=c.horizon, renew_before_blocks=20, **inputs
+    )
+    assert result.directive.previous_directive_sha256 == old.directive_sha256
+    writes = len(c.store.writes)
+    assert (
+        c.reopen().step(
+            c.native.reopen(), valid_through_block=c.horizon + 1, renew_before_blocks=20, **inputs
+        )
+        == result
+    )
+    assert len(c.signatures) == 1 and len(c.store.writes) == writes
+    assert c.events[-1]["renew_after_block"] == c.horizon - 20
+
+
+async def test_interrupted_renewal_reuses_exact_signed_successor(channel_case):
+    c = channel_case
+    old, inputs = await retained_head_with_window(c, remaining=-1)
+    failed = []
+
+    def fail_edge(key, raw):
+        if key == channel_page_key(c.config, 2, old.directive_sha256) and not failed:
+            failed.append(raw)
+            raise OSError("interrupted renewal edge")
+
+    c.store.before = fail_edge
+    owner = c.reopen()
+    with pytest.raises(OSError, match="renewal edge"):
+        owner.step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    retained = owner.journal.get("reference_channel_signed", "0000000000000003")
+    c.store.before = None
+    result = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon + 50, **inputs)
+    assert canonical_json_bytes(result) == canonical_json_bytes(retained)
+    assert result.directive.valid_through_block == c.horizon and len(c.signatures) == 1
+
+
+@pytest.mark.parametrize("margin", [-1, True, 1000])
+async def test_invalid_renewal_margin_refuses_before_signer(channel_case, margin):
+    c = channel_case
+    inputs = await c.native.inputs()
+    with pytest.raises(ValueError, match="renewal margin"):
+        c.reopen().step(
+            c.native.reopen(),
+            valid_through_block=c.horizon,
+            renew_before_blocks=margin,
+            **inputs,
+        )
+    assert not c.signatures and not c.native.calls
+
+
+async def test_readonly_original_owner_inspection_never_signs_or_writes(channel_case):
+    c = channel_case
+    inputs = await c.native.inputs()
+    signed = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    journal = c.reopen().journal
+    before = journal.path.stat()
+    writes, signatures = len(c.store.writes), len(c.signatures)
+    owner = TranslationReferenceChannelPublisher(
+        journal.root,
+        config=c.config,
+        release=c.release,
+        store=c.store,
+        signer_loader=lambda: pytest.fail("readonly inspection loaded signer"),
+        maximum_bytes=8 * 1024**2,
+        read_only=True,
+    )
+    state = owner.inspect_state(observed_block=inputs["control"].snapshot.block_number)
+    assert state["head_directive_sha256"] == signed.directive_sha256
+    assert state["pending_intent_sha256"] is None and not state["channel_writes"]
+    with pytest.raises(ValueError, match="read-only"):
+        owner.step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    after = journal.path.stat()
+    assert (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    assert len(c.store.writes) == writes and len(c.signatures) == signatures
+
+
+async def test_readonly_inspection_exposes_expired_pending_signature_without_repair(channel_case):
+    c = channel_case
+    old, inputs = await retained_head_with_window(c, remaining=-20)
+    owner = c.reopen()
+    block = inputs["control"].snapshot.block_number
+    pending = sign(
+        old.directive.model_copy(
+            update={
+                "sequence": 3,
+                "previous_directive_sha256": old.directive_sha256,
+                "valid_through_block": block - 1,
+            }
+        )
+    )
+    owner.journal.put("reference_channel_intent", "0000000000000003", pending.directive)
+    owner.journal.put("reference_channel_signed", "0000000000000003", pending)
+    before = owner.journal.path.stat()
+    writes, signatures = len(c.store.writes), len(c.signatures)
+    readonly = TranslationReferenceChannelPublisher(
+        owner.journal.root,
+        config=c.config,
+        release=c.release,
+        store=c.store,
+        signer_loader=lambda: pytest.fail("readonly inspection loaded signer"),
+        maximum_bytes=8 * 1024**2,
+        read_only=True,
+    )
+    state = readonly.inspect_state(observed_block=block)
+    assert state["head_expired_at_observation"]
+    assert state["pending_signed"] and state["pending_expired_at_observation"]
+    assert state["pending_intent_sha256"] == pending.directive_sha256
+    after = owner.journal.path.stat()
+    assert (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    assert len(c.store.writes) == writes and len(c.signatures) == signatures

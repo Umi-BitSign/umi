@@ -40,6 +40,14 @@ from .validator_supervisor import COMMON_SUPERVISOR_AUTHORITY_HOTKEY
 from .weight_storage import subtensor_stored_weights
 
 
+class ReferenceRowPending(ValueError):
+    """Current native row must catch up before a reference approval can be issued."""
+
+    def __init__(self, *, last_update: int, minimum_update: int):
+        super().__init__("native reference row does not match the signed effective allocation")
+        self.last_update, self.minimum_update = last_update, minimum_update
+
+
 class TranslationReferenceApprovalPublisher:
     """Retain exact approvals before idempotent immutable publication.
 
@@ -148,7 +156,9 @@ class TranslationReferenceApprovalPublisher:
         )
         minimum = max(selected.effective_at_block, cohort.not_before_block)
         if tuple(chain.validator_row) != row or chain.validator_last_update < minimum:
-            raise ValueError("native reference row does not match the signed effective allocation")
+            raise ReferenceRowPending(
+                last_update=chain.validator_last_update, minimum_update=minimum
+            )
         # The body is stable across reference refreshes and daemon restarts.
         # Registration changes or a new signed activation get a new approval.
         result = ApprovedTranslationReferencePolicy(

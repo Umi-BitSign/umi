@@ -119,8 +119,8 @@ private evidence-bucket tests do not establish public distribution access.
 
 `TranslationReferencePublisherService` polls native current control and complete
 registration, loads the compact allocation named by the signed current decision,
-and calls the approval and channel owners in owned I/O workers. Configure every
-admitted cohort's publication horizon explicitly; retained signed clocks remain
+and calls the approval and channel owners in owned I/O workers. Select explicit
+cohort horizons or version 3 rolling authorization; retained signed clocks remain
 unchanged. Admission and activation drain wait without replacing the current
 directive. A signed suspension or revocation publishes a hold through the same
 cursor, without requiring model data or another registration pass. Shutdown drains
@@ -190,6 +190,38 @@ signed policy/directive bytes or horizons. Preserve existing state in place when
 adopting version2. The local `check` still does not open credentials or establish
 network readiness; qualify conditional creation, updates, stale rejection,
 competing writers, immutable retries and independent readback on actual R2.
+
+For automatic renewal, select `umi-reference-publisher-config/3` and add
+`directive_renewal` with schema `umi-reference-directive-renewal/1`, positive
+`lifetime_blocks` and a smaller positive `renew_before_blocks`. Version 3 supports
+both S3 and gateway transport. It may omit `horizons`; any retained horizon map
+must still cover the signed series. Versions 1 and 2 preserve their canonical
+configuration and require their explicit horizons. Check the installed runtime
+supports version 3 before selecting the new configuration.
+
+Each poll derives the next directive's horizon from the current native finalized
+block plus `lifetime_blocks`. A matching current directive remains selected until
+its remaining authorization reaches the renewal margin. The publisher then signs
+a successor under fresh native control, allocation and registration checks.
+An expired public head can also receive a successor through its authenticated
+history. Existing signatures, cohort clocks, policy and release targets remain
+unchanged; no weight transaction is submitted by this owner. The margin and
+lifetime describe this renewable publication lease, not a cohort deadline or an
+activation delay. Progress reports the selected expiry and renewal block.
+
+Preserve the original state directory during this upgrade. Before restarting,
+inspect each original channel with `TranslationReferenceChannelPublisher` in
+`read_only=True` mode and call `inspect_state(observed_block=BLOCK)`. This checks
+authenticated history and reports pending intent/signature expiry without loading
+the signer or writing channel/journal records. Its observation block is not a
+native-finality capability. An expired or conflicting pending intent still needs
+explicit reconciliation; never rewrite its interval, replace its signature or
+reset the journal. A current reference row that has not reached the signed
+allocation reports `reference_current_row_pending` and waits with progress rather
+than repeatedly restarting. Invalid authority and damaged retained state continue
+to refuse. Qualify actual installed old-state inspection and signed successor
+readback before claiming deployment; publication does not establish adoption by
+external validators.
 
 The `check` action validates these bindings without opening credentials, loading
 the wallet, creating journals or contacting the chain. It does not establish
