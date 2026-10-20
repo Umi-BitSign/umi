@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import OrderedDict
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from pathlib import Path
-from threading import RLock
+from threading import Condition, Event, RLock
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -22,10 +24,11 @@ from .competition_transport_verification import TransferProgress
 from .open_competition import digest
 from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
-from .r2_evidence import EvidenceObjectHead, R2EvidenceClient
+from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
+PROOF_PUBLICATION_WORKERS = 4
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
@@ -220,8 +223,9 @@ class _ProofIndex(RoundJournal):
 class RemoteProofStore:
     """One authenticated namespace with metadata independent of cached bytes.
 
-    All synchronous callers already run inside owned I/O threads. Serialization
-    admits one bounded transfer per store. A pinned cache entry cannot be evicted;
+    All synchronous callers already run inside owned I/O threads. Publication
+    admits bounded independent objects while keeping receipt mutations serial.
+    A pinned cache entry cannot be evicted;
     insufficient space for another lease is a retry, never an unbounded allocation.
     """
 
@@ -253,6 +257,9 @@ class RemoteProofStore:
         self.journal.migrate_completions(self.namespace_sha256)
         self._cache, self._pins, self._bytes = OrderedDict(), {}, 0
         self._lock = RLock()
+        self._publication_condition = Condition(self._lock)
+        self._publishing_keys: set[str] = set()
+        self._publishing_bytes = 0
 
     def _key(self, path: str) -> str:
         key = self.config.prefix + "/" + path
@@ -392,25 +399,105 @@ class RemoteProofStore:
             progress.advance(reference.size_bytes)
 
     def put_bytes(self, raw: bytes, *, path: str | None = None) -> dict:
+        return self._put_bytes(raw, path=path)[0]
+
+    def _put_bytes(self, raw: bytes, *, path: str | None = None) -> tuple[dict, bool]:
         if type(raw) is not bytes or not 0 < len(raw) <= MAX_PROOF_OBJECT_BYTES:
             raise ValueError("remote proof object exceeds its original byte bound")
         if self.config.read_only:
             raise ValueError("selected proof archive is read-only")
         sha = hashlib.sha256(raw).hexdigest()
         key = self._key("objects/" + sha if path is None else path)
-        with self._lock, TransferProgress("proof_replication", len(raw)) as progress:
-            prior = self._retained(key)
-            if prior is not None:
-                self.validate_reference(prior.model_dump(mode="json", by_alias=True))
-                if (prior.content_sha256, prior.size_bytes) != (sha, len(raw)):
-                    raise ValueError("immutable proof index conflicts with its original bytes")
-                progress.advance(len(raw), restored=True)
-                return prior.model_dump(mode="json", by_alias=True)
+        with (
+            TransferProgress("proof_replication", len(raw)) as progress,
+            self._publication_slot(key, len(raw), progress),
+        ):
+            with self._lock:
+                prior = self._retained(key)
+                if prior is not None:
+                    self.validate_reference(prior.model_dump(mode="json", by_alias=True))
+                    if (prior.content_sha256, prior.size_bytes) != (sha, len(raw)):
+                        raise ValueError("immutable proof index conflicts with its original bytes")
+                    progress.advance(len(raw), restored=True)
+                    return prior.model_dump(mode="json", by_alias=True), True
             head = self.client.publish(key, raw, sha)
             reference = self._reference(key, head)
-            self._remember(reference)
+            with self._lock:
+                self._remember(reference)
             progress.advance(len(raw))
-            return reference.model_dump(mode="json", by_alias=True)
+            return reference.model_dump(mode="json", by_alias=True), False
+
+    @contextmanager
+    def _publication_slot(self, key, size, progress):
+        # The existing maximum object size also bounds aggregate active bytes.
+        # One maximum supported object always fits; admission waits, never drops it.
+        waited = False
+        with self._publication_condition:
+            while (
+                key in self._publishing_keys
+                or len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS
+                or self._publishing_bytes + size > MAX_PROOF_OBJECT_BYTES
+            ):
+                progress.emit("waiting", reason="bounded_proof_publication_admission")
+                waited = True
+                self._publication_condition.wait(timeout=1)
+            self._publishing_keys.add(key)
+            self._publishing_bytes += size
+        if waited:
+            progress.emit("running", reason="proof_publication_admitted")
+        try:
+            yield
+        finally:
+            with self._publication_condition:
+                self._publishing_keys.remove(key)
+                self._publishing_bytes -= size
+                self._publication_condition.notify_all()
+
+    def put_many(self, objects: Mapping[str, bytes]) -> None:
+        """Publish one encoder-owned graph before its recipe/frame can be exposed.
+
+        Workers borrow the already materialized codec bytes. Each owns and closes
+        its HTTP scope; a failed worker stops new jobs and drains active transfers.
+        Successful durable receipts remain reusable by the unchanged retry.
+        """
+        if not objects:
+            return
+        lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(objects)))]
+        for number, (sha, raw) in enumerate(objects.items()):
+            checked_digest(sha)
+            if type(raw) is not bytes or not 0 < len(raw) <= MAX_PROOF_OBJECT_BYTES:
+                raise ValueError("remote proof object exceeds its original byte bound")
+            lanes[number % len(lanes)].append((sha, raw))
+        stop = Event()
+
+        def publish_lane(lane):
+            try:
+                with r2_evidence_connection_scope(self.client):
+                    for sha, raw in lane:
+                        if stop.is_set():
+                            return
+                        reference, restored = self._put_bytes(raw)
+                        if reference["content_sha256"] != sha:
+                            raise ValueError(
+                                "encoded proof object differs from its content identity"
+                            )
+                        progress.advance(len(raw), restored=restored)
+            except BaseException:
+                stop.set()
+                raise
+
+        with TransferProgress(
+            "proof_graph_replication", sum(len(raw) for raw in objects.values())
+        ) as progress:
+            if len(lanes) == 1:
+                publish_lane(lanes[0])
+                return
+            with ThreadPoolExecutor(
+                max_workers=len(lanes), thread_name_prefix="umi-proof-publish"
+            ) as pool:
+                futures = [pool.submit(publish_lane, lane) for lane in lanes]
+                for future in futures:
+                    future.result()
 
     def _space(self, required: int) -> None:
         for sha in tuple(self._cache):
