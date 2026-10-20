@@ -5959,6 +5959,11 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
             expected_rule_sha256=digest(rule),
             export_archive=RewardProofArchive(archive_root, remote=remote),
         )
+
+        def no_implicit_migration(*_args, **_kwargs):
+            pytest.fail("native coverage started an implicit legacy source migration")
+
+        monkeypatch.setattr(journal.externalized, "externalize_many", no_implicit_migration)
         preparation = StandingRewardPreparation(
             c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
         )
@@ -5991,7 +5996,7 @@ async def test_remote_coverage_reuses_native_facts_after_eviction_restart_and_re
     assert interval.credited_ms == 12000
     keys = [coverage_point(e, rule).key() for e in endpoints]
     with journal.journal.read_transaction() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         assert (
             db.execute(
                 "SELECT COUNT(*) FROM records WHERE kind IN "
