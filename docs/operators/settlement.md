@@ -826,6 +826,24 @@ and reward activation.
 
 ### Retained header hints
 
+Normal completed-history restoration supplies its checkpoint headers directly
+to the owned historical provider. When the finality journal has a gap, the
+provider imports the intervening completed headers in batches of at most 4,096,
+then performs the ordinary hash-linked walk from a genuinely owned finalized
+anchor. These headers grant no finality or proof authority. This path applies
+to successor cohorts as well as retained cohorts; no whole-range RPC download
+is needed when the completed local headers cover the gap.
+
+The import reports header counts, elapsed time and a measured ETA under
+`historical_retained_header_import`; that estimate excludes later ancestry,
+history and reward review. A partial completed prefix can supply hints, while
+missing later work keeps the normal recovery path. Damaged completion records,
+wrong heights or conflicting existing hints refuse restoration and require
+explicit repair. Capacity failure rolls back the active batch. Cancellation
+drains the owned operation, and restart reuses the retained hints while
+rechecking their ancestry. Checkpoint formats, signed inputs and successful
+block-proof verification identities remain unchanged.
+
 The additive `umi.historical_header_hint_import_cli` command can transfer
 untrusted native-format header hints into an existing isolated provider cache.
 Run it as that cache's installed service account, using the selected runtime's

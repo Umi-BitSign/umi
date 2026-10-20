@@ -36,6 +36,7 @@ from .competition_reward_control_evidence import (
     _Archive as _Archive,
 )
 from .competition_reward_history_verifier import HistoryProofTools, verify_slot_archive
+from .competition_transport_verification import TransferProgress
 from .competition_worker import (
     CompetitionReplayWorker,
     _canonical_absolute_path,
@@ -176,6 +177,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         self._hint_path = self._hint_directory / "historical-headers.sqlite3"
         self._hint_database_maximum_bytes = historical_header_database_maximum_bytes
         self._hint_lock: int | None = None
+        self._checkpoint_hint_window = None
         self._historical_headers = HistoricalHeaderRecovery(
             self._hint_connect,
             maximum_bytes=historical_header_maximum_bytes,
@@ -343,15 +345,58 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         )
         return result
 
-    async def _resolve_control_header(self, ref, encoded):
+    async def _resolve_control_header(self, ref, encoded, *, retained_headers=None):
         # Single historical reads and checkpoint restoration always acquire a
         # current owned head. Only an explicit bounded worker batch shares it.
-        async with self._control_header_window() as resolve:
+        options = {} if retained_headers is None else {"retained_headers": retained_headers}
+        async with self._control_header_window(**options) as resolve:
             return await resolve(ref, encoded)
+
+    async def _retain_checkpoint_header_window(self, source, first, last):
+        if first > last:
+            return
+        saved = self._checkpoint_hint_window
+        low = first
+        if saved is not None and saved[0] == source and saved[1] <= first <= saved[2] + 1:
+            low = max(low, saved[2] + 1)
+        if low > last:
+            return
+        with TransferProgress(
+            "historical_retained_header_import",
+            last - low + 1,
+            unit="headers",
+            planning_unit_seconds=(0.0001, 0.05),
+        ) as progress:
+            begin = low
+            while low <= last:
+                high = min(last, low + 4095)
+                expected = high - low + 1
+                headers = await run_owned_thread(source, low, high)
+                if type(headers) is not tuple or len(headers) > expected:
+                    raise ValueError("completed header source returned an invalid batch")
+                if not headers:
+                    break
+                for height, encoded in enumerate(headers, low):
+                    if (
+                        _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)["number"]
+                        != height
+                    ):
+                        raise ValueError("completed header source has a gap or wrong height")
+                await self._historical_headers.retain_hints(headers)
+                low += len(headers)
+                progress.advance(len(headers))
+                left = begin
+                if saved is not None and saved[0] == source and saved[1] <= begin <= saved[2] + 1:
+                    left = min(begin, saved[1])
+                self._checkpoint_hint_window = (source, left, low - 1)
+                if len(headers) != expected:
+                    break
 
     @asynccontextmanager
     async def _control_header_window(
         self,
+        *,
+        retained_headers=None,
     ) -> AsyncIterator[Callable[[FinalizedSnapshotRef, str], Awaitable[tuple[int | None, int]]]]:
         """Resolve historical headers against one genuinely owned finalized head.
 
@@ -417,6 +462,10 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                     or anchor.timestamp_ms > head_block.timestamp_ms
                 ):
                     raise ValueError("reward admission anchor exceeds owned head")
+                if retained_headers is not None:
+                    await self._retain_checkpoint_header_window(
+                        retained_headers, ref.block_number + 1, anchor.height - 1
+                    )
                 try:
                     recovered = await self._historical_headers.recover(
                         anchor, ref, self._registration_rpc.request, target_header=encoded
