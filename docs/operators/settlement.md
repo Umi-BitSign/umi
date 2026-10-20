@@ -766,6 +766,16 @@ and restart reuses completed uploads. An interrupted alias commit leaves its
 original inputs unaccepted; retry retains the same immutable bytes. Missing or
 damaged completed identity/alias state requires explicit repair.
 
+Direct source capture uses history capability generation5. Its metadata-only
+upgrade preserves generation3 aliases, original source tokens, successful checks
+and journal inode. Object aliases use `umi-journal-remote-source/2` with
+`umi-source-hex-object/1`: they reference the same bare immutable proof-node bytes
+as the exported archive, so capture and export do not upload duplicate node
+representations. The reader reconstructs and checks the original canonical hex
+record. Existing `/1` aliases remain byte-identical and readable. This is distinct
+from the transport receipt index's generation4. Older source readers refuse
+generation5; upgrade every owner, copier and recovery consumer before selection.
+
 Previously retained local sources remain in place when a new frame shares them.
 In particular, an imported completed-admission interval keeps all original raw
 sources, counters and fences. Its newly captured tail can use direct R2 aliases
