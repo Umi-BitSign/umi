@@ -6,6 +6,7 @@ Only the public common channels and typed approval namespace are admitted.
 """
 
 import re
+from threading import local
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,6 +30,7 @@ class R2ReferenceGatewayClient(R2EvidenceClient):
             raise ValueError("reference control gateway credentials/budget differ")
         self.origin, self._token, self.transport = origin, token, transport
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 15))
+        self._connections = local()
 
     @staticmethod
     def _key(key):
@@ -60,12 +62,7 @@ class R2ReferenceGatewayClient(R2EvidenceClient):
         }
         try:
             with (
-                httpx.Client(
-                    transport=self.transport,
-                    timeout=self.timeout,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as client,
+                self._request_client() as client,
                 client.stream(
                     method, self.origin + "/" + key, headers=request_headers, content=body
                 ) as response,

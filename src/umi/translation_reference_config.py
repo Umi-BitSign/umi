@@ -17,7 +17,7 @@ from .competition_reward_coordinator_boot import load_reward_coordinator_config
 from .competition_reward_decisions import StandingRewardControlReader
 from .open_competition import digest
 from .private_files import Directory, _read_private_bytes, private_path
-from .protocol import Hex32, StrictProtocolModel
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_evidence import R2EvidenceClient
 from .r2_sigv4 import R2Credentials, R2SigV4
 from .translation_reference_channel import TranslationReferenceChannelPublisher, channel_page_key
@@ -28,6 +28,7 @@ from .translation_reference_gateway import (
     validate_gateway_origin,
 )
 from .translation_reference_publication import TranslationReferenceApprovalPublisher
+from .translation_reference_renewal import ReferenceDirectiveRenewal
 from .translation_reference_service import TranslationReferencePublisherService
 from .validator_supervisor import (
     COMMON_SUPERVISOR_AUTHORITY_HOTKEY,
@@ -51,9 +52,11 @@ class ReferenceGatewayCredentials(StrictProtocolModel):
 
 
 class ReferencePublisherConfig(StrictProtocolModel):
-    schema_: Literal["umi-reference-publisher-config/1", "umi-reference-publisher-config/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-reference-publisher-config/1",
+        "umi-reference-publisher-config/2",
+        "umi-reference-publisher-config/3",
+    ] = Field(alias="schema")
     coordinator_config: Directory
     state_directory: Directory
     resources: CompetitionChainResources
@@ -69,7 +72,8 @@ class ReferencePublisherConfig(StrictProtocolModel):
     reference_hotkey: str
     channels: Annotated[list[ReferenceChannelSelection], Field(min_length=1, max_length=2)]
     allocations: dict[Hex32, Directory]
-    horizons: dict[Hex32, Annotated[int, Field(ge=1, le=2**53 - 1)]]
+    horizons: dict[Hex32, Annotated[int, Field(ge=1, le=2**53 - 1)]] = Field(default_factory=dict)
+    directive_renewal: ReferenceDirectiveRenewal | None = None
     poll_seconds: Annotated[int, Field(ge=1, le=3600)] = 30
 
     @model_serializer(mode="wrap")
@@ -77,6 +81,10 @@ class ReferencePublisherConfig(StrictProtocolModel):
         value = handler(self)
         if self.gateway_origin is None:
             value.pop("gateway_origin", None)
+        if self.directive_renewal is None:
+            value.pop("directive_renewal", None)
+        if self.schema_ == "umi-reference-publisher-config/3" and not self.horizons:
+            value.pop("horizons", None)
         return value
 
     @model_validator(mode="after")
@@ -99,12 +107,18 @@ class ReferencePublisherConfig(StrictProtocolModel):
                 raise ValueError("reference channel differs from the common authority/profile")
         # Validate the account endpoint/bucket without opening credentials.
         R2SigV4(self.endpoint, self.bucket, R2Credentials("a" * 32, "b" * 64))
-        if (self.schema_ == "umi-reference-publisher-config/2") != (
-            self.gateway_origin is not None
-        ):
+        if (
+            self.schema_ == "umi-reference-publisher-config/1" and self.gateway_origin is not None
+        ) or (self.schema_ == "umi-reference-publisher-config/2" and self.gateway_origin is None):
             raise ValueError(
                 "reference gateway transport requires its explicit configuration version"
             )
+        if (self.schema_ == "umi-reference-publisher-config/3") != (
+            self.directive_renewal is not None
+        ):
+            raise ValueError("rolling reference authorization requires explicit config version3")
+        if self.directive_renewal is None and not self.horizons:
+            raise ValueError("reference publication needs explicit valid cohort horizons")
         if self.gateway_origin is not None:
             validate_gateway_origin(self.gateway_origin)
             if (
@@ -145,6 +159,14 @@ def read_input(path: Path, maximum: int, *, producer_uid: int | None = None) -> 
 
 
 def selected_inputs(config: ReferencePublisherConfig):
+    if (config.schema_ == "umi-reference-publisher-config/3") != (
+        config.directive_renewal is not None
+    ):
+        raise ValueError("rolling reference authorization requires explicit config version3")
+    if config.directive_renewal is not None:
+        ReferenceDirectiveRenewal.model_validate_json(
+            canonical_json_bytes(config.directive_renewal)
+        )
     selected = load_reward_coordinator_config(Path(config.coordinator_config))
     root = Path(config.state_directory)
     protected = [
@@ -172,8 +194,9 @@ def selected_inputs(config: ReferencePublisherConfig):
         }
     )
     config.resources.check(chain)
-    if set(config.horizons) != {digest(c) for c in selected.series.cohorts} or any(
-        config.horizons[digest(c)] < c.not_before_block for c in selected.series.cohorts
+    if (config.horizons or config.directive_renewal is None) and (
+        set(config.horizons) != {digest(c) for c in selected.series.cohorts}
+        or any(config.horizons[digest(c)] < c.not_before_block for c in selected.series.cohorts)
     ):
         raise ValueError("reference publication needs every signed cohort horizon")
     if config.reference_hotkey not in selected.series.validators:
@@ -289,6 +312,7 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
         decisions=decisions,
         allocations=allocations,
         horizons=config.horizons,
+        directive_renewal=config.directive_renewal,
         poll_seconds=config.poll_seconds,
         progress=progress,
     )

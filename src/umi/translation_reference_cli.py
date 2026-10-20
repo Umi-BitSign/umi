@@ -11,6 +11,7 @@ from pathlib import Path
 from .concurrency import run_until_stopped
 from .open_competition import digest
 from .private_files import read_private_model
+from .translation_reference_channel import ReferenceHorizonExpired
 from .translation_reference_config import (
     ReferencePublisherConfig,
     build_reference_service,
@@ -98,6 +99,15 @@ def main(argv=None):
                 eta_seconds=None,
                 eta_basis="repair required; completion is not forecast",
                 recovery="restore_original_inputs_or_supported_configuration_no_reset",
+                **(
+                    dict(
+                        reason_code="reference_directive_horizon_expired",
+                        selected_horizon=error.selected_horizon,
+                        current_block=error.current_block,
+                    )
+                    if isinstance(error, ReferenceHorizonExpired)
+                    else {}
+                ),
             )
         )
         raise SystemExit(1) from None

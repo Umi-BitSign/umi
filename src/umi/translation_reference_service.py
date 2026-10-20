@@ -20,11 +20,16 @@ from .competition_reward_decisions import StandingRewardControlReader
 from .concurrency import await_owned_task, run_owned_thread
 from .open_competition import digest
 from .private_files import ensure_private_directory, lock_private_file
+from .protocol import canonical_json_bytes
 from .translation_reference_channel import (
     ReferenceChannelConflict,
     TranslationReferenceChannelPublisher,
 )
-from .translation_reference_publication import TranslationReferenceApprovalPublisher
+from .translation_reference_publication import (
+    ReferenceRowPending,
+    TranslationReferenceApprovalPublisher,
+)
+from .translation_reference_renewal import ReferenceDirectiveRenewal
 from .validator_chain import ValidatorChainError
 
 
@@ -40,6 +45,7 @@ class TranslationReferencePublisherService:
         decisions,
         allocations,
         horizons: dict[str, int],
+        directive_renewal: ReferenceDirectiveRenewal | None = None,
         poll_seconds: int = 30,
         progress=None,
     ):
@@ -58,7 +64,11 @@ class TranslationReferencePublisherService:
             or not 1 <= poll_seconds <= 3600
         ):
             raise ValueError("reference publication service owners differ")
-        if (
+        if directive_renewal is not None:
+            directive_renewal = ReferenceDirectiveRenewal.model_validate_json(
+                canonical_json_bytes(directive_renewal)
+            )
+        if (horizons or directive_renewal is None) and (
             set(horizons) != {digest(p) for p in reader.series.cohorts}
             or any(type(v) is not int or not 1 <= v <= 2**53 - 1 for v in horizons.values())
             or any(horizons[digest(p)] < p.not_before_block for p in reader.series.cohorts)
@@ -67,8 +77,17 @@ class TranslationReferencePublisherService:
         self.root, self.reader, self.provider, self.approval = root, reader, provider, approval
         self.channels, self.decisions, self.allocations = channels, decisions, allocations
         self.horizons, self.poll_seconds, self.progress = dict(horizons), poll_seconds, progress
+        self.directive_renewal = directive_renewal
 
-    def _event(self, stage, started, *, completed=0, total=1, status="running"):
+    def _window(self, block: int, cohort: str | None = None) -> tuple[int, int]:
+        if self.directive_renewal is not None:
+            return (
+                self.directive_renewal.through_block(block),
+                self.directive_renewal.renew_before_blocks,
+            )
+        return (max(self.horizons.values()) if cohort is None else self.horizons[cohort], 0)
+
+    def _event(self, stage, started, *, completed=0, total=1, status="running", row_pending=None):
         if self.progress is not None:
             self.progress(
                 dict(
@@ -84,6 +103,15 @@ class TranslationReferencePublisherService:
                     status=status,
                     stalled=status in {"waiting_inputs", "retrying"},
                     retrying=status == "retrying",
+                    **(
+                        dict(
+                            reason_code="reference_current_row_pending",
+                            reference_last_update=row_pending.last_update,
+                            minimum_reference_update=row_pending.minimum_update,
+                        )
+                        if row_pending is not None
+                        else {}
+                    ),
                 )
             )
 
@@ -99,7 +127,7 @@ class TranslationReferencePublisherService:
             self._event("reference_owner_wait_selection", started, status="waiting_inputs")
             return selected.state
         if selected.state in {"revoked", "suspended"}:
-            horizon = max(self.horizons.values())
+            horizon, margin = self._window(control.snapshot.block_number)
             for index, channel in enumerate(self.channels, 1):
                 await run_owned_thread(
                     lambda channel=channel: channel.select_hold(
@@ -107,6 +135,7 @@ class TranslationReferencePublisherService:
                         control=control,
                         source=self.decisions,
                         valid_through_block=horizon,
+                        renew_before_blocks=margin,
                     )
                 )
                 self._event(
@@ -118,8 +147,11 @@ class TranslationReferencePublisherService:
                 )
             return selected.state
         activation = selected.activation
-        if activation is None or activation.cohort_sha256 not in self.horizons:
+        if activation is None or activation.cohort_sha256 not in {
+            digest(p) for p in self.reader.series.cohorts
+        }:
             raise ValueError("selected cohort has no configured publication horizon")
+        horizon, margin = self._window(control.snapshot.block_number, activation.cohort_sha256)
         allocation_sha = activation.effective_allocation_sha256 or activation.allocation_sha256
         self._event("reference_owner_allocation", started)
         allocation = await run_owned_thread(self.allocations, allocation_sha)
@@ -140,7 +172,8 @@ class TranslationReferencePublisherService:
             await run_owned_thread(
                 lambda channel=channel: channel.step(
                     self.approval,
-                    valid_through_block=self.horizons[activation.cohort_sha256],
+                    valid_through_block=horizon,
+                    renew_before_blocks=margin,
                     **inputs,
                 )
             )
@@ -173,6 +206,13 @@ class TranslationReferencePublisherService:
                     await self.tick()
                 except FileNotFoundError:
                     self._event("reference_owner_wait_inputs", started, status="waiting_inputs")
+                except ReferenceRowPending as error:
+                    self._event(
+                        "reference_owner_wait_reference_row",
+                        started,
+                        status="waiting_inputs",
+                        row_pending=error,
+                    )
                 except (
                     OSError,
                     TimeoutError,

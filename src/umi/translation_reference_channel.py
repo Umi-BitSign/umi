@@ -48,6 +48,30 @@ class ReferenceChannelConflict(RuntimeError):
     """A concurrent or interrupted write requires a new authoritative read."""
 
 
+class ReferenceHorizonExpired(ValueError):
+    """Numeric, nonsecret diagnostics for an expired local authorization window."""
+
+    def __init__(self, *, selected_horizon: int, current_block: int):
+        if type(selected_horizon) is not int or type(current_block) is not int:
+            raise ValueError("reference horizon diagnostics require integer blocks")
+        super().__init__("reference directive lacks its selected future authorization horizon")
+        self.selected_horizon = selected_horizon
+        self.current_block = current_block
+
+
+def _validate_window(valid_through_block, block, renew_before_blocks):
+    if type(valid_through_block) is not int or type(block) is not int:
+        raise ValueError("reference authorization window requires integer blocks")
+    if valid_through_block < block:
+        raise ReferenceHorizonExpired(selected_horizon=valid_through_block, current_block=block)
+    if (
+        type(renew_before_blocks) is not int
+        or renew_before_blocks < 0
+        or (renew_before_blocks and renew_before_blocks >= valid_through_block - block)
+    ):
+        raise ValueError("reference renewal margin does not fit its authorization window")
+
+
 class ReferenceChannelStore(Protocol):
     def read(self, key: str) -> ChannelObject | None: ...
     def compare_and_swap(self, key: str, previous: ChannelObject | None, raw: bytes) -> None: ...
@@ -74,6 +98,7 @@ class TranslationReferenceChannelPublisher:
         signer_loader,
         maximum_bytes: int,
         progress=None,
+        read_only: bool = False,
     ):
         self.config = ValidatorSupervisorConfig.model_validate_json(canonical_json_bytes(config))
         self.release = SupervisorReleaseTarget.model_validate_json(canonical_json_bytes(release))
@@ -97,9 +122,27 @@ class TranslationReferenceChannelPublisher:
             trust_sha256=digest(self.config.trust_policy()),
             release_sha256=digest(self.release),
         )
-        self.journal = RoundJournal(root, self.binding, maximum_bytes=maximum_bytes)
+        if type(read_only) is not bool:
+            raise ValueError("reference channel read-only selection must be explicit")
+        self.journal = RoundJournal(
+            root,
+            self.binding,
+            maximum_bytes=maximum_bytes,
+            read_only=read_only,
+            existing_only=read_only,
+        )
 
-    def _event(self, stage, started, *, completed=0, total=1, retrying=False):
+    def _event(
+        self,
+        stage,
+        started,
+        *,
+        completed=0,
+        total=1,
+        retrying=False,
+        valid_through_block=None,
+        renew_after_block=None,
+    ):
         if self.progress is not None:
             elapsed = time.monotonic() - started
             self.progress(
@@ -115,6 +158,14 @@ class TranslationReferenceChannelPublisher:
                     "retries extend range; external adoption separate",
                     retrying=retrying,
                     stalled=retrying,
+                    **(
+                        dict(
+                            valid_through_block=valid_through_block,
+                            renew_after_block=renew_after_block,
+                        )
+                        if valid_through_block is not None
+                        else {}
+                    ),
                 )
             )
 
@@ -169,9 +220,10 @@ class TranslationReferenceChannelPublisher:
             page = self._page(value, sequence=sequence, sha=sha, block=block)
             if not page.directives:
                 return head, value, initial_value, initial, prefix
-            self.journal.put(
-                "reference_channel_observed", f"{page.head.directive.sequence:016d}", page.head
-            )
+            if not self.journal.read_only:
+                self.journal.put(
+                    "reference_channel_observed", f"{page.head.directive.sequence:016d}", page.head
+                )
             if prefix:
                 prefix.extend(page.directives)
                 if len(prefix) > MAX_SUPERVISOR_DIRECTIVES_PER_PAGE:
@@ -191,6 +243,51 @@ class TranslationReferenceChannelPublisher:
             self._write(
                 channel_page_key(self.config, 0, None), initial_value, canonical_json_bytes(mirror)
             )
+
+    def inspect_state(self, *, observed_block: int) -> dict[str, object]:
+        """Read authenticated history and retained transition metadata, never sign.
+
+        The block is an observation hint, not an issued native finality capability.
+        An actual publication still requires fresh native control and registration.
+        """
+        if not self.journal.read_only or type(observed_block) is not int or observed_block < 1:
+            raise ValueError("reference inspection needs a read-only owner and observed block")
+        with self.journal.locked():
+            head, _value, _initial_value, _initial, _prefix = self._head(
+                observed_block, time.monotonic()
+            )
+            key = f"{head.directive.sequence + 1:016d}"
+            intent = self.journal.get("reference_channel_intent", key)
+            signed = self.journal.get("reference_channel_signed", key)
+            directive = None if intent is None else SupervisorDirective.model_validate(intent)
+            if signed is not None:
+                signed = SignedSupervisorDirective.model_validate(signed)
+                if directive is None or signed.directive != directive:
+                    raise ValueError("retained reference signature requires original intent repair")
+                verify_signed_supervisor_directive_history(
+                    signed, config=self.config, finalized_block=observed_block
+                )
+            if directive is not None and (
+                directive.previous_directive_sha256 != head.directive_sha256
+                or directive.sequence != head.directive.sequence + 1
+            ):
+                raise ValueError("retained reference intent differs from authenticated head")
+            return {
+                "platform": self.config.target_platform,
+                "head_sequence": head.directive.sequence,
+                "head_directive_sha256": head.directive_sha256,
+                "head_valid_through_block": head.directive.valid_through_block,
+                "head_expired_at_observation": head.directive.valid_through_block < observed_block,
+                "pending_intent_sha256": None
+                if directive is None
+                else supervisor_directive_sha256(directive),
+                "pending_signed": signed is not None,
+                "pending_expired_at_observation": directive is not None
+                and directive.valid_through_block < observed_block,
+                "signer_loaded": False,
+                "channel_writes": False,
+                "independent_native_finality_verified": False,
+            }
 
     def _sign(self, directive):
         signer = self.signer_loader()
@@ -230,8 +327,15 @@ class TranslationReferenceChannelPublisher:
             raise ReferenceChannelConflict("reference channel readback differs")
 
     def step(
-        self, approval: TranslationReferenceApprovalPublisher, *, valid_through_block: int, **inputs
+        self,
+        approval: TranslationReferenceApprovalPublisher,
+        *,
+        valid_through_block: int,
+        renew_before_blocks: int = 0,
+        **inputs,
     ) -> SignedSupervisorDirective:
+        if self.journal.read_only:
+            raise ValueError("read-only reference inspection cannot publish or load a signer")
         if type(approval) is not TranslationReferenceApprovalPublisher:
             raise TypeError("reference channel requires its current native approval owner")
         if identity(approval.authority_hotkey) != identity(self.authority.hotkey):
@@ -239,15 +343,16 @@ class TranslationReferenceChannelPublisher:
         started = time.monotonic()
         with self.journal.locked():
             try:
-                return self._step(approval, inputs, valid_through_block, started)
+                return self._step(
+                    approval, inputs, valid_through_block, started, renew_before_blocks
+                )
             except BaseException:
                 self._event("reference_channel_retry", started, retrying=True)
                 raise
 
-    def _step(self, approval, inputs, valid_through_block, started):
+    def _step(self, approval, inputs, valid_through_block, started, renew_before_blocks=0):
         block = inputs["control"].snapshot.block_number
-        if type(valid_through_block) is not int or valid_through_block < block:
-            raise ValueError("reference directive lacks its selected future authorization horizon")
+        _validate_window(valid_through_block, block, renew_before_blocks)
         policy = approval.step(**inputs)
         sha = reference_policy_sha256(policy)
         verify_reference_policy(
@@ -268,12 +373,21 @@ class TranslationReferenceChannelPublisher:
             block=block,
             valid_through_block=valid_through_block,
             started=started,
+            renew_before_blocks=renew_before_blocks,
         )
 
     def select_hold(
-        self, reader: StandingRewardControlReader, *, control, source, valid_through_block: int
+        self,
+        reader: StandingRewardControlReader,
+        *,
+        control,
+        source,
+        valid_through_block: int,
+        renew_before_blocks: int = 0,
     ) -> SignedSupervisorDirective:
         """Propagate an authenticated revocation/suspension through the same cursor."""
+        if self.journal.read_only:
+            raise ValueError("read-only reference inspection cannot publish or load a signer")
         if type(reader) is not StandingRewardControlReader:
             raise TypeError("reference hold requires the configured native control reader")
         started = time.monotonic()
@@ -295,28 +409,48 @@ class TranslationReferenceChannelPublisher:
                     block=control.snapshot.block_number,
                     valid_through_block=valid_through_block,
                     started=started,
+                    renew_before_blocks=renew_before_blocks,
                 )
             except BaseException:
                 self._event("reference_channel_retry", started, retrying=True)
                 raise
 
     def _publish_transition(
-        self, *, mode, policy_sha256, release, native_check, block, valid_through_block, started
+        self,
+        *,
+        mode,
+        policy_sha256,
+        release,
+        native_check,
+        block,
+        valid_through_block,
+        started,
+        renew_before_blocks=0,
     ):
         sha = policy_sha256
-        if type(valid_through_block) is not int or valid_through_block < block:
-            raise ValueError("reference directive lacks its selected future authorization horizon")
+        _validate_window(valid_through_block, block, renew_before_blocks)
         head, prior_value, initial_value, initial, prefix = self._head(block, started)
         if (
             head.directive.mode == mode
             and head.directive.policy_sha256 == sha
             and head.directive.release == release
+            and head.directive.valid_through_block >= block
         ):
-            native_check()
             verify_signed_supervisor_directive(head, config=self.config, finalized_block=block)
-            self._mirror(initial_value, initial, prefix, head)
-            self._event("reference_channel_selected", started, completed=1)
-            return head
+            if (
+                head.directive.valid_through_block - block > renew_before_blocks
+                or valid_through_block <= head.directive.valid_through_block
+            ):
+                native_check()
+                self._mirror(initial_value, initial, prefix, head)
+                self._event(
+                    "reference_channel_selected",
+                    started,
+                    completed=1,
+                    valid_through_block=head.directive.valid_through_block,
+                    renew_after_block=head.directive.valid_through_block - renew_before_blocks,
+                )
+                return head
         sequence = head.directive.sequence + 1
         key = f"{sequence:016d}"
         intent = self.journal.get("reference_channel_intent", key)
@@ -401,5 +535,11 @@ class TranslationReferenceChannelPublisher:
             key,
             {"directive_sha256": signed.directive_sha256, "policy_sha256": sha},
         )
-        self._event("reference_channel_selected", started, completed=1)
+        self._event(
+            "reference_channel_selected",
+            started,
+            completed=1,
+            valid_through_block=signed.directive.valid_through_block,
+            renew_after_block=signed.directive.valid_through_block - renew_before_blocks,
+        )
         return signed

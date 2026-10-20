@@ -159,6 +159,52 @@ def test_all_cohort_horizons_required_before_opening_credentials_or_journals(ins
     assert not item.root.exists()
 
 
+@pytest.mark.parametrize("gateway", [False, True])
+async def test_rolling_config_uses_current_block_without_rewriting_legacy_config(
+    installed, gateway
+):
+    item = installed
+    original = canonical_json_bytes(item.config)
+    values = item.config.model_dump(mode="json", by_alias=True)
+    values.update(
+        schema="umi-reference-publisher-config/3",
+        directive_renewal={
+            "schema": "umi-reference-directive-renewal/1",
+            "lifetime_blocks": 7200,
+            "renew_before_blocks": 1200,
+        },
+    )
+    values.pop("horizons")
+    if gateway:
+        values.update(
+            gateway_origin=REFERENCE_GATEWAY_ORIGIN, endpoint=REFERENCE_GATEWAY_R2_ENDPOINT
+        )
+        item.credentials.write_text(json.dumps({"token": "a" * 64}))
+    config = wiring.ReferencePublisherConfig.model_validate(values)
+    service = wiring.build_reference_service(config)
+    assert service.horizons == {}
+    block = item.c.native.item.finality.ref.block_number
+    assert service._window(block, digest(item.c.native.c.series.cohorts[0])) == (block + 7200, 1200)
+    assert canonical_json_bytes(item.config) == original
+    await service.provider.aclose()
+
+
+def test_rolling_mode_cannot_be_smuggled_into_legacy_configuration(installed):
+    from umi.translation_reference_renewal import ReferenceDirectiveRenewal
+
+    item = installed
+    renewal = ReferenceDirectiveRenewal(
+        schema="umi-reference-directive-renewal/1",
+        lifetime_blocks=7200,
+        renew_before_blocks=1200,
+    )
+    item.credentials.unlink()
+    bad = item.config.model_copy(update={"directive_renewal": renewal})
+    with pytest.raises(ValueError, match="explicit config version3"):
+        wiring.build_reference_service(bad)
+    assert not item.root.exists()
+
+
 def test_check_entrypoint_does_not_open_credentials_or_wallet(installed, tmp_path, capsys):
     config_path = tmp_path / "private" / "config.json"
     config_path.write_bytes(canonical_json_bytes(installed.config))
@@ -180,6 +226,26 @@ def test_entrypoint_error_never_prints_parser_input_secrets(tmp_path, capsys):
         main(["check", "--config", str(config)])
     output = capsys.readouterr().out
     assert "repair_required" in output and "sensitive-never-report" not in output
+
+
+def test_expired_horizon_cli_reports_only_safe_numeric_diagnostics(
+    installed, tmp_path, monkeypatch, capsys
+):
+    from umi import translation_reference_cli as cli
+    from umi.translation_reference_channel import ReferenceHorizonExpired
+
+    async def expired(_config):
+        raise ReferenceHorizonExpired(selected_horizon=9317800, current_block=9327218)
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", expired)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    record = json.loads(capsys.readouterr().out)
+    assert record["reason_code"] == "reference_directive_horizon_expired"
+    assert record["selected_horizon"] == 9317800 and record["current_block"] == 9327218
 
 
 def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):

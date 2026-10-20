@@ -72,6 +72,35 @@ async def test_native_tick_selects_current_then_successor_without_operator_inter
     assert c.events[-1]["status"] == "complete" and c.events[-1]["eta_seconds"] == 0
 
 
+async def test_rolling_native_tick_signs_fresh_window_and_preserves_cohort_clocks(
+    channel_case, tmp_path
+):
+    from umi.translation_reference_renewal import ReferenceDirectiveRenewal
+
+    c = channel_case
+    await c.native.inputs()
+    original = c.native.c.series.model_dump(mode="json")
+    renewal = ReferenceDirectiveRenewal(
+        schema="umi-reference-directive-renewal/1",
+        lifetime_blocks=7200,
+        renew_before_blocks=1200,
+    )
+    service = owner(c, tmp_path / "rolling-service", horizons={}, directive_renewal=renewal)
+    assert await service.tick() == "selected"
+    from umi.translation_reference_channel import channel_page_key
+    from umi.validator_supervisor import parse_canonical_supervisor_directive_page
+
+    page = parse_canonical_supervisor_directive_page(
+        c.store.read(channel_page_key(c.config, 0, None)).payload
+    )
+    assert page.head.directive.valid_through_block == (
+        c.native.item.finality.ref.block_number + 7200
+    )
+    signatures = len(c.signatures)
+    assert await service.tick() == "selected" and len(c.signatures) == signatures
+    assert c.native.c.series.model_dump(mode="json") == original
+
+
 async def test_native_revocation_tick_stops_channel_without_collecting_allocation_or_weights(
     channel_case, tmp_path, monkeypatch
 ):
@@ -109,6 +138,28 @@ async def test_missing_input_is_visible_wait_and_shutdown_drains_provider(channe
     assert c.events[-1]["status"] == "waiting_inputs"
     assert c.events[-1]["eta_seconds"] is None
     assert not c.signatures and not c.native.calls
+
+
+async def test_pending_reference_row_waits_without_restarting_or_signing(
+    channel_case, tmp_path, monkeypatch
+):
+    from umi.translation_reference_publication import ReferenceRowPending
+
+    c = channel_case
+    await c.native.inputs()
+    stop = asyncio.Event()
+    service = owner(c, tmp_path / "pending-row-service")
+
+    def pending(**_inputs):
+        stop.set()
+        raise ReferenceRowPending(last_update=100, minimum_update=200)
+
+    monkeypatch.setattr(service.approval, "prepare_policy", pending)
+    await service.run(stop)
+    assert service.provider._closed and not c.signatures
+    assert c.events[-1]["reason_code"] == "reference_current_row_pending"
+    assert c.events[-1]["reference_last_update"] == 100
+    assert c.events[-1]["status"] == "waiting_inputs"
 
 
 async def test_cancellation_drains_started_io_before_releasing_service_lock(channel_case, tmp_path):
