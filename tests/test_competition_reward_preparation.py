@@ -6649,7 +6649,14 @@ async def test_native_allocation_export_repairs_partial_delivery_without_replay(
             path = files.root / "allocations" / (digest(prepared.allocation) + ".json")
             identity = path.stat()
             assert await owner.prepare(p.package, **replay_args(observations)) is prepared
-            assert path.stat() == identity
+            # An unchanged delivery can be read during retry, updating atime.
+            # Its inode, ownership, size and mutation timestamps must remain.
+            fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+            unchanged = path.stat()
+            assert tuple(getattr(unchanged, name) for name in fields) == tuple(
+                getattr(identity, name) for name in fields
+            )
             # Repair the delivery copy, preserving completed native verification.
             path.unlink()
             assert await owner.prepare(p.package, **replay_args(observations)) is prepared

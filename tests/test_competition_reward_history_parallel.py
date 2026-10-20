@@ -380,6 +380,29 @@ async def test_one_worker_byte_window_keeps_supported_inputs_and_bounds_dispatch
     assert len(h.pools) == 1
 
 
+async def test_one_frame_byte_window_does_not_prefetch_fresh_capture(history_case, monkeypatch):
+    h = history_case
+    first = h.reader.first_block
+    h.reader.verification_profile = profile(maximum_in_flight_bytes=workers.MAX_FRAME_BYTES)
+    prepare = h.reader._prepare
+    requested = []
+
+    async def bounded(provider, height):
+        # The previous frame must be durably applied before another raw frame
+        # enters a one-frame admission window, even with four selected workers.
+        assert h.reader._next == height
+        if height > first:
+            assert h.reader.checkpoints.load(height - 1) is not None
+        requested.append(height)
+        return await prepare(provider, height)
+
+    monkeypatch.setattr(h.reader, "_prepare", bounded)
+    result = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    assert result.next_block == first + 2 and result.history is None
+    assert requested == [first, first + 1]
+    assert h.body_requests == requested
+
+
 async def test_parallel_windows_refresh_once_each_and_restart_checks_fresh_tip(
     parallel_case, monkeypatch
 ):

@@ -197,7 +197,7 @@ async def _run(reader, provider, last, stop):
     # evidence lowers throughput rather than failing an accepted input.
     count = min(profile.maximum_in_flight, profile.maximum_in_flight_bytes // MAX_FRAME_BYTES)
     async with history_memory_window(profile.required_memory_bytes):
-        pool = prepared = fields = values = None
+        pool = fields = values = None
         entries = []
         failure = None
         try:
@@ -211,12 +211,13 @@ async def _run(reader, provider, last, stop):
                 if completed is None and fields is not None:
                     entries.append((reader._next, fields, retained))
                 if not entries:
-                    # No retained frame: use the existing online capture owner,
-                    # outside its lock. The shared journal remains owned here.
-                    prepared = reader._start_preparation(provider, reader._next)
-                    value = await await_owned_task(prepared.task)
-                    value = await reader._ensure_checkpoint_export(value)
-                    reader._apply_checkpoint(value)
+                    # Online capture still owns native verification. Reuse its
+                    # bounded pipeline instead of serializing capture, source
+                    # persistence and export for every missing frame. A one-frame
+                    # profile must not admit lookahead.
+                    await reader._advance_capture_locked(
+                        provider, window_last, prefetch=count >= 2, stop=stop
+                    )
                     continue
                 if pool is None:
                     pool = HistoryWorkers(
@@ -256,7 +257,7 @@ async def _run(reader, provider, last, stop):
                 if failure is None:
                     failure = compact_memory_error(error)
             entries.clear()
-            pool = prepared = fields = values = None
+            pool = fields = values = None
             reader._prepared_encodings.clear()
             reader._source_tokens.clear()
         if failure is not None:
