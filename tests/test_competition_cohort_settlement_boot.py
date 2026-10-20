@@ -536,10 +536,15 @@ def test_package_aggregate_budget_does_not_raise_promotion_limit(selected):
         SettlementServiceConfig.model_validate(original | {"maximum_promotion_bytes": 1024**3})
 
 
-async def test_r2_settlement_boot_retains_selection_on_restart(selected, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_read_through", [False, True])
+async def test_r2_settlement_boot_retains_selection_on_restart(
+    selected, tmp_path, monkeypatch, legacy_read_through
+):
     from .test_competition_remote_proof_store import select_remote_proofs
 
-    selected.config, opened, _ = select_remote_proofs(selected.config, tmp_path, monkeypatch)
+    selected.config, opened, _ = select_remote_proofs(
+        selected.config, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+    )
     for _ in range(2):
         await test_settlement_boot_owns_keys_locks_and_drains_children(
             selected, monkeypatch, "stop"

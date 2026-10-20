@@ -120,9 +120,12 @@ def test_forecast_budget_preserves_existing_configuration_bytes(config_case):
     selected = h.config.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2})
     h.save(h.path, canonical_json_bytes(selected))
     assert boot.load_reward_coordinator_config(h.path).forecast_accounting_bytes == 64 * 1024**2
-    assert canonical_json_bytes(
-        selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
-    ) == original
+    assert (
+        canonical_json_bytes(
+            selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
+        )
+        == original
+    )
 
 
 def test_coordinator_history_capacity_matches_native_history_envelope(config_case):
@@ -442,12 +445,15 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
 
 
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+@pytest.mark.parametrize("legacy_read_through", [False, True])
 async def test_r2_reward_owner_boot_retains_selection_on_restart(
-    config_case, tmp_path, monkeypatch, role
+    config_case, tmp_path, monkeypatch, role, legacy_read_through
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
-    config_case.config, opened, _ = select_remote_proofs(config_case.config, tmp_path, monkeypatch)
+    config_case.config, opened, _ = select_remote_proofs(
+        config_case.config, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+    )
     for _ in range(2):
         await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             config_case, monkeypatch, role, None, True, successor=False

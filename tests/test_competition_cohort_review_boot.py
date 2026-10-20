@@ -1254,13 +1254,18 @@ def test_request_aggregate_override_preserves_legacy_config_and_other_phase_limi
     assert canonical_json_bytes(PhaseReviewServiceConfig.model_validate(restored)) == original
 
 
+@pytest.mark.parametrize("legacy_read_through", [False, True])
 async def test_r2_phase_review_boot_selects_only_import_on_restart(
-    selected, providers, tmp_path, monkeypatch
+    selected, providers, tmp_path, monkeypatch, legacy_read_through
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
     selected.config, opened, _ = select_remote_proofs(
-        selected.config, tmp_path, monkeypatch, import_only=True
+        selected.config,
+        tmp_path,
+        monkeypatch,
+        import_only=True,
+        legacy_read_through=legacy_read_through,
     )
     for _ in range(2):
         async with boot.phase_review_app(selected.config):

@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_evidence_codec import MAX_EVIDENCE_BYTES, checked_digest
 from .competition_round_journal import RoundJournal
@@ -29,7 +29,7 @@ MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
-    schema_: Literal["umi-r2-proof-archive/1"] = Field(alias="schema")
+    schema_: Literal["umi-r2-proof-archive/1", "umi-r2-proof-archive/2"] = Field(alias="schema")
     credentials_file: Directory
     bucket: Annotated[str, Field(min_length=3, max_length=63)]
     prefix: Annotated[str, Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$")]
@@ -37,6 +37,20 @@ class ProofArchiveR2Config(StrictProtocolModel):
     maximum_cache_bytes: Annotated[int, Field(ge=MAX_PROOF_OBJECT_BYTES, le=16 * 1024**3)]
     maximum_index_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)]
     timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    legacy_read_through: bool = False
+
+    @model_validator(mode="after")
+    def legacy_selection(self):
+        if self.legacy_read_through and self.schema_ != "umi-r2-proof-archive/2":
+            raise ValueError("retained local proof reads require explicit archive/2 selection")
+        return self
+
+    @model_serializer(mode="wrap")
+    def original_bytes(self, handler):
+        value = handler(self)
+        if not self.legacy_read_through:
+            value.pop("legacy_read_through", None)
+        return value
 
 
 class ProofArchiveStores(StrictProtocolModel):

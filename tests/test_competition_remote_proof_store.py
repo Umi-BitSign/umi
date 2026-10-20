@@ -353,7 +353,9 @@ def test_migration_changed_source_requires_explicit_exact_byte_repair(tmp_path, 
     assert result["replicated_files"] == 1
 
 
-def select_remote_proofs(value, tmp_path, monkeypatch, *, import_only=False):
+def select_remote_proofs(
+    value, tmp_path, monkeypatch, *, import_only=False, legacy_read_through=False
+):
     """Use real selection/owner stores and a bounded authenticated HTTP fixture."""
     from umi import competition_proof_archive_selection as selection
     from umi.protocol import canonical_json_bytes
@@ -366,10 +368,20 @@ def select_remote_proofs(value, tmp_path, monkeypatch, *, import_only=False):
         return result
 
     monkeypatch.setattr(selection, "RemoteProofStore", remote)
+
+    def selected_config(root, *, read_only=False):
+        selected = config(root, read_only=read_only)
+        if legacy_read_through:
+            selected = ProofArchiveR2Config.model_validate(
+                selected.model_dump(mode="json", by_alias=True)
+                | {"schema": "umi-r2-proof-archive/2", "legacy_read_through": True}
+            )
+        return selected
+
     stores = ProofArchiveStores(
         schema="umi-proof-archive-stores/1",
-        imported=config(tmp_path / "reader", read_only=True),
-        exported=None if import_only else config(tmp_path / "writer"),
+        imported=selected_config(tmp_path / "reader", read_only=True),
+        exported=None if import_only else selected_config(tmp_path / "writer"),
     )
     assert b'"proof_stores"' not in canonical_json_bytes(value)
     selected = type(value).model_validate_json(
@@ -413,6 +425,121 @@ def test_selected_exporter_migrates_original_before_startup_and_restarts_without
     monkeypatch.setattr(RewardProofArchive, "_frame", prohibit)
     selection.selected_proof_archive(root, config(tmp_path))
     assert not server.calls
+
+
+def test_retained_local_selection_preserves_old_config_bytes_and_refuses_implicit_upgrade(tmp_path):
+    from umi.protocol import canonical_json_bytes
+
+    original = config(tmp_path)
+    raw = canonical_json_bytes(original)
+    assert b"legacy_read_through" not in raw
+    assert canonical_json_bytes(ProofArchiveR2Config.model_validate_json(raw)) == raw
+    with pytest.raises(ValueError, match="explicit archive/2"):
+        ProofArchiveR2Config.model_validate(
+            original.model_dump(mode="json", by_alias=True) | {"legacy_read_through": True}
+        )
+
+
+def retained_local_config(root):
+    return ProofArchiveR2Config.model_validate(
+        config(root).model_dump(mode="json", by_alias=True)
+        | {"schema": "umi-r2-proof-archive/2", "legacy_read_through": True}
+    )
+
+
+def test_retained_local_startup_and_restart_never_inventory_or_migrate_history(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+    import os
+
+    from umi import competition_proof_archive_selection as selection
+
+    server = EvidenceServer()
+    root, old_key, new_key = tmp_path / "archive", "ab" * 32, "cd" * 32
+    original = RewardProofArchive(root)
+    original.write("history", old_key, context={"height": 7}, fields={"proof": b"original"})
+    before = {
+        path: (path.read_bytes(), path.stat().st_ino, path.stat().st_ctime_ns)
+        for path in root.rglob("*.json")
+    }
+    monkeypatch.setattr(
+        selection,
+        "RemoteProofStore",
+        lambda directory, selected: RemoteProofStore(directory, selected, client=server.client()),
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("retained local startup must not enumerate or migrate the archive")
+
+    monkeypatch.setattr(selection, "migrate_proof_archive", refuse)
+    scan = os.scandir
+
+    def bounded_scan(path):
+        if path in (root, root / "objects", root / "history"):
+            refuse()
+        return scan(path)
+
+    monkeypatch.setattr(os, "scandir", bounded_scan)
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    for restart in (False, True):
+        selected = selection.selected_proof_archive(root, retained_local_config(tmp_path))
+        assert selected.read("history", old_key, bounds={"proof": 20}) == (
+            {"height": 7},
+            {"proof": b"original"},
+        )
+        if not restart:
+            assert not server.calls
+            selected.write("history", new_key, context={"height": 8}, fields={"proof": b"remote"})
+        assert selected.read("history", new_key, bounds={"proof": 20}) == (
+            {"height": 8},
+            {"proof": b"remote"},
+        )
+        assert not (root / "history" / (new_key + ".json")).exists()
+        assert all(
+            (path.read_bytes(), path.stat().st_ino, path.stat().st_ctime_ns) == expected
+            for path, expected in before.items()
+        )
+    assert "retained_local_history_remote_new_proofs" in caplog.text
+    assert "proof_archive_transport_selection" in caplog.text
+
+
+def test_retained_local_mode_preserves_immutable_frame_conflicts(tmp_path):
+    server = EvidenceServer()
+    root, key = tmp_path / "archive", "ab" * 32
+    original = RewardProofArchive(root)
+    original.write("history", key, context={"height": 7}, fields={"proof": b"original"})
+    remote = RemoteProofStore(
+        root / ".remote-state", retained_local_config(tmp_path), client=server.client()
+    )
+    selected = RewardProofArchive(root, remote=remote, legacy_read_through=True)
+    with pytest.raises(ValueError, match="differs from selected publication"):
+        selected.write("history", key, context={"height": 8}, fields={"proof": b"changed"})
+    with pytest.raises(ValueError, match="differs from selected publication"):
+        selected.write("history", key, context={"height": 7}, fields={"proof": b"changed"})
+    assert "proofs/frames/history/" + key not in server.objects
+
+
+def test_completed_remote_loss_never_falls_back_to_retained_local_copy(tmp_path):
+    server = EvidenceServer()
+    root, key = tmp_path / "archive", "ab" * 32
+    original = RewardProofArchive(root)
+    original.write("history", key, context={"height": 7}, fields={"proof": b"original"})
+    selected_config = retained_local_config(tmp_path)
+    remote = RemoteProofStore(root / ".remote-state", selected_config, client=server.client())
+    selected = RewardProofArchive(root, remote=remote, legacy_read_through=True)
+    selected.write("history", key, context={"height": 7}, fields={"proof": b"original"})
+    del server.objects["proofs/frames/history/" + key]
+    remote.evict_cache()
+    with pytest.raises(ValueError, match=r"missing|generation"):
+        selected.read("history", key, bounds={"proof": 20})
+    restarted = RewardProofArchive(
+        root,
+        remote=RemoteProofStore(root / ".remote-state", selected_config, client=server.client()),
+        legacy_read_through=True,
+    )
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        restarted.read("history", key, bounds={"proof": 20})
 
 
 @pytest.mark.parametrize("damage", ["missing", "malformed", "changed"])

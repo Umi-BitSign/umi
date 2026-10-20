@@ -462,9 +462,12 @@ def test_forecast_budget_preserves_existing_boot_bytes(inputs):
     selected = i.value.model_copy(update={"forecast_accounting_bytes": 64 * 1024**2})
     i.save(i.path, canonical_json_bytes(selected))
     assert boot.load_standing_boot(i.path, i.anchor).forecast_accounting_bytes == 64 * 1024**2
-    assert canonical_json_bytes(
-        selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
-    ) == original
+    assert (
+        canonical_json_bytes(
+            selected.model_copy(update={"forecast_accounting_bytes": 512 * 1024**2})
+        )
+        == original
+    )
 
 
 @pytest.mark.parametrize("proof_reads", [False, True])
@@ -662,12 +665,15 @@ def test_content_reader_does_not_confuse_signed_envelope_with_decision_identity(
         files.decision(digest(decision.decision))
 
 
+@pytest.mark.parametrize("legacy_read_through", [False, True])
 async def test_r2_writer_boot_retains_archive_selection_across_restart(
-    inputs, tmp_path, monkeypatch
+    inputs, tmp_path, monkeypatch, legacy_read_through
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
-    inputs.value, opened, _ = select_remote_proofs(inputs.value, tmp_path, monkeypatch)
+    inputs.value, opened, _ = select_remote_proofs(
+        inputs.value, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+    )
     for _ in range(2):
         await test_native_assembly_preserves_configuration_and_closes_owned_providers(
             inputs, monkeypatch, None, True

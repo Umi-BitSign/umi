@@ -712,6 +712,25 @@ planning or measured ETA, and retry/stall state. A changed completed local ident
 requires explicit exact-byte repair. Retain this compatibility migration while
 any installed or recovery consumer still has local `/1` archives.
 
+For an existing large archive, select `"schema": "umi-r2-proof-archive/2"` and
+`"legacy_read_through": true` on the required imported/exported stores to keep
+retained local history readable while publishing new proofs only to R2. Startup
+opens the receipt index without enumerating or copying the local object graph.
+The ordinary original frame and object readers still check retained bytes and
+identities; successful native verification remains owned by its original journals.
+This mode does not release local history or certify that it is replicated.
+
+A completed remote receipt takes precedence over a local copy. Missing, changed
+or corrupt completed remote state still requires the existing explicit repair;
+a local copy never hides that loss. Repeated publication preserves original
+immutable frame conflicts. The `/1` selection keeps its existing eager migration
+behavior and canonical configuration bytes. Older runtimes reject `/2` before
+selection; qualify the target runtime and all consuming services through their
+supported upgrade boundary before enabling it. Keep local originals until an
+explicitly completed remote migration, restore qualification and consumer release
+allow eviction. Retire this read-through selection only after those retained
+local archives and their recovery consumers no longer require it.
+
 Offline `migrate_proof_archive(original, selected, evict=True)` can remove local
 archive payload files only after the complete graph is acknowledged. The caller
 must hold the original service's exclusive upgrade boundary. This library repair

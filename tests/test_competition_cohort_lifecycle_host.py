@@ -654,12 +654,15 @@ async def test_request_readiness_requires_exact_fresh_dispatch_observation(lifec
         assert await live._ready(state, capture) is (fault is None)
 
 
+@pytest.mark.parametrize("legacy_read_through", [False, True])
 async def test_r2_lifecycle_publishes_original_registration_proofs_across_restart(
-    host, tmp_path, monkeypatch
+    host, tmp_path, monkeypatch, legacy_read_through
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
-    selected, opened, server = select_remote_proofs(host.config.lifecycle, tmp_path, monkeypatch)
+    selected, opened, server = select_remote_proofs(
+        host.config.lifecycle, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+    )
     host.service.config = ServiceAdmissionHostConfig.model_validate_json(
         canonical_json_bytes(host.config.model_copy(update={"lifecycle": selected}))
     )
