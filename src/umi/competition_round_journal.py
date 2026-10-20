@@ -328,7 +328,11 @@ class RoundJournal:
                     (sequence, *expected),
                 )
 
-    def _validate_existing(self, binding):
+    def _validate_existing(self, binding, *, require_clean_rollback=True):
+        if type(require_clean_rollback) is not bool or (
+            not require_clean_rollback and not self.read_only
+        ):
+            raise ValueError("live existing journal inspection requires a read-only connection")
         # Never run a schema/binding migration while merely opening the source
         # of a stopped-owner transfer. Old layouts require their explicit repair.
         for suffix in ("-wal", "-shm"):
@@ -340,7 +344,7 @@ class RoundJournal:
         if header[:16] != b"SQLite format 3\0" or header[18:20] != b"\x01\x01":
             raise ValueError("existing journal requires clean rollback format")
         rollback = Path(str(self.path) + "-journal")
-        if rollback.exists() or rollback.is_symlink():
+        if require_clean_rollback and (rollback.exists() or rollback.is_symlink()):
             if self.read_only or self.physical_budget is None:
                 raise ValueError(
                     "existing source journal requires explicit interrupted transaction recovery"
