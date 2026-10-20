@@ -12,6 +12,7 @@ from umi.competition_history_source_externalization import (
     HEX_OBJECT_ENCODING,
     MARKER_TABLE,
 )
+from umi.competition_remote_proof_store import RemoteProofStore
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import SOURCE_KINDS, HistoryCheckpointRepairRequired
 from umi.competition_reward_history_workers import HistoryVerificationProfile
@@ -19,7 +20,7 @@ from umi.competition_reward_proof_archive import RewardProofArchive, history_arc
 from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
 
-from .test_competition_remote_proof_store import EvidenceServer, store
+from .test_competition_remote_proof_store import EvidenceServer, config, store
 from .test_competition_reward_history import chain as chain
 from .test_competition_reward_history import chain_config as chain_config
 from .test_competition_reward_history import control as control
@@ -174,6 +175,37 @@ async def test_new_history_is_captured_remotely_before_native_verification_and_r
     assert await direct.advance(h.item.provider, through_block=h.end) == expected
     assert direct.progress.native_completed == 0 and server.calls == []
     assert retained(direct.journal) == successes
+
+
+async def test_readonly_receipt_consumer_reuses_capture_success_without_proofs_or_payloads(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer-index", server)
+    direct = fresh_remote(h.reader, producer, tmp_path / "direct")
+    assert await direct.advance(h.item.provider, through_block=h.end) == expected
+    successes = retained(direct.journal)
+    original = direct.journal.path.read_bytes()
+    source_original = producer.journal.path.read_bytes()
+    server.calls.clear()
+    remote = RemoteProofStore(
+        tmp_path / "consumer-index", config(tmp_path, read_only=True), client=server.client(),
+        receipt_source_directory=producer.journal.root,
+    )
+    readonly = RewardControlHistoryReader(
+        direct.journal.root, control_hotkey=direct.hotkey,
+        chain_config_sha256=direct.config_sha256, first_block=direct.first_block,
+        maximum_bytes=direct.journal.maximum_bytes, remote_store=remote,
+        existing_only=True, read_only=True,
+    )
+    prohibit_proof_replay(monkeypatch, readonly)
+    assert await readonly.advance(h.item.provider, through_block=h.end) == expected
+    assert readonly.progress.native_completed == 0 and server.calls == []
+    assert retained(readonly.journal) == successes
+    assert direct.journal.path.read_bytes() == original
+    assert producer.journal.path.read_bytes() == source_original
 
 
 async def test_direct_capture_and_proof_export_share_exact_acknowledged_node_objects(
