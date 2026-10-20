@@ -677,6 +677,8 @@ async def test_observed_remote_damage_blocks_reuse_until_original_generation_rep
     height = h.reader.first_block
     checkpoint = h.reader.checkpoints.load(height)
     await h.reader.externalize_history_sources(maximum_records=4096)
+    # Observe remote damage after releasing trusted local bytes.
+    h.reader.remote_store.evict_cache()
     alias = h.reader.journal.get(ALIAS_KIND, digest(["control_history_block", str(height)]))
     ref = alias["remote"]
     original = server.objects[ref["key"]]

@@ -136,11 +136,21 @@ def _hex_spans(raw: bytes):
             position = closing
 
 
-def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
+def encode_evidence(raw: bytes, *, kind: str, single_object: bool = False) -> EncodedEvidence:
     if not isinstance(raw, bytes):
         raise ValueError("evidence must be bytes")
     checked_size(len(raw), evidence_bound(kind))
+    if type(single_object) is not bool:
+        raise ValueError("evidence representation selection must be explicit")
     identity = hashlib.sha256(raw).hexdigest()
+    if single_object:
+        # This is the existing /1 literal representation, also emitted by the
+        # ordinary encoder's size fallback. R2 first publication avoids hundreds
+        # of request-latency-bound tiny objects without changing original bytes.
+        recipe = canonical_json_bytes(
+            {"schema": _SCHEMA, "length": len(raw), "segments": [["b", identity, len(raw)]]}
+        )
+        return EncodedEvidence(identity, len(raw), recipe, {identity: raw})
     objects: dict[str, bytes] = {}
     segments: list[list] = []
 
@@ -177,16 +187,55 @@ def encode_evidence(raw: bytes, *, kind: str) -> EncodedEvidence:
     return EncodedEvidence(identity, len(raw), encoded, objects)
 
 
-def encode_evidence_for_reuse(raw: bytes, *, kind: str) -> PreparedEvidenceEncoding:
+def encode_evidence_for_reuse(
+    raw: bytes, *, kind: str, single_object: bool = False
+) -> PreparedEvidenceEncoding:
     """Retain this encoder's exact output for a second owned publication."""
-    encoded = encode_evidence(raw, kind=kind)
+    encoded = encode_evidence(raw, kind=kind, single_object=single_object)
     return _prepare_encoding(
         raw,
         kind,
         encoded.sha256,
         encoded.recipe,
         encoded.objects,
-        canonical_encoder=True,
+        canonical_encoder=not single_object,
+    )
+
+
+def prepare_evidence_with_recipe(
+    raw: bytes, recipe: bytes, *, kind: str
+) -> PreparedEvidenceEncoding:
+    """Preserve an existing encoding using the caller's exact original bytes.
+
+    Reconstruct each segment from the bounded input already in memory, then run
+    the ordinary decoder checks. This avoids refetching unchanged remote pieces
+    merely to retain their existing representation. It is transport, not proof
+    acceptance, and never edits an older source record or receipt.
+    """
+    checked_size(len(raw), evidence_bound(kind))
+    objects, offset = {}, 0
+    for mode, sha, size in inspect_recipe(recipe, expanded_bytes=len(raw), kind=kind):
+        length = size * 2 if mode == "x" else size
+        part = raw[offset : offset + length]
+        offset += length
+        if mode == "x":
+            try:
+                value = bytes.fromhex(part.decode("ascii"))
+            except (ValueError, UnicodeDecodeError) as error:
+                raise ValueError("retained evidence recipe differs from original bytes") from error
+            if value.hex().encode("ascii") != part:
+                raise ValueError("retained evidence hex differs from original bytes")
+        else:
+            value = part
+        if len(value) != size or hashlib.sha256(value).hexdigest() != sha:
+            raise ValueError("retained evidence segment differs from original bytes")
+        objects[sha] = value
+    return decode_evidence_for_reuse(
+        recipe,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        expanded_bytes=len(raw),
+        kind=kind,
+        resolve=lambda sha, size: objects[sha],
     )
 
 

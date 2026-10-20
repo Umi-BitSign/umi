@@ -394,9 +394,10 @@ class RemoteProofStore:
         if self._retained(reference.key) != reference:
             raise ValueError("remote proof replication receipt is missing or damaged")
         for journal in (self.journal, self.receipt_source):
-            if journal is not None and journal.get(
-                "remote_proof_damage", self._damage_key(reference)
-            ) is not None:
+            if (
+                journal is not None
+                and journal.get("remote_proof_damage", self._damage_key(reference)) is not None
+            ):
                 raise ValueError("remote proof requires explicit original-generation repair")
         return reference
 
@@ -450,9 +451,11 @@ class RemoteProofStore:
 
     def _check_producer_receipt(self, reference: RemoteProofReference) -> None:
         """Never let a consumer repair clear a producer's independent hold."""
-        if self._retained(reference.key) != reference or self.receipt_source.get(
-            "remote_proof_damage", self._damage_key(reference)
-        ) is not None:
+        if (
+            self._retained(reference.key) != reference
+            or self.receipt_source.get("remote_proof_damage", self._damage_key(reference))
+            is not None
+        ):
             raise ValueError("producer proof receipt requires explicit original-generation repair")
 
     def put_bytes(self, raw: bytes, *, path: str | None = None) -> dict:
@@ -481,6 +484,18 @@ class RemoteProofStore:
             reference = self._reference(key, head)
             with self._lock:
                 self._remember(reference)
+                # This owner already has the exact bytes just durably published.
+                # Keep them under the existing disposable byte/pin budget so a
+                # following export does not immediately HEAD/GET them again.
+                cache_key = digest(reference)
+                if cache_key not in self._cache:
+                    try:
+                        self._space(len(raw))
+                    except OSError:
+                        pass  # Cache pressure must not undo completed transport.
+                    else:
+                        self._cache[cache_key] = raw
+                        self._bytes += len(raw)
             progress.advance(len(raw))
             return reference.model_dump(mode="json", by_alias=True), False
 

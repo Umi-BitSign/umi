@@ -14,6 +14,7 @@ effects. Execution still requires fresh current control and recipient proofs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
 import sqlite3
 import time
@@ -26,11 +27,13 @@ from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import _hotkey, _uint
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
+    MAX_RECIPE_BYTES,
     checked_digest,
     decode_evidence,
     decode_evidence_for_reuse,
     encode_evidence,
     encode_evidence_for_reuse,
+    prepare_evidence_with_recipe,
 )
 from .competition_history_source_externalization import (
     JournalSourceExternalizer,
@@ -374,10 +377,45 @@ class RewardControlHistoryReader:
             prepared[name] = []
             for offset in range(0, len(raw), MAX_EVIDENCE_BYTES):
                 part = raw[offset : offset + MAX_EVIDENCE_BYTES]
-                if self.export_archive is None:
+                remote_capture = self.remote_sources.remote is not None
+                prior = None
+                if remote_capture:
+                    # Chunk keys are expanded-byte identities shared across
+                    # heights. Preserve any already captured representation,
+                    # including an interrupted older release's original recipe.
+                    with self.journal.read_transaction() as db:
+                        prior = self.remote_sources.get(
+                            "control_history_chunk", hashlib.sha256(part).hexdigest(), db=db
+                        )
+                if prior is not None:
+                    if (
+                        type(prior) is not dict
+                        or set(prior) != {"length", "recipe_hex"}
+                        or type(prior["length"]) is not int
+                        or prior["length"] != len(part)
+                        or type(prior["recipe_hex"]) is not str
+                        or not 0 < len(prior["recipe_hex"]) <= 2 * MAX_RECIPE_BYTES
+                    ):
+                        raise HistoryCheckpointRepairRequired(
+                            "retained source chunk requires explicit repair"
+                        )
+                    try:
+                        recipe = bytes.fromhex(prior["recipe_hex"])
+                        if recipe.hex() != prior["recipe_hex"]:
+                            raise ValueError("retained source recipe is not canonical hex")
+                        encoding = prepare_evidence_with_recipe(part, recipe, kind="proof")
+                    except ValueError as error:
+                        raise HistoryCheckpointRepairRequired(
+                            "retained source recipe requires explicit repair"
+                        ) from error
+                    encoded = encoding.for_bytes(part, kind="proof")
+                    prepared[name].append(encoding)
+                elif self.export_archive is None and not remote_capture:
                     encoded = encode_evidence(part, kind="proof")
                 else:
-                    encoding = encode_evidence_for_reuse(part, kind="proof")
+                    encoding = encode_evidence_for_reuse(
+                        part, kind="proof", single_object=remote_capture
+                    )
                     encoded = encoding.for_bytes(part, kind="proof")
                     prepared[name].append(encoding)
                 records.extend(

@@ -812,6 +812,22 @@ unchanged retry. Existing frame bytes, signed transport selections and timeout
 budgets are preserved. Qualify sustained native export throughput and the complete
 consumer upgrade/adoption path before selecting this transport for live capture.
 
+New R2 source captures and fresh archive frames use one bounded byte object per
+ordinary evidence chunk. This uses the existing `/1` literal recipe; original
+expanded hashes and decoder limits stay unchanged. Local captures keep their
+deduplicated encoding. Existing chunks and frames retain their exact prior
+recipes, including interrupted captures and decoder-valid legacy encodings.
+Compact copying batches missing objects through the same bounded workers and
+reuses intact durable object receipts without fetching unchanged source payloads.
+
+Freshly published bytes may stay in the configured in-memory cache for the next
+consumer. Active pins and the existing aggregate cache budget still apply; cache
+pressure cannot reject a completed durable publication. Eviction and restart
+retain verification/transport receipts independently. A cold fetch still checks
+the observed remote generation and original content, and a recorded repair hold
+blocks reuse even when correct bytes remain cached. Publication and codec
+round-trips confer no native proof or certification authority.
+
 An observed missing, replaced or corrupt remote object creates a persistent
 repair hold. Restore its exact original generation and invoke the original
 owner's `RemoteProofStore.repair_reference` under an explicit repair operation;

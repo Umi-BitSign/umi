@@ -140,6 +140,7 @@ def test_observed_damage_persists_until_explicit_original_generation_repair(tmp_
     server = EvidenceServer()
     first = store(tmp_path / "owner", server)
     reference = first.put_bytes(b"original")
+    first.evict_cache()  # Exercise a real remote fetch, not freshly published bytes.
     if damage == "deleted":
         del server.objects[reference["key"]]
     elif damage == "changed":
@@ -175,6 +176,7 @@ def test_observed_metadata_or_generation_race_requires_explicit_repair(tmp_path,
     server = EvidenceServer()
     first = store(tmp_path / "owner", server)
     reference = first.put_bytes(b"original")
+    first.evict_cache()
     server.invalid_head = failure == "head"
     server.get_failure = None if failure == "head" else failure
     with pytest.raises(ValueError):
@@ -207,6 +209,7 @@ def test_bounded_http_response_and_safe_error_text(tmp_path):
     server = EvidenceServer()
     first = store(tmp_path / "owner", server)
     reference = first.put_bytes(b"original")
+    first.evict_cache()
     server.extra_get = True
     with pytest.raises(ValueError, match="byte bound"):
         first.read_bytes(reference, maximum=8)
