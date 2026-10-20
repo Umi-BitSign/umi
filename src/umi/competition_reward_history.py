@@ -406,7 +406,7 @@ class RewardControlHistoryReader:
             )
             self._source_tokens[height] = source_tokens
 
-        self.journal.put_many(self.remote_sources.filter_records(records), index=index)
+        self.remote_sources.capture(records, index=index)
         self.progress.record("captured", height)
         if self.export_archive is not None:
             self._prepared_encodings[height] = prepared
@@ -875,7 +875,7 @@ class RewardControlHistoryReader:
             self.progress.restored_completed += 1
             self._apply_checkpoint(value)
 
-    def _export_identity(self):
+    def _export_identity(self, *, local_only=False):
         root = self.export_archive.root
         try:
             stat = root.stat()
@@ -883,7 +883,7 @@ class RewardControlHistoryReader:
             return None
         value = {"path": str(root.resolve()), "identity": [stat.st_dev, stat.st_ino, stat.st_uid]}
         remote = getattr(self.export_archive, "remote", None)
-        if remote is not None:
+        if remote is not None and not local_only:
             value["remote_namespace_sha256"] = remote.namespace_sha256
         return digest(value)
 
@@ -894,6 +894,20 @@ class RewardControlHistoryReader:
         if identity in value["exports"]:
             self.progress.record("exported", value["snapshot"]["block_number"])
             return value
+        remote = getattr(self.export_archive, "remote", None)
+        if (
+            remote is not None
+            and self.export_archive.legacy_read_through
+            and self._export_identity(local_only=True) in value["exports"]
+        ):
+            height = value["snapshot"]["block_number"]
+            key = history_archive_key(self.config_sha256, self.hotkey, height)
+            # An existing acknowledged remote generation still wins, including
+            # its missing/damaged-metadata refusal. Otherwise preserve this
+            # original local delivery without claiming a new R2 replication.
+            if remote.reference_for_path("frames/history/" + key) is None:
+                self.progress.retained_local_export(height)
+                return value
         # A new destination needs its first copy, but no new native proof check.
         # Retain the old successful result and bind the new delivery fact to the
         # same original source identities in the atomic checkpoint transaction.

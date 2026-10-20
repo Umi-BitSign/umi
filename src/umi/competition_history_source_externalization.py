@@ -15,6 +15,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .competition_remote_proof_store import MAX_PROOF_OBJECT_BYTES
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -301,6 +302,134 @@ class JournalSourceExternalizer:
                 ):
                     raise self.repair_error("captured source differs from externalized original")
         return remaining
+
+    def capture(self, records, *, index):
+        """Publish new source bytes before atomically retaining local identities.
+
+        Existing local sources stay local, including an admitted legacy prefix.
+        New sources are born as aliases; no original source is deleted and no
+        completed-admission mutation fence is reset. The caller owns its normal
+        compound-operation mutex. Transport receipts never attest proof validity.
+        """
+        if self.remote is None:
+            self.journal.put_many(self.filter_records(records), index=index)
+            return
+        self._install()
+        local, pending = [], {}
+        with self.journal.read_transaction() as db:
+            self.checkpoints.check_schema(db)
+            for kind, key, value in records:
+                if kind not in self.source_kinds or type(key) is not str:
+                    raise self.repair_error("unsupported captured source kind or key")
+                alias = self._alias(kind, key, db)
+                if alias is not None:
+                    self.source_token(kind, key, db)
+                    raw = canonical_json_bytes(value)
+                    if (hashlib.sha256(raw).hexdigest(), len(raw)) != (
+                        alias["raw_sha256"],
+                        alias["size"],
+                    ):
+                        raise self.repair_error(
+                            "captured source differs from externalized original"
+                        )
+                    continue
+                row = db.execute(
+                    f"SELECT revision,present FROM {self.source_table} WHERE kind=? AND id=?",
+                    (kind, key),
+                ).fetchone()
+                present = db.execute(
+                    "SELECT 1 FROM records WHERE kind=? AND id=?", (kind, key)
+                ).fetchone()
+                if present:
+                    self.source_token(kind, key, db)
+                    local.append((kind, key, value))
+                    continue
+                if (
+                    row is not None
+                    or db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
+                ):
+                    raise self.repair_error(
+                        "captured source lost original metadata; repair required"
+                    )
+                prior = pending.setdefault((kind, key), value)
+                if prior is not value and (
+                    canonical_json_bytes(prior) != canonical_json_bytes(value)
+                ):
+                    raise self.repair_error("captured source key has conflicting original bytes")
+
+        aliases, batch, batch_sources, batch_bytes = [], {}, [], 0
+
+        def publish_batch():
+            self.remote.put_many(batch)
+            for kind, key, sha, size in batch_sources:
+                reference = self.remote.reference_for_path("objects/" + sha)
+                if reference is None:
+                    raise self.repair_error("captured source lost completed transport metadata")
+                self.remote.validate_reference(reference)
+                aliases.append(
+                    (
+                        self.alias_kind,
+                        digest([kind, key]),
+                        {
+                            "schema": SCHEMA,
+                            "owner": self.checkpoints.owner,
+                            "kind": kind,
+                            "key": key,
+                            "revision": 0,
+                            "raw_sha256": sha,
+                            "size": size,
+                            "remote": reference,
+                        },
+                    )
+                )
+
+        with TransferProgress("journal_source_capture", len(pending), unit="records") as progress:
+            for (kind, key), value in pending.items():
+                raw = canonical_json_bytes(value)
+                if len(raw) > self.journal.maximum_record_bytes:
+                    raise ValueError("captured source exceeds its original journal record bound")
+                if batch and batch_bytes + len(raw) > MAX_PROOF_OBJECT_BYTES:
+                    publish_batch()
+                    progress.advance(len(batch_sources))
+                    batch, batch_sources, batch_bytes = {}, [], 0
+                sha = hashlib.sha256(raw).hexdigest()
+                batch[sha] = raw
+                batch_sources.append((kind, key, sha, len(raw)))
+                batch_bytes += len(raw)
+            if batch:
+                publish_batch()
+                progress.advance(len(batch_sources))
+
+        def commit_sources(db):
+            self.checkpoints.check_schema(db)
+            for _, _, alias in aliases:
+                kind, key = alias["kind"], alias["key"]
+                if db.execute(
+                    "SELECT 1 FROM records WHERE kind=? AND id=?", (kind, key)
+                ).fetchone():
+                    raise self.repair_error(
+                        "captured source changed during publication; original retained"
+                    )
+                if self._alias(kind, key, db) != alias:
+                    raise self.repair_error("captured source alias changed during publication")
+                row = db.execute(
+                    f"SELECT revision,present FROM {self.source_table} WHERE kind=? AND id=?",
+                    (kind, key),
+                ).fetchone()
+                if row is None:
+                    # The first logical generation lives remotely. This is a
+                    # captured-input identity, never a successful-proof verdict.
+                    db.execute(
+                        f"INSERT INTO {self.source_table}(kind,id,revision,present) "
+                        "VALUES (?,?,1,0)",
+                        (kind, key),
+                    )
+                elif row != (1, 0):
+                    raise self.repair_error("captured source identity changed during publication")
+                self.source_token(kind, key, db)
+            index(db)
+
+        self.journal.put_many([*local, *aliases], index=commit_sources)
 
     def _install(self):
         if self.remote is None or self.remote.config.read_only:

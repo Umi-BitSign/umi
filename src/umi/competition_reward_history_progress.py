@@ -29,6 +29,8 @@ class HistoryProgress:
         self._new_native = set()
         self.durable = {name: set() for name in ("captured", "verified", "exported")}
         self.counts = dict.fromkeys(self.durable, 0)
+        self.retained_local_exports = set()
+        self.retained_local_export_count = 0
         self.inventory_through = first_block - 1
         self.export_identity = None
         self.inventory_completed = 0
@@ -66,6 +68,9 @@ class HistoryProgress:
                 name: sum(height <= target for height in heights)
                 for name, heights in self.durable.items()
             }
+            self.retained_local_export_count = sum(
+                height <= target for height in self.retained_local_exports
+            )
             self.native_elapsed = 0.0
             self.native_completed = self.restored_completed = self.native_applied = 0
             self._new_native.clear()
@@ -88,6 +93,10 @@ class HistoryProgress:
         self.ancestry_progress = None
 
     def record(self, stage, height):
+        if stage == "exported" and height in self.retained_local_exports:
+            self.retained_local_exports.remove(height)
+            if self.target is not None and height <= self.target:
+                self.retained_local_export_count -= 1
         values = self.durable[stage]
         if height not in values:
             values.add(height)
@@ -100,12 +109,22 @@ class HistoryProgress:
         self.record("captured", height)
         self.record("verified", height)
 
+    def retained_local_export(self, height):
+        if height not in self.retained_local_exports:
+            self.retained_local_exports.add(height)
+            if self.target is not None and height <= self.target:
+                self.retained_local_export_count += 1
+
     def applied(self, height):
         if height in self._new_native:
             self._new_native.remove(height)
             self.native_applied += 1
 
     def invalidate(self, height):
+        if height in self.retained_local_exports:
+            self.retained_local_exports.remove(height)
+            if self.target is not None and height <= self.target:
+                self.retained_local_export_count -= 1
         for stage in ("verified", "exported"):
             if height in self.durable[stage]:
                 self.durable[stage].remove(height)
@@ -119,6 +138,8 @@ class HistoryProgress:
             self.inventory_through = self.first_block - 1
             self.durable["exported"].clear()
             self.counts["exported"] = 0
+            self.retained_local_exports.clear()
+            self.retained_local_export_count = 0
         first = self.inventory_through + 1
         if first > self.target:
             return
@@ -406,6 +427,7 @@ class HistoryProgress:
                 "completed_admission_blocks": completed_admission,
                 "verified_ahead_of_applied_blocks": max(0, verified - done),
                 "exported_blocks": self.counts["exported"],
+                "retained_local_export_blocks": self.retained_local_export_count,
                 "export_scope": "selected_r2_proof_archive"
                 if self.remote_export_selected
                 else "selected_local_proof_archive",
