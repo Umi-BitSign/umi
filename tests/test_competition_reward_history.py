@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi.competition_reward_history import RewardControlHistoryReader, validate_control_history
+from umi.competition_reward_history_workers import HistoryVerificationProfile
 from umi.encoding import account_id32
 from umi.finalized_ancestry import encode_rpc_header
 from umi.open_competition import digest
@@ -170,6 +171,23 @@ async def test_frame_object_reuse_is_bounded_and_does_not_cross_snapshots(
 @pytest.fixture
 async def history_case(historical, monkeypatch, tmp_path):
     return await make_history_case(historical, monkeypatch, tmp_path)
+
+
+@pytest.fixture(params=("serial", "parallel"))
+def capture_pipeline_case(history_case, request):
+    h = history_case
+    if request.param == "parallel":
+        selected = HistoryVerificationProfile(schema="umi-history-verification-profile/1")
+        h.reader.verification_profile = selected
+        restart = h.restart
+
+        async def restart_selected():
+            reader = await restart()
+            reader.verification_profile = selected
+            return reader
+
+        h.restart = restart_selected
+    return h
 
 
 async def test_scale_fixture_captures_across_old_head_and_past_ten_hours(
@@ -626,11 +644,11 @@ async def test_cancelled_save_drains_before_releasing_archive_owner(
 
 @pytest.mark.parametrize("stage", ["save", "export"])
 async def test_one_frame_capture_overlaps_publication_without_advancing_prefix(
-    history_case, monkeypatch, tmp_path, stage
+    capture_pipeline_case, monkeypatch, tmp_path, stage
 ):
     from umi.competition_reward_proof_archive import RewardProofArchive
 
-    h = history_case
+    h = capture_pipeline_case
     first = h.old.height
     h.reader.export_archive = RewardProofArchive(tmp_path / "pipeline-export")
     entered, following_ready = asyncio.Event(), asyncio.Event()
@@ -681,9 +699,9 @@ async def test_one_frame_capture_overlaps_publication_without_advancing_prefix(
 
 @pytest.mark.parametrize("boundary", ["work", "target"])
 async def test_lookahead_never_exceeds_frozen_work_or_target_boundary(
-    history_case, monkeypatch, boundary
+    capture_pipeline_case, monkeypatch, boundary
 ):
-    h = history_case
+    h = capture_pipeline_case
     first = h.old.height
     prepare = h.reader._prepare
     requested = []
@@ -704,11 +722,11 @@ async def test_lookahead_never_exceeds_frozen_work_or_target_boundary(
 
 
 async def test_lookahead_preserves_sequential_original_proof_and_export_bytes(
-    history_case, tmp_path
+    capture_pipeline_case, tmp_path
 ):
     from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 
-    h = history_case
+    h = capture_pipeline_case
     first = h.old.height
     serial_archive = RewardProofArchive(tmp_path / "serial-export")
     serial = RewardControlHistoryReader(
@@ -747,11 +765,11 @@ async def test_lookahead_preserves_sequential_original_proof_and_export_bytes(
 
 @pytest.mark.parametrize("stage", ["save", "export"])
 async def test_publication_failure_discards_lookahead_and_preserves_original_error(
-    history_case, monkeypatch, tmp_path, stage
+    capture_pipeline_case, monkeypatch, tmp_path, stage
 ):
     from umi.competition_reward_proof_archive import RewardProofArchive
 
-    h = history_case
+    h = capture_pipeline_case
     first = h.old.height
     h.reader.export_archive = RewardProofArchive(tmp_path / "failed-export")
     prepare = h.reader._prepare
@@ -789,9 +807,17 @@ async def test_publication_failure_discards_lookahead_and_preserves_original_err
         release.set()
     with pytest.raises(OSError) as raised:
         await task
-    assert raised.value is failure
     frames = {frame.name for frame in traceback.extract_tb(raised.value.__traceback__)}
-    assert "failed" in frames
+    if h.reader.verification_profile is None:
+        assert raised.value is failure
+        assert "failed" in frames
+    else:
+        # Parallel admission deliberately compacts exception graphs before its
+        # memory reservation closes; preserve the primary class and diagnostic.
+        assert type(raised.value) is type(failure)
+        assert raised.value.args == failure.args
+        assert "secondary lookahead failure" not in str(raised.value)
+        assert failure.__traceback__ is None
     assert "prepared" not in frames
     assert finished.is_set() and not h.reader._lock.locked()
     assert h.reader._next == first
@@ -876,11 +902,11 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
 @pytest.mark.parametrize("publication", ["save", "export"])
 @pytest.mark.parametrize("native_failure", [False, True])
 async def test_repeated_cancellation_drains_publication_and_native_lookahead_before_release(
-    history_case, monkeypatch, tmp_path, publication, native_failure
+    capture_pipeline_case, monkeypatch, tmp_path, publication, native_failure
 ):
     from umi.competition_reward_proof_archive import RewardProofArchive
 
-    h = history_case
+    h = capture_pipeline_case
     first = h.old.height
     h.reader.export_archive = RewardProofArchive(tmp_path / "cancel-export")
     published = asyncio.Event()
