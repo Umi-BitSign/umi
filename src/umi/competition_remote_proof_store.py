@@ -227,9 +227,24 @@ class RemoteProofStore:
     admits bounded independent objects while keeping receipt mutations serial.
     A pinned cache entry cannot be evicted;
     insufficient space for another lease is a retry, never an unbounded allocation.
+
+    An explicit receipt source opens the original completed ledger readonly.
+    The consumer's separate index retains only its independent damage holds;
+    missing original receipts never trigger remote adoption or index copying.
     """
 
-    def __init__(self, root: Path, config: ProofArchiveR2Config, *, client=None):
+    def __init__(
+        self,
+        root: Path,
+        config: ProofArchiveR2Config,
+        *,
+        client=None,
+        receipt_source_directory: Path | None = None,
+    ):
+        if receipt_source_directory is not None and (
+            not config.read_only or root.resolve() == receipt_source_directory.resolve()
+        ):
+            raise ValueError("receipt source requires an independent read-only consumer")
         self.config = config
         if client is None:
             credentials = load_r2_credentials(Path(config.credentials_file))
@@ -255,6 +270,20 @@ class RemoteProofStore:
             maximum_record_bytes=64 * 1024,
         )
         self.journal.migrate_completions(self.namespace_sha256)
+        self.receipt_source = None
+        if receipt_source_directory is not None:
+            self.receipt_source = _ProofIndex(
+                receipt_source_directory,
+                self.binding,
+                maximum_rounds=65536,
+                maximum_bytes=config.maximum_index_bytes,
+                maximum_record_bytes=64 * 1024,
+                existing_only=True,
+                read_only=True,
+            )
+            with self.receipt_source.read_transaction() as db:
+                if db.execute("PRAGMA user_version").fetchone()[0] != 4:
+                    raise ValueError("receipt source requires its completed immutable ledger")
         self._cache, self._pins, self._bytes = OrderedDict(), {}, 0
         self._lock = RLock()
         self._publication_condition = Condition(self._lock)
@@ -293,7 +322,8 @@ class RemoteProofStore:
         return reference
 
     def _retained(self, key: str) -> RemoteProofReference | None:
-        with self.journal.read_transaction() as db:
+        journal = self.receipt_source or self.journal
+        with journal.read_transaction() as db:
             completed = self._completion(key, db)
             try:
                 raw = self.journal.get_raw(
@@ -319,6 +349,8 @@ class RemoteProofStore:
             return completed
 
     def _remember(self, reference: RemoteProofReference) -> None:
+        if self.receipt_source is not None:
+            raise ValueError("read-only receipt consumer cannot adopt new producer receipts")
         key = hashlib.sha256(reference.key.encode()).hexdigest()
         self.journal.put_many(
             (
@@ -354,8 +386,11 @@ class RemoteProofStore:
             raise ValueError("remote proof reference selects another authenticated namespace")
         if self._retained(reference.key) != reference:
             raise ValueError("remote proof replication receipt is missing or damaged")
-        if self.journal.get("remote_proof_damage", self._damage_key(reference)) is not None:
-            raise ValueError("remote proof requires explicit original-generation repair")
+        for journal in (self.journal, self.receipt_source):
+            if journal is not None and journal.get(
+                "remote_proof_damage", self._damage_key(reference)
+            ) is not None:
+                raise ValueError("remote proof requires explicit original-generation repair")
         return reference
 
     def repair_reference(self, value: dict) -> None:
@@ -373,10 +408,13 @@ class RemoteProofStore:
             reference.size_bytes, reference.etag, reference.content_sha256
         )
         with self._lock, TransferProgress("proof_repair", reference.size_bytes) as progress:
-            with self.journal.read_transaction() as db:
+            receipt_owner = self.receipt_source or self.journal
+            with receipt_owner.read_transaction() as db:
                 if self._completion(reference.key, db) != reference:
                     progress.emit("repair_required", reason="original_completion_metadata_required")
                     raise ValueError("remote proof repair requires its original completion ledger")
+            if self.receipt_source is not None:
+                self._check_producer_receipt(reference)
             try:
                 if self.client.head(reference.key) != expected:
                     raise ValueError("remote proof repair requires the original object generation")
@@ -386,17 +424,29 @@ class RemoteProofStore:
                 progress.emit("repair_required", reason="remote_proof_original_not_restored")
                 raise
             with self.journal.transaction() as db:
-                if self._completion(reference.key, db) != reference:
+                if self.receipt_source is not None:
+                    self._check_producer_receipt(reference)
+                elif self._completion(reference.key, db) != reference:
                     raise ValueError("remote proof completion changed during explicit repair")
                 key = self._damage_key(reference)
                 # Preserve the original completed transport fact. Only its exact
                 # damaged/missing replica and a prior availability hold are repaired.
-                db.execute("DELETE FROM records WHERE kind='remote_proof_object' AND id=?", (key,))
-                self.journal.insert_completion_record(
-                    db, "remote_proof_object", key, canonical_json_bytes(reference)
-                )
+                if self.receipt_source is None:
+                    db.execute(
+                        "DELETE FROM records WHERE kind='remote_proof_object' AND id=?", (key,)
+                    )
+                    self.journal.insert_completion_record(
+                        db, "remote_proof_object", key, canonical_json_bytes(reference)
+                    )
                 db.execute("DELETE FROM records WHERE kind='remote_proof_damage' AND id=?", (key,))
             progress.advance(reference.size_bytes)
+
+    def _check_producer_receipt(self, reference: RemoteProofReference) -> None:
+        """Never let a consumer repair clear a producer's independent hold."""
+        if self._retained(reference.key) != reference or self.receipt_source.get(
+            "remote_proof_damage", self._damage_key(reference)
+        ) is not None:
+            raise ValueError("producer proof receipt requires explicit original-generation repair")
 
     def put_bytes(self, raw: bytes, *, path: str | None = None) -> dict:
         return self._put_bytes(raw, path=path)[0]
@@ -554,6 +604,8 @@ class RemoteProofStore:
         with self._lock:
             reference = self._retained(key)
             if reference is None:
+                if self.receipt_source is not None:
+                    raise ValueError("producer proof receipt is missing; explicit repair required")
                 with TransferProgress("proof_import", 1, unit="objects") as progress:
                     head = self.client.head(key)
                     if head is None:

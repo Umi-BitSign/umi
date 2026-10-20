@@ -632,6 +632,17 @@ ordered blocks per wall-clock second, including retries and cooldowns.
 `local_release` separately reports original SQL records moved to R2 and
 logical bytes released. It does not report a smaller SQLite file on disk.
 
+A native readonly observer of an existing R2 history must also select the original
+replication receipt owner. `RemoteProofStore` accepts an explicit
+`receipt_source_directory` for this purpose only when its transport is readonly
+and its own state directory is separate. The original completed receipt ledger
+opens existing-only and readonly; the observer retains its own bounded memory
+cache and durable damage holds. It neither copies the producer database nor
+imports absent receipts from R2. Missing or damaged original receipts and producer
+holds require explicit producer repair. Repairing an observer's independent hold
+does not clear the producer's hold. Native history verification still determines
+proof validity; receipt reuse grants no new verdict or coverage capability.
+
 History journal byte allowances cover logical retained records and reservations,
 not a physical disk reservation. SQLite keys, indexes and page utilization need
 additional space. Journal writers preserve the existing database page size and

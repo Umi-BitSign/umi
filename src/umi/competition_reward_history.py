@@ -949,6 +949,8 @@ class RewardControlHistoryReader:
     def _externalize_sources(self, maximum_records):
         if type(maximum_records) is not int or not 1 <= maximum_records <= 4096:
             raise ValueError("history source replication requires a bounded record batch")
+        if self.journal.read_only:
+            raise ValueError("read-only history cannot externalize sources")
         with self.journal.locked():
             return self._externalize_sources_locked(maximum_records)
 
@@ -1003,8 +1005,13 @@ class RewardControlHistoryReader:
         self.progress.report(self, "running", force=True)
         monitor = asyncio.create_task(self.progress.monitor(self, stop))
         failed = False
+        replicate_sources = (
+            self.remote_store is not None
+            and not self.remote_store.config.read_only
+            and not self.journal.read_only
+        )
         try:
-            if self.remote_store is not None:
+            if replicate_sources:
                 self.progress.stage = "history_source_replication"
                 self.progress.report(self, "running", force=True)
                 async with self._lock:
@@ -1012,7 +1019,7 @@ class RewardControlHistoryReader:
             result = await self._advance(
                 provider, through_block=through_block, maximum_blocks=maximum_blocks
             )
-            if self.remote_store is not None:
+            if replicate_sources:
                 self.progress.stage = "history_source_replication"
                 self.progress.report(self, "running", force=True)
                 async with self._lock:
