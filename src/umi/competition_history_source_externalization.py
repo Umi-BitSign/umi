@@ -15,6 +15,8 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .competition_evidence_codec import checked_digest
+from .competition_remote_proof_store import MAX_PROOF_OBJECT_BYTES
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -24,6 +26,8 @@ from .r2_evidence import r2_evidence_connection_scope
 ALIAS_KIND = "control_history_remote_source"
 MARKER_TABLE = "round_generation_history_remote"
 SCHEMA = "umi-journal-remote-source/1"
+CAPTURE_SCHEMA = "umi-journal-remote-source/2"
+HEX_OBJECT_ENCODING = "umi-source-hex-object/1"
 
 
 @dataclass(frozen=True)
@@ -60,7 +64,7 @@ def source_journal_version(
 ):
     """History/coverage-only v3 reader; reservation-generation owners are separate."""
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version != 3:
+    if version not in (3, 5):
         return RoundJournal._version(db)
     table, triggers = _fence_schema(marker_table, alias_kind)
     actual = db.execute(
@@ -69,7 +73,8 @@ def source_journal_version(
     if actual != (table,):
         raise ValueError("remote source journal fence missing or changed; repair required")
     rows = db.execute(f"SELECT id,schema,namespace FROM {marker_table} LIMIT 2").fetchall()
-    if rows != [(1, SCHEMA, remote_namespace)] or remote_namespace is None:
+    schema = SCHEMA if version == 3 else CAPTURE_SCHEMA
+    if rows != [(1, schema, remote_namespace)] or remote_namespace is None:
         raise ValueError("remote source journal requires its original selected R2 namespace")
     actual_triggers = dict(
         db.execute(
@@ -126,12 +131,14 @@ class JournalSourceExternalizer:
             value = self.journal.get(self.alias_kind, digest([kind, key]), db=db)
             if value is None:
                 return None
+            fields = {"schema", "owner", "kind", "key", "revision", "raw_sha256", "size", "remote"}
+            if type(value) is dict and value.get("schema") == CAPTURE_SCHEMA:
+                fields.add("encoding")
             if (
                 self.remote is None
                 or type(value) is not dict
-                or set(value)
-                != {"schema", "owner", "kind", "key", "revision", "raw_sha256", "size", "remote"}
-                or value["schema"] != SCHEMA
+                or set(value) != fields
+                or value["schema"] not in (SCHEMA, CAPTURE_SCHEMA)
                 or value["owner"] != self.checkpoints.owner
                 or (value["kind"], value["key"]) != (kind, key)
                 or type(value["revision"]) is not int
@@ -140,12 +147,21 @@ class JournalSourceExternalizer:
                 or not 0 < value["size"] <= self.journal.maximum_record_bytes
             ):
                 raise ValueError("invalid remote source alias")
+            checked_digest(value["raw_sha256"])
             reference = self.remote.validate_reference(value["remote"])
-            if (reference.content_sha256, reference.size_bytes) != (
-                value["raw_sha256"],
-                value["size"],
+            if value["schema"] == SCHEMA:
+                if (reference.content_sha256, reference.size_bytes) != (
+                    value["raw_sha256"],
+                    value["size"],
+                ):
+                    raise ValueError("remote source alias changes original bytes")
+            elif (
+                value["encoding"] != HEX_OBJECT_ENCODING
+                or kind != "control_history_object"
+                or reference.content_sha256 != checked_digest(key)
+                or value["size"] != 2 * reference.size_bytes + len(b'{"hex":""}')
             ):
-                raise ValueError("remote source alias changes original bytes")
+                raise ValueError("remote hex source changes its original representation")
         except (TypeError, KeyError, ValueError) as error:
             raise self.repair_error(
                 "remote source alias or receipt damaged; repair required"
@@ -266,12 +282,19 @@ class JournalSourceExternalizer:
                 f"SELECT 1 FROM {self.source_table} WHERE kind=? AND id=? AND present=0",
                 (kind, key),
             ).fetchone()
-            if row and db.execute("PRAGMA user_version").fetchone()[0] == 3:
+            if row and db.execute("PRAGMA user_version").fetchone()[0] in (3, 5):
                 raise self.repair_error("deleted retained source requires explicit repair")
             return self.journal.get_raw(kind, key, db=db)
         self.source_token(kind, key, db)
         try:
             raw = self.remote.read_bytes(alias["remote"], maximum=self.journal.maximum_record_bytes)
+            if alias["schema"] == CAPTURE_SCHEMA:
+                raw = canonical_json_bytes({"hex": raw.hex()})
+                if (
+                    len(raw) != alias["size"]
+                    or hashlib.sha256(raw).hexdigest() != alias["raw_sha256"]
+                ):
+                    raise ValueError("remote hex source differs from original canonical bytes")
             # The transport authenticates the original receipt's hash and size.
             # Decoding still preserves the journal's exact canonical byte rule.
             if canonical_json_bytes(json.loads(raw)) != raw:
@@ -302,16 +325,160 @@ class JournalSourceExternalizer:
                     raise self.repair_error("captured source differs from externalized original")
         return remaining
 
+    def capture(self, records, *, index):
+        """Publish new source bytes before atomically retaining local identities.
+
+        Existing local sources stay local, including an admitted legacy prefix.
+        New sources are born as aliases; no original source is deleted and no
+        completed-admission mutation fence is reset. The caller owns its normal
+        compound-operation mutex. Transport receipts never attest proof validity.
+        """
+        if self.remote is None:
+            self.journal.put_many(self.filter_records(records), index=index)
+            return
+        self._install_capture()
+        local, pending = [], {}
+        with self.journal.read_transaction() as db:
+            self.checkpoints.check_schema(db)
+            for kind, key, value in records:
+                if kind not in self.source_kinds or type(key) is not str:
+                    raise self.repair_error("unsupported captured source kind or key")
+                alias = self._alias(kind, key, db)
+                if alias is not None:
+                    self.source_token(kind, key, db)
+                    raw = canonical_json_bytes(value)
+                    if (hashlib.sha256(raw).hexdigest(), len(raw)) != (
+                        alias["raw_sha256"],
+                        alias["size"],
+                    ):
+                        raise self.repair_error(
+                            "captured source differs from externalized original"
+                        )
+                    continue
+                row = db.execute(
+                    f"SELECT revision,present FROM {self.source_table} WHERE kind=? AND id=?",
+                    (kind, key),
+                ).fetchone()
+                present = db.execute(
+                    "SELECT 1 FROM records WHERE kind=? AND id=?", (kind, key)
+                ).fetchone()
+                if present:
+                    self.source_token(kind, key, db)
+                    local.append((kind, key, value))
+                    continue
+                if (
+                    row is not None
+                    or db.execute("SELECT 1 FROM holds WHERE id=?", (key,)).fetchone()
+                ):
+                    raise self.repair_error(
+                        "captured source lost original metadata; repair required"
+                    )
+                prior = pending.setdefault((kind, key), value)
+                if prior is not value and (
+                    canonical_json_bytes(prior) != canonical_json_bytes(value)
+                ):
+                    raise self.repair_error("captured source key has conflicting original bytes")
+
+        aliases, batch, batch_sources, batch_bytes = [], {}, [], 0
+
+        def publish_batch():
+            self.remote.put_many(batch)
+            for kind, key, sha, size, wire_sha, encoding in batch_sources:
+                reference = self.remote.reference_for_path("objects/" + wire_sha)
+                if reference is None:
+                    raise self.repair_error("captured source lost completed transport metadata")
+                self.remote.validate_reference(reference)
+                alias = {
+                    "schema": SCHEMA if encoding is None else CAPTURE_SCHEMA,
+                    "owner": self.checkpoints.owner,
+                    "kind": kind,
+                    "key": key,
+                    "revision": 0,
+                    "raw_sha256": sha,
+                    "size": size,
+                    "remote": reference,
+                }
+                if encoding is not None:
+                    alias["encoding"] = encoding
+                aliases.append((self.alias_kind, digest([kind, key]), alias))
+
+        with TransferProgress("journal_source_capture", len(pending), unit="records") as progress:
+            for (kind, key), value in pending.items():
+                raw = canonical_json_bytes(value)
+                if len(raw) > self.journal.maximum_record_bytes:
+                    raise ValueError("captured source exceeds its original journal record bound")
+                wire, encoding = raw, None
+                if kind == "control_history_object":
+                    if (
+                        type(value) is not dict
+                        or set(value) != {"hex"}
+                        or type(value["hex"]) is not str
+                    ):
+                        raise self.repair_error("captured proof object is not canonical hex")
+                    wire = bytes.fromhex(value["hex"])
+                    if (
+                        not wire
+                        or wire.hex() != value["hex"]
+                        or hashlib.sha256(wire).hexdigest() != key
+                    ):
+                        raise self.repair_error(
+                            "captured proof object differs from its original identity"
+                        )
+                    encoding = HEX_OBJECT_ENCODING
+                if batch and batch_bytes + len(wire) > MAX_PROOF_OBJECT_BYTES:
+                    publish_batch()
+                    progress.advance(len(batch_sources))
+                    batch, batch_sources, batch_bytes = {}, [], 0
+                sha = hashlib.sha256(raw).hexdigest()
+                wire_sha = hashlib.sha256(wire).hexdigest()
+                batch[wire_sha] = wire
+                batch_sources.append((kind, key, sha, len(raw), wire_sha, encoding))
+                batch_bytes += len(wire)
+            if batch:
+                publish_batch()
+                progress.advance(len(batch_sources))
+
+        def commit_sources(db):
+            self.checkpoints.check_schema(db)
+            for _, _, alias in aliases:
+                kind, key = alias["kind"], alias["key"]
+                if db.execute(
+                    "SELECT 1 FROM records WHERE kind=? AND id=?", (kind, key)
+                ).fetchone():
+                    raise self.repair_error(
+                        "captured source changed during publication; original retained"
+                    )
+                if self._alias(kind, key, db) != alias:
+                    raise self.repair_error("captured source alias changed during publication")
+                row = db.execute(
+                    f"SELECT revision,present FROM {self.source_table} WHERE kind=? AND id=?",
+                    (kind, key),
+                ).fetchone()
+                if row is None:
+                    # The first logical generation lives remotely. This is a
+                    # captured-input identity, never a successful-proof verdict.
+                    db.execute(
+                        f"INSERT INTO {self.source_table}(kind,id,revision,present) "
+                        "VALUES (?,?,1,0)",
+                        (kind, key),
+                    )
+                elif row != (1, 0):
+                    raise self.repair_error("captured source identity changed during publication")
+                self.source_token(kind, key, db)
+            index(db)
+
+        self.journal.put_many([*local, *aliases], index=commit_sources)
+
     def _install(self):
         if self.remote is None or self.remote.config.read_only:
             raise ValueError("source externalization requires its writable R2 store")
         table, triggers = _fence_schema(self.marker_table, self.alias_kind)
         with self.journal.read_transaction() as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] == 3:
+            if db.execute("PRAGMA user_version").fetchone()[0] in (3, 5):
                 return  # the journal reader checked the exact selected fence
         with self.journal.transaction() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 3:
+            if version in (3, 5):
                 source_journal_version(
                     db,
                     marker_table=self.marker_table,
@@ -330,6 +497,25 @@ class JournalSourceExternalizer:
             for sql in triggers.values():
                 db.execute(sql)
             db.execute("PRAGMA user_version=3")
+
+    def _install_capture(self):
+        self._install()
+        with self.journal.read_transaction() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] == 5:
+                return
+        with TransferProgress("journal_source_capture_migration", 1, unit="owners") as progress:
+            with self.journal.transaction() as db:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version == 3:
+                    # Existing aliases, tokens, successes and inode stay intact.
+                    # Older readers refuse generation5 before opening this owner.
+                    db.execute(
+                        f"UPDATE {self.marker_table} SET schema=? WHERE id=1", (CAPTURE_SCHEMA,)
+                    )
+                    db.execute("PRAGMA user_version=5")
+                elif version != 5:
+                    raise ValueError("unsupported direct source capture migration")
+            progress.advance(1)
 
     def externalize(self, kind, key):
         """Upload outside the writer transaction; atomically alias and delete once.

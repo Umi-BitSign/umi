@@ -6,6 +6,7 @@ the independent prospective installation-selection boundary are explicit fixture
 the provenance module has its own kernel/filesystem boundary tests.
 """
 
+import ast
 import fcntl
 import logging
 import os
@@ -34,6 +35,8 @@ from umi.protocol import canonical_json_bytes
 
 from . import test_competition_reward_admission_provenance as provenance_fixtures
 from . import test_competition_reward_history as history_fixtures
+from .test_competition_history_source_externalization import originals, reopen
+from .test_competition_remote_proof_store import EvidenceServer, store
 from .test_competition_reward_decisions import signatures
 from .test_competition_reward_history import control as control
 from .test_competition_reward_history import historical as historical
@@ -477,6 +480,43 @@ async def test_completed_interval_retains_original_sources_before_remote_release
     assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
 
 
+async def test_direct_remote_tail_preserves_admitted_prefix_and_all_original_fences(
+    admission_case, tmp_path, monkeypatch
+):
+    c, h = admission_case, admission_case.h
+    await c.migrate()
+    h.reader = h.new_reader()
+    prefix_sources = originals(h.reader.journal)
+    admission = h.reader.completed_admission.load()
+    server = EvidenceServer()
+    h.reader = reopen(h.reader, store(tmp_path / "remote-tail", server))
+    result = await h.reader.advance(h.item.provider, through_block=h.end)
+    assert result.history.tip.block_number == h.end
+    assert h.reader.progress.native_completed == h.end - c.boundary
+    assert originals(h.reader.journal) == prefix_sources
+    assert h.reader.completed_admission.load() == admission
+    with h.reader.journal.read_transaction() as db:
+        assert db.execute("SELECT revision FROM history_completed_admission").fetchall() == [(0,)]
+    saved = h.reader.checkpoints.load(h.end)
+    server.calls.clear()
+    h.reader = reopen(h.reader, store(tmp_path / "remote-tail", server))
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("completed native proof replayed")
+
+    monkeypatch.setattr(h.item.provider, "review_control", forbidden)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == result
+    assert server.calls == []
+    assert h.reader.checkpoints.load(h.end) == saved
+    assert h.reader.completed_admission.load() == admission
+    # The existing protection still detects an ordinary source mutation.
+    kind, key, _ = prefix_sources[0]
+    with h.reader.journal.transaction() as db:
+        db.execute("UPDATE records SET body=body WHERE kind=? AND id=?", (kind, key))
+    with pytest.raises(HistoryCheckpointRepairRequired, match="source or marker changed"):
+        h.reader.completed_admission.load()
+
+
 async def test_migration_transaction_rolls_back_records_index_and_triggers(
     admission_case, monkeypatch
 ):
@@ -543,11 +583,18 @@ async def test_change_during_boundary_verification_cannot_commit(
         ).fetchone()
 
 
-async def test_migration_reports_bounded_progress_and_scope(admission_case, caplog):
+async def test_migration_reports_bounded_progress_and_scope(
+    admission_case, caplog, http_log_redaction
+):
     c = admission_case
     caplog.set_level(logging.INFO, logger=migration.__name__)
     await c.migrate()
-    values = [r.args for r in caplog.records if r.msg == "reward_admission_migration_progress %s"]
+    prefix = "reward_admission_migration_progress "
+    values = [
+        ast.literal_eval(record.getMessage()[len(prefix) :])
+        for record in caplog.records
+        if record.name == migration.__name__ and record.getMessage().startswith(prefix)
+    ]
     assert [v["percent"] for v in values] == [0, 25, 50, 75, 100]
     assert all(v["eta_scope"] == "admission_result_migration_only" for v in values)
     assert values[0]["planning_eta_seconds"] == [1, 300]

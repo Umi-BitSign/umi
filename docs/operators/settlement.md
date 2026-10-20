@@ -719,6 +719,13 @@ opens the receipt index without enumerating or copying the local object graph.
 The ordinary original frame and object readers still check retained bytes and
 identities; successful native verification remains owned by its original journals.
 This mode does not release local history or certify that it is replicated.
+An unchanged checkpoint with a completed delivery to this same original local
+archive keeps that fact during replay instead of bulk-exporting the retained
+prefix to the new R2 namespace. `retained_local_export_blocks` reports those
+deliveries separately; they do not count as `replicated_blocks`. New blocks still
+publish to R2. An existing completed remote receipt retains its normal precedence
+and repair requirements. Historical R2 backfill and local eviction remain separate
+qualified operations.
 
 Synchronous proof-frame writes, encoded transfers, reads and bounded history
 source replication batches reuse one HTTP client per owned worker thread. Nested
@@ -750,6 +757,30 @@ bound to their original revisions and remote receipts. Existing successful `/1`
 history facts remain unchanged. Deleted raw records free logical capacity and
 reusable SQLite pages, not physical database file size. The remote generation
 fence refuses old runtimes and transitions to reservation-only layouts.
+
+With writable R2 selected, newly captured history sources publish directly to R2
+before one atomic local alias/identity commit. They never occupy local raw-source
+rows. This captures inputs; the ordinary native proof checks still determine
+their validity. Bounded publication batches checkpoint durable transport receipts,
+and restart reuses completed uploads. An interrupted alias commit leaves its
+original inputs unaccepted; retry retains the same immutable bytes. Missing or
+damaged completed identity/alias state requires explicit repair.
+
+Direct source capture uses history capability generation5. Its metadata-only
+upgrade preserves generation3 aliases, original source tokens, successful checks
+and journal inode. Object aliases use `umi-journal-remote-source/2` with
+`umi-source-hex-object/1`: they reference the same bare immutable proof-node bytes
+as the exported archive, so capture and export do not upload duplicate node
+representations. The reader reconstructs and checks the original canonical hex
+record. Existing `/1` aliases remain byte-identical and readable. This is distinct
+from the transport receipt index's generation4. Older source readers refuse
+generation5; upgrade every owner, copier and recovery consumer before selection.
+
+Previously retained local sources remain in place when a new frame shares them.
+In particular, an imported completed-admission interval keeps all original raw
+sources, counters and fences. Its newly captured tail can use direct R2 aliases
+without deleting or resetting any protected prefix state. Qualify actual retained
+artifacts, restart, repair and every consuming runtime before selecting this path.
 
 Selected R2 proof publication sends independent codec objects through at most four
 owned HTTP workers. Aggregate active publication bytes stay within the existing
@@ -1294,8 +1325,10 @@ or replicated R2 proofs.
 
 Retain the root seal, original installation provenance, original history and
 decision database identities, original signed intent/vote and original raw
-history sources. The migration deliberately disables source externalization for
-this owner. Missing or damaged completion metadata, provenance, source records
+history sources. The migration deliberately disables deletion-based source
+externalization for this owner. A selected writable R2 store can capture new tail
+sources directly as remote aliases; this does not delete the original prefix or
+reset its mutation fence. Missing or damaged completion metadata, provenance, source records
 or source fences requires explicit restoration in place; it is not a cache miss.
 The four migration milestones report progress, elapsed time, planning ETA and
 stalled/interrupted/repair states; this ETA covers the local result import and

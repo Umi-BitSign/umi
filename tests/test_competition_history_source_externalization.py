@@ -6,11 +6,16 @@ from contextlib import contextmanager
 
 import pytest
 
-from umi.competition_history_source_externalization import ALIAS_KIND, MARKER_TABLE
+from umi.competition_history_source_externalization import (
+    ALIAS_KIND,
+    CAPTURE_SCHEMA,
+    HEX_OBJECT_ENCODING,
+    MARKER_TABLE,
+)
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import SOURCE_KINDS, HistoryCheckpointRepairRequired
 from umi.competition_reward_history_workers import HistoryVerificationProfile
-from umi.competition_reward_proof_archive import RewardProofArchive
+from umi.competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from umi.competition_round_journal import RoundJournal
 from umi.open_competition import digest
 
@@ -56,6 +61,290 @@ def originals(journal):
         return db.execute(
             "SELECT kind,id,body FROM records WHERE kind IN (?,?,?) ORDER BY kind,id", SOURCE_KINDS
         ).fetchall()
+
+
+def fresh_remote(reader, remote, root):
+    return RewardControlHistoryReader(
+        root,
+        control_hotkey=reader.hotkey,
+        chain_config_sha256=reader.config_sha256,
+        first_block=reader.first_block,
+        maximum_bytes=reader.journal.maximum_bytes,
+        remote_store=remote,
+    )
+
+
+async def test_read_through_keeps_original_local_delivery_without_claiming_r2_replication(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    archive = tmp_path / "original-export"
+    h.reader.export_archive = RewardProofArchive(archive)
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    height = h.reader.first_block
+    original = h.reader.checkpoints.load(height)
+    server = EvidenceServer()
+    remote = store(tmp_path / "remote", server)
+    selected = RewardProofArchive(archive, remote=remote, legacy_read_through=True)
+    h.reader = reopen(h.reader, remote, export_archive=selected)
+    h.reader.progress.start(h.end, height)
+    h.reader.progress.remote_export_selected = True
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader._ensure_checkpoint_export(original) == original
+    assert h.reader.checkpoints.load(height) == original
+    assert h.reader.progress.retained_local_export_count == 1
+    assert h.reader.progress.counts["exported"] == 0
+    assert server.calls == []
+
+
+async def test_read_through_new_tail_exports_to_r2_without_backfilling_original_archive(
+    history_case, tmp_path
+):
+    h = history_case
+    archive = tmp_path / "original-export"
+    h.reader.export_archive = RewardProofArchive(archive)
+    await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=1)
+    height = h.reader.first_block
+    remote = store(tmp_path / "remote", EvidenceServer())
+    selected = RewardProofArchive(archive, remote=remote, legacy_read_through=True)
+    h.reader = reopen(h.reader, remote, export_archive=selected)
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    assert (
+        remote.reference_for_path(
+            "frames/history/" + history_archive_key(h.reader.config_sha256, h.reader.hotkey, height)
+        )
+        is None
+    )
+    assert h.reader.progress.latest["retained_local_export_blocks"] == 1
+    assert h.reader.progress.latest["replicated_blocks"] == h.end - height
+    assert (
+        remote.reference_for_path(
+            "frames/history/" + history_archive_key(h.reader.config_sha256, h.reader.hotkey, h.end)
+        )
+        is not None
+    )
+
+
+async def test_retained_local_delivery_never_hides_damaged_completed_remote_receipt(
+    history_case, tmp_path
+):
+    h = history_case
+    archive = tmp_path / "original-export"
+    h.reader.export_archive = RewardProofArchive(archive)
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    original = h.reader.checkpoints.load(h.reader.first_block)
+    remote = store(tmp_path / "remote", EvidenceServer())
+    key = history_archive_key(h.reader.config_sha256, h.reader.hotkey, h.reader.first_block)
+    frame = (archive / "history" / (key + ".json")).read_bytes()
+    remote.put_bytes(frame, path="frames/history/" + key)
+    with remote.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='remote_proof_object'")
+    selected = RewardProofArchive(archive, remote=remote, legacy_read_through=True)
+    h.reader = reopen(h.reader, remote, export_archive=selected)
+    with pytest.raises(ValueError, match="missing or damaged"):
+        await h.reader._ensure_checkpoint_export(original)
+    assert h.reader.progress.retained_local_export_count == 0
+
+
+async def test_new_history_is_captured_remotely_before_native_verification_and_reuses_success(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    server = EvidenceServer()
+    direct = fresh_remote(h.reader, store(tmp_path / "direct-index", server), tmp_path / "direct")
+    transaction = direct.journal.transaction
+
+    @contextmanager
+    def no_local_payloads(**kwargs):
+        with transaction(**kwargs) as db:
+            yield db
+            assert not db.execute(
+                "SELECT 1 FROM records WHERE kind IN (?,?,?) LIMIT 1", SOURCE_KINDS
+            ).fetchone()
+
+    monkeypatch.setattr(direct.journal, "transaction", no_local_payloads)
+    assert await direct.advance(h.item.provider, through_block=h.end) == expected
+    assert direct.progress.native_completed == h.end - direct.first_block + 1
+    assert not originals(direct.journal)
+    successes = retained(direct.journal)
+    server.calls.clear()
+    direct = reopen(direct, store(tmp_path / "direct-index", server))
+    prohibit_proof_replay(monkeypatch, direct)
+    assert await direct.advance(h.item.provider, through_block=h.end) == expected
+    assert direct.progress.native_completed == 0 and server.calls == []
+    assert retained(direct.journal) == successes
+
+
+async def test_direct_capture_and_proof_export_share_exact_acknowledged_node_objects(
+    history_case, tmp_path
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    height = h.reader.first_block
+    fields = h.reader._load(height)
+    server = EvidenceServer()
+    remote = store(tmp_path / "direct-index", server)
+    direct = fresh_remote(h.reader, remote, tmp_path / "direct")
+    direct.export_archive = RewardProofArchive(tmp_path / "export", remote=remote)
+    direct._save_fields(height, fields)
+    with direct.journal.read_transaction() as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (5,)
+        aliases = [
+            json.loads(row[0])
+            for row in db.execute("SELECT body FROM records WHERE kind=?", (ALIAS_KIND,))
+        ]
+    nodes = [a for a in aliases if a["schema"] == CAPTURE_SCHEMA]
+    assert nodes and all(a["encoding"] == HEX_OBJECT_ENCODING for a in nodes)
+    assert all(a["remote"]["content_sha256"] == a["key"] for a in nodes)
+    keys = {a["remote"]["key"] for a in nodes}
+    server.calls.clear()
+    direct._export_fields(height, fields, direct.export_archive)
+    assert not any(
+        method == "PUT" and path.removeprefix("/umi-proof-artifacts/") in keys
+        for method, path in server.calls
+    )
+    assert direct._load(height) == fields
+
+
+async def test_capture_upgrade_preserves_original_v3_aliases_tokens_successes_and_inode(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    fields = h.reader._load(h.reader.first_block)
+    server = EvidenceServer()
+    h.reader = reopen(h.reader, store(tmp_path / "remote", server))
+    await h.reader.externalize_history_sources(maximum_records=4096)
+    with h.reader.journal.read_transaction() as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+        aliases = db.execute(
+            "SELECT id,body FROM records WHERE kind=? ORDER BY id", (ALIAS_KIND,)
+        ).fetchall()
+    inode, successes = h.reader.journal.path.stat().st_ino, retained(h.reader.journal)
+    saved = h.reader.checkpoints.load(h.reader.first_block)
+    server.calls.clear()
+    h.reader._save_fields(h.reader.first_block, fields)
+    with h.reader.journal.read_transaction() as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (5,)
+        assert (
+            db.execute(
+                "SELECT id,body FROM records WHERE kind=? ORDER BY id", (ALIAS_KIND,)
+            ).fetchall()
+            == aliases
+        )
+    assert h.reader.journal.path.stat().st_ino == inode
+    assert retained(h.reader.journal) == successes
+    assert h.reader.checkpoints.load(h.reader.first_block) == saved
+    h.reader = reopen(h.reader, store(tmp_path / "remote", server))
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert server.calls == []
+
+
+async def test_unsupported_reader_and_downgraded_capture_capability_refuse_before_replay(
+    history_case, tmp_path
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    remote = store(tmp_path / "direct-index", EvidenceServer())
+    direct = fresh_remote(h.reader, remote, tmp_path / "direct")
+    direct._save_fields(h.reader.first_block, h.reader._load(h.reader.first_block))
+    with (
+        direct.journal.read_transaction() as db,
+        pytest.raises(ValueError, match="unsupported round journal capability"),
+    ):
+        RoundJournal._version(db)
+    with direct.journal.transaction() as db:
+        db.execute("PRAGMA user_version=3")
+    with pytest.raises(ValueError, match="original selected R2 namespace"):
+        reopen(direct, store(tmp_path / "direct-index", EvidenceServer()))
+
+
+@pytest.mark.parametrize("interruption", ["put_ack", "before_commit", "after_commit"])
+async def test_interrupted_direct_capture_retains_remote_progress_without_local_payloads(
+    history_case, tmp_path, monkeypatch, interruption
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    height = h.reader.first_block
+    fields = h.reader._load(height)
+    server = EvidenceServer()
+    direct = fresh_remote(h.reader, store(tmp_path / "direct-index", server), tmp_path / "direct")
+    with monkeypatch.context() as patch:
+        if interruption == "put_ack":
+            server.lose_put_ack = True
+        elif interruption == "before_commit":
+            transaction = direct.journal.transaction
+
+            @contextmanager
+            def interrupted(**kwargs):
+                with transaction(**kwargs) as db:
+                    yield db
+                    if db.execute("SELECT 1 FROM records WHERE kind=?", (ALIAS_KIND,)).fetchone():
+                        raise OSError("interrupted direct capture commit")
+
+            patch.setattr(direct.journal, "transaction", interrupted)
+        else:
+            capture = direct.remote_sources.capture
+
+            def interrupted(*args, **kwargs):
+                capture(*args, **kwargs)
+                raise OSError("lost direct capture commit acknowledgement")
+
+            patch.setattr(direct.remote_sources, "capture", interrupted)
+        with pytest.raises(OSError):
+            direct._save_fields(height, fields)
+    assert not originals(direct.journal)
+    assert direct.checkpoints.load(height) is None
+    direct = reopen(direct, store(tmp_path / "direct-index", server))
+    calls = len(server.calls)
+    direct._save_fields(height, fields)
+    assert direct._load(height) == fields
+    assert not originals(direct.journal)
+    if interruption != "put_ack":
+        assert not any(method == "PUT" for method, _ in server.calls[calls:])
+
+
+async def test_direct_capture_refuses_missing_original_alias_identity(history_case, tmp_path):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    height = h.reader.first_block
+    fields = h.reader._load(height)
+    direct = fresh_remote(
+        h.reader, store(tmp_path / "direct-index", EvidenceServer()), tmp_path / "direct"
+    )
+    direct._save_fields(height, fields)
+    with direct.journal.transaction() as db:
+        db.execute(
+            "DELETE FROM history_source_identity WHERE kind=? AND id=?",
+            ("control_history_block", str(height)),
+        )
+    with pytest.raises(HistoryCheckpointRepairRequired, match="identity missing"):
+        direct._save_fields(height, fields)
+
+
+async def test_direct_capture_preserves_a_source_that_appears_during_publication(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    height = h.reader.first_block
+    fields = h.reader._load(height)
+    direct = fresh_remote(
+        h.reader, store(tmp_path / "direct-index", EvidenceServer()), tmp_path / "direct"
+    )
+    publish = direct.remote_store.put_many
+
+    def raced(objects):
+        publish(objects)
+        direct.journal.put("control_history_block", str(height), {"competing": True})
+
+    monkeypatch.setattr(direct.remote_store, "put_many", raced)
+    with pytest.raises(HistoryCheckpointRepairRequired, match="changed during publication"):
+        direct._save_fields(height, fields)
+    assert direct.journal.get("control_history_block", str(height)) == {"competing": True}
+    assert direct.journal.get(ALIAS_KIND, digest(["control_history_block", str(height)])) is None
 
 
 @pytest.mark.parametrize("parallel", [False, True])
