@@ -720,6 +720,15 @@ The ordinary original frame and object readers still check retained bytes and
 identities; successful native verification remains owned by its original journals.
 This mode does not release local history or certify that it is replicated.
 
+Synchronous proof-frame writes, encoded transfers, reads and bounded history
+source replication batches reuse one HTTP client per owned worker thread. Nested
+object publications share that operation's connection; its outer scope closes
+the client on success or failure. Requests retain their individual signatures,
+timeouts, byte bounds and immutable-generation checks. This changes no native
+verification result or durable receipt. Measure complete block publication
+throughput against the chain interval before selecting a live remote exporter;
+connection reuse alone does not establish sustained capacity.
+
 A completed remote receipt takes precedence over a local copy. Missing, changed
 or corrupt completed remote state still requires the existing explicit repair;
 a local copy never hides that loss. Repeated publication preserves original

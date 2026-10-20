@@ -41,6 +41,7 @@ from .private_files import (
     read_private_model,
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+from .r2_evidence import r2_evidence_connection_scope
 
 MAX_FRAME_BYTES = 64 * 1024
 MAX_FIELD_BYTES = 256 * 1024**2
@@ -272,7 +273,11 @@ class RewardProofArchive:
 
     @contextmanager
     def _directory_scope(self, *, enabled=True):
-        if not enabled or self.remote is not None or os.getpid() != self._pid:
+        if self.remote is not None:
+            with r2_evidence_connection_scope(getattr(self.remote, "client", None)):
+                yield None
+            return
+        if not enabled or os.getpid() != self._pid:
             yield None
             return
         directory = _ObjectDirectory(self.root / "objects")
@@ -567,32 +572,33 @@ class RewardProofArchive:
                 return False
         # Publish no frame until every bounded referenced object is durable.
         # Repeated objects within this transfer need only one resolver read.
-        retained = {}
-        for recipe, segments in recipes:
-            for _, sha, size in segments:
-                if sha in retained:
-                    if retained[sha] != size:
-                        raise ValueError("encoded transport object length differs")
-                    continue
-                if self._published_object_present(sha, size):
+        with self._directory_scope():
+            retained = {}
+            for recipe, segments in recipes:
+                for _, sha, size in segments:
+                    if sha in retained:
+                        if retained[sha] != size:
+                            raise ValueError("encoded transport object length differs")
+                        continue
+                    if self._published_object_present(sha, size):
+                        retained[sha] = size
+                        continue
+                    raw = resolve(sha, size)
+                    if type(raw) is not bytes or len(raw) != size:
+                        raise ValueError("encoded transport object size differs")
+                    if self._retain_bytes(raw) != sha:
+                        raise ValueError("encoded transport object digest differs")
                     retained[sha] = size
-                    continue
-                raw = resolve(sha, size)
-                if type(raw) is not bytes or len(raw) != size:
-                    raise ValueError("encoded transport object size differs")
-                if self._retain_bytes(raw) != sha:
-                    raise ValueError("encoded transport object digest differs")
-                retained[sha] = size
-            self._retain_bytes(recipe)
-        if self.remote is None:
-            if self.physical_budget is not None:
-                self.physical_budget.check(self.root, MAX_FRAME_BYTES)
-            publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
-        else:
-            raw = canonical_json_bytes(frame)
-            checked_size(len(raw), MAX_FRAME_BYTES)
-            self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
-        return True
+                self._retain_bytes(recipe)
+            if self.remote is None:
+                if self.physical_budget is not None:
+                    self.physical_budget.check(self.root, MAX_FRAME_BYTES)
+                publish_private_model(path, frame, maximum_bytes=MAX_FRAME_BYTES)
+            else:
+                raw = canonical_json_bytes(frame)
+                checked_size(len(raw), MAX_FRAME_BYTES)
+                self.remote.put_bytes(raw, path="frames/" + kind + "/" + key)
+            return True
 
     def _frame(self, kind: Kind, key: str) -> _Frame:
         path = self._path(kind, key)
