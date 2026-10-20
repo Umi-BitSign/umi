@@ -106,10 +106,13 @@ async def test_read_through_new_tail_exports_to_r2_without_backfilling_original_
     h.reader.export_archive = RewardProofArchive(archive)
     await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=1)
     height = h.reader.first_block
+    original_sources = originals(h.reader.journal)
     remote = store(tmp_path / "remote", EvidenceServer())
     selected = RewardProofArchive(archive, remote=remote, legacy_read_through=True)
     h.reader = reopen(h.reader, remote, export_archive=selected)
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    remaining_sources = originals(h.reader.journal)
+    assert all(row in remaining_sources for row in original_sources)
     assert (
         remote.reference_for_path(
             "frames/history/" + history_archive_key(h.reader.config_sha256, h.reader.hotkey, height)
@@ -124,6 +127,53 @@ async def test_read_through_new_tail_exports_to_r2_without_backfilling_original_
         )
         is not None
     )
+
+
+@pytest.mark.parametrize("read_through_selection", ["source", "export", "both"])
+@pytest.mark.parametrize("partial_explicit_migration", [False, True])
+async def test_read_through_full_advance_reuses_original_checkpoint_without_implicit_migration(
+    history_case, tmp_path, monkeypatch, read_through_selection, partial_explicit_migration
+):
+    h = history_case
+    archive = tmp_path / "original-export"
+    h.reader.export_archive = RewardProofArchive(archive)
+    expected = await h.reader.advance(h.item.provider, through_block=h.end)
+    saved_sources = originals(h.reader.journal)
+    saved_successes = retained(h.reader.journal)
+    server = EvidenceServer()
+    selected_config = config(tmp_path)
+    if read_through_selection in ("source", "both"):
+        selected_config = selected_config.model_copy(
+            update={"schema_": "umi-r2-proof-archive/2", "legacy_read_through": True}
+        )
+    remote = RemoteProofStore(tmp_path / "remote", selected_config, client=server.client())
+    # Both selections preserve existing local export delivery. The source-only
+    # case has no export owner and must still avoid implicit source migration.
+    selected_archive = (
+        RewardProofArchive(archive, remote=remote, legacy_read_through=True)
+        if read_through_selection in ("export", "both")
+        else None
+    )
+    h.reader = reopen(h.reader, remote, export_archive=selected_archive)
+    if partial_explicit_migration:
+        # Supported explicit migration remains available, and an interrupted
+        # migration must not silently resume ahead of completed history replay.
+        result = await h.reader.externalize_history_sources(maximum_records=1)
+        assert result["replicated_records"] == 1
+        saved_sources = originals(h.reader.journal)
+        assert retained(h.reader.journal) == saved_successes
+        h.reader = reopen(h.reader, remote, export_archive=selected_archive)
+        server.calls.clear()
+
+    def reject_implicit_migration(*_args, **_kwargs):
+        raise AssertionError("read-through must not migrate retained SQL sources during advance")
+
+    monkeypatch.setattr(h.reader, "_externalize_sources", reject_implicit_migration)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
+    assert originals(h.reader.journal) == saved_sources
+    assert retained(h.reader.journal) == saved_successes
+    assert h.reader.progress.native_completed == 0 and not server.calls
 
 
 async def test_retained_local_delivery_never_hides_damaged_completed_remote_receipt(
@@ -191,14 +241,20 @@ async def test_readonly_receipt_consumer_reuses_capture_success_without_proofs_o
     source_original = producer.journal.path.read_bytes()
     server.calls.clear()
     remote = RemoteProofStore(
-        tmp_path / "consumer-index", config(tmp_path, read_only=True), client=server.client(),
+        tmp_path / "consumer-index",
+        config(tmp_path, read_only=True),
+        client=server.client(),
         receipt_source_directory=producer.journal.root,
     )
     readonly = RewardControlHistoryReader(
-        direct.journal.root, control_hotkey=direct.hotkey,
-        chain_config_sha256=direct.config_sha256, first_block=direct.first_block,
-        maximum_bytes=direct.journal.maximum_bytes, remote_store=remote,
-        existing_only=True, read_only=True,
+        direct.journal.root,
+        control_hotkey=direct.hotkey,
+        chain_config_sha256=direct.config_sha256,
+        first_block=direct.first_block,
+        maximum_bytes=direct.journal.maximum_bytes,
+        remote_store=remote,
+        existing_only=True,
+        read_only=True,
     )
     prohibit_proof_replay(monkeypatch, readonly)
     assert await readonly.advance(h.item.provider, through_block=h.end) == expected
