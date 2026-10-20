@@ -174,6 +174,56 @@ class HistoricalHeaderRecovery:
                 db.rollback()
                 raise
 
+    async def retain_hints(self, headers: tuple[str, ...]) -> int:
+        """Import a bounded local batch as untrusted hints, never verified ancestry.
+
+        Existing hints must agree exactly. Recovery still walks and hashes every
+        parent from its genuinely owned anchor, including after restart. One
+        transaction avoids a full capacity scan and fsync for each retained link.
+        """
+        if type(headers) is not tuple or not 1 <= len(headers) <= 4096:
+            raise ValueError("retained header batch must contain 1 to 4096 headers")
+        records = {}
+        for encoded in headers:
+            if type(encoded) is not str or len(encoded) > 2 * MAXIMUM_HEADER_BYTES + 2:
+                raise ValueError("retained header exceeds its byte bound")
+            header = _decode_header(encoded, maximum_bytes=MAXIMUM_HEADER_BYTES)
+            prior = records.setdefault(header["hash"], encoded)
+            if prior != encoded:
+                raise ValueError("retained header identities conflict")
+        async with self._lock:
+            return await run_owned_thread(self._retain_hints, records)
+
+    def _retain_hints(self, records):
+        with closing(self._open()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                additions = []
+                for key, encoded in records.items():
+                    old = db.execute(
+                        "SELECT substr(encoded,1,?) FROM historical_header_hints WHERE hash=?",
+                        (2 * MAXIMUM_HEADER_BYTES + 3, key),
+                    ).fetchone()
+                    if old is not None:
+                        if old[0] != encoded:
+                            raise ValueError("historical header hint changed")
+                    else:
+                        additions.append((key, encoded))
+                if additions:
+                    used = db.execute(
+                        "SELECT COALESCE(SUM(length(encoded)),0) FROM historical_header_hints"
+                    ).fetchone()[0]
+                    if used + sum(len(encoded) for _, encoded in additions) > self.maximum_bytes:
+                        raise HistoricalHeaderRecoveryPending(
+                            "historical header cache needs capacity"
+                        )
+                    db.executemany("INSERT INTO historical_header_hints VALUES (?,?)", additions)
+                db.commit()
+                return len(additions)
+            except BaseException:
+                db.rollback()
+                raise
+
     async def recover(self, anchor, target: FinalizedSnapshotRef, request, *, target_header=None):
         """Use an optional exact target header only as an untrusted final-link hint."""
         if not isinstance(target, FinalizedSnapshotRef):

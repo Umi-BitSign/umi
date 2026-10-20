@@ -242,9 +242,9 @@ async def test_completed_restart_uses_only_compact_results_and_current_finality(
     resolve = h.item.provider._resolve_control_header
     tips = []
 
-    async def counted(ref, encoded):
+    async def counted(ref, encoded, **kwargs):
         tips.append(ref.block_number)
-        return await resolve(ref, encoded)
+        return await resolve(ref, encoded, **kwargs)
 
     monkeypatch.setattr(h.item.provider, "_resolve_control_header", counted)
     h.rpc_calls.clear()

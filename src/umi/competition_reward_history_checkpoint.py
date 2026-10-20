@@ -406,6 +406,14 @@ class HistoryCheckpoints:
             failure.height = height
             raise failure from error
 
+    def header_hints(self, first: int, last: int) -> tuple[str, ...]:
+        """Reuse completed local headers without opening their proof payloads.
+
+        These remain untrusted ancestry inputs. Missing future work ends the
+        contiguous batch; damaged completed results keep their explicit repair.
+        """
+        return tuple(value["header"] for value in self.load_many(first, last))
+
     @staticmethod
     def _batch_bounds(first, last):
         if (

@@ -804,7 +804,15 @@ class RewardControlHistoryReader:
             with self.progress.watch_ancestry(
                 provider._historical_headers.telemetry, snapshot.block_number
             ):
-                await provider._resolve_control_header(snapshot, value["header"])
+                # Explicit repair must reach the damaged item through its
+                # original archive. It cannot require that item's completed
+                # checkpoint as a hint while restoring its healthy predecessor.
+                options = (
+                    {}
+                    if self._repair_reason
+                    else {"retained_headers": self.checkpoints.header_hints}
+                )
+                await provider._resolve_control_header(snapshot, value["header"], **options)
 
     async def _restore_prefix(self, provider, last):
         self.progress.native_stop()
