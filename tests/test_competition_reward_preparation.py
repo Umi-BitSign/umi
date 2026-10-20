@@ -3035,6 +3035,7 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
     )
     archive = RewardProofArchive(tmp_path / "proof-export")
     original_write = archive.write
+    original_compact_copy = archive.copy_encoded_transport
     interrupted = set()
 
     def lost_export_reply(kind, *args, **kwargs):
@@ -3043,7 +3044,15 @@ async def test_portable_proofs_restore_fresh_native_journals_without_history_rpc
             interrupted.add(kind)
             raise OSError("export acknowledgement lost")
 
+    def lost_compact_export_reply(kind, *args, **kwargs):
+        copied = original_compact_copy(kind, *args, **kwargs)
+        if copied and kind not in interrupted:
+            interrupted.add(kind)
+            raise OSError("compact export acknowledgement lost")
+        return copied
+
     monkeypatch.setattr(archive, "write", lost_export_reply)
+    monkeypatch.setattr(archive, "copy_encoded_transport", lost_compact_export_reply)
     h.reader = RewardControlHistoryReader(
         tmp_path / "export-history",
         control_hotkey=c.series.control_hotkey,
