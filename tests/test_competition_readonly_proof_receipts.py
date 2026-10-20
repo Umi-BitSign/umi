@@ -1,6 +1,9 @@
 """Native observers reuse live receipt metadata without owning the producer."""
 
 import hashlib
+import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -127,3 +130,45 @@ def test_producer_source_cannot_be_written_through_native_receipt_view(tmp_path)
     with pytest.raises(ValueError, match="cannot adopt"):
         observer._remember(producer.validate_reference(reference))
     assert producer.journal.path.read_bytes() == original
+
+
+def test_observer_can_open_while_original_producer_has_an_uncommitted_write(tmp_path):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    original = producer.journal.path.read_bytes()
+    with producer.journal.transaction() as db:
+        db.execute("INSERT INTO records VALUES ('test_pending','new',?)", (b'{}',))
+        assert producer.journal.path.with_name('rounds.sqlite3-journal').exists()
+        observer = consumer(tmp_path / "observer", producer, server)
+        assert observer.validate_reference(reference).key == reference['key']
+        assert producer.journal.path.read_bytes() == original
+        # Roll back only this task fixture's uncommitted writer.
+        db.execute("DELETE FROM records WHERE kind='test_pending'")
+    assert observer.validate_reference(reference).key == reference['key']
+
+
+def test_observer_never_recovers_a_crashed_producer_hot_journal(tmp_path):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    child = '''
+import os,sqlite3,sys
+db=sqlite3.connect(sys.argv[1],isolation_level=None)
+db.create_function('umi_round_writer_generation',0,lambda:2)
+db.execute('PRAGMA synchronous=FULL')
+db.execute('PRAGMA cache_size=1')
+db.execute('PRAGMA recursive_triggers=ON')
+db.execute('BEGIN IMMEDIATE')
+for index in range(64):
+ db.execute("INSERT INTO records VALUES ('test_pending',?,?)",(str(index),b'x'*8192))
+os._exit(0)
+'''
+    subprocess.run([sys.executable, '-c', child, str(producer.journal.path)], check=True)
+    rollback = producer.journal.path.with_name('rounds.sqlite3-journal')
+    assert rollback.exists() and rollback.read_bytes()[:8] != bytes(8)
+    database_before, journal_before = producer.journal.path.read_bytes(), rollback.read_bytes()
+    with pytest.raises(sqlite3.OperationalError, match=r'readonly|read-only|locked'):
+        consumer(tmp_path / "observer", producer, server).validate_reference(reference)
+    assert producer.journal.path.read_bytes() == database_before
+    assert rollback.read_bytes() == journal_before

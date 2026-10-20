@@ -642,6 +642,10 @@ imports absent receipts from R2. Missing or damaged original receipts and produc
 holds require explicit producer repair. Repairing an observer's independent hold
 does not clear the producer's hold. Native history verification still determines
 proof validity; receipt reuse grants no new verdict or coverage capability.
+The receipt view can open during a producer transaction using SQLite's readonly
+committed snapshot. It never performs rollback recovery. A crashed hot journal,
+unsupported WAL owner or damaged completion ledger still refuses; the ordinary
+stopped history transfer reader retains its original clean-journal requirement.
 
 History journal byte allowances cover logical retained records and reservations,
 not a physical disk reservation. SQLite keys, indexes and page utilization need

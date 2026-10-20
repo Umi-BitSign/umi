@@ -121,6 +121,13 @@ def _completion_triggers():
 
 
 class _ProofIndex(RoundJournal):
+    def _validate_existing(self, binding):
+        # A producer may be writing another immutable receipt. SQLite's mode=ro
+        # connection provides its committed snapshot without writing the source.
+        # It still refuses a hot journal that actually needs rollback recovery;
+        # the ordinary stopped-owner transfer reader keeps its clean-file fence.
+        return super()._validate_existing(binding, require_clean_rollback=not self.read_only)
+
     @property
     def maximum_records(self):
         return self.maximum_bytes
