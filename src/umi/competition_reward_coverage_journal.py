@@ -369,13 +369,69 @@ class RewardCoverageJournal:
                     )
                 self._pending_tokens[key] = tokens
 
-        self.journal.put_many(records, index=capture)
+        # New proof sources are durable in R2 before their local identities and
+        # interval commit. Existing local sources stay local until an explicit
+        # bounded migration; ordinary replay must not backfill an old cohort.
+        sources = [r for r in records if r[0] in KINDS]
+        additional = [r for r in records if r[0] not in KINDS]
+        if sources:
+            self.externalized.capture(sources, additional_records=additional, index=capture)
+        else:
+            self.journal.put_many(additional, index=capture)
 
-    def _externalize_completed(self, key):
-        if self.remote_store is not None:
-            value = self.checkpoints.load(key)
-            if value is not None:
-                self.externalized.externalize_many((v[0], v[1]) for v in value["sources"])
+    async def externalize_endpoint_sources(
+        self, key: str, *, maximum_records: int = 256
+    ) -> dict[str, int | str]:
+        """Migrate a bounded original-source batch under the native owner.
+
+        Successful aliases persist independently of this operation. Restart or
+        retry skips them without proof replay or source payload rereads.
+        """
+        async with self._lock:
+            return await run_owned_thread(self._externalize_endpoint_sources, key, maximum_records)
+
+    def _externalize_endpoint_sources(self, key: str, maximum_records: int) -> dict[str, int | str]:
+        if type(maximum_records) is not int or not 1 <= maximum_records <= 4096:
+            raise ValueError("coverage source migration requires a bounded record batch")
+        if self.remote_store is None or self.remote_store.config.read_only:
+            raise ValueError("coverage source migration requires its writable R2 store")
+        with self.journal.locked():
+            with TransferProgress(
+                "coverage_source_migration_selection", 1, unit="endpoints"
+            ) as progress:
+                value = self.checkpoints.load(checked_digest(key))
+                if value is None:
+                    raise ValueError(
+                        "coverage source migration requires a completed native endpoint"
+                    )
+                with self.journal.read_transaction() as db:
+                    # Select metadata only. Aliases are absent from these original
+                    # source slots, so completed uploads never occupy a retry batch.
+                    local = []
+                    for kind, source, _revision in value["sources"]:
+                        row = db.execute(
+                            "SELECT LENGTH(body) FROM records WHERE kind=? AND id=?",
+                            (kind, source),
+                        ).fetchone()
+                        if row is not None:
+                            local.append((kind, source, row[0]))
+                    # Even a one-record batch must reclaim a large payload before
+                    # expanding a small legacy frame into its durable alias.
+                    local.sort(key=lambda item: item[2], reverse=True)
+                progress.advance(1)
+            selected = [(kind, source) for kind, source, _size in local[:maximum_records]]
+            result = (
+                self.externalized.externalize_many(selected)
+                if selected
+                else {"replicated_records": 0, "restored_records": 0, "released_logical_bytes": 0}
+            )
+            remaining = len(local) - len(selected)
+            return {
+                **result,
+                "remaining_local_records": remaining,
+                "state": "pending" if remaining else "completed",
+                "disk_reclamation_basis": "reusable_sqlite_pages_not_database_file_shrink",
+            }
 
     def _import(self, key):
         if self.archive is None:
@@ -448,7 +504,6 @@ class RewardCoverageJournal:
             self._remember_endpoint(endpoint)
             if self.export_archive is not None:
                 self._export(key, self.export_archive)
-            self._externalize_completed(key)
             return key
 
     async def credit(
@@ -476,8 +531,6 @@ class RewardCoverageJournal:
                     self._export(coverage_point(endpoint, self.rule).key(), self.export_archive)
                 if interval is not None:
                     self.export_archive.retain_interval(interval.key(), interval)
-            for endpoint in (left, right):
-                self._externalize_completed(coverage_point(endpoint, self.rule).key())
             if interval is not None:
                 self._verified[interval.key()] = interval
                 self._verified_through[interval.key()] = coverage_point(right, self.rule).block
@@ -666,7 +719,6 @@ class RewardCoverageJournal:
                 await run_owned_thread(self._remember_endpoint, endpoint)
                 if self.export_archive is not None:
                     await run_owned_thread(self._export, key, self.export_archive)
-                await run_owned_thread(self._externalize_completed, key)
                 return endpoint
 
     async def restore_endpoint(self, key, **context):

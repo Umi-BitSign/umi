@@ -325,19 +325,29 @@ class JournalSourceExternalizer:
                     raise self.repair_error("captured source differs from externalized original")
         return remaining
 
-    def capture(self, records, *, index):
+    def capture(
+        self, records, *, index, additional_records: Sequence[tuple[str, str, object]] = ()
+    ):
         """Publish new source bytes before atomically retaining local identities.
 
         Existing local sources stay local, including an admitted legacy prefix.
         New sources are born as aliases; no original source is deleted and no
-        completed-admission mutation fence is reset. The caller owns its normal
-        compound-operation mutex. Transport receipts never attest proof validity.
+        completed-admission mutation fence is reset. Non-source records can join
+        the same local transaction; they cannot substitute source bytes or aliases.
+        The caller owns its normal compound-operation mutex. Transport receipts
+        never attest proof validity.
         """
+        additional_records = list(additional_records)
+        if any(
+            kind in self.source_kinds or kind == self.alias_kind
+            for kind, _key, _value in additional_records
+        ):
+            raise ValueError("additional capture records cannot bypass source publication")
         if self.remote is None:
-            self.journal.put_many(self.filter_records(records), index=index)
+            self.journal.put_many([*self.filter_records(records), *additional_records], index=index)
             return
         self._install_capture()
-        local, pending = [], {}
+        local, pending = list(additional_records), {}
         with self.journal.read_transaction() as db:
             self.checkpoints.check_schema(db)
             for kind, key, value in records:

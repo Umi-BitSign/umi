@@ -794,13 +794,35 @@ and restart reuses completed uploads. An interrupted alias commit leaves its
 original inputs unaccepted; retry retains the same immutable bytes. Missing or
 damaged completed identity/alias state requires explicit repair.
 
-Direct source capture uses history capability generation5. Its metadata-only
-upgrade preserves generation3 aliases, original source tokens, successful checks
-and journal inode. Object aliases use `umi-journal-remote-source/2` with
+Coverage journals also publish new sources to R2 before atomically committing
+their local source identities and interval records. Fresh R2 coverage retains
+aliases rather than raw SQL proof payloads. Existing local sources stay in place;
+retaining, crediting or replaying an endpoint never starts a bulk source migration.
+The first requested portable endpoint export to a new destination still requires
+its complete proof graph and reports that transport separately. Existing native
+checks and completed export receipts remain reusable after payload-cache eviction.
+
+For a supported older coverage owner, the native owning process can explicitly
+call `externalize_endpoint_sources(key, maximum_records=256)` under its existing
+ownership boundary. The selected endpoint must already have its valid native
+completion. Each call publishes at most the requested source-record batch, returns
+`remaining_local_records` and `pending` or `completed`, and reports selection and
+replication progress, elapsed time and stage ETAs. Successful aliases survive
+interruption; the next call skips them without payload rereads or proof replay.
+Missing or damaged completion, source identity or remote receipts requires repair.
+This API is not a separate installed cleanup command and must not race a live
+owner. It releases logical records and reusable pages, not physical database bytes.
+Keep it while supported retained coverage owners still contain local sources.
+
+Direct history and coverage source capture use capability generation5. Their
+metadata-only upgrade preserves generation3 aliases, original source tokens,
+successful checks and journal inode. History object aliases use
+`umi-journal-remote-source/2` with
 `umi-source-hex-object/1`: they reference the same bare immutable proof-node bytes
 as the exported archive, so capture and export do not upload duplicate node
 representations. The reader reconstructs and checks the original canonical hex
-record. Existing `/1` aliases remain byte-identical and readable. This is distinct
+record. Coverage captures retain the existing canonical `/1` source representation.
+Existing `/1` aliases remain byte-identical and readable. This is distinct
 from the transport receipt index's generation4. Older source readers refuse
 generation5; upgrade every owner, copier and recovery consumer before selection.
 
