@@ -352,13 +352,13 @@ def history(c, length, *, initial_length):
 async def test_full_initial_page_retains_history_and_advances_through_cursor(channel_case):
     c = channel_case
     original = history(c, 64, initial_length=64)
-    selected = c.reopen().step(
-        c.native.reopen(), valid_through_block=c.horizon, **await c.native.inputs()
-    )
+    selected = await finish_cursor_repair(c)
     assert selected.directive.sequence == 65
-    assert c.store.read(channel_page_key(c.config, 0, None)).payload == canonical_json_bytes(
-        original
+    initial = parse_canonical_supervisor_directive_page(
+        c.store.read(channel_page_key(c.config, 0, None)).payload
     )
+    assert initial.directives == original.directives and initial.head == original.head
+    assert initial.more  # The full prefix is historical; do not execute its expired head.
     assert (
         c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **await c.native.inputs())
         == selected
@@ -372,11 +372,21 @@ async def test_long_catchup_resumes_completed_discovery_instead_of_starting_over
     with pytest.raises(ValueError, match="bounded catch-up"):
         c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **await c.native.inputs())
     assert not c.signatures
-    selected = c.reopen().step(
-        c.native.reopen(), valid_through_block=c.horizon, **await c.native.inputs()
-    )
+    selected = await finish_cursor_repair(c)
     assert selected.directive.sequence == 81
     assert len(c.signatures) == 1
+
+
+async def finish_cursor_repair(c):
+    for _ in range(5):
+        try:
+            return c.reopen().step(
+                c.native.reopen(), valid_through_block=c.horizon, **await c.native.inputs()
+            )
+        except ReferenceChannelConflict as error:
+            if "another bounded pass" not in str(error):
+                raise
+    raise AssertionError("bounded forward repair did not resume its completed pages")
 
 
 async def test_repeated_initial_mirror_interruptions_keep_original_forward_chain(channel_case):
@@ -652,3 +662,128 @@ async def test_readonly_inspection_exposes_expired_pending_signature_without_rep
         after.st_ctime_ns,
     )
     assert len(c.store.writes) == writes and len(c.signatures) == signatures
+
+
+@pytest.mark.parametrize("cursor", [0, 1, 2])
+async def test_expired_old_cursor_reaches_current_head_through_installed_controller(
+    channel_case, tmp_path, cursor
+):
+    from umi.validator_supervisor import (
+        ValidatorSupervisorConfig,
+        advance_supervisor_directive_history_state,
+        store_supervisor_directive_state,
+    )
+    from umi.validator_supervisor_runtime import ValidatorSupervisorRuntime
+
+    from .test_validator_supervisor_runtime import FakeFinalizedBlockReader, FakeWorkerAdapter
+
+    c = channel_case
+    old, inputs = await retained_head_with_window(c, remaining=-1)
+    selected = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    root = tmp_path / ("client-" + str(cursor))
+    root.mkdir(mode=0o700)
+    values = c.config.model_dump(mode="json", by_alias=True)
+    values.update(
+        state_root=str(root / "state"),
+        worker_state_root=str(root / "worker"),
+        release_root=str(root / "release"),
+        operator_input_root=str(root / "inputs"),
+    )
+    for name in ("state", "worker", "release", "inputs"):
+        (root / name).mkdir(mode=0o700)
+    config = ValidatorSupervisorConfig.model_validate(values)
+    block = inputs["control"].snapshot.block_number
+    state = None
+    for signed in [c.original, old][:cursor]:
+        advanced = advance_supervisor_directive_history_state(
+            signed, config=config, finalized_block=block, prior_state=state
+        )
+        store_supervisor_directive_state(
+            root / "state/directive-state.json",
+            advanced,
+            trust_policy=config.trust_policy(),
+            expected_prior=state,
+        )
+        state = advanced
+
+    class Fetcher:
+        async def fetch_directive_page(self, *, after_sequence, after_directive_sha256):
+            return c.store.read(
+                channel_page_key(config, after_sequence, after_directive_sha256)
+            ).payload
+
+    worker = FakeWorkerAdapter()
+    runtime = ValidatorSupervisorRuntime(
+        config=config,
+        directive_fetcher=Fetcher(),
+        finalized_block_reader=FakeFinalizedBlockReader(block),
+        worker_adapter=worker,
+    )
+    for _ in range(6):
+        result = await runtime.reconcile()
+        if worker.active_mode == "translation_weights":
+            break
+    assert result.accepted_sequence == selected.directive.sequence
+    assert [a.sequence for a in worker.activations] == [selected.directive.sequence]
+    assert worker.active_mode == "translation_weights"
+
+
+async def test_cursor_repair_resumes_after_remote_write_without_new_signature(
+    channel_case, monkeypatch
+):
+    from umi.competition_round_journal import RoundJournal
+    from umi.translation_reference_cursor import CURSOR_KIND
+
+    c = channel_case
+    _old, inputs = await retained_head_with_window(c, remaining=-1)
+    original = RoundJournal.put
+    failed = []
+
+    def interrupted(self, kind, key, value):
+        if kind == CURSOR_KIND and not failed:
+            failed.append(key)
+            raise OSError("interrupted cursor checkpoint after remote CAS")
+        return original(self, kind, key, value)
+
+    monkeypatch.setattr(RoundJournal, "put", interrupted)
+    with pytest.raises(OSError, match="cursor checkpoint"):
+        c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    assert len(c.signatures) == 1
+    result = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon + 1, **inputs)
+    assert result.directive.sequence == 3 and len(c.signatures) == 1
+    writes = len(c.store.writes)
+    old_key = channel_page_key(c.config, 1, c.original.directive_sha256)
+    reads = []
+    read = c.store.read
+
+    def counted(key):
+        reads.append(key)
+        return read(key)
+
+    monkeypatch.setattr(c.store, "read", counted)
+    assert c.reopen().step(c.native.reopen(), valid_through_block=c.horizon + 2, **inputs) == result
+    assert old_key not in reads and len(c.store.writes) == writes
+
+
+async def test_missing_old_forward_page_refuses_and_restores_without_resigning(channel_case):
+    c = channel_case
+    _old, inputs = await retained_head_with_window(c, remaining=-1)
+    key = channel_page_key(c.config, 1, c.original.directive_sha256)
+    original = c.store.objects.pop(key)
+    with pytest.raises(ValueError, match="explicit restoration"):
+        c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    assert key not in c.store.objects and len(c.signatures) == 1
+    c.store.objects[key] = original
+    selected = c.reopen().step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
+    assert selected.directive.sequence == 3 and len(c.signatures) == 1
+
+
+async def test_damaged_forward_checkpoint_requires_explicit_repair(channel_case):
+    from umi.translation_reference_cursor import CURSOR_KIND
+
+    c = channel_case
+    inputs = await c.native.inputs()
+    owner = c.reopen()
+    owner.journal.put(CURSOR_KIND, "0000000000000001", {"invalid": "retained record"})
+    with pytest.raises(ValueError):
+        owner.step(c.native.reopen(), valid_through_block=c.horizon, **inputs)
