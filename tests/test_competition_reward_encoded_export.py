@@ -316,6 +316,13 @@ def test_remote_compact_transport_multiple_parts(tmp_path):
             self.data[path or "objects/" + sha] = raw
             return {"content_sha256": sha}
 
+        def put_many(self, objects):
+            for raw in objects.values():
+                self.put_bytes(raw)
+
+        def reference_for_path(self, path):
+            return None  # This byte-only fixture has no durable receipt owner.
+
         def read_path(self, path, *, maximum):
             if path not in self.data:
                 raise FileNotFoundError(path)

@@ -31,6 +31,7 @@ from .competition_evidence_codec import (
     decode_evidence,
     encode_evidence,
     inspect_recipe,
+    prepare_evidence_with_recipe,
 )
 from .competition_journal_physical_budget import ArchivePhysicalBudget
 from .open_competition import digest, identity
@@ -350,7 +351,15 @@ class RewardProofArchive:
         process, different destination, changed inode or unqualified clock takes
         the ordinary resolver/digest/publication path.
         """
-        if self.remote is not None or os.getpid() != self._pid:
+        if self.remote is not None:
+            reference = self.remote.reference_for_path("objects/" + sha)
+            if reference is None:
+                return False
+            completed = self.remote.validate_reference(reference)
+            if (completed.content_sha256, completed.size_bytes) != (sha, size):
+                raise ValueError("completed remote object differs from encoded transport")
+            return True
+        if os.getpid() != self._pid:
             return False
         with self._publication_lock:
             prior = self._published.pop(sha, None)
@@ -480,11 +489,36 @@ class RewardProofArchive:
                     ):
                         raise ValueError("archive export requires a codec-owned prepared encoding")
                     encoded = (
-                        encode_evidence(chunk, kind="proof")
+                        encode_evidence(
+                            chunk,
+                            kind="proof",
+                            single_object=self.remote is not None and existing is None,
+                        )
                         if prepared is None
                         else prepared[number].for_bytes(chunk, kind="proof")
                     )
-                    if prepared is not None and not prepared[number].canonical_encoder:
+                    if (
+                        self.remote is not None
+                        and existing is not None
+                        and number < len(existing.fields[name])
+                    ):
+                        original = existing.fields[name][number]
+                        if (
+                            original.sha256 == encoded.sha256
+                            and original.expanded_bytes == encoded.expanded_bytes
+                            and original.recipe_sha256 != hashlib.sha256(encoded.recipe).hexdigest()
+                        ):
+                            recipe = self.remote.read_object(
+                                original.recipe_sha256, maximum=MAX_RECIPE_BYTES
+                            )
+                            encoded = prepare_evidence_with_recipe(
+                                chunk, recipe, kind="proof"
+                            ).for_bytes(chunk, kind="proof")
+                    if (
+                        prepared is not None
+                        and not prepared[number].canonical_encoder
+                        and (self.remote is None or existing is not None)
+                    ):
                         part = _Part(
                             sha256=encoded.sha256,
                             expanded_bytes=encoded.expanded_bytes,
@@ -577,6 +611,26 @@ class RewardProofArchive:
         # Repeated objects within this transfer need only one resolver read.
         with self._directory_scope():
             retained = {}
+            pending, pending_bytes = {}, 0
+
+            def flush():
+                nonlocal pending, pending_bytes
+                if pending:
+                    self.remote.put_many(pending)
+                    pending, pending_bytes = {}, 0
+
+            def retain(raw):
+                nonlocal pending_bytes
+                if self.remote is None:
+                    return self._retain_bytes(raw)
+                sha = hashlib.sha256(raw).hexdigest()
+                if sha not in pending:
+                    if pending_bytes + len(raw) > MAX_EVIDENCE_BYTES:
+                        flush()
+                    pending[sha] = raw
+                    pending_bytes += len(raw)
+                return sha
+
             for recipe, segments in recipes:
                 for _, sha, size in segments:
                     if sha in retained:
@@ -589,10 +643,11 @@ class RewardProofArchive:
                     raw = resolve(sha, size)
                     if type(raw) is not bytes or len(raw) != size:
                         raise ValueError("encoded transport object size differs")
-                    if self._retain_bytes(raw) != sha:
+                    if retain(raw) != sha:
                         raise ValueError("encoded transport object digest differs")
                     retained[sha] = size
-                self._retain_bytes(recipe)
+                retain(recipe)
+            flush()
             if self.remote is None:
                 if self.physical_budget is not None:
                     self.physical_budget.check(self.root, MAX_FRAME_BYTES)

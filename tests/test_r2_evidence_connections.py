@@ -103,7 +103,7 @@ def test_worker_threads_have_independent_scope_owners(transport):
 
 
 @pytest.mark.parametrize("encoded", [False, True])
-def test_entire_native_proof_frame_uses_one_publication_client(tmp_path, transport, encoded):
+def test_native_proof_frame_uses_bounded_owned_publication_clients(tmp_path, transport, encoded):
     client, clients, requests, _ = transport
     config = ProofArchiveR2Config(
         schema="umi-r2-proof-archive/1",
@@ -132,7 +132,14 @@ def test_entire_native_proof_frame_uses_one_publication_client(tmp_path, transpo
     else:
         target.write("history", key, context={}, fields=fields)
     publishing = {id(c) for c, method in requests if method == "PUT"}
-    assert len(publishing) == 1
+    if encoded:
+        from umi.competition_remote_proof_store import PROOF_PUBLICATION_WORKERS
+
+        # Independent graph lanes each own one client; the outer owner writes
+        # the frame only after those workers have closed and completed.
+        assert 1 < len(publishing) <= PROOF_PUBLICATION_WORKERS + 1
+    else:
+        assert len(publishing) == 1
     assert all(c.is_closed for c in clients)
     assert target.read("history", key, bounds={name: len(raw) for name, raw in fields.items()}) == (
         {},
