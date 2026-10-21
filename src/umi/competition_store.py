@@ -17,6 +17,7 @@ from pydantic import Field, ValidationError
 from .competition_artifacts import verify_preserved_bundle
 from .competition_cohort_baseline_history import (
     apply_cohort_baseline,
+    cohort_baseline_application_status,
     read_cohort_baseline_receipt,
     verify_cohort_baseline_fence,
 )
@@ -3749,6 +3750,16 @@ class CompetitionStore(VoidEvidenceRetention):
         ):
             raise ValueError("stored evidence cutoff schedule is corrupt")
         return schedule
+
+    def cohort_baseline_application_status(
+        self,
+        certificate: CertifiedCohortBaselineReview,
+        *,
+        required_submission_sha256s: tuple[str, ...] | None = None,
+    ) -> str:
+        return cohort_baseline_application_status(
+            self, certificate, required_submission_sha256s=required_submission_sha256s
+        )
 
     def apply_cohort_baseline(
         self,

@@ -60,6 +60,10 @@ def execute(args: argparse.Namespace) -> dict:
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "apply-cohort-baseline":
+        from .competition_progress import configure_progress_logging
+
+        configure_progress_logging()
     try:
         result = execute(args)
     except CompetitionSubmissionError as error:

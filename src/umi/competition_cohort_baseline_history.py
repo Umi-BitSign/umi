@@ -164,6 +164,58 @@ def _advance_intake_anchor(store, connection, review, record):
     )
 
 
+def cohort_baseline_application_status(
+    store: CompetitionStore,
+    certificate: CertifiedCohortBaselineReview,
+    *,
+    required_submission_sha256s: tuple[str, ...] | None = None,
+) -> str:
+    """Inspect existing history without creating, migrating or repairing state.
+
+    A completed receipt is authenticated before returning ``completed``; damage
+    requires explicit repair rather than another append or payload verification.
+    Intake callers also bind the exact retained required-submission list. This
+    is metadata inspection, not a native preparation or a chain observation.
+    """
+    certificate = verify_baseline_review(certificate, store.policy)
+    review = certificate.review
+    record = cohort_baseline_record(review)
+    target = baseline_record_digest(record)
+    with store._connection() as connection:
+        if not connection.in_transaction:
+            connection.execute("BEGIN")
+        head = connection.execute(
+            "SELECT digest FROM promotions ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        if head not in {(review.previous.promotion_sha256,), (target,)}:
+            raise ValueError("cohort baseline source has another current promotion head")
+        store._verify_retained_baseline(connection, head[0])
+        _read_parent(connection, review)
+        if required_submission_sha256s is not None:
+            expected = canonical_json_bytes(
+                {
+                    "schema": "umi-competition-retained-intake-anchor/1",
+                    "policy_sha256": review.policy_sha256,
+                    "baseline_promotion_sha256": head[0],
+                    "required_submission_sha256s": list(required_submission_sha256s),
+                }
+            ).decode()
+            anchor = connection.execute(
+                "SELECT value FROM metadata WHERE key='retained_intake_anchor'"
+            ).fetchone()
+            if anchor != (expected,):
+                raise ValueError("cohort baseline config differs from its retained intake anchor")
+        if head == (target,):
+            read_cohort_baseline_receipt(store, connection, record)
+            return "completed"
+        prior = connection.execute(
+            "SELECT 1 FROM promotions WHERE sequence=?", (record["sequence"],)
+        ).fetchone()
+        if prior is not None:
+            raise ValueError("cohort baseline sequence is already occupied")
+        return "pending"
+
+
 def apply_cohort_baseline(
     store: CompetitionStore,
     certificate: CertifiedCohortBaselineReview,
