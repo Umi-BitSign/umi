@@ -180,13 +180,17 @@ class SubmissionHeadCheckpointFile:
         return self.directory / _CHECKPOINT_NAME
 
     @contextmanager
-    def locked(self) -> Iterator[None]:
+    def locked(self, *, existing_only: bool = False) -> Iterator[None]:
         """Serialize DB commit plus checkpoint persistence across intake processes."""
 
         directory = self._open_directory()
         descriptor = -1
         try:
-            descriptor, created = _open_lock(directory)
+            descriptor, created = (
+                _open_lock(directory, existing_only=True)
+                if existing_only
+                else _open_lock(directory)
+            )
             if created:
                 os.fsync(descriptor)
                 os.fsync(directory)
@@ -346,7 +350,19 @@ class SubmissionHeadCheckpointFile:
             )
 
 
-def _open_lock(directory: int) -> tuple[int, bool]:
+def _open_lock(directory: int, *, existing_only: bool = False) -> tuple[int, bool]:
+    if existing_only:
+        descriptor = os.open(
+            _LOCK_NAME,
+            os.O_RDONLY | _no_follow() | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory,
+        )
+        try:
+            _check_private_regular(os.fstat(descriptor), "submission checkpoint lock")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor, False
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | _no_follow() | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(_LOCK_NAME, flags, 0o600, dir_fd=directory)

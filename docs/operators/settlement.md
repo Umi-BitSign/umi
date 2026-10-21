@@ -1672,6 +1672,27 @@ must be evaluated together on the successor's frozen suite and runtime. Equality
 qualifies. A model's declared parent remains provenance and need not be the
 reference used for that paired measurement.
 
+Before long reward-history preparation, read the parent from the authoritative
+intake or evaluator history using `CompetitionStore(..., read_only_existing=True)`
+or the corresponding `EvaluatorReviewStore` option. Supply that source's exact
+policy, role, public launch, checkpoint location and historical archive bindings.
+This existing-only path does not initialize, migrate, hydrate or repair the owner;
+it authenticates the ordinary retained promotion receipts and refuses mutations.
+It retains the source checkpoint mutex, uses SQLite `mode=ro`, and reports
+`existing_promotion_history_open` progress. SQLite's reader coordination files
+still need their normal source-account access; a filesystem sandbox may protect
+the database file while permitting that coordination in the source directory.
+The source account must also be able to read the selected runtime and its base
+Python installation; a developer's private virtual environment is not sufficient.
+
+A reward-package replay store may legitimately have no promotion head when its
+allocation comes directly from cohort model awards. Do not initialize a replacement
+baseline there or infer the current head from a saved status response. Check the
+actual source before history work and recheck its head before producing the review;
+the applying consumer must still compare its own current parent. Missing receipts,
+writer fences or unsupported source bindings require explicit repair. Reading a
+head does not create native reward preparation or finality authority.
+
 `CompetitionStore.apply_cohort_baseline` applies a policy-quorum certificate as
 `umi-model-baseline/4`, without authorizing weights or rereading model payloads.
 Both intake and independent evaluator histories record this same reviewed head.

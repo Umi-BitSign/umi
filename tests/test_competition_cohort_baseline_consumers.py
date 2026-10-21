@@ -161,6 +161,10 @@ def test_independent_review_history_accepts_winner_without_intake_authority(
     selected = reopened.reviewed_promotion_head(digest(future), maximum_bytes=1_000_000)
     assert selected.model_sha256 == digest(review.model)
     assert selected.sequence == review.previous.sequence + 1
+    readonly = EvaluatorReviewStore(
+        peer.directory, source.policy, limits=limits, read_only_existing=True
+    )
+    assert readonly.reviewed_promotion_head(digest(future), maximum_bytes=1_000_000) == selected
     assert (
         reopened.reviewed_promotion_at(
             digest(future),
