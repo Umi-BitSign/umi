@@ -4,6 +4,32 @@
 
 - [Successor supervisor upgrade requirements](#successor-supervisor-upgrade)
 
+## Package-triggered service restarts
+
+Linux UMI owners require ordered drainage, retained-journal recovery and current
+consumer bindings. Before operating coordinator, reviewer, writer, replication or
+validator services, install the package-restart policy from the current checkout:
+
+```sh
+sudo python3 deploy/miner-upgrade/upgrade.py --install-restart-policy
+```
+
+For a custom unit outside the `umi-*.service` namespace, also pass
+`--service EXACT_UNIT.service`; repeat the argument for each managed unit. The
+command runs without a miner manifest, a wallet or a selected cohort runtime.
+It writes only exact owned needrestart policy files, reuses them on repeat, and
+reports a recovered interrupted publication explicitly. Administrator edits,
+unsafe files and conflicting full needrestart configuration refuse. Keep those
+files while the UMI or explicitly named custom service remains installed.
+
+Security package updates and stale-process reporting remain enabled. Apply
+needed service restarts through the supported controlled maintenance path;
+changing package policy does not itself drain or restart a service, authenticate
+a new runtime, or qualify journal/capability recovery. The Linux supervisor
+installer uses this path before starting the staged production unit. Its package
+bootstrap uses needrestart list-only mode until that policy is installed, so
+existing owners cannot be restarted by dependency-install hooks.
+
 ## Intake runtime maintenance
 
 An intake runtime repair does not require a new public deployment, cohort,

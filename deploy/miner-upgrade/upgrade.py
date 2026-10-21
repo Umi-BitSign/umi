@@ -45,6 +45,207 @@ HEX32 = re.compile(r"^[0-9a-f]{64}$")
 GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.:@-]+\.service$")
 PROGRESS = None
+PACKAGE_RESTART_POLICY = (
+    b"# UMI owners require ordered drainage, immutable consumer rebinding and native\n"
+    b"# restart qualification. Keep reporting outdated processes; defer their restart\n"
+    b"# to the UMI maintenance controller for C5 and all successor cohorts.\n"
+    b"$nrconf{override_rc}->{qr(^umi-.*\\.service$)} = 0;\n"
+)
+
+
+def install_package_restart_policy(
+    etc_directory: Path = Path("/etc"),
+    *,
+    owner: tuple[int, int] = (0, 0),
+    service_name: str | None = None,
+) -> dict:
+    """Publish only our exact root-owned needrestart override, without a restart.
+
+    The explicit base and owner are for isolated filesystem qualification. The
+    installed CLI always uses /etc and root. Existing administrator content is
+    never overwritten. Recover a completed pending publication only by checking
+    its exact bytes, ownership and inode relationship to the final file.
+    """
+    started = time.monotonic()
+    if service_name is not None and SYSTEMD_UNIT.fullmatch(service_name) is None:
+        raise ValueError("package restart policy service name differs")
+    content = (
+        PACKAGE_RESTART_POLICY
+        if service_name is None
+        else (
+            "# Explicit UMI-managed custom service; keep package-triggered restarts controlled.\n"
+            "$nrconf{override_rc}->{qr(^"
+            + re.escape(service_name).replace("@", r"\@")
+            + "$)} = 0;\n"
+        ).encode()
+    )
+    filename = (
+        "90-umi-controlled-restarts.conf"
+        if service_name is None
+        else "91-umi-controlled-service-" + sha256(service_name.encode()) + ".conf"
+    )
+    if os.geteuid() != owner[0] or not etc_directory.is_absolute():
+        raise ValueError("package restart policy needs its actual filesystem owner")
+    directory = etc_directory / "needrestart" / "conf.d"
+    for path in (etc_directory, etc_directory / "needrestart", directory):
+        if path != etc_directory and not os.path.lexists(path):
+            path.mkdir(mode=0o755)
+            fsync_directory(path.parent)
+        info = path.lstat()
+        if (
+            path.resolve(strict=True) != path
+            or not stat.S_ISDIR(info.st_mode)
+            or (info.st_uid, info.st_gid) != owner
+            or info.st_mode & 0o022
+        ):
+            raise ValueError("unsafe package restart policy directory")
+    target = directory / filename
+    pending = directory / ("." + filename + ".pending")
+
+    def checked(path: Path, links: tuple[int, ...] = (1,)):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink not in links
+                or (before.st_uid, before.st_gid) != owner
+                or before.st_mode & 0o022
+                or before.st_size != len(content)
+            ):
+                raise ValueError("unsafe or incomplete package restart policy file")
+            raw = stream.read(len(content) + 1)
+            after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            raw != content
+            or any(getattr(before, k) != getattr(after, k) for k in fields)
+            or (path.lstat().st_dev, path.lstat().st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise ValueError("existing package restart policy differs; services unchanged")
+        return before
+
+    repaired = False
+    existed = os.path.lexists(target)
+    if existed:
+        if os.path.lexists(pending):
+            a, b = checked(target, (2,)), checked(pending, (2,))
+            if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                raise ValueError("package restart policy has unrelated pending content")
+            pending.unlink()
+            fsync_directory(directory)
+            repaired = True
+        checked(target)
+    else:
+        if os.path.lexists(pending):
+            checked(pending)
+            repaired = True
+        else:
+            descriptor = os.open(
+                pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        # A competing creator refuses instead of replacing its control file.
+        os.link(pending, target, follow_symlinks=False)
+        pending.unlink()
+        fsync_directory(directory)
+        checked(target)
+    return {
+        "schema": "umi-package-restart-policy-installation/1",
+        "status": "repaired_interrupted_publish"
+        if repaired
+        else "reused"
+        if existed
+        else "installed",
+        "path": str(target),
+        "sha256": sha256(content),
+        "services_restarted": False,
+        "security_package_updates_enabled": True,
+        "completed": 1,
+        "total": 1,
+        "elapsed_seconds": time.monotonic() - started,
+        "eta_seconds": 0,
+        "eta_basis": "exact policy installed; future UMI restarts require controlled maintenance",
+    }
+
+
+def qualify_package_restart_configuration(
+    services: tuple[str, ...],
+    config: Path = Path("/etc/needrestart/needrestart.conf"),
+    *,
+    owner: tuple[int, int] = (0, 0),
+) -> None:
+    """Refuse administrator overrides that would defeat these selected units."""
+    if not os.path.lexists(config):
+        return  # The installed conf.d policy also covers a future package install.
+    for path in (config, *sorted(config.parent.glob("conf.d/*.conf"))):
+        info = path.lstat()
+        if (
+            path.resolve(strict=True) != path
+            or not stat.S_ISREG(info.st_mode)
+            or (info.st_uid, info.st_gid) != owner
+            or info.st_mode & 0o022
+        ):
+            raise ValueError("unsafe complete needrestart configuration; services unchanged")
+    units = tuple(
+        sorted(
+            set(services)
+            | {
+                "umi-validator-supervisor.service",
+                "umi-miner.service",
+                "umi-reference-publication.service",
+            }
+        )
+    )
+    program = r"""our %nrconf; my $path=shift @ARGV; my $loaded=do $path;
+    die $@ if $@; die $! unless defined $loaded;
+    for my $unit (@ARGV) {
+        my @matches=grep {$unit =~ $_} keys %{$nrconf{override_rc}};
+        die "restart protection missing or conflicting for $unit"
+            unless @matches && !grep {$nrconf{override_rc}->{$_} != 0} @matches;
+    }"""
+    run("perl", "-e", program, str(config), *units)
+
+
+def package_restart_policy_command() -> None:
+    if sys.platform != "linux" or os.geteuid() != 0:
+        raise ValueError("package restart policy installation requires root on Linux")
+    parser = argparse.ArgumentParser(
+        description="Install restart protection without changing services"
+    )
+    parser.add_argument("--service", action="append", default=[])
+    args = parser.parse_args(sys.argv[2:])
+    services = tuple(sorted(set(args.service)))
+    if any(SYSTEMD_UNIT.fullmatch(name) is None for name in services):
+        raise ValueError("package restart policy service name differs")
+    print(
+        canonical(
+            {
+                "stage": "package_restart_policy_installation",
+                "completed": 0,
+                "total": 1,
+                "elapsed_seconds": 0,
+                "eta_seconds": None,
+                "planning_eta_seconds": [1, 10],
+                "eta_basis": "bounded local control publication; no service or package restart",
+                "stalled": False,
+                "retrying": False,
+            }
+        ).decode(),
+        flush=True,
+    )
+    reports = [install_package_restart_policy()]
+    reports.extend(
+        install_package_restart_policy(service_name=name)
+        for name in services
+        if not name.startswith("umi-")
+    )
+    qualify_package_restart_configuration(services)
+    for report in reports:
+        print(canonical(report).decode(), flush=True)
 
 
 class MigrationProgress:
@@ -1516,6 +1717,18 @@ def cooperative_upgrade(services: tuple[Service, ...]):
         if path.exists() and (path.is_symlink() or path.read_bytes() != raw):
             raise ValueError("existing cooperative upgrade guard differs")
         paths.append(path)
+    # Use this single-file distribution's standalone policy path before changing
+    # any service. Older installed runtimes need no new module or state reset.
+    policy = run(
+        sys.executable,
+        "-I",
+        "-B",
+        str(Path(__file__).resolve()),
+        "--install-restart-policy",
+        *(argument for entry in services for argument in ("--service", entry.name)),
+    )
+    if policy.stdout:
+        print(policy.stdout, end="", flush=True)
     try:
         for path in paths:
             _root_file(path, raw, 0o644)
@@ -2975,6 +3188,8 @@ def main() -> None:
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--run-command":
         launch_command(Path(sys.argv[2]), sys.argv[3])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--install-restart-policy":
+        package_restart_policy_command()
     elif len(sys.argv) == 3 and sys.argv[1] == "--run-enrollment":
         run_enrollment(Path(sys.argv[2]))
     else:
