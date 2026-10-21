@@ -39,6 +39,11 @@ history directory. Run under the owning service account with its supported
 state and native finality permissions. `--check-only` does not prove that the
 current finalized head is inside the certificate's application window.
 
+Actual retained rounds and disputed history block publication. An unused cycle
+of the legacy continuous calendar does not block a certified cohort winner;
+existing round records retain their original baseline and signed schedule.
+Runtime-port publication keeps its separate published-calendar guard.
+
 Before applying, quiesce all writers to that history and independently verify
 the supported backup/restore coverage. Run the same command with
 `--confirm-quiesced-backup` in place of `--check-only`. It obtains its own native

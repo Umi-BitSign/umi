@@ -118,15 +118,19 @@ def read_runtime_port_receipt(store: CompetitionStore, connection, record, maxim
     return receipt
 
 
-def _require_between_rounds(store, connection, block):
+def _require_no_retained_round_activity(connection, block):
     if connection.execute(
         "SELECT 1 FROM round_conflicts UNION ALL SELECT 1 FROM settlement_disputes LIMIT 1"
     ).fetchone():
-        raise ValueError("runtime port cannot bypass disputed history")
+        raise ValueError("baseline cannot bypass disputed history")
     for (raw,) in connection.execute("SELECT body FROM rounds"):
         round_ = EvaluationRound.model_validate_json(raw)
         if block <= round_.valid_through_block:
-            raise ValueError("runtime port cannot replace a baseline during a retained round")
+            raise ValueError("cannot replace the baseline during a retained round")
+
+
+def _require_between_rounds(store, connection, block):
+    _require_no_retained_round_activity(connection, block)
     launch = store._require_current_public_launch(connection)
     if launch is not None:
         start = launch.round_schedule.roster_close_earliest_block
