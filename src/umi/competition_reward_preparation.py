@@ -21,6 +21,7 @@ from .competition_cohort_baseline import (
     CohortBaselineCandidate,
     select_cohort_baseline_candidate,
 )
+from .competition_cohort_baseline_review import CohortBaselineReview, validate_baseline_review
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_cohort_reward_allocation import (
@@ -63,13 +64,14 @@ from .competition_reward_transactions import (
     standing_weight_call,
 )
 from .competition_reward_transport_qualification import PackageTransportQualifications
+from .competition_settlement import PromotionHeadBinding
 from .competition_store import CompetitionStore
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .competition_verification_snapshot import verified_package_digest
 from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
-from .open_competition import digest, identity
+from .open_competition import ModelBundle, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .signed_extrinsic import verify_mortal_call
 
@@ -157,6 +159,7 @@ class StandingRewardPreparation:
         self._lock = asyncio.Lock()
         self._owner = object()
         self._prepared: dict[str, PreparedStandingReward] = {}
+        self._baseline_models: dict[str, dict[str, ModelBundle]] = {}
         self._transport_qualifications = None
 
     @property
@@ -351,6 +354,13 @@ class StandingRewardPreparation:
             _owner=self._owner,
         )
         object.__setattr__(prepared, "_binding", _binding(prepared))
+        if allocation.model_award is not None:
+            self._baseline_models[digest(activation)] = {
+                digest(sub): sub.model_bundle
+                for participant in package.inputs.roster.participants
+                if (sub := participant.record.request.signed_submission.submission).track == "model"
+                and sub.model_bundle is not None
+            }
         # Retain completion inside the owned thread, even if its waiter was
         # cancelled. Proof expiry during replay never discards immutable work.
         self._prepared[digest(activation)] = prepared
@@ -434,6 +444,69 @@ class StandingRewardPreparation:
             candidate = select_cohort_baseline_candidate(award)
             progress.advance(1)
         return candidate
+
+    def baseline_review(
+        self,
+        prepared: PreparedStandingReward,
+        *,
+        target_cohort_sha256: str,
+        previous: PromotionHeadBinding,
+        not_before_block: int,
+        valid_through_block: int,
+    ) -> CohortBaselineReview:
+        """Build review metadata solely from this owner's completed native replay.
+
+        The caller independently reads the actual promotion head. Its consuming
+        append must recheck that head and the original retained preparation; this
+        method grants neither signature authority nor permission to alter it.
+        The successor's own paired evaluation determines meet-or-exceed status.
+        """
+        with TransferProgress(
+            "cohort_baseline_review_preparation",
+            1,
+            unit="reviews",
+            planning_unit_seconds=(0.001, 10),
+        ) as progress:
+            candidate = self.baseline_candidate(prepared)
+            if candidate is None:
+                raise ValueError("no eligible public model can become a successor baseline")
+            plans = {digest(p): p for p in self.reader.series.cohorts}
+            source = plans.get(prepared.activation.cohort_sha256)
+            target = plans.get(target_cohort_sha256)
+            model = self._baseline_models.get(digest(prepared.activation), {}).get(
+                candidate.submission_sha256
+            )
+            if (
+                source is None
+                or target is None
+                or model is None
+                or digest(model) != candidate.model_sha256
+            ):
+                raise ValueError("baseline review requires retained source and selected successor")
+            if not_before_block < prepared.reviewed_at_block:
+                raise ValueError("baseline review cannot backdate its native source observation")
+            result = validate_baseline_review(
+                CohortBaselineReview(
+                    schema="umi-cohort-baseline-review/1",
+                    policy_sha256=self.policy_sha256,
+                    series_sha256=self.series_sha256,
+                    source_cohort_sha256=digest(source),
+                    source_sequence=source.sequence,
+                    activation_sha256=digest(prepared.activation),
+                    package_sha256=prepared.activation.package_sha256,
+                    allocation_sha256=digest(prepared.allocation),
+                    target_cohort_sha256=digest(target),
+                    target_sequence=target.sequence,
+                    previous=previous,
+                    candidate=candidate,
+                    model=model,
+                    not_before_block=not_before_block,
+                    valid_through_block=valid_through_block,
+                ),
+                self.reader.policy,
+            )
+            progress.advance(1)
+            return result
 
     async def project(
         self,

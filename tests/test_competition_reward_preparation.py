@@ -382,9 +382,23 @@ async def test_baseline_candidate_requires_its_native_preparation_owner(
         p.preparation.baseline_candidate(replace(prepared, _owner=None))
     with pytest.raises(ValueError, match="native replay owner"):
         p.reopen().baseline_candidate(prepared)
+    review_options = dict(
+        target_cohort_sha256="ff" * 32,
+        previous=p.store.reviewed_promotion_head(
+            prepared.allocation.round_sha256, maximum_bytes=1_000_000
+        ),
+        not_before_block=prepared.reviewed_at_block,
+        valid_through_block=p.reader.policy.valid_through_block,
+    )
+    with pytest.raises(ValueError, match="native replay owner"):
+        p.preparation.baseline_review(replace(prepared, _owner=None), **review_options)
+    with pytest.raises(ValueError, match="native replay owner"):
+        p.reopen().baseline_review(prepared, **review_options)
     if prepared.allocation.model_award is None:
         with pytest.raises(ValueError, match="has no cohort model award"):
             p.preparation.baseline_candidate(prepared)
+        with pytest.raises(ValueError, match="has no cohort model award"):
+            p.preparation.baseline_review(prepared, **review_options)
     else:
         candidate = p.preparation.baseline_candidate(prepared)
         assert candidate is None or candidate.reference_promotion_authorized is False
