@@ -251,7 +251,7 @@ async def run():
             "\npathlib.Path('/run/umi-probe/result.json').write_text(json.dumps(result))" +
             '\nimport time; time.sleep(600)', str(config.worker_uid),
             str(config.worker_memory_bytes), str(config.worker_pids_limit),
-            str(config.worker_cpu_millis)]
+            str(config.worker_cpu_millis), 'none']
         cid = (await port._command(*args)).decode().strip()
         await port._inspect_owned(cid)
         await port._command('start', cid)
@@ -259,6 +259,10 @@ async def run():
             if (proof / 'result.json').is_file():
                 break
             await asyncio.sleep(0.1)
+        if not (proof / 'result.json').is_file():
+            diagnostic = await port._command('logs', '--tail=40', cid)
+            raise RuntimeError('sandbox probe produced no result; bounded worker logs:\n' +
+                               diagnostic.decode(errors='replace')[-16384:])
         if json.loads((proof / 'result.json').read_bytes()) != {
                 'schema': 'umi-successor-sandbox-rehearsal/1', 'ok': True}:
             raise RuntimeError('sandbox probe did not pass')
