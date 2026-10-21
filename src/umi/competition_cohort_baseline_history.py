@@ -179,7 +179,9 @@ def apply_cohort_baseline(
     with TransferProgress(
         "cohort_baseline_history_append", 1, unit="promotions", planning_unit_seconds=(0.001, 30)
     ) as progress:
-        store._require_intake()
+        # Independent evaluator histories need the same quorum-reviewed head.
+        # Recording it grants no intake authority: admission and round mutation
+        # retain their separate role checks, as with agreed/runtime-port heads.
         certificate = verify_baseline_review(certificate, store.policy)
         review = certificate.review
         record = cohort_baseline_record(review)

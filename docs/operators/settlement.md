@@ -1674,6 +1674,10 @@ reference used for that paired measurement.
 
 `CompetitionStore.apply_cohort_baseline` applies a policy-quorum certificate as
 `umi-model-baseline/4`, without authorizing weights or rereading model payloads.
+Both intake and independent evaluator histories record this same reviewed head.
+Evaluator histories retain their role restrictions: recording the reference
+does not authorize new intake, and round-specific reads still require the
+independently certified cutoff and retained roster for that round.
 It checks the exact current promotion parent and finalized application window,
 refuses an active retained or published round, and atomically advances any
 authenticated retained-intake anchor while retaining its original bytes. Already
