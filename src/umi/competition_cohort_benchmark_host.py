@@ -25,6 +25,7 @@ from .competition_cohort_order_signer import (
     CohortOrderSigner,
     CohortOrderSignerConfig,
 )
+from .competition_cohort_reference_cache import CohortReferenceModelCache
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_sandbox import CohortCpuSandbox, DirectCohortCpuSandbox
@@ -161,33 +162,41 @@ class BenchmarkHost:
                         raise ValueError("legacy execution changes its private reviewed intent")
                 return value
 
-            def reference_authorized(job, bundle):
+            def reference(job, bundle):
                 if promotion_store is None:
-                    return False
+                    return None
                 if digest(
                     bundle
                 ) != job.round.incumbent_model_sha256 or job.round.policy_sha256 != digest(
                     self.policy
                 ):
                     raise ValueError("certified reference differs from its frozen execution")
-                return promotion_store.verified_cohort_baseline_model(
+                return promotion_store.certified_cohort_baseline_reference(
                     job.round.cohort_sha256,
                     job.round.sequence,
                     digest(bundle),
                     maximum_bytes=config.maximum_promotion_bytes,
                 )
 
+            def reference_authorized(job, bundle):
+                return reference(job, bundle) is not None
+
             self.sandbox = DirectCohortCpuSandbox(
                 **sandbox,
                 artifacts=direct_artifacts,
                 request=request,
                 legacy_artifacts=(
-                    None
-                    if legacy_readers is None
-                    else LegacyCohortModelCache(
+                    CohortReferenceModelCache(
                         direct_artifacts,
-                        legacy_readers,
-                        reference_authorized=reference_authorized,
+                        legacy=None
+                        if legacy_readers is None
+                        else LegacyCohortModelCache(
+                            direct_artifacts,
+                            legacy_readers,
+                            reference_authorized=reference_authorized,
+                        ),
+                        journal=model_reviewer.journal,
+                        reference=reference,
                     )
                 ),
             )

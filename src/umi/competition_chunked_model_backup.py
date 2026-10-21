@@ -780,7 +780,14 @@ class ChunkedModelBackupReader:
             )
             written = []
             with (
-                TransferProgress("chunked_model_materialization", total, report) as progress,
+                TransferProgress(
+                    "chunked_model_materialization",
+                    total,
+                    report,
+                    total_operations=(
+                        sum(len(item.chunks) + 1 for item in self.selection.package.files) + 1
+                    ),
+                ) as progress,
                 ByteCheckpoints(state_root, context, progress) as local,
                 self._store(progress) as remote,
             ):
@@ -826,6 +833,7 @@ class ChunkedModelBackupReader:
                         if _local_identity(destination, root) != stamp:
                             raise ValueError("chunked model cache changed during reuse")
                         progress.advance(record.size_bytes, restored=True)
+                        progress.advance_operations(len(item.chunks) + 1, restored=True)
                     elif stamp is not None:
                         progress.emit(
                             "repair_required", reason="chunked_model_local_verification_required"
@@ -848,6 +856,7 @@ class ChunkedModelBackupReader:
                         if _local_identity(destination, root) != stamp:
                             raise ValueError("chunked model cache changed during local repair")
                         local.remember(record.path, stamp, record.sha256)
+                        progress.advance_operations(len(item.chunks) + 1)
                     else:
                         if available_bytes() < record.size_bytes + reserve_bytes:
                             raise OSError("chunked model cache capacity is unavailable")
@@ -864,6 +873,7 @@ class ChunkedModelBackupReader:
                                     raise OSError("chunked model cache write was incomplete")
                                 hasher.update(raw)
                                 progress.advance(len(raw))
+                                progress.advance_operations(1)
                             if hasher.hexdigest() != record.sha256:
                                 raise ValueError(
                                     "restored model file differs from its signed manifest"
@@ -880,6 +890,7 @@ class ChunkedModelBackupReader:
                             os.fsync(descriptor)
                         local.remember(record.path, stamp, record.sha256)
                         remote.remember(record.path, self._source(item, heads), record.sha256)
+                        progress.advance_operations(1)
                     written.append([record.path, stamp["file"]])
                 if heads:
                     await self._unchanged(heads, report)
@@ -888,4 +899,5 @@ class ChunkedModelBackupReader:
                 if json.loads(expected)["files"] != written:
                     raise ValueError("restored model changed before native receipt publication")
                 await run_owned_thread(_remember_preserved_verification, bundle, archive, expected)
+                progress.advance_operations(1)
             return target

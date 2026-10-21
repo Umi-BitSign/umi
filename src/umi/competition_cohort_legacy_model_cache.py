@@ -67,10 +67,12 @@ class LegacyCohortModelCache:
                     planning_unit_seconds=(0.001, 1),
                 ) as progress:
                     if self.reference_authorized(job, bundle) is True:
-                        # The native sandbox still verifies its canonical local
-                        # bytes. This grants no new admission or execution order.
+                        # The later baseline certificate selects the reference;
+                        # the original adoption still selects only its byte source.
+                        # This grants no new admission or execution order.
+                        preserved = self.sources.preserved_reference(cohort, bundle)
                         progress.advance(1)
-                        return None
+                        return preserved
             resolved = self.sources.resolve(
                 cohort,
                 baseline=digest(bundle) == authenticated.legacy.baseline_model_sha256,

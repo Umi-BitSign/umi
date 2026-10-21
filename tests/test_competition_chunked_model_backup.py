@@ -662,6 +662,37 @@ async def test_interrupted_materialization_preserves_completed_files(backup, tmp
 
 
 @pytest.mark.asyncio
+async def test_materialization_does_not_finish_at_last_payload_byte(backup, tmp_path, monkeypatch):
+    events = []
+    original = chunked._remember_preserved_verification
+    observed = []
+
+    def complete_receipt(*args):
+        latest = next(e for e in reversed(events) if e["stage"] == "chunked_model_materialization")
+        # Native manifest/receipt publication remains after the last tiny file.
+        assert latest["completed_bytes"] == latest["total_bytes"]
+        assert latest["completed_operations"] < latest["total_operations"]
+        assert latest["status"] != "completed" and latest["percent"] < 100
+        assert latest["eta_seconds"] != 0
+        observed.append(True)
+        return original(*args)
+
+    monkeypatch.setattr(chunked, "_remember_preserved_verification", complete_receipt)
+    archive = tmp_path / "cache"
+    await restore(reader(backup, tmp_path), archive, report=events.append)
+    terminal = next(e for e in reversed(events) if e["stage"] == "chunked_model_materialization")
+    assert observed and terminal["status"] == "completed"
+    assert terminal["completed_operations"] == terminal["total_operations"]
+    previous_reads = list(backup.remote.reads)
+    events.clear()
+    await restore(reader(backup, tmp_path), archive, report=events.append)
+    terminal = next(e for e in reversed(events) if e["stage"] == "chunked_model_materialization")
+    assert backup.remote.reads == previous_reads
+    assert terminal["restored_operations"] == terminal["total_operations"] - 1
+    assert terminal["native_operations"] == 1
+
+
+@pytest.mark.asyncio
 async def test_restore_refuses_cache_state_overlap_capacity_and_links(backup, tmp_path):
     actual = reader(backup, tmp_path)
     with pytest.raises(ValueError, match="overlaps"):

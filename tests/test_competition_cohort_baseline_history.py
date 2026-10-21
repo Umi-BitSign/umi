@@ -285,6 +285,7 @@ def test_certified_reference_survives_restart_without_editing_legacy_inventory(r
     apply(store, review)
     reopened = CompetitionStore(store.directory, store.policy, read_only_existing=True)
     assert reopened.verified_cohort_baseline_model(*args, maximum_bytes=1_000_000)
+    assert reopened.certified_cohort_baseline_reference(*args, maximum_bytes=1_000_000) == review
     assert not reopened.verified_cohort_baseline_model(
         "ef" * 32, review.target_sequence, model, maximum_bytes=1_000_000
     )

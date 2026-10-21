@@ -404,6 +404,15 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     assert source.ranges_read == reads_before_eviction
     assert canonical_json_bytes(direct_request) == signed_before
 
+    from .cohort_reference_cache_checks import check_inherited_direct_reference
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct_review, "_filesystem_device", lambda path: path.stat().st_dev)
+        patch.setattr(direct_review, "_filesystem_usage", shutil.disk_usage)
+        await check_inherited_direct_reference(
+            boot_reviewer(), direct_request, result, boot_root / "inherited-reference"
+        )
+
     changed = next(record for record in bundle.files if record.size_bytes)
     changed_path = materialized / digest(bundle) / "model" / changed.path
     changed_path.chmod(0o600)

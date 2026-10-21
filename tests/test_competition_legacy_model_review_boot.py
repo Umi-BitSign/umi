@@ -259,7 +259,7 @@ async def test_real_phase_review_boot_signs_original_and_runs_retained_sandbox_a
             port = app.state.benchmark.sandbox
             assert port.legacy_artifacts is not None
             assert (
-                port.legacy_artifacts.sources.authenticated[i.case.cohort].legacy
+                port.legacy_artifacts.legacy.sources.authenticated[i.case.cohort].legacy
                 == i.sources.authenticated[i.case.cohort].legacy
             )
             cpu_readback(port, i, monkeypatch)
