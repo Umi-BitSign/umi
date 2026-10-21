@@ -31,6 +31,29 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def model_parent_context(monkeypatch, request):
+    parent = getattr(request, "param", None)
+    if parent is None:
+        return
+    from . import test_competition_cohort_execution as execution
+    from . import test_competition_cohort_model_award as model_award
+
+    original = execution.bundle_at
+
+    def historical_parent(root, marker="baseline", parent_baseline=None):
+        return original(
+            root,
+            marker,
+            parent
+            if root.name == "candidate" or root.name.startswith("alternate-")
+            else parent_baseline,
+        )
+
+    monkeypatch.setattr(execution, "bundle_at", historical_parent)
+    monkeypatch.setattr(model_award, "bundle_at", historical_parent)
+
+
 @pytest.fixture
 async def review_case(model_case):
     b, _, _, _, _ = model_case
@@ -139,3 +162,17 @@ async def test_review_requires_policy_quorum_and_original_signed_body(review_cas
             ),
             policy,
         )
+
+
+@pytest.mark.parametrize("model_parent_context", ["89" * 32], indirect=True)
+async def test_native_accepted_older_parent_is_preserved_independently_of_paired_reference(
+    review_case,
+):
+    policy, body = review_case
+    assert body.model.parent_baseline_sha256 == "89" * 32
+    assert body.model.parent_baseline_sha256 != body.previous.model_sha256
+    assert body.candidate.original_baseline_model_sha256 == body.previous.model_sha256
+    original = canonical_json_bytes(body.model)
+    checked = verify_baseline_review(certify(body), policy)
+    assert canonical_json_bytes(checked.review.model) == original
+    assert checked.review.candidate.model_sha256 == digest(body.model)

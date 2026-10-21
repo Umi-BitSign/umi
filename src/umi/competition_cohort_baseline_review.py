@@ -50,6 +50,8 @@ class CohortBaselineReview(StrictProtocolModel):
     @model_validator(mode="after")
     def exact_reference(self):
         c = self.candidate
+        # The original accepted parent is provenance, independent of which
+        # incumbent supplied the paired quality measurement. Preserve it.
         score = Fraction(int(c.aggregate.numerator), int(c.aggregate.denominator))
         reference = Fraction(
             int(c.baseline_aggregate.numerator), int(c.baseline_aggregate.denominator)
@@ -62,7 +64,6 @@ class CohortBaselineReview(StrictProtocolModel):
             or self.previous.model_sha256 != c.original_baseline_model_sha256
             or digest(self.model) != c.model_sha256
             or model_content_digest(self.model) != c.content_sha256
-            or self.model.parent_baseline_sha256 not in {None, self.previous.model_sha256}
             or not 0 <= reference <= score <= 1
             or self.previous.sequence == 2**53 - 1
         ):
