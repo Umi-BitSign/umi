@@ -2297,13 +2297,34 @@ installation or replace the signed host transition.
 
 Dependency-preserving maintenance builds use `tools/build_successor_host.py`.
 It clones the selected signed dependency tree, checks the pinned source and
-unchanged dependency locks, and migrates both lifecycle launchers before sealing
+dependency locks, and migrates both lifecycle launchers before sealing
 the new manifest. Added `project.scripts` declarations are supported when all
 existing commands and every other parsed project field remain unchanged. They
 are recorded as `uninstalled_added_project_scripts`: the supervisor host installs
 only its two lifecycle launchers; new miner/operator commands use the ordinary
-package installation. Changes to dependencies, existing commands or other project
-metadata require a separate migration and refuse before creating a build tree.
+package installation. Changes to existing commands or other project metadata
+require a separate migration and refuse before creating a build tree.
+
+For a locked pure-Python dependency version update, supply one explicit
+`--dependency-wheel /ABSOLUTE/package-version-py3-none-any.whl` per changed
+package. The builder requires the exact wheel filename, size and SHA-256 in the
+target `uv.lock`. Both complete lockfiles must otherwise have identical resolution
+semantics, package membership, dependency edges and registry bindings. It verifies
+the original signed lock and package RECORD, the wheel's full RECORD inventory,
+metadata and bounded expansion. It rejects executable installation hooks, entry
+points, `.pth`, `.data`, symlinks, shared ownership layouts and nonportable wheels
+before creating a candidate. Other dependency changes need a separately supported
+build path; do not bypass the lock check or retain old CA roots under a new lock.
+
+Replacement touches only the unsigned candidate after its original dependency
+clone has passed signed-file verification. The old signed installation is never
+modified. Progress reports `locked_dependency_migration`; the unsigned build
+receipt lists exact old/new versions and wheel hashes. The candidate still needs
+native import, spawned-worker, artifact, restart and supported-platform
+qualification before signing and selection. Interrupted builds retain their
+candidate and refuse reuse of that output root; inspect the failure and use a
+fresh root, without resetting installed state or a completed native verification.
+
 `competition_host_entrypoints` renders isolated launchers with
 `if __name__ == "__main__"` so spawned history workers do not enter the supervisor
 or acquire its startup lease. The builder accepts the original unguarded wrapper

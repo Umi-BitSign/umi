@@ -106,7 +106,25 @@ def _render(case, layout, user, config, code, run):
 
 def _ready(record):
     unit = _show_unit(record.layout.unit_name)
-    assert unit["ActiveState"] != "failed", "rooted supervisor failed before worker startup"
+    if unit["ActiveState"] == "failed":
+        # These units exist only in the explicitly opted-in wallet-free VM.
+        # Keep the terminal cause in CI's retained failure rather than losing
+        # it when the fixture tears the service down.
+        journal = _command(
+            "/usr/bin/journalctl",
+            "--unit=" + record.layout.unit_name,
+            "--lines=40",
+            "--no-pager",
+            "--output=cat",
+            check=False,
+        )
+        raise AssertionError(
+            "rooted supervisor failed before worker startup: "
+            + repr(unit)
+            + "\n"
+            + journal.stdout.decode(errors="replace")
+            + journal.stderr.decode(errors="replace")
+        )
     path = record.state / "started.json"
     if unit["ActiveState"] == "active" and path.exists():
         value = json.loads(path.read_bytes())
