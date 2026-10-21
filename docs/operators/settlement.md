@@ -1662,6 +1662,56 @@ model pool goes to burn. Missing evidence remains pending and cannot be removed
 from the roster. The native geometric award and allocation are version 4 and version 5,
 respectively; historical versions remain readable with unchanged digests.
 
+The successor reference is selected separately from reward bands. Select the
+highest exact eligible public-model quality, with original complete-acceptance
+order breaking a tie. `StandingRewardPreparation.baseline_review` derives the
+review from that owner's native-replayed award and retains the original model
+manifest, attribution, license, rights and reconstruction bindings. The winner's
+old aggregate is not a score cutoff for the successor: candidate and reference
+must be evaluated together on the successor's frozen suite and runtime. Equality
+qualifies. A model's declared parent remains provenance and need not be the
+reference used for that paired measurement.
+
+Before long reward-history preparation, read the parent from the authoritative
+intake or evaluator history using `CompetitionStore(..., read_only_existing=True)`
+or the corresponding `EvaluatorReviewStore` option. Supply that source's exact
+policy, role, public launch, checkpoint location and historical archive bindings.
+This existing-only path does not initialize, migrate, hydrate or repair the owner;
+it authenticates the ordinary retained promotion receipts and refuses mutations.
+It retains the source checkpoint mutex, uses SQLite `mode=ro`, and reports
+`existing_promotion_history_open` progress. SQLite's reader coordination files
+still need their normal source-account access; a filesystem sandbox may protect
+the database file while permitting that coordination in the source directory.
+The source account must also be able to read the selected runtime and its base
+Python installation; a developer's private virtual environment is not sufficient.
+
+A reward-package replay store may legitimately have no promotion head when its
+allocation comes directly from cohort model awards. Do not initialize a replacement
+baseline there or infer the current head from a saved status response. Check the
+actual source before history work and recheck its head before producing the review;
+the applying consumer must still compare its own current parent. Missing receipts,
+writer fences or unsupported source bindings require explicit repair. Reading a
+head does not create native reward preparation or finality authority.
+
+`CompetitionStore.apply_cohort_baseline` applies a policy-quorum certificate as
+`umi-model-baseline/4`, without authorizing weights or rereading model payloads.
+Both intake and independent evaluator histories record this same reviewed head.
+Evaluator histories retain their role restrictions: recording the reference
+does not authorize new intake, and round-specific reads still require the
+independently certified cutoff and retained roster for that round.
+It checks the exact current promotion parent and finalized application window,
+refuses an active retained or published round, and atomically advances any
+authenticated retained-intake anchor while retaining its original bytes. Already
+signed submissions and already selected rounds keep their original identities.
+The original certificate and observed block remain in a separate local receipt;
+repeat application reuses them without requiring a new observation. Missing or
+damaged receipts require explicit repair. Old open writers are fenced before
+the new record commits. All selected clients, miners, reviewers, coordinators,
+copiers and upgrade/replay consumers must support the record and the retained
+intake transition before publication; implementing this API alone does not
+establish a deployed promotion. Retain compatibility readers while any signed
+history or recovery consumer still needs them.
+
 Duplicate content retains the earliest certified complete-artifact acceptance's
 recipient, score and eligibility. A later alias cannot make originally ineligible
 content eligible. Distinct runnable content within one band receives successive

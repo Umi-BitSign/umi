@@ -223,14 +223,22 @@ confirmed on chain.
 
 Read the active policy for the service and model reward shares and the cohort
 manifest for allowed tracks. Future track selection may change until that
-cohort's intake opens. Under the current model rules, the quality floor is
-equality with the frozen baseline, and a sole eligible entrant receives the full
-model pool. Exact duplicate content is counted once. Eligible models then enter
-fixed five-percentage-point quality bands, each of which creates one credit for
-its highest exact score. The pool is divided among those credits in proportion
-to their exact scores. The first complete certified acceptance fixes score,
-eligibility and attribution for exact copies; later aliases do not create
-another trial. It also breaks an exact score tie. Complete submission, artifact
-preservation and rights checks remain required. The model award is separate from
-promotion of the reference model. The previous certified allocation retains its
-existing rules until a certified successor row takes over.
+cohort's intake opens. The public-model quality floor is equality with the
+reference selected for that cohort's frozen evaluation. When a previous cohort's
+winner becomes the next reference, entries must match or beat that model on
+the new cohort's paired evaluation; its previous aggregate is not a fixed numeric
+cutoff. A model may retain an older declared parent: derivation provenance and
+the paired evaluation reference serve different purposes.
+
+A sole eligible distinct model receives the full model pool. Exact duplicate
+content is counted once. The signed authority and any authenticated reward
+adoption select the allocation rule. Under geometric bands, eligible distinct
+models share normalized decaying weights across occupied bands and within each
+band. Read those signed parameters for band width and both decay factors rather
+than assuming fixed values. Historical cohort rules remain readable. The first
+complete certified acceptance fixes score, eligibility and attribution for exact
+copies; later aliases do not create another trial. It also breaks an exact score
+tie. Complete submission, artifact preservation and rights checks remain required.
+The model award is separate from promotion of the reference model. The previous
+certified allocation retains its existing rules until a certified successor row
+takes over.

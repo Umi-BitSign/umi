@@ -24,6 +24,22 @@ def checkpoint_file(directory, **options):
     )
 
 
+def test_existing_lock_reader_never_creates_or_replaces_lock(directory):
+    checkpoint = checkpoint_file(directory)
+    with (
+        pytest.raises(checkpoints.SubmissionCheckpointError, match="lock is unavailable"),
+        checkpoint.locked(existing_only=True),
+    ):
+        pytest.fail("missing retained lock must refuse")
+    assert not list(directory.iterdir())
+    with checkpoint.locked():
+        pass
+    before = {p.name: (p.stat().st_ino, p.read_bytes()) for p in directory.iterdir()}
+    with checkpoint.locked(existing_only=True):
+        assert checkpoint.load() is None
+    assert {p.name: (p.stat().st_ino, p.read_bytes()) for p in directory.iterdir()} == before
+
+
 def test_lock_timeout_default_preserves_binding_and_checkpoint_bytes(directory):
     default = checkpoint_file(directory)
     configured = checkpoint_file(directory, lock_timeout_seconds=0.01)

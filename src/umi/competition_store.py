@@ -15,6 +15,12 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_cohort_baseline_history import (
+    apply_cohort_baseline,
+    read_cohort_baseline_receipt,
+    verify_cohort_baseline_fence,
+)
+from .competition_cohort_baseline_review import CertifiedCohortBaselineReview
 from .competition_evidence import (
     IndependentEvaluationEvidence,
     independent_evidence_digest,
@@ -222,10 +228,25 @@ class CompetitionStore(VoidEvidenceRetention):
         ) = None,
         historical_public_launch: PublicLaunchIdentity | None = None,
         predecessor_policies: tuple[CompetitionPolicy, ...] = (),
+        read_only_existing: bool = False,
     ):
+        if type(read_only_existing) is not bool:
+            raise ValueError("existing reader selection must be boolean")
+        self.read_only_existing = read_only_existing
+        if read_only_existing and (
+            migrate_writer_generation
+            or initialize_submission_checkpoint
+            or launch_amendment is not None
+            or amendment_observed_block is not None
+        ):
+            raise ValueError("existing reader cannot migrate competition state")
         if not directory.is_absolute() or directory.is_symlink():
             raise ValueError("competition state directory must be absolute and not a symlink")
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if read_only_existing:
+            if not directory.is_dir():
+                raise ValueError("existing reader requires retained competition state")
+        else:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if directory.stat().st_mode & 0o077:
             raise ValueError("competition state directory must be private")
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -344,6 +365,12 @@ class CompetitionStore(VoidEvidenceRetention):
         # compound operation. Nested connections reuse this outer file lock.
         self._hold_submission_checkpoint_lock = self._submission_checkpoint is not None
         self._submission_checkpoint_lock_depth = 0
+        if read_only_existing:
+            # This path never initializes, migrates, hydrates or repairs a writer.
+            # The ordinary promotion readers still authenticate every receipt.
+            with self._connection():
+                pass
+            return
         database_existed = self.path.is_file()
         pending_rollover_from = None
         if database_existed:
@@ -629,7 +656,12 @@ class CompetitionStore(VoidEvidenceRetention):
         # Queue this process's API threads before starting the bounded
         # cross-process flock timer.  A busy local reader must not cause its
         # siblings to report a false external-lock failure.
-        with self._submission_checkpoint_process_lock, checkpoint.locked():
+        selected_lock = (
+            checkpoint.locked(existing_only=True)
+            if self.read_only_existing
+            else checkpoint.locked()
+        )
+        with self._submission_checkpoint_process_lock, selected_lock:
             yield
 
     @contextmanager
@@ -645,10 +677,25 @@ class CompetitionStore(VoidEvidenceRetention):
         with checkpoint_lock:
             if owns_checkpoint_lock:
                 self._submission_checkpoint_lock_depth += 1
-            connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+            if self.read_only_existing:
+                from .competition_store_readonly import connect_existing
+                from .competition_transport_verification import TransferProgress
+
+                with TransferProgress(
+                    "existing_promotion_history_open",
+                    1,
+                    unit="stores",
+                    planning_unit_seconds=(0.001, 30),
+                ) as progress:
+                    connection = connect_existing(self)
+                    progress.advance(1)
+            else:
+                connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
             try:
                 connection.create_function("umi_runtime_port_writer", 0, lambda: 1)
                 verify_runtime_port_fence(connection, self._WRITER_FENCED_TABLES)
+                connection.create_function("umi_cohort_baseline_writer", 0, lambda: 1)
+                verify_cohort_baseline_fence(connection, self._WRITER_FENCED_TABLES)
                 connection.create_function(
                     "umi_writer_generation",
                     0,
@@ -661,8 +708,9 @@ class CompetitionStore(VoidEvidenceRetention):
                     lambda: self._submission_checkpoint_binding,
                     deterministic=True,
                 )
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA synchronous=FULL")
+                if not self.read_only_existing:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute("PRAGMA synchronous=FULL")
                 yield connection
             finally:
                 connection.close()
@@ -935,6 +983,8 @@ class CompetitionStore(VoidEvidenceRetention):
 
     @contextmanager
     def _transaction(self):
+        if self.read_only_existing:
+            raise ValueError("existing competition reader cannot mutate state")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1539,7 +1589,8 @@ class CompetitionStore(VoidEvidenceRetention):
         """
         info = self.path.stat()
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             for name, sql in self._submission_generation_triggers().items():
                 if connection.execute(
                     "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
@@ -1749,7 +1800,8 @@ class CompetitionStore(VoidEvidenceRetention):
             head = self._submission_checkpoint.status(checkpoint)
         else:
             with self._connection() as connection:
-                connection.execute("BEGIN")
+                if not connection.in_transaction:
+                    connection.execute("BEGIN")
                 admission = self._admission_capacity_status(connection)
                 retained = self._bind_submission_head(connection)
                 submission_ids = self._submission_ids(connection)
@@ -2005,7 +2057,8 @@ class CompetitionStore(VoidEvidenceRetention):
 
     def baseline_summary(self) -> dict | None:
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             row = connection.execute(
                 "SELECT sequence, digest, model, contributor FROM promotions "
                 "ORDER BY sequence DESC LIMIT 1"
@@ -2289,7 +2342,8 @@ class CompetitionStore(VoidEvidenceRetention):
         if not 0 <= offset <= 10_000_000 or not 1 <= limit <= 100:
             raise ValueError("invalid round-evidence page")
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             if not connection.execute(
                 "SELECT 1 FROM rounds WHERE digest=?", (round_sha256,)
             ).fetchone():
@@ -2335,7 +2389,8 @@ class CompetitionStore(VoidEvidenceRetention):
     def settlement_status(self, round_sha256: str) -> dict | None:
         _require_hex32(round_sha256, "round digest")
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             row = connection.execute(
                 "SELECT digest, body FROM competition_settlements WHERE round=?",
                 (round_sha256,),
@@ -2464,6 +2519,9 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("preserved promotion sequence is corrupt")
         if not self.lineage.admits(record.get("policy_sha256")):
             raise ValueError("preserved promotion belongs to another policy")
+        if record.get("schema") == "umi-model-baseline/4":
+            read_cohort_baseline_receipt(self, connection, record, maximum_bytes)
+            return None
         if record.get("schema") == "umi-model-baseline/3":
             read_runtime_port_receipt(self, connection, record, maximum_bytes)
             return None
@@ -3213,7 +3271,8 @@ class CompetitionStore(VoidEvidenceRetention):
         if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= 16 * 1024**2:
             raise ValueError("invalid promotion head byte bound")
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             self._assert_action_allowed(connection, round_sha256)
             if promotion_sha256 is None:
                 head = connection.execute(
@@ -3318,7 +3377,8 @@ class CompetitionStore(VoidEvidenceRetention):
         limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
         round_id = digest(round_)
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
             self._assert_action_allowed(connection, round_id)
             raw = _bounded_stored_body(
                 connection, "rounds", "digest", round_id, limits.maximum_certificate_bytes
@@ -3689,6 +3749,14 @@ class CompetitionStore(VoidEvidenceRetention):
         ):
             raise ValueError("stored evidence cutoff schedule is corrupt")
         return schedule
+
+    def apply_cohort_baseline(
+        self,
+        certificate: CertifiedCohortBaselineReview,
+        *,
+        observed_block: int | Callable[[], int],
+    ) -> dict:
+        return apply_cohort_baseline(self, certificate, observed_block=observed_block)
 
     def apply_runtime_port(
         self,

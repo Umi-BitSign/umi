@@ -65,6 +65,14 @@ class EvaluatorReviewStore(CompetitionStore):
     def __init__(self, directory, policy, *, limits, **kwargs):
         self.limits = PublicationReplayLimits.model_validate_json(canonical_json_bytes(limits))
         super().__init__(directory, policy, role="evaluator_review", **kwargs)
+        if self.read_only_existing:
+            with self._connection() as connection:
+                prior = connection.execute(
+                    "SELECT value FROM metadata WHERE key='review_limits'"
+                ).fetchone()
+                if prior != (canonical_json_bytes(self.limits).decode(),):
+                    raise ValueError("review history limits changed")
+            return
         with self._transaction() as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reviewed_cutoffs "
