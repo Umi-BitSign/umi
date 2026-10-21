@@ -367,6 +367,29 @@ def replay_args(observations):
     return {k: observations[k] for k in ("control", "history", "source")}
 
 
+async def test_baseline_candidate_requires_its_native_preparation_owner(
+    preparation_case, monkeypatch
+):
+    p = preparation_case
+    observed = await p.observations()
+    prepared = await p.preparation.prepare(p.package, **replay_args(observed))
+
+    def forbid_replay(*args, **kwargs):
+        raise AssertionError("candidate selection must reuse native replay without payload reads")
+
+    monkeypatch.setattr(preparation, "_replay_detached_reward_package", forbid_replay)
+    with pytest.raises(ValueError, match="native replay owner"):
+        p.preparation.baseline_candidate(replace(prepared, _owner=None))
+    with pytest.raises(ValueError, match="native replay owner"):
+        p.reopen().baseline_candidate(prepared)
+    if prepared.allocation.model_award is None:
+        with pytest.raises(ValueError, match="has no cohort model award"):
+            p.preparation.baseline_candidate(prepared)
+    else:
+        candidate = p.preparation.baseline_candidate(prepared)
+        assert candidate is None or candidate.reference_promotion_authorized is False
+
+
 @pytest.fixture
 async def historical_preparation_case(preparation_case, monkeypatch):
     """Package lifecycle tests substitute only historical control selection.
@@ -6656,8 +6679,17 @@ async def test_native_allocation_export_repairs_partial_delivery_without_replay(
             assert await owner.prepare(p.package, **replay_args(observations)) is prepared
             # An unchanged delivery can be read during retry, updating atime.
             # Its inode, ownership, size and mutation timestamps must remain.
-            fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink",
-                      "st_size", "st_mtime_ns", "st_ctime_ns")
+            fields = (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_gid",
+                "st_mode",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
             unchanged = path.stat()
             assert tuple(getattr(unchanged, name) for name in fields) == tuple(
                 getattr(identity, name) for name in fields

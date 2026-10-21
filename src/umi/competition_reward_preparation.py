@@ -17,6 +17,10 @@ from typing import Literal
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import OwnedCompetitionChainObservation
+from .competition_cohort_baseline import (
+    CohortBaselineCandidate,
+    select_cohort_baseline_candidate,
+)
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
 from .competition_cohort_reward_allocation import (
@@ -406,6 +410,30 @@ class StandingRewardPreparation:
         )
         if digest(prepared.allocation) != expected:
             raise ValueError("prepared rewards changed their effective allocation")
+
+    def baseline_candidate(
+        self, prepared: PreparedStandingReward
+    ) -> CohortBaselineCandidate | None:
+        """Select from this owner's replayed award without reloading its payload.
+
+        This does not append promotion history or authorize a signature. A
+        separately reviewed preserving promotion must bind the candidate to the
+        activation/package and the actual current promotion head.
+        """
+        self._authority()
+        self._check_prepared(prepared)
+        award = prepared.allocation.model_award
+        if award is None:
+            raise ValueError("a promotion-attribution allocation has no cohort model award")
+        with TransferProgress(
+            "cohort_baseline_candidate_selection",
+            1,
+            unit="awards",
+            planning_unit_seconds=(0.001, 10),
+        ) as progress:
+            candidate = select_cohort_baseline_candidate(award)
+            progress.advance(1)
+        return candidate
 
     async def project(
         self,
