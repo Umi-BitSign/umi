@@ -119,6 +119,15 @@ async def test_complete_certified_quality_preserves_all_participants_and_assigne
     for result in outcomes:
         assert result.request_closure_sha256 == digest(b["closure"])
         assert result.candidate.aggregate.numerator == result.candidate.aggregate.denominator
+        # Dedicated task scores survive the certified manifest and a fresh
+        # reviewer; an aggregate alone cannot establish fingerspelling quality.
+        expected_strata = set(b["policy"].stratum_weights)
+        assert "fingerspelling" in expected_strata
+        for totals in (result.candidate, result.incumbent):
+            assert {row.stratum for row in totals.strata} == expected_strata
+        for run in result.runs:
+            assert run.candidate.strata == result.candidate.strata
+            assert run.incumbent.strata == result.incumbent.strata
         basis = (
             "endpoint_content_only" if result.track == "endpoint" else "measured_model_execution"
         )

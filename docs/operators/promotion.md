@@ -2,8 +2,60 @@
 
 # Review and promote contributed models
 
+- [Cohort winner baseline publication](#cohort-winner-baseline-publication)
 - [Model promotion agreement](#open-competition-promotion-agreement)
 - [Reviewed promotion delivery](#open-competition-promotion-delivery)
+
+## Cohort winner baseline publication
+
+Use `apply-cohort-baseline` to publish an already quorum-certified cohort winner
+to an existing intake, phase-reviewer or evaluator promotion history. The
+certificate must come from the native cohort preparation and bind the exact
+source cohort, successor cohort, original parent and reviewed winning model.
+This command does not perform the review, sign it, enable rewards or release a
+cohort hold. Retained rounds and signed submissions keep their original bindings.
+
+Check the intended replacement service configuration without starting finality
+or creating or migrating a history:
+
+```sh
+umi-competition --policy /ABSOLUTE/competition-policy.json apply-cohort-baseline \
+  --intake-config /ABSOLUTE/replacement-intake-config.json \
+  --certificate /ABSOLUTE/certified-cohort-baseline.json \
+  --chain-config /ABSOLUTE/baseline-observer-chain-config.json --check-only
+```
+
+Select exactly one of `--intake-config`, `--reviewer-config` or
+`--evaluator-config`. Each role must use its original history and bindings. An
+independent evaluator still needs its independently reviewed promotion parent;
+do not copy an intake database or invent missing local evaluation. The intake's
+replacement config pins the certified target baseline and preserves its exact
+required-submission list. The preflight checks the currently retained anchor
+before the command atomically advances it with the baseline record.
+
+The observer chain configuration must bind the service's exact policy, chain
+and finality authority, with separate finality state outside every service or
+history directory. Run under the owning service account with its supported
+state and native finality permissions. `--check-only` does not prove that the
+current finalized head is inside the certificate's application window.
+
+Before applying, quiesce all writers to that history and independently verify
+the supported backup/restore coverage. Run the same command with
+`--confirm-quiesced-backup` in place of `--check-only`. It obtains its own native
+finalized observation, checks the original application window again at the
+append, and retains the original certificate and observed block atomically.
+There is no operator-supplied block override. Preparation, finality and append
+emit counted progress, elapsed time and ETA basis on stderr; JSON results use
+stdout. Observation delays do not create a new signed deadline.
+
+Exact repeat execution authenticates the retained receipt and returns
+`cohort_baseline_already_applied` without starting finality or revalidating model
+payloads. Missing or damaged receipts, another parent, an occupied sequence or
+changed retained bindings refuse explicitly. Preserve the original failure and
+restore or repair that exact history through its supported recovery path; do
+not clear the receipt or rerun the completed native review. Select only a
+qualified compatible runtime for every writer before restarting the service:
+the new history fences older writers while retaining historical readers.
 
 <a id="open-competition-promotion-agreement"></a>
 
