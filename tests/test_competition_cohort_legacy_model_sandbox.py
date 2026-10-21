@@ -540,6 +540,13 @@ async def test_new_reference_requires_explicit_independent_baseline_authority(
         return authorized
 
     port.legacy_artifacts.reference_authorized = authorize
+    if authorized is True:
+        # Publishing a baseline did not provision these canonical local bytes.
+        # The supported sandbox must recover from its authenticated R2 source.
+        import shutil
+
+        shutil.rmtree(port.archive / digest(bundle))
+        cpu_readback(port, installed, monkeypatch)
 
     async def native_reference(self, selected, invocation):
         assert self is port and selected == job
@@ -550,11 +557,42 @@ async def test_new_reference_requires_explicit_independent_baseline_authority(
 
     monkeypatch.setattr(CohortCpuSandbox, "invoke", native_reference)
     if authorized is True:
-        assert await port.invoke(job, attempt(job, 1)) == "native-preserved-reference"
-        assert references == [digest(bundle)]
+        assert await port.invoke(job, attempt(job, 1)) == "inert-cpu-result"
+        assert not references
+        assert not (port.archive / digest(bundle)).exists()
+        first_reads = list(installed.remote.reads)
+        reopened = sandbox(installed)
+        reopened.legacy_artifacts.reference_authorized = authorize
+        cpu_readback(reopened, installed, monkeypatch)
+        assert await reopened.invoke(job, attempt(job, 1, 2)) == "inert-cpu-result"
+        assert installed.remote.reads == first_reads
     else:
         with pytest.raises(ValueError, match=r"incumbent|repair"):
             await port.invoke(job, attempt(job, 1))
         assert not references
-    assert calls == [digest(bundle)]
+    assert calls == [digest(bundle)] * (2 if authorized is True else 1)
+    if authorized is not True:
+        assert not installed.remote.reads
+
+
+async def test_certified_reference_missing_original_requires_repair(installed, monkeypatch):
+    port = sandbox(installed)
+    bundle = installed.case.subs[0].model_bundle
+    job = installed.job.model_copy(
+        update={
+            "incumbent": bundle,
+            "round": installed.job.round.model_copy(
+                update={"incumbent_model_sha256": digest(bundle)}
+            ),
+        }
+    )
+    port.legacy_artifacts.reference_authorized = lambda *_: True
+    selected = next(
+        e
+        for e in installed.sources.authenticated[installed.case.cohort].legacy.entries
+        if e.model_sha256 == digest(bundle) and e.payload_state == "preserved"
+    )
+    del installed.case.objects[selected.request_raw_sha256]
+    with pytest.raises((ValueError, KeyError), match=r"original|repair|[0-9a-f]{64}"):
+        await port.invoke(job, attempt(job, 1))
     assert not installed.remote.reads

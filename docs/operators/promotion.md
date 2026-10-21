@@ -66,16 +66,32 @@ For an R2-adopted cohort, the frozen legacy inventory continues to describe its
 original baseline and execution incumbents. Do not rewrite that signed inventory
 when publishing a new winner. The phase reviewer separately authenticates the
 locally applied cohort-baseline receipt, including the exact target cohort,
-sequence and model, before its native sandbox can use the canonical preserved
-reference. Unknown models still require their original authenticated source;
+sequence and model, before selecting reference bytes. If the winner is already
+a preserved participant in an authenticated legacy inventory, the sandbox restores
+that exact original through its R2 association into the bounded model cache.
+A later direct-upload winner uses its retained source-cohort review request and
+matching private acceptance intent to select the preserved R2 object. The source
+submission, contributor, policy and complete bundle must match the certified
+baseline. Unknown models still require their original authenticated source;
 a missing or damaged promotion receipt requires repair. Candidate admission,
 rights review and execution-order checks are unchanged.
 
-Keep that winning reference and its successful verification record in the
-reviewer's canonical model archive. Bounded candidate-cache eviction does not
-authorize removal of this reference. Select a compatible phase-reviewer runtime
-with the committed R2 configuration before the successor cohort executes; merely
-publishing the baseline or configuring a transport-adoption reviewer is insufficient.
+Retain those source records and the applied baseline receipt while any cohort
+uses the reference. Missing or damaged source records require explicit repair;
+they are not ordinary cache misses. Successful byte verification stays outside
+the disposable cache and survives eviction and restart. Each active invocation
+holds the cache lease, including inherited references, so another model cannot
+evict its bytes. Materialization progress counts chunk/file-finalization work as
+well as bytes; the last payload byte does not mean publication is finished.
+
+Original baselines without an authenticated remote source continue to require
+their canonical preserved archive. Bounded-cache selection alone never authorizes
+canonical archive retirement, reservation release or a change to another live
+consumer's retention contract. Preserve those bytes until durable remote custody,
+required restoration and every consumer release are independently established.
+Select a compatible phase-reviewer runtime with the committed R2 configuration
+before the successor cohort executes; merely publishing the baseline or
+configuring a transport-adoption reviewer is insufficient.
 
 <a id="open-competition-promotion-agreement"></a>
 

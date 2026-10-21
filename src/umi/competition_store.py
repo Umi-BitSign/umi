@@ -3240,6 +3240,16 @@ class CompetitionStore(VoidEvidenceRetention):
     def verified_cohort_baseline_model(
         self, cohort_sha256: str, sequence: int, model_sha256: str, *, maximum_bytes: int
     ) -> bool:
+        return (
+            self.certified_cohort_baseline_reference(
+                cohort_sha256, sequence, model_sha256, maximum_bytes=maximum_bytes
+            )
+            is not None
+        )
+
+    def certified_cohort_baseline_reference(
+        self, cohort_sha256: str, sequence: int, model_sha256: str, *, maximum_bytes: int
+    ):
         """Authenticate a retained certified reference outside an older R2 census.
 
         A newer promotion does not edit the frozen transport inventory. Only a
@@ -3265,7 +3275,7 @@ class CompetitionStore(VoidEvidenceRetention):
                 "FROM promotions WHERE model=? ORDER BY sequence DESC",
                 (model_sha256,),
             )
-            selected, consumed = 0, 0
+            selected, consumed = None, 0
             for stored in rows:
                 if type(stored[4]) is not int or stored[4] < 1:
                     raise ValueError("certified cohort reference history is corrupt")
@@ -3298,10 +3308,10 @@ class CompetitionStore(VoidEvidenceRetention):
                     and review.target_sequence == sequence
                     and review.candidate.model_sha256 == model_sha256
                 ):
-                    selected += 1
-            if selected > 1:
-                raise ValueError("certified cohort reference is ambiguous")
-            return selected == 1
+                    if selected is not None:
+                        raise ValueError("certified cohort reference is ambiguous")
+                    selected = review
+            return selected
 
     def baseline(self) -> dict | None:
         with self._connection() as connection:

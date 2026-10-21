@@ -64,6 +64,31 @@ class LegacyModelStorageReaders:
             incumbent_sha256=incumbent_sha256,
         )
 
+    def preserved_reference(self, cohort, bundle):
+        """Resolve existing authenticated bytes; caller owns reference authority.
+
+        A later certified baseline may already be a preserved participant in
+        this frozen inventory. Reuse that exact original and association without
+        inventing an incumbent or modifying the signed census. A missing or
+        damaged selected original requires repair, never another source guess.
+        """
+        model = digest(bundle)
+        entries = self.authenticated[cohort].legacy.entries
+        original = next(
+            (
+                entry
+                for entry in entries
+                if entry.model_sha256 == model and entry.payload_state == "preserved"
+            ),
+            None,
+        )
+        if original is None:
+            return None
+        resolved = self.resolve(cohort, request_sha256=original.request_sha256)
+        if resolved.selection.bundle != bundle:
+            raise ValueError("preserved reference differs from its certified model")
+        return resolved
+
     def admitted(self, cohort, *, record, admission):
         """Resolve only the exact frozen, certified, preserved original."""
         resolution = self.resolve(cohort, request_sha256=digest(record.request))
