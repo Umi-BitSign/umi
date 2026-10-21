@@ -1337,6 +1337,10 @@ def test_cooperative_guard_is_installed_before_stop_and_retained_while_draining(
     draining = False
 
     def run(*arguments, **kwargs):
+        if "--install-restart-policy" in arguments:
+            if guard.exists():
+                assert "SendSIGKILL=no" in guard.read_text()
+            return subprocess.CompletedProcess(arguments, 0, "", "")
         assert guard.exists() or arguments == ("systemctl", "daemon-reload")
         if arguments[-1] == "--property=ActiveState,ControlGroup":
             output = (

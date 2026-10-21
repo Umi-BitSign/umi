@@ -13,6 +13,13 @@
 
 Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
 
+Before starting or upgrading Linux cohort owners, apply the
+[controlled package-restart policy](../validators/successor-upgrade.md#package-triggered-service-restarts).
+Keep the original journals, signed clocks and model/retention bindings through
+an OS update. Package updates must not thaw a deliberately frozen replica or
+restart process-bound consumers before their qualified rebind. Policy installation
+alone does not prove replica custody, restore coverage or a successful restart.
+
 ## Work progress and ETA logs
 
 The intake owner, phase reviewer, settlement service and reward runtime emit

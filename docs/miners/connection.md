@@ -184,6 +184,14 @@ certificate. `yes` also records public-model intent; it does not assert model
 rights or upload a bundle. A model submission still needs its own signed consent,
 rights decision and complete artifact.
 
+Before changing a Linux endpoint service, the updater installs an owner-checked
+needrestart override so package upgrades cannot restart UMI owners outside their
+controlled lifecycle. Standard `umi-*.service` units are covered together; a
+supported custom miner or sidecar name receives an exact-name override. Existing
+administrator content or conflicting needrestart rules refuse the upgrade before
+any service stop. Security package updates remain enabled. The standalone public
+model client does not change endpoint services or this root-level configuration.
+
 The updater discovers the one running `umi.miner` systemd service and retains its
 hotkey, model revision, serving origin, wallet, model backend and public port. It
 keeps the existing service account, including an existing root-run installation.

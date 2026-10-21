@@ -271,8 +271,8 @@ if [ "$missing_package_command" = true ]; then
     *debian*|*ubuntu*) ;;
     *) fail "install Podman, slirp4netns, uidmap, curl, Git, and systemd first" ;;
   esac
-  DEBIAN_FRONTEND=noninteractive apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends \
     --no-upgrade --no-remove \
     ca-certificates crun curl git podman slirp4netns uidmap util-linux \
     coreutils findutils gawk tar
@@ -646,6 +646,12 @@ supervisor preflight-common-switch --config "$config_stage" > "$common_preflight
   --legacy-unit "$legacy_unit" \
   || fail "legacy translation retirement needs a qualified preserving migration; no legacy process was stopped"
 cat "$common_preflight_receipt"
+
+# Package hooks must not restart any retained UMI owner outside its qualified
+# lifecycle. The bootstrap source is Git-verified; the helper is standalone and
+# works even when the selected historical runtime predates this policy.
+"$supervisor_root/.venv/bin/python" -I -B \
+  "$source_root/deploy/miner-upgrade/upgrade.py" --install-restart-policy --service "$service_name"
 
 # Rehearse the exact production unit name and sandbox before any legacy writer
 # is touched. The checked-in drop-in keeps only ExecStartPre live and replaces
