@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile, ZipInfo
 
 import pytest
 
@@ -314,3 +318,213 @@ def test_build_refuses_insufficient_local_headroom(case, monkeypatch):
     with pytest.raises(ValueError, match="headroom"):
         _build(case)
     assert not (case.arguments["output_root"] / "unsigned-host").exists()
+
+
+def _locked_dependency(case, *, damage=None):
+    """Real signed old inventory, target lock hash and wheel RECORD."""
+    site = case.previous / ".venv/lib/python3.12/site-packages"
+
+    def package(version):
+        info = f"example-{version}.dist-info"
+        files = {
+            "example/__init__.py": f"version = {version}\n".encode(),
+            info + "/METADATA": f"Name: example\nVersion: {version}\n".encode(),
+            info + "/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        }
+        if damage in {"traversal", "pth", "data", "ownership"} and version == 2:
+            path = {
+                "traversal": "../escape",
+                "pth": "example/execute.pth",
+                "data": "example-2.data/scripts/execute",
+                "ownership": "another/file.py",
+            }[damage]
+            files[path] = b"bad path"
+        if damage == "metadata" and version == 2:
+            files[info + "/METADATA"] = b"Name: another\nVersion: 2\n"
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        for name, body in files.items():
+            digest = "sha256=" + base64.urlsafe_b64encode(
+                hashlib.sha256(body).digest()
+            ).decode().rstrip("=")
+            writer.writerow([name, digest, len(body)])
+        writer.writerow([info + "/RECORD", "", ""])
+        files[info + "/RECORD"] = stream.getvalue().encode()
+        if damage == "record" and version == 2:
+            files[info + "/RECORD"] = files[info + "/RECORD"].replace(b"sha256=", b"sha512=")
+        return files
+
+    old_files, new_files = package(1), package(2)
+    for name, body in old_files.items():
+        path = site / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        path.chmod(0o444)
+    wheel = case.source.parent / "example-2-py3-none-any.whl"
+    with ZipFile(wheel, "w") as archive:
+        for name, body in new_files.items():
+            if damage == "symlink" and name == "example/__init__.py":
+                entry = ZipInfo(name)
+                entry.create_system = 3
+                entry.external_attr = 0o120777 << 16
+                archive.writestr(entry, body)
+            else:
+                archive.writestr(name, body)
+        if damage == "duplicate":
+            archive.writestr("example/__init__.py", b"duplicate")
+    raw = wheel.read_bytes()
+    old_lock = (
+        'version = 1\n[[package]]\nname = "example"\nversion = "1"\n'
+        'source = {registry = "https://pypi.org/simple"}\n'
+    )
+    new_lock = old_lock.replace('version = "1"', 'version = "2"')
+    new_lock += (
+        f'wheels = [{{url = "https://files.example/{wheel.name}", '
+        f'hash = "sha256:{hashlib.sha256(raw).hexdigest()}", size = {len(raw)}}}]\n'
+    )
+    if damage == "edges":
+        new_lock += 'dependencies = [{name = "another"}]\n'
+    if damage == "resolution":
+        new_lock = new_lock.replace("version = 1\n", "version = 2\n", 1)
+    previous_lock = case.previous / "uv.lock"
+    previous_lock.chmod(0o644)
+    previous_lock.write_text(old_lock)
+    previous_lock.chmod(0o444)
+    (case.source / "uv.lock").write_text(new_lock)
+    records = [
+        artifacts.HostArtifactFile(
+            path=p.relative_to(case.previous).as_posix(),
+            sha256=hashlib.sha256(p.read_bytes()).hexdigest(),
+            size_bytes=p.stat().st_size,
+            mode=p.stat().st_mode & 0o777,
+        )
+        for p in sorted(
+            case.previous.rglob("*"), key=lambda p: p.relative_to(case.previous).as_posix()
+        )
+        if p.is_file()
+    ]
+    manifest = case.signed.manifest.model_copy(
+        update={"files": records, "total_size_bytes": sum(p.size_bytes for p in records)}
+    )
+    signed = sign(manifest)
+    case.arguments["maintenance_path"].write_bytes(
+        canonical_json_bytes({"signed_host": signed.model_dump(mode="json", by_alias=True)})
+    )
+    case.arguments["previous_manifest_sha256"] = signed.manifest_sha256
+    if damage == "hash":
+        wheel.write_bytes(raw + b"changed")
+    return wheel, new_files
+
+
+def test_locked_wheel_upgrade_and_repeat_preserve_signed_installation(case):
+    wheel, files = _locked_dependency(case)
+    before = _inventory(case.previous)
+    result = _build(case, dependency_wheels=(wheel,))
+    tree = case.arguments["output_root"] / "unsigned-host/tree"
+    site = tree / ".venv/lib/python3.12/site-packages"
+    for name, raw in files.items():
+        assert (site / name).read_bytes() == raw
+    assert not (site / "example-1.dist-info").exists()
+    assert _inventory(case.previous) == before
+    assert result["locked_dependency_migrations"][0]["version"] == "2"
+    assert any(event["stage"] == "locked_dependency_migration" for event in case.events)
+    prior = case.hosts / case.arguments["revision"]
+    shutil.copytree(tree, prior)
+    manifest = artifacts.SuccessorHostArtifactManifest.model_validate_json(
+        (tree.parent / "host-manifest.unsigned.json").read_bytes()
+    )
+    case.arguments["maintenance_path"].write_bytes(
+        canonical_json_bytes({"signed_host": sign(manifest).model_dump(mode="json", by_alias=True)})
+    )
+    second = _build(
+        case,
+        previous_revision=case.arguments["revision"],
+        revision="ef" * 20,
+        previous_manifest_sha256=result["manifest_sha256"],
+        output_root=case.arguments["output_root"].with_name("repeat"),
+    )
+    assert second["locked_dependency_migrations"] == []
+    assert _inventory(case.previous) == before
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "hash",
+        "edges",
+        "resolution",
+        "traversal",
+        "pth",
+        "data",
+        "ownership",
+        "metadata",
+        "record",
+        "symlink",
+        "duplicate",
+    ],
+)
+def test_unsupported_locked_wheels_refuse_before_creating_candidate(case, damage):
+    wheel, _files = _locked_dependency(case, damage=damage)
+    before = _inventory(case.previous)
+    with pytest.raises(ValueError):
+        _build(case, dependency_wheels=(wheel,))
+    assert not case.arguments["output_root"].exists()
+    assert _inventory(case.previous) == before
+
+
+def test_locked_wheel_transition_requires_explicit_wheel(case):
+    _locked_dependency(case)
+    with pytest.raises(ValueError, match="supply exact locked"):
+        _build(case)
+    assert not case.arguments["output_root"].exists()
+
+
+@pytest.mark.parametrize(
+    "relative", ["uv.lock", ".venv/lib/python3.12/site-packages/example-1.dist-info/RECORD"]
+)
+def test_wheel_plan_requires_original_signed_lock_and_record(case, relative):
+    wheel, _files = _locked_dependency(case)
+    path = case.previous / relative
+    path.chmod(0o644)
+    path.write_bytes(path.read_bytes() + b"tampered")
+    path.chmod(0o444)
+    before = _inventory(case.previous)
+    with pytest.raises(ValueError, match="selected signed dependency"):
+        _build(case, dependency_wheels=(wheel,))
+    assert not case.arguments["output_root"].exists()
+    assert _inventory(case.previous) == before
+
+
+def test_source_lock_mutation_after_wheel_plan_cannot_reach_manifest(case):
+    wheel, _files = _locked_dependency(case)
+    before = _inventory(case.previous)
+
+    def mutate(event):
+        if event["stage"] == "dependency_clone" and event["completed"] == 0:
+            path = case.source / "uv.lock"
+            path.write_bytes(path.read_bytes() + b"# changed after preflight\n")
+
+    with pytest.raises(ValueError, match="metadata changed"):
+        _build(case, dependency_wheels=(wheel,), emit=mutate)
+    assert not (case.arguments["output_root"] / "unsigned-host-build.json").exists()
+    assert _inventory(case.previous) == before
+
+
+def test_interrupted_wheel_build_retains_candidate_and_refuses_reset(case, monkeypatch):
+    wheel, _files = _locked_dependency(case)
+    before = _inventory(case.previous)
+
+    def fail(*_args):
+        raise OSError("inert candidate interruption after migration")
+
+    monkeypatch.setattr(builder, "repair_candidate_entrypoints", fail)
+    with pytest.raises(OSError):
+        _build(case, dependency_wheels=(wheel,))
+    assert not (case.arguments["output_root"] / "unsigned-host-build.json").exists()
+    assert (
+        case.arguments["output_root"]
+        / "unsigned-host/tree/.venv/lib/python3.12/site-packages/example-2.dist-info/RECORD"
+    ).exists()
+    with pytest.raises(FileExistsError):
+        _build(case, dependency_wheels=(wheel,))
+    assert _inventory(case.previous) == before
