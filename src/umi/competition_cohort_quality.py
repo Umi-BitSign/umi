@@ -41,6 +41,7 @@ from .competition_cohort_service_closure import (
 from .competition_cohort_service_seal import ServiceWorkSeal
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_endpoint_execution import RetainedRevealPulse
+from .competition_exact_quality import ExactQuality
 from .open_competition import (
     CaseOutput,
     CompetitionPolicy,
@@ -57,11 +58,6 @@ from .policy import ScoringPolicy
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 QualityReason = Literal["infrastructure_failure", "incumbent_failure", "observation_disagreement"]
-
-
-class ExactQuality(StrictProtocolModel):
-    numerator: Annotated[str, Field(pattern=r"^[0-9]+$", max_length=4096)]
-    denominator: Annotated[str, Field(pattern=r"^[1-9][0-9]*$", max_length=4096)]
 
 
 class StratumQuality(StrictProtocolModel):

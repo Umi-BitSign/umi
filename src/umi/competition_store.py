@@ -15,6 +15,12 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_cohort_baseline_history import (
+    apply_cohort_baseline,
+    read_cohort_baseline_receipt,
+    verify_cohort_baseline_fence,
+)
+from .competition_cohort_baseline_review import CertifiedCohortBaselineReview
 from .competition_evidence import (
     IndependentEvaluationEvidence,
     independent_evidence_digest,
@@ -649,6 +655,8 @@ class CompetitionStore(VoidEvidenceRetention):
             try:
                 connection.create_function("umi_runtime_port_writer", 0, lambda: 1)
                 verify_runtime_port_fence(connection, self._WRITER_FENCED_TABLES)
+                connection.create_function("umi_cohort_baseline_writer", 0, lambda: 1)
+                verify_cohort_baseline_fence(connection, self._WRITER_FENCED_TABLES)
                 connection.create_function(
                     "umi_writer_generation",
                     0,
@@ -2464,6 +2472,9 @@ class CompetitionStore(VoidEvidenceRetention):
             raise ValueError("preserved promotion sequence is corrupt")
         if not self.lineage.admits(record.get("policy_sha256")):
             raise ValueError("preserved promotion belongs to another policy")
+        if record.get("schema") == "umi-model-baseline/4":
+            read_cohort_baseline_receipt(self, connection, record, maximum_bytes)
+            return None
         if record.get("schema") == "umi-model-baseline/3":
             read_runtime_port_receipt(self, connection, record, maximum_bytes)
             return None
@@ -3689,6 +3700,14 @@ class CompetitionStore(VoidEvidenceRetention):
         ):
             raise ValueError("stored evidence cutoff schedule is corrupt")
         return schedule
+
+    def apply_cohort_baseline(
+        self,
+        certificate: CertifiedCohortBaselineReview,
+        *,
+        observed_block: int | Callable[[], int],
+    ) -> dict:
+        return apply_cohort_baseline(self, certificate, observed_block=observed_block)
 
     def apply_runtime_port(
         self,

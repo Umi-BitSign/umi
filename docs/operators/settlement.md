@@ -1655,6 +1655,31 @@ model pool goes to burn. Missing evidence remains pending and cannot be removed
 from the roster. The native geometric award and allocation are version 4 and version 5,
 respectively; historical versions remain readable with unchanged digests.
 
+The successor reference is selected separately from reward bands. Select the
+highest exact eligible public-model quality, with original complete-acceptance
+order breaking a tie. `StandingRewardPreparation.baseline_review` derives the
+review from that owner's native-replayed award and retains the original model
+manifest, attribution, license, rights and reconstruction bindings. The winner's
+old aggregate is not a score cutoff for the successor: candidate and reference
+must be evaluated together on the successor's frozen suite and runtime. Equality
+qualifies. A model's declared parent remains provenance and need not be the
+reference used for that paired measurement.
+
+`CompetitionStore.apply_cohort_baseline` applies a policy-quorum certificate as
+`umi-model-baseline/4`, without authorizing weights or rereading model payloads.
+It checks the exact current promotion parent and finalized application window,
+refuses an active retained or published round, and atomically advances any
+authenticated retained-intake anchor while retaining its original bytes. Already
+signed submissions and already selected rounds keep their original identities.
+The original certificate and observed block remain in a separate local receipt;
+repeat application reuses them without requiring a new observation. Missing or
+damaged receipts require explicit repair. Old open writers are fenced before
+the new record commits. All selected clients, miners, reviewers, coordinators,
+copiers and upgrade/replay consumers must support the record and the retained
+intake transition before publication; implementing this API alone does not
+establish a deployed promotion. Retain compatibility readers while any signed
+history or recovery consumer still needs them.
+
 Duplicate content retains the earliest certified complete-artifact acceptance's
 recipient, score and eligibility. A later alias cannot make originally ineligible
 content eligible. Distinct runnable content within one band receives successive

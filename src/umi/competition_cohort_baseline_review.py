@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from .competition_cohort_baseline import CohortBaselineCandidate
+from .competition_cohort_baseline_types import CohortBaselineCandidate
 from .competition_cohort_recovery import Block, verify_recovery_quorum
 from .competition_settlement import PromotionHeadBinding
 from .open_competition import (
