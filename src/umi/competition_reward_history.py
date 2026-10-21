@@ -672,12 +672,10 @@ class RewardControlHistoryReader:
                 else:
                     snapshot = observation.slot.snapshot
                 if snapshot.block_number != self._next or (
-                    self._tip is not None
-                    and snapshot.parent_hash != self._tip.snapshot.block_hash
+                    self._tip is not None and snapshot.parent_hash != self._tip.snapshot.block_hash
                 ):
                     raise ValueError("control history has a gap or a different parent")
-                if (prefetch and self._next < last
-                        and (stop is None or not stop.is_set())):
+                if prefetch and self._next < last and (stop is None or not stop.is_set()):
                     # Native proof work may overlap persistence/export.
                     # Each child owns its own success checkpoint, even
                     # if its predecessor fails or this caller cancels.
@@ -691,9 +689,7 @@ class RewardControlHistoryReader:
                     # restored blocks never enter the rate numerator.
                     await self._validate_checkpoint_tip(provider, value)
                     if await run_owned_thread(self.checkpoints.load, self._next) != value:
-                        raise HistoryCheckpointRepairRequired(
-                            "checkpoint changed during finality"
-                        )
+                        raise HistoryCheckpointRepairRequired("checkpoint changed during finality")
                     value = await self._ensure_checkpoint_export(value)
                     self.progress.restored_completed += 1
                 elif self.export_archive is not None:
