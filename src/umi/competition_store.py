@@ -3237,6 +3237,72 @@ class CompetitionStore(VoidEvidenceRetention):
             )
             return digest(round_)
 
+    def verified_cohort_baseline_model(
+        self, cohort_sha256: str, sequence: int, model_sha256: str, *, maximum_bytes: int
+    ) -> bool:
+        """Authenticate a retained certified reference outside an older R2 census.
+
+        A newer promotion does not edit the frozen transport inventory. Only a
+        locally applied, quorum-certified cohort baseline authorizes this other
+        reference source; missing or damaged receipts remain explicit failures.
+        Older completed cohorts keep their exact reference after the head advances.
+        """
+        _require_hex32(cohort_sha256, "cohort")
+        _require_hex32(model_sha256, "model")
+        if (
+            type(sequence) is not int
+            or sequence < 1
+            or type(maximum_bytes) is not int
+            or not 1 <= maximum_bytes <= 16 * 1024**2
+        ):
+            raise ValueError("invalid certified cohort reference selection")
+        with self._connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN")
+            self._assert_action_allowed(connection, cohort_sha256)
+            rows = connection.execute(
+                "SELECT sequence,digest,model,contributor,length(CAST(body AS BLOB)) "
+                "FROM promotions WHERE model=? ORDER BY sequence DESC",
+                (model_sha256,),
+            )
+            selected, consumed = 0, 0
+            for stored in rows:
+                if type(stored[4]) is not int or stored[4] < 1:
+                    raise ValueError("certified cohort reference history is corrupt")
+                consumed += stored[4]
+                if consumed > maximum_bytes:
+                    raise ValueError(
+                        "certified cohort reference history exceeds its metadata bound"
+                    )
+                raw = _bounded_stored_body(
+                    connection, "promotions", "sequence", stored[0], maximum_bytes
+                )
+                record = json.loads(raw)
+                if not isinstance(record, dict):
+                    raise ValueError("certified cohort reference history is corrupt")
+                if record.get("schema") != "umi-model-baseline/4":
+                    continue
+                contributor = record.get("contributor_hotkey")
+                if (
+                    _record_digest(record) != stored[1]
+                    or not self.lineage.admits(record.get("policy_sha256"))
+                    or record.get("sequence") != stored[0]
+                    or record.get("model_sha256") != stored[2]
+                    or stored[3] != (None if contributor is None else identity(contributor))
+                ):
+                    raise ValueError("certified cohort reference history is corrupt")
+                receipt = read_cohort_baseline_receipt(self, connection, record, maximum_bytes)
+                review = receipt.certificate.review
+                if (
+                    review.target_cohort_sha256 == cohort_sha256
+                    and review.target_sequence == sequence
+                    and review.candidate.model_sha256 == model_sha256
+                ):
+                    selected += 1
+            if selected > 1:
+                raise ValueError("certified cohort reference is ambiguous")
+            return selected == 1
+
     def baseline(self) -> dict | None:
         with self._connection() as connection:
             row = connection.execute(

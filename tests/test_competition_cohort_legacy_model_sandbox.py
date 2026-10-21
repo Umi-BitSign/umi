@@ -512,3 +512,49 @@ async def test_original_admission_without_old_intent_can_use_new_post_adoption_a
     assert installed.case.objects == originals
     assert installed.request.acceptance.schema_ == "umi-cohort-model-artifact-acceptance/1"
     assert installed.request.direct_artifact is None
+
+
+@pytest.mark.parametrize("authorized", [True, False, "damaged_receipt"])
+async def test_new_reference_requires_explicit_independent_baseline_authority(
+    installed, monkeypatch, authorized
+):
+    from umi.competition_cohort_sandbox import CohortCpuSandbox
+
+    port = sandbox(installed)
+    bundle = installed.case.subs[0].model_bundle
+    job = installed.job.model_copy(
+        update={
+            "incumbent": bundle,
+            "round": installed.job.round.model_copy(
+                update={"incumbent_model_sha256": digest(bundle)}
+            ),
+        }
+    )
+    references, calls = [], []
+
+    def authorize(selected, model):
+        assert selected == job and model == bundle
+        calls.append(digest(model))
+        if authorized == "damaged_receipt":
+            raise ValueError("certified baseline receipt needs repair")
+        return authorized
+
+    port.legacy_artifacts.reference_authorized = authorize
+
+    async def native_reference(self, selected, invocation):
+        assert self is port and selected == job
+        assert invocation.step_index == 1
+        verify_preserved_bundle(bundle, port.archive, installed.case.policy)
+        references.append(digest(bundle))
+        return "native-preserved-reference"
+
+    monkeypatch.setattr(CohortCpuSandbox, "invoke", native_reference)
+    if authorized is True:
+        assert await port.invoke(job, attempt(job, 1)) == "native-preserved-reference"
+        assert references == [digest(bundle)]
+    else:
+        with pytest.raises(ValueError, match=r"incumbent|repair"):
+            await port.invoke(job, attempt(job, 1))
+        assert not references
+    assert calls == [digest(bundle)]
+    assert not installed.remote.reads

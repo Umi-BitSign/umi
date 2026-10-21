@@ -62,6 +62,21 @@ not clear the receipt or rerun the completed native review. Select only a
 qualified compatible runtime for every writer before restarting the service:
 the new history fences older writers while retaining historical readers.
 
+For an R2-adopted cohort, the frozen legacy inventory continues to describe its
+original baseline and execution incumbents. Do not rewrite that signed inventory
+when publishing a new winner. The phase reviewer separately authenticates the
+locally applied cohort-baseline receipt, including the exact target cohort,
+sequence and model, before its native sandbox can use the canonical preserved
+reference. Unknown models still require their original authenticated source;
+a missing or damaged promotion receipt requires repair. Candidate admission,
+rights review and execution-order checks are unchanged.
+
+Keep that winning reference and its successful verification record in the
+reviewer's canonical model archive. Bounded candidate-cache eviction does not
+authorize removal of this reference. Select a compatible phase-reviewer runtime
+with the committed R2 configuration before the successor cohort executes; merely
+publishing the baseline or configuring a transport-adoption reviewer is insufficient.
+
 <a id="open-competition-promotion-agreement"></a>
 
 ## Model promotion agreement

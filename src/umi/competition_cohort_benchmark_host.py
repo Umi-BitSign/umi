@@ -104,6 +104,7 @@ class BenchmarkHost:
         model_reviewer=None,
         direct_artifacts=None,
         legacy_readers=None,
+        promotion_store=None,
     ):
         self.config = c = BenchmarkHostConfig.model_validate_json(
             canonical_json_bytes(config.benchmark)
@@ -160,6 +161,22 @@ class BenchmarkHost:
                         raise ValueError("legacy execution changes its private reviewed intent")
                 return value
 
+            def reference_authorized(job, bundle):
+                if promotion_store is None:
+                    return False
+                if digest(
+                    bundle
+                ) != job.round.incumbent_model_sha256 or job.round.policy_sha256 != digest(
+                    self.policy
+                ):
+                    raise ValueError("certified reference differs from its frozen execution")
+                return promotion_store.verified_cohort_baseline_model(
+                    job.round.cohort_sha256,
+                    job.round.sequence,
+                    digest(bundle),
+                    maximum_bytes=config.maximum_promotion_bytes,
+                )
+
             self.sandbox = DirectCohortCpuSandbox(
                 **sandbox,
                 artifacts=direct_artifacts,
@@ -167,7 +184,11 @@ class BenchmarkHost:
                 legacy_artifacts=(
                     None
                     if legacy_readers is None
-                    else LegacyCohortModelCache(direct_artifacts, legacy_readers)
+                    else LegacyCohortModelCache(
+                        direct_artifacts,
+                        legacy_readers,
+                        reference_authorized=reference_authorized,
+                    )
                 ),
             )
         self.worker = CohortExecutionWorker(

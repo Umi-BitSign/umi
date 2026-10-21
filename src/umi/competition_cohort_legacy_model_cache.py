@@ -19,10 +19,13 @@ from .protocol import canonical_json_bytes
 class LegacyCohortModelCache:
     """Byte restoration only; original review/order journals still own authority."""
 
-    def __init__(self, artifacts, sources):
+    def __init__(self, artifacts, sources, *, reference_authorized=None):
         if digest(artifacts.policy) != digest(sources.policy):
             raise ValueError("legacy cache policy differs from its authenticated readers")
         self.artifacts, self.sources = artifacts, sources
+        if reference_authorized is not None and not callable(reference_authorized):
+            raise ValueError("certified reference authorization must be callable")
+        self.reference_authorized = reference_authorized
 
     def execution_source(self, job, role, bundle, request=None):
         cohort = job.round.cohort_sha256
@@ -49,6 +52,25 @@ class LegacyCohortModelCache:
         elif role == "incumbent":
             if digest(bundle) != job.round.incumbent_model_sha256:
                 raise ValueError("legacy execution reference differs from its certified round")
+            model = digest(bundle)
+            if (
+                model != authenticated.legacy.baseline_model_sha256
+                and not any(
+                    value.model_sha256 == model for value in authenticated.legacy.incumbents
+                )
+                and self.reference_authorized is not None
+            ):
+                with TransferProgress(
+                    "certified_cohort_reference_selection",
+                    1,
+                    unit="models",
+                    planning_unit_seconds=(0.001, 1),
+                ) as progress:
+                    if self.reference_authorized(job, bundle) is True:
+                        # The native sandbox still verifies its canonical local
+                        # bytes. This grants no new admission or execution order.
+                        progress.advance(1)
+                        return None
             resolved = self.sources.resolve(
                 cohort,
                 baseline=digest(bundle) == authenticated.legacy.baseline_model_sha256,

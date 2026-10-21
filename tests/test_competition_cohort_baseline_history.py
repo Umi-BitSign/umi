@@ -275,3 +275,48 @@ def test_retained_damage_requires_repair_instead_of_silent_reverification(retain
             connection.execute("DELETE FROM metadata WHERE key='cohort_baseline_writer'")
     with pytest.raises(ValueError):
         CompetitionStore(store.directory, store.policy)
+
+
+def test_certified_reference_survives_restart_without_editing_legacy_inventory(retained_case):
+    store, review, _, _ = retained_case
+    target, model = review.target_cohort_sha256, review.candidate.model_sha256
+    args = (target, review.target_sequence, model)
+    assert not store.verified_cohort_baseline_model(*args, maximum_bytes=1_000_000)
+    apply(store, review)
+    reopened = CompetitionStore(store.directory, store.policy, read_only_existing=True)
+    assert reopened.verified_cohort_baseline_model(*args, maximum_bytes=1_000_000)
+    assert not reopened.verified_cohort_baseline_model(
+        "ef" * 32, review.target_sequence, model, maximum_bytes=1_000_000
+    )
+    assert not reopened.verified_cohort_baseline_model(
+        target, review.target_sequence + 1, model, maximum_bytes=1_000_000
+    )
+    assert not reopened.verified_cohort_baseline_model(
+        target, review.target_sequence, review.previous.model_sha256, maximum_bytes=1_000_000
+    )
+
+
+@pytest.mark.parametrize("damage", ["missing", "bytes", "wrong_target"])
+def test_certified_reference_cannot_hide_missing_or_damaged_receipt(retained_case, damage):
+    store, review, _, _ = retained_case
+    apply(store, review)
+    key = "cohort_baseline_receipt:" + str(review.previous.sequence + 1)
+    with store._connection() as db:
+        if damage == "missing":
+            db.execute("DELETE FROM metadata WHERE key=?", (key,))
+        else:
+            raw = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()[0]
+            if damage == "bytes":
+                raw += "\n"
+            else:
+                value = json.loads(raw)
+                value["certificate"]["review"]["target_cohort_sha256"] = "ef" * 32
+                raw = canonical_json_bytes(value).decode()
+            db.execute("UPDATE metadata SET value=? WHERE key=?", (raw, key))
+    with pytest.raises(ValueError):
+        store.verified_cohort_baseline_model(
+            review.target_cohort_sha256,
+            review.target_sequence,
+            review.candidate.model_sha256,
+            maximum_bytes=1_000_000,
+        )
