@@ -924,7 +924,7 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     )
     h = await make_historical(c, "exact_runtime", monkeypatch, tmp_path)
     h = await make_history_case(h, monkeypatch, tmp_path, distance=end - first + 1)
-    h.reader = h.new_reader(maximum_bytes=64 * 1024**2)
+    h.reader = h.new_reader(maximum_bytes=(256 if scale else 64) * 1024**2)
     h.package_case, h.validator_hotkey, h.variant = p, validator_hotkey, variant
     h.coverage_first, h.coverage_scale = coverage_first, scale
     try:
@@ -2976,7 +2976,10 @@ async def test_coverage_waits_for_both_validators_and_rebuilds_after_outage(
             previous_state = state
             assert stalled_passes < 100, "native collection stopped advancing"
             if collector and all(collector._next.get(k, 0) > head for k in c.series.validators):
-                head += min(32, max(1, (target - min(amounts)) // 12000))
+                # Keep the simulated producer within the collector's recent
+                # window. Larger jumps deliberately create gaps and need a
+                # separate backfill drain before advancing the finite chain.
+                head += min(collector.capture_window, max(1, (target - min(amounts)) // 12000))
                 assert head <= h.end
         pytest.fail("native coverage failed to reach the selected minimum")
 

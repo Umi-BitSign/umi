@@ -1,7 +1,7 @@
 """Synthetic successor direct object delivery through native certification.
 
 The provider, finality, inference and scratch filesystem are explicit fixture
-ports. Actual signed C6 remains on its original legacy delivery plan.
+ports. These cases do not select or rewrite any production cohort plan.
 """
 
 import asyncio
@@ -117,14 +117,15 @@ def policy(native_policy):  # noqa: F811
 
 
 @pytest.fixture
-def scenario(single_scenario, policy):  # noqa: F811
+def scenario(single_scenario, policy, request):  # noqa: F811
+    model_only = getattr(request, "param", {}).get("model_only", False)
     old = single_scenario["intake_history"]
     plan = old.plan.model_copy(
         update={
             "schema_": "umi-recoverable-cohort-plan/4",
-            "sequence": 7,
-            "eligible_tracks": ("endpoint", "model"),
-            "service_pool_bps": 5000,
+            "sequence": 6 if model_only else 7,
+            "eligible_tracks": ("model",) if model_only else ("endpoint", "model"),
+            "service_pool_bps": 0 if model_only else 5000,
             "request_tail_rule": "original_request_12h_with_completed_miner/1",
             "model_delivery": ModelDeliveryProfile(
                 schema="umi-model-delivery-profile/1",
@@ -139,8 +140,23 @@ def scenario(single_scenario, policy):  # noqa: F811
         plan,
         policy,
         model_rewards=True,
-        model_rule="baseline_or_better_quality_bucket_best_score_first_complete/1",
-        model_quality_bucket_width_bps=500,
+        model_rule=(
+            "baseline_or_better_geometric_bands_first_complete/1"
+            if model_only
+            else "baseline_or_better_quality_bucket_best_score_first_complete/1"
+        ),
+        model_quality_bucket_width_bps=None if model_only else 500,
+        model_reward_parameters=(
+            {
+                "schema": "umi-geometric-reward-parameters/2",
+                "band_width_bps": 250,
+                "band_decay_bps": 7500,
+                "within_band_decay_bps": 7500,
+                "score_duplicate_tolerance_bps": 1,
+            }
+            if model_only
+            else None
+        ),
     )
     history = CohortRecoveryHistory(
         schema="umi-cohort-recovery-history/1",
@@ -483,6 +499,23 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
     monkeypatch,
     chain_config,
 ):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=True
+    )
+
+
+@pytest.mark.parametrize("scenario", [{"model_only": True}], indirect=True)
+async def test_native_direct_model_only_certification_and_rewards_recover(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config
+):
+    await _assert_native_direct_recovery(
+        host, scenario, runtime, tmp_path, monkeypatch, chain_config, mixed=False
+    )
+
+
+async def _assert_native_direct_recovery(
+    host, scenario, runtime, tmp_path, monkeypatch, chain_config, *, mixed
+):
     direct = NativeDirect(tmp_path / "direct", host.h.intake.policy, monkeypatch)
     settled = await run_pipeline(
         host,
@@ -492,10 +525,15 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
         monkeypatch,
         chain_config,
         interrupt=True,
-        mixed=True,
+        mixed=mixed,
         direct=direct,
     )
     assert settled.package.inputs.history.plan == scenario["intake_history"].plan
+    if not mixed:
+        assert settled.package.inputs.history.plan.eligible_tracks == ("model",)
+        assert settled.package.inputs.history.plan.service_pool_bps == 0
+        assert settled.package.allocation.schema_ == "umi-cohort-reward-allocation/5"
+        assert settled.package.allocation.recipients
     assert set(direct.candidate_jobs) == {"Charlie", "Dave"}
     assert set(direct.candidate_invocations) == {"Charlie", "Dave"}
     for name, job in direct.candidate_jobs.items():
@@ -546,6 +584,8 @@ async def test_native_direct_multipart_paid_work_and_certification_recover(
         json.dumps(
             {
                 "cohort_sha256": host.h.cohort,
+                "eligible_tracks": settled.package.inputs.history.plan.eligible_tracks,
+                "service_pool_bps": settled.package.inputs.history.plan.service_pool_bps,
                 "package_sha256": digest(settled.package),
                 "reservations": [
                     r.model_dump(mode="json", by_alias=True) for r in direct.reservations

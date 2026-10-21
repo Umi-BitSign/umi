@@ -159,13 +159,14 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         async def archive(observation):
             return await run_owned_thread(SettlementRegistrationFiles._read, proofs, observation)
 
+        promotion_store = CompetitionStore(Path(config.promotion_directory), config.policy)
         reviewer = SelectedPhaseReviewer(
             config,
             provider,
             client,
             owner_token,
             archive,
-            CompetitionStore(Path(config.promotion_directory), config.policy),
+            promotion_store,
         )
         signer = CohortProgressSigner(config.signing, reviewer, sign)
         # Capacity, credentials and network placement can change on recovery;
@@ -315,6 +316,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 model_reviewer=models,
                 direct_artifacts=direct_artifacts,
                 legacy_readers=legacy_readers,
+                promotion_store=promotion_store,
             )
             app.include_router(benchmark.routes)
             app.state.benchmark = benchmark

@@ -361,9 +361,9 @@ def configure_owner(o, orders, chain_config, root, monkeypatch, *, overrides=Non
         / (scoring_policy_hash(o.h.transport) + ".json"),
         o.h.transport,
     )
-    SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory)).publish(
-        digest(o.h.terms), lambda _: canonical_json_bytes(o.h.terms)
-    )
+    term_files = SettlementEvidenceFiles(Path(config.lifecycle.sources.objects_directory))
+    for terms in (o.h.terms, *o.h.terms_by_cohort.values()):
+        term_files.publish(digest(terms), lambda _, terms=terms: canonical_json_bytes(terms))
     reference_objects = getattr(
         o.h, "reference_objects", {digest(o.h.reference): canonical_json_bytes(o.h.reference)}
     )
@@ -1021,7 +1021,7 @@ async def run_pipeline(
             assert (dict(inference), dict(signatures)) == counts
             if (
                 activate
-                and mixed
+                and (mixed or direct is not None)
                 and (not interrupt or direct is not None or activate_after_interruption)
             ):
                 # The actual recurring settlement output feeds reward discovery.
