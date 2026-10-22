@@ -27,9 +27,45 @@ its bundle manifest:
 "$HOME/.local/share/umi/model-client/umi-model-client" \
   --policy competition-policy.json submit-cohort-model \
   --request model-participation.json --source /absolute/path/to/model \
-  --origin https://REVIEWED_INTAKE_HOST \
+  --origin https://api.umi.vision \
   --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
 ```
+
+Save the command's stdout as your initial receipt; keep the original
+`model-participation.json` request separately. C6 model bytes go directly to R2.
+A successful command can print `pending_attestation`: that is the immutable
+acknowledgement, not a continuously updated admission result.
+
+#### Check admission after upload
+
+Use the same installed client and original signed request:
+
+```sh
+"$HOME/.local/share/umi/model-client/umi-model-client" \
+  --policy competition-policy.json query-cohort-admission \
+  --request model-participation.json --origin https://api.umi.vision
+```
+
+This command queries and verifies the current admission certificate. It does not
+upload the model again or require a new signature. Read its returned `status`:
+
+- `admission_certified`: this exact participation has its admission certificate.
+- `pending_attestation`: independent admission attestation is still pending.
+
+The original upload receipt's `status` always remains `pending_attestation`, even
+when this query returns `admission_certified`. Do not wait for that saved receipt
+to change. Admission certification is separate from quality scoring, final cohort
+certification and active chain rewards.
+
+The equivalent public read is
+`GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
+Both digests appear under `proposed_admission` in the original receipt. Use the
+**consent digest**, not the model digest or submission digest. The CLI also verifies
+the returned certificate against your request and policy, so it is the preferred
+check. If the live query remains pending, report those digests, your hotkey/UID,
+client revision and retry reason; preserve the original signed request and source.
+
+#### Delivery, retries and retained state
 
 The command checks local hashes, verifies the cohort history, selects the model
 delivery mechanism from the signed plan or its authenticated transport adoption, waits for complete byte
