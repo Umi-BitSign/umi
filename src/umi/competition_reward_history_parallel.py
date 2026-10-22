@@ -203,7 +203,7 @@ async def _run(reader, provider, last, stop):
         try:
             while reader._next <= last and not stop.is_set():
                 await reader._restore_prefix(provider, last)
-                if reader._next > last:
+                if reader._next > last or stop.is_set():
                     break
                 entries = []
                 window_last = min(last, reader._next + count - 1)
@@ -229,10 +229,14 @@ async def _run(reader, provider, last, stop):
                 # Recheck cheap source revisions before publication/application;
                 # no repeated hashing or native verification of unchanged bytes.
                 for value, (height, fields, _) in zip(values, entries, strict=False):
+                    if stop.is_set():
+                        break
                     if await run_owned_thread(reader.checkpoints.load, height) != value:
                         raise HistoryCheckpointRepairRequired(
                             "checkpoint changed during parallel verification"
                         )
+                    if stop.is_set():
+                        break
                     if reader.export_archive is not None:
                         await run_owned_thread(
                             reader._export_fields, height, fields, reader.export_archive
@@ -264,8 +268,24 @@ async def _run(reader, provider, last, stop):
             raise failure from None
 
 
+class _HistoryStop:
+    """Local cancellation must not request shutdown of unrelated owners."""
+
+    def __init__(self, shutdown_event):
+        self.local = asyncio.Event()
+        self.shutdown_event = shutdown_event
+
+    def is_set(self):
+        return self.local.is_set() or (
+            self.shutdown_event is not None and self.shutdown_event.is_set()
+        )
+
+    def set(self):
+        self.local.set()
+
+
 async def advance_parallel_locked(reader, provider, last):
     """Caller retains reader and journal locks until all native children drain."""
-    stop = asyncio.Event()
+    stop = _HistoryStop(reader.shutdown_event)
     task = asyncio.create_task(_run(reader, provider, last, stop))
     await await_owned_task(task, on_cancel=stop.set)

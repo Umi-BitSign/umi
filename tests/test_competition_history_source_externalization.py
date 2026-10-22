@@ -1,5 +1,6 @@
 """Original native verdicts survive remote payload eviction, restart and repair."""
 
+import asyncio
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -73,6 +74,32 @@ def fresh_remote(reader, remote, root):
         maximum_bytes=reader.journal.maximum_bytes,
         remote_store=remote,
     )
+
+
+async def test_shutdown_does_not_admit_another_source_replication_batch(
+    history_case, tmp_path, monkeypatch
+):
+    h = history_case
+    stop = asyncio.Event()
+    remote = store(tmp_path / "shutdown-remote", EvidenceServer())
+    h.reader = reopen(h.reader, remote)
+    h.reader.shutdown_event = stop
+    externalize = h.reader._externalize_sources
+    batches = []
+
+    def finish_owned_batch(maximum_records):
+        result = externalize(maximum_records)
+        batches.append(result)
+        # A stop during the first owned replication must not start capture or
+        # another replication batch, even though the caller wasn't cancelled.
+        stop.set()
+        return result
+
+    monkeypatch.setattr(h.reader, "_externalize_sources", finish_owned_batch)
+    result = await h.reader.advance(h.item.provider, through_block=h.end)
+    assert result.history is None and result.next_block == h.reader.first_block
+    assert len(batches) == 1 and not h.body_requests
+    assert h.reader.progress.latest["shutdown_state"] == "drained"
 
 
 async def test_read_through_keeps_original_local_delivery_without_claiming_r2_replication(
