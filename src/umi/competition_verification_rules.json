@@ -569,7 +569,7 @@
     "registration_bridge.py": "4bc2940b3c598c1aeeb93d82c0bff0d23a1b6ebcd675237c57cd8c8b92a0843c",
     "resources.py": "ea9fe3b319014d91b19e271c12573faa47371bf2d759ac1b59248e794db4b1ba",
     "rpc_bittensor.py": "f522fb9f11a6b2f31e2d5001e91556b9b88f754ec98ffd32d0281e0178964956",
-    "rpc_transport.py": "cea84c9e29ebf2b0ad34b6a7df791a0b24e5b2bf64e958e8b82e90a3a2bf2d52",
+    "rpc_transport.py": "3b2d6919bdac086ef7284d1987976fb086e7aae9b0d163d20920911c297f1b95",
     "runtime_metadata.py": "91e4688fd8e044c9df15a9edc45d0e845491610906ce5625f7b08a61f403595d",
     "runtime_targets.py": "22275241770a418756b90fb053eeb568f77eed83c9c8583b8355df051f2c1f40",
     "scoring.py": "6b36ffbf2dcbb0e7bd15ffb71785133cbb50bf8db81fe1c4f024cbcbf1a4e14b",

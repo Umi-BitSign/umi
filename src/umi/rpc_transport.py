@@ -30,6 +30,7 @@ from websockets.http11 import Response
 CONFIG_ENV = "UMI_RPC_TRANSPORT_CONFIG"
 WORKER_DIRECTORY = "/run/umi-rpc"
 CONFIG_FILENAME = "transport.json"
+LOOPBACK_SIDECAR_ENDPOINT = "ws://127.0.0.1:9955"
 _QUIET_LOGGER = logging.Logger("umi.private_rpc_transport")
 _QUIET_LOGGER.disabled = True
 _LOGGER = logging.getLogger(__name__)
@@ -94,9 +95,13 @@ class RpcRoute:
     authorization_file: Path | None
 
 
-def _endpoint(value: Any) -> str:
+def _endpoint(value: Any, *, allow_loopback_sidecar: bool = False) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= 2048:
         raise ValueError("rpc_transport_endpoint_invalid")
+    # Only the operator-owned route destination can select the exact local
+    # sidecar. Signed/source endpoint identities continue to require TLS.
+    if allow_loopback_sidecar and value == LOOPBACK_SIDECAR_ENDPOINT:
+        return value
     parsed = urlsplit(value)
     if (
         parsed.scheme != "wss"
@@ -167,7 +172,8 @@ def load_routes(path: Path) -> dict[str, RpcRoute]:
         for record in records:
             if set(record) != {"source", "endpoint", "authorization_file"}:
                 raise ValueError
-            source, endpoint = _endpoint(record["source"]), _endpoint(record["endpoint"])
+            source = _endpoint(record["source"])
+            endpoint = _endpoint(record["endpoint"], allow_loopback_sidecar=True)
             name = record["authorization_file"]
             if name is not None and (
                 not isinstance(name, str)

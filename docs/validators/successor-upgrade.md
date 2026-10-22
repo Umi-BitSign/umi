@@ -2869,6 +2869,35 @@ existing transport fallback. An invalid route configuration requires correction.
 Verify authenticated reads from the installed host and worker before claiming
 the operational switch is complete.
 
+For an operator-managed local RPC sidecar, a route destination may be exactly
+`ws://127.0.0.1:9955`, with `authorization_file` set to `null` when the local
+service requires no credential. This is the only plaintext route destination.
+Sources and external destinations retain their credential-free `wss://`
+requirement; other ports, `localhost`, alternate loopback addresses, paths,
+credentials, queries and fragments are refused. The route disables outbound
+proxy selection and does not follow redirects.
+
+Select that destination through the private operational route file, rather than
+changing `rpc_url` in a retained chain configuration. Keep its source URL, native
+finality/proof pins, signed inputs and clocks, state paths and existing independent
+fallbacks unchanged. A transport route does not establish validity: native
+finality and storage proofs still decide which responses are accepted. SDK unknown
+transaction outcomes retain their existing recovery rules; an endpoint change
+never authorizes resending an ambiguous extrinsic.
+
+Older released route readers reject this local destination before opening a
+socket. Qualify the candidate source reader and its verification manifest before
+selecting it, including repeat reads, restart and reopening retained native state.
+The same `umi-rpc-transport/1` file is read without migration or rewriting; rolling
+back the destination to the original secure source also preserves chain/cache
+bindings. Service upgrades must preserve the route environment and file binding.
+The managed endpoint service upgrader requires Linux/systemd; its macOS model-client
+installer does not constitute a launchd endpoint-service migration. A macOS
+endpoint deployment must separately qualify its installed source selection,
+service account, launchd environment and cooperative stop/restart before cutover.
+Do not use a user LaunchAgent to bypass the ownership of an existing system
+LaunchDaemon or start another miner against its journals.
+
 When all proof providers fail, the phase report retains each provider's index,
 request method and block hash, numeric JSON-RPC or HTTP error, and a bounded
 transport category such as `timeout` or `connection_closed`. Inspect every
