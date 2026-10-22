@@ -13,7 +13,7 @@
     "bootstrap_weights.py": "de0ce5b8448e13a07cf2d78e2215b16eda834c71412468933854a3f84aa8c55d",
     "canonical_aggregate.py": "b55a54a6301bd4401549f3fb26f5be7ae69261014dd51014b8c218a502485762",
     "canonical_proof.py": "3c7cf4b17d03584f4e9ebc62ea5de3f43aaf3d8683f9e9a543ecf362174016ac",
-    "canonical_reuse.py": "a20941fa2c175175ad3f639810d8d7a81dcfebdd3a8305da9e2d58ce9e1a2adb",
+    "canonical_reuse.py": "d78cba06a0392fcca3a04e0c5fb516929efc7f1a7a8df73c653fff316e2dc8e0",
     "canonical_stream.py": "d5bcd3334e077414d726db1d7c284156d3857dd2ad421a63cb9ea356c21e8f3c",
     "chain.py": "ea37d85c2a2d7713ccd6e1e9861855584d8d417bbb47681a9084ea9a474524db",
     "chain_evidence.py": "4a72f1316a718dada75e98e3998c2a8f886a525ced042a08a9da11985ce7540c",
