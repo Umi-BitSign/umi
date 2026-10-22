@@ -76,6 +76,10 @@ class DirectModelUploadPending(OSError):
     """A retained attempt is still inside its crash-recovery lease."""
 
 
+class DirectModelProviderUnavailable(DirectModelUploadPending):
+    """Provider generation and completed object are both absent; signed restart needed."""
+
+
 class DirectModelUploadOwnerConfig(StrictProtocolModel):
     schema_: Literal["umi-direct-model-upload-owner-config/1"] = Field(alias="schema")
     directory: Directory
@@ -505,7 +509,8 @@ class DirectModelUploadOwner:
                     raise ValueError("direct upload restart reservation was superseded")
                 if (
                     self.journal.get("direct-object", request.reservation_sha256) is not None
-                    or self.journal.get("direct-completion", request.reservation_sha256) is not None
+                    or self.journal.get("direct-verification", request.reservation_sha256)
+                    is not None
                 ):
                     raise ValueError("completed direct upload cannot be restarted")
                 if now_unix_ms < attempt.retry_after_unix_ms:
@@ -519,6 +524,12 @@ class DirectModelUploadOwner:
                     raise DirectModelUploadPending(
                         "direct upload provider generation remains available"
                     )
+                # A signed completion is an intent, not proof of an object. A
+                # provider may have committed despite a lost response, so fence
+                # replacement on HEAD as well as multipart absence. Never erase
+                # that original completion or replace a remotely completed object.
+                if await self.multipart.head(attempt.object_key, at=at) is not None:
+                    raise ValueError("completed direct upload cannot be restarted")
                 self.journal.put(
                     "direct-restart-request", request.reservation_sha256, signed_restart
                 )
@@ -898,11 +909,16 @@ class DirectModelUploadOwner:
                     )
                 except OSError:
                     head = await self.multipart.head(attempt.object_key, at=at)
-                    if (
-                        head is None
-                        or head.size_bytes != reservation.reservation.payload.total_bytes
-                    ):
+                    if head is None:
+                        if not await self.multipart.multipart_exists(
+                            attempt.object_key, upload_id=provider.provider_upload_id, at=at
+                        ):
+                            raise DirectModelProviderUnavailable(
+                                "direct upload provider generation and object are unavailable"
+                            ) from None
                         raise
+                    if head.size_bytes != reservation.reservation.payload.total_bytes:
+                        raise ValueError("completed direct upload object size differs") from None
                     provider_etag = head.etag
             else:
                 provider_etag = head.etag

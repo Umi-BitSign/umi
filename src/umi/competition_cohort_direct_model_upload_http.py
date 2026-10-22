@@ -16,6 +16,7 @@ from .competition_cohort_direct_model_attempts import (
     DirectModelMetadataCapacityPending,
 )
 from .competition_cohort_direct_model_owner import (
+    DirectModelProviderUnavailable,
     DirectModelUploadOwner,
     DirectModelUploadPending,
 )
@@ -145,6 +146,12 @@ def direct_model_upload_routes(
             if value.completion.reservation_sha256 != reservation:
                 raise ValueError("direct model upload completion path differs")
             return await owner.complete(value, now_unix_ms=now_unix_ms())
+        except DirectModelProviderUnavailable as error:
+            raise HTTPException(
+                503,
+                "direct model provider generation expired; signed restart required",
+                headers={"X-UMI-Reason-Code": "model_upload_provider_generation_unavailable"},
+            ) from error
         except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
             raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:

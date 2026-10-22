@@ -1121,3 +1121,130 @@ async def test_http_metadata_damage_is_retryable_and_repair_preserves_reservatio
     )
     assert len(direct.authorizations) == 1
     assert len(direct.multipart.create_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_replacement", [False, True])
+async def test_expired_provider_after_retained_completion_intent_resumes_same_upload(
+    direct, monkeypatch, fail_replacement
+):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completion = signed_completion(first, direct.payload.payload)
+
+    async def provider_unavailable(*args, **kwargs):
+        raise OSError("completion failed before provider commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct.multipart, "complete", provider_unavailable)
+        with pytest.raises(OSError, match="before provider commit"):
+            await direct.owner.complete(completion, now_unix_ms=1_800_000_010_000)
+    first_sha = digest(first.reservation)
+    original = direct.owner.journal.get("direct-completion", first_sha)
+    assert original is not None
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    provider = direct.owner.journal.get("direct-provider", first.reservation.attempt_id)
+    direct.multipart.multipart_uploads.remove(
+        (attempt["object_key"], provider["provider_upload_id"])
+    )
+    restart = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    signed_restart = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=restart,
+        signature=sign_object(restart, wallet("Alice")),
+    )
+    now = 1_800_000_121_000
+    if fail_replacement:
+        direct.multipart.fail_creates = 1
+        with pytest.raises(OSError, match="provider offline"):
+            await direct.owner.restart(signed_restart, now_unix_ms=now)
+        assert direct.owner.journal.get("direct-completion", first_sha) == original
+        with pytest.raises(DirectModelUploadPending):
+            await direct.owner.restart(signed_restart, now_unix_ms=now + 1)
+        now += 121_000
+    second = await direct.owner.restart(signed_restart, now_unix_ms=now)
+    assert second.reservation.generation == (3 if fail_replacement else 2)
+    assert second.reservation.payload == first.reservation.payload
+    assert direct.owner.journal.get("direct-completion", first_sha) == original
+    assert await direct.owner.restart(signed_restart, now_unix_ms=now + 1) == second
+    assert len(direct.authorizations) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_object", [False, True])
+async def test_completion_intent_recovery_requires_absent_provider_and_object(
+    direct, remote_object
+):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    first_sha = digest(first.reservation)
+    direct.owner.journal.put(
+        "direct-completion", first_sha, signed_completion(first, direct.payload.payload)
+    )
+    attempt = direct.owner.journal.get("direct-intent", first.reservation.attempt_id)
+    if remote_object:
+        direct.multipart.multipart_uploads.clear()
+        direct.multipart.objects[attempt["object_key"]] = (
+            direct.multipart.total_bytes,
+            "committed",
+        )
+    request = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=first_sha,
+        generation=first.reservation.generation,
+        reason_code="provider_upload_unavailable",
+    )
+    wrong = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=request,
+        signature=sign_object(request, wallet("Bob")),
+    )
+    with pytest.raises(ValueError, match="signer"):
+        await direct.owner.restart(wrong, now_unix_ms=1_800_000_121_000)
+    signed = wrong.model_copy(update={"signature": sign_object(request, wallet("Alice"))})
+    if remote_object:
+        with pytest.raises(ValueError, match="completed"):
+            await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+    else:
+        with pytest.raises(DirectModelUploadPending, match="remains available"):
+            await direct.owner.restart(signed, now_unix_ms=1_800_000_121_000)
+    assert direct.owner.journal.get("direct-superseded", first_sha) is None
+    assert len(direct.multipart.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_expiry_http_reports_signed_restart_reason(direct, monkeypatch):
+    first = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completion = signed_completion(first, direct.payload.payload)
+    direct.multipart.multipart_uploads.clear()
+
+    async def expired(*args, **kwargs):
+        raise OSError("NoSuchUpload")
+
+    monkeypatch.setattr(direct.multipart, "complete", expired)
+    app = FastAPI()
+    app.include_router(
+        direct_model_upload_routes(direct.owner, now_unix_ms=lambda: 1_800_000_121_000)
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="https://intake.example"
+    ) as client:
+        response = await client.post(
+            f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/direct-model-uploads/{digest(first.reservation)}/complete",
+            content=canonical_json_bytes(completion),
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 503
+    assert response.headers["X-UMI-Reason-Code"] == "model_upload_provider_generation_unavailable"
+    assert direct.owner.journal.get(
+        "direct-completion", digest(first.reservation)
+    ) == completion.model_dump(mode="json", by_alias=True)

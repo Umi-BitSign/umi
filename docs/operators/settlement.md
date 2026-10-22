@@ -2952,6 +2952,16 @@ entire stream, every declared file, and the license/provenance documents. A
 model cannot enter participation or artifact acceptance before those checks and
 the standing review complete.
 
+Retained completion metadata is a signed intent, not a completed-object verdict.
+If provider completion fails and both the multipart generation and object are
+absent, completion returns HTTP503 with
+`X-UMI-Reason-Code: model_upload_provider_generation_unavailable`. The supported
+client authenticates a restart, waits for the original attempt lease, then resends
+parts under a new generation. The owner preserves the original completion and
+signed restart/supersession records. Existing completed or verified objects cannot
+be replaced; an existing provider object reconciles a lost response. Provider
+outages or unknown object status remain retry holds and never authorize replacement.
+
 The direct host reuses the admission owner's hotkey and key file. Configure a
 separate private metadata `directory`, the R2 credential file and bucket, plus
 the standing review policy. The credential export must be an absolute,
