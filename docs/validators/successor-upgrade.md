@@ -783,6 +783,14 @@ when SIGTERM or SIGINT sets their stop event, including during initial history
 replay. The current owned operation and cleanup finish before process ownership
 is released; shutdown need not finish the remaining replay batch. This does not
 add a forced termination deadline or permit a replacement writer to overlap.
+The coordinator, reviewer, writer and explicit history repair pass that same stop
+event into both current and predecessor history readers. Serial capture and
+parallel native workers finish already owned proof/checkpoint operations, then
+stop admitting blocks, exports and source-replication batches. Durable successful
+checkpoints remain reusable on restart. History diagnostics withdraw the full
+interval forecast during shutdown and report drainage separately; a drained
+reader does not imply a completed history interval. Signing and submission keep
+their existing ownership shield.
 
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.

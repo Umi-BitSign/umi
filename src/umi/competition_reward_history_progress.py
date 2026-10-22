@@ -58,6 +58,7 @@ class HistoryProgress:
         self._ancestry_sample = None
         self.forecast = None
         self.forecast_health = None
+        self.shutdown_started = None
 
     def start(self, target, next_block, *, repair=False):
         now = time.monotonic()
@@ -148,6 +149,9 @@ class HistoryProgress:
         prior_stage = self.stage
         self.stage = "history_progress_inventory"
         for low in range(first, self.target + 1, 512):
+            shutdown = getattr(reader, "shutdown_event", None)
+            if shutdown is not None and shutdown.is_set():
+                break
             high = min(low + 511, self.target)
             rows = await run_owned_thread(reader.checkpoints.progress_rows, low, high, identity)
             for stage, heights in zip(self.durable, rows, strict=True):
@@ -265,6 +269,10 @@ class HistoryProgress:
         # A broken diagnostics sink must never change a native result or error.
         try:
             now = time.monotonic()
+            shutdown = getattr(reader, "shutdown_event", None)
+            stopping = shutdown is not None and shutdown.is_set()
+            if stopping and self.shutdown_started is None:
+                self.shutdown_started = now
             if ancestry_progress is None and self._ancestry_watch is not None:
                 telemetry, target = self._ancestry_watch
                 if telemetry.active and telemetry.latest.get("target_block") == target:
@@ -469,6 +477,24 @@ class HistoryProgress:
                     if unavailable
                     else ancestry.get("eta_basis"),
                     stage_eta_scope=ancestry.get("eta_scope"),
+                )
+            if stopping:
+                self.latest.update(
+                    shutdown_requested=True,
+                    shutdown_elapsed_seconds=now - self.shutdown_started,
+                    shutdown_state="draining" if self.active else "drained",
+                    shutdown_eta_seconds=None if self.active else 0,
+                    shutdown_eta_basis="finish_owned_native_and_durable_operations"
+                    if self.active
+                    else "owned_history_operations_drained",
+                    eta_seconds=0 if state == "completed" else None,
+                    planning_eta_seconds=None,
+                    eta_basis="complete_selected_history_interval"
+                    if state == "completed"
+                    else "withdrawn_shutdown_requested",
+                    stage_eta_seconds=None,
+                    stage_planning_eta_seconds=None,
+                    stage_eta_basis="withdrawn_shutdown_requested",
                 )
             if force or state != "running" or now - self.last_emitted >= self.heartbeat_seconds:
                 self.last_emitted = now

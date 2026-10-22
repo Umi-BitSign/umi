@@ -971,3 +971,83 @@ async def test_repeated_cancellation_drains_publication_and_native_lookahead_bef
     assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
     assert h.body_requests.count(first) == 1
     assert h.body_requests.count(first + 1) == (2 if native_failure else 1)
+
+
+@pytest.mark.parametrize("publication", ["save", "export"])
+async def test_shutdown_event_drains_owned_capture_and_reuses_success_after_restart(
+    capture_pipeline_case, monkeypatch, tmp_path, publication
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    h = capture_pipeline_case
+    first = h.reader.first_block
+    stop = h.reader.shutdown_event = asyncio.Event()
+    h.reader.export_archive = RewardProofArchive(tmp_path / "shutdown-export")
+    published, native_started = asyncio.Event(), asyncio.Event()
+    release_publication, release_native = threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    method = "_save" if publication == "save" else "_export"
+    publish = getattr(h.reader, method)
+    verify = h.item.verifier.verify_extrinsics_root
+    calls = 0
+
+    def blocked_publication(observation, *args):
+        if observation.slot.snapshot.block_number == first:
+            loop.call_soon_threadsafe(published.set)
+            assert release_publication.wait(10)
+        return publish(observation, *args)
+
+    def blocked_native(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            loop.call_soon_threadsafe(native_started.set)
+            assert release_native.wait(10)
+        return verify(**kwargs)
+
+    monkeypatch.setattr(h.reader, method, blocked_publication)
+    monkeypatch.setattr(h.item.verifier, "verify_extrinsics_root", blocked_native)
+    task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
+    try:
+        await asyncio.wait_for(published.wait(), 5)
+        await asyncio.wait_for(native_started.wait(), 5)
+        stop.set()  # CLI SIGTERM sets this event without cancelling the shielded step.
+        stop.set()
+        await asyncio.sleep(0)
+        assert not task.done() and h.reader._lock.locked()
+        release_publication.set()
+        await asyncio.sleep(0)
+        assert not task.done() and h.reader._lock.locked()
+        with pytest.raises((ValueError, RuntimeError, BlockingIOError)):
+            await h.new_reader().advance(h.item.provider, through_block=h.end)
+    finally:
+        release_publication.set()
+        release_native.set()
+    result = await asyncio.wait_for(task, 10)
+    assert result.history is None and result.next_block == first
+    assert not task.cancelled() and not h.reader._lock.locked()
+    assert h.reader.checkpoints.load(first) is not None
+    assert h.reader.checkpoints.load(first + 1) is not None
+    assert h.body_requests == [first, first + 1]
+    assert h.reader.progress.latest["shutdown_state"] == "drained"
+    assert h.reader.progress.latest["eta_seconds"] is None
+    h.offline_through = first + 1
+    h.reader = await h.restart()
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history is not None
+    assert h.body_requests.count(first) == h.body_requests.count(first + 1) == 1
+
+
+async def test_already_stopping_reader_rejects_invalid_input_without_new_work(
+    capture_pipeline_case,
+):
+    h = capture_pipeline_case
+    h.reader.shutdown_event = asyncio.Event()
+    h.reader.shutdown_event.set()
+    for _ in range(2):
+        result = await h.reader.advance(h.item.provider, through_block=h.end)
+        assert result.history is None and result.next_block == h.reader.first_block
+    assert not h.body_requests
+    with pytest.raises(ValueError, match="work count"):
+        await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=0)
+    with pytest.raises(ValueError, match="provider differs"):
+        await h.reader.advance(object(), through_block=h.end)

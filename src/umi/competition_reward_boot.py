@@ -460,6 +460,7 @@ async def run_installed_standing_rewards(
         verification_profile=config.service.history_verification,
         archive=imported,
         export_archive=exported,
+        shutdown_event=stop,
     )
     coverage = RewardCoverageJournal(
         root / "coverage",
@@ -538,6 +539,7 @@ async def run_installed_standing_rewards(
                 verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
+                shutdown_event=stop,
             )
             select_history_forecasts(
                 old_history,

@@ -128,6 +128,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
     ensure_private_directory(root / "history")
     (root / "history" / "rounds.sqlite3").touch(mode=0o600)
     providers, arguments = [], []
+    shutdown = asyncio.Event()
 
     class Request:
         sha256 = "11" * 32
@@ -147,6 +148,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
             assert kwargs["maximum_bytes"] == config.maximum_history_bytes
             assert kwargs["repair_record_capacity"] is True
             assert kwargs["verification_profile"] == history_profile
+            assert kwargs["shutdown_event"] is shutdown
             with pytest.raises(PrivateStateBusyError):
                 lock_private_file(root / "service.lock")
             if failure == "metadata":
@@ -200,7 +202,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
             with pytest.raises(expected):
                 await repair.run_reward_history_repair(
                     config,
-                    asyncio.Event(),
+                    shutdown,
                     through_block=200,
                     reason="original restored",
                     history=selection,
@@ -208,7 +210,7 @@ async def test_repair_uses_original_bindings_no_keys_and_closes_provider(
         else:
             result = await repair.run_reward_history_repair(
                 config,
-                asyncio.Event(),
+                shutdown,
                 through_block=200,
                 reason="original restored",
                 history=selection,

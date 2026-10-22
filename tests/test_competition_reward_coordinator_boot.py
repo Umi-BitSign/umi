@@ -341,6 +341,7 @@ async def test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             )
             assert self.history.journal.maximum_bytes == config.maximum_history_bytes
             assert self.history.verification_profile == history_profile
+            assert self.history.shutdown_event is stop
             assert self.history.progress.forecast is not None
             assert self.history.progress.forecast.identity["series_sha256"] == digest(
                 selected_series

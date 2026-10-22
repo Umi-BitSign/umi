@@ -516,6 +516,7 @@ async def test_native_assembly_preserves_configuration_and_closes_owned_provider
         assert kwargs["legacy_providers"] == {digest(old.chain): providers[1]}
         assert providers[1].kwargs["resources"] == old.resources
         assert kwargs["history"].verification_profile == history_profile
+        assert kwargs["history"].shutdown_event is kwargs["stop"]
         forecast = kwargs["history"].progress.forecast
         assert forecast is not None
         assert forecast.identity["series_sha256"] == digest(selected.series)
@@ -604,6 +605,8 @@ async def test_successor_native_assembly_reconstructs_predecessor_owners(inputs,
         assert coverage.preparation.manifest == i.value.manifest
         assert coverage.profile == i.value.eligibility
         assert coverage.history.verification_profile == history_profile
+        assert coverage.history.shutdown_event is kwargs["stop"]
+        assert kwargs["history"].shutdown_event is kwargs["stop"]
         assert kwargs["history"].verification_profile == history_profile
         assert coverage.history.archive is kwargs["history"].archive
         assert coverage.history.export_archive is kwargs["history"].export_archive

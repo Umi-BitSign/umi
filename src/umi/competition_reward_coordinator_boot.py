@@ -354,6 +354,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             verification_profile=config.service.history_verification,
             archive=imported,
             export_archive=exported,
+            shutdown_event=stop,
         )
         select_history_forecasts(
             history, root=root, config=config, resources=resources, role=config.role
@@ -444,6 +445,7 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 verification_profile=config.service.history_verification,
                 archive=imported,
                 export_archive=exported,
+                shutdown_event=stop,
             )
             select_history_forecasts(
                 old_history,

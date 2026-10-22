@@ -264,10 +264,12 @@ async def test_export_failure_retains_native_success_then_resume(
     assert h.reader.progress.latest["replicated_blocks"] is None
 
 
+@pytest.mark.parametrize("signal", ["cancel", "shutdown"])
 async def test_repeated_cancellation_drains_workers_and_provider_before_close(
-    parallel_case, monkeypatch
+    parallel_case, monkeypatch, signal
 ):
     h = parallel_case
+    h.reader.shutdown_event = asyncio.Event()
     first = h.reader.first_block
     h.fixture["delay"] = {first: 1.0, first + 1: 1.0}
     submitted = asyncio.Event()
@@ -283,16 +285,32 @@ async def test_repeated_cancellation_drains_workers_and_provider_before_close(
     task = asyncio.create_task(h.reader.advance(h.item.provider, through_block=h.end))
     await asyncio.wait_for(submitted.wait(), timeout=15)
     close = asyncio.create_task(h.item.provider.aclose())
-    task.cancel()
+    if signal == "cancel":
+        task.cancel()
+    else:
+        h.reader.shutdown_event.set()
     await asyncio.sleep(0.01)
-    task.cancel()
+    if signal == "cancel":
+        task.cancel()
+    else:
+        h.reader.shutdown_event.set()
     assert not close.done()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    if signal == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not h.reader.shutdown_event.is_set()
+    else:
+        result = await task
+        assert result.history is None and result.next_block == first
     await close
     assert h.reader.checkpoints.load(first) is not None
     assert h.reader.checkpoints.load(first + 1) is not None
     assert not multiprocessing.active_children()
+    if signal == "shutdown":
+        await h.restart()
+        h.reader = h.open_parallel()
+        assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+        assert h.reader.progress.native_completed == len(h.frames) - 2
 
 
 async def test_worker_crash_drains_without_claiming_history(parallel_case):

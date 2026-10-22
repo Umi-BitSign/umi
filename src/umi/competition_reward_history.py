@@ -233,6 +233,7 @@ class RewardControlHistoryReader:
         read_only: bool = False,
         physical_budget: JournalPhysicalBudget | None = None,
         compact_export_only: bool = False,
+        shutdown_event: asyncio.Event | None = None,
     ) -> None:
         _uint(first_block, 2**53 - 1)
         if first_block == 0:
@@ -242,6 +243,8 @@ class RewardControlHistoryReader:
         self.first_block = first_block
         self.verification_profile = verification_profile
         self.compact_export_only = compact_export_only
+        # Process lifecycle only: never part of signed or durable bindings.
+        self.shutdown_event = shutdown_event
         self._field_bounds = _FIELDS
         self.archive = archive
         self.export_archive = export_archive
@@ -655,7 +658,7 @@ class RewardControlHistoryReader:
         pending = following = None
         try:
             await self._restore_prefix(provider, last)
-            if self._next <= last:
+            if self._next <= last and (stop is None or not stop.is_set()):
                 pending = self._start_preparation(provider, self._next)
             while self._next <= last and (stop is None or not stop.is_set()):
                 await pending.ready.wait()
@@ -749,14 +752,20 @@ class RewardControlHistoryReader:
         async with self._lock:
             if through_block < self.first_block or through_block < self._next - 1:
                 raise ValueError("control history target regressed")
+            if self._shutdown_requested():
+                history = self._prefix(through_block) if self._next == through_block + 1 else None
+                return ControlHistoryProgress(self._next, through_block, history)
             with self.journal.locked():
                 await self._restore_completed_admission(provider, through_block)
                 last = min(through_block, self._next + maximum_blocks - 1)
-                await self.progress.inventory(self)
-                if self.verification_profile is not None:
+                if not self._shutdown_requested():
+                    await self.progress.inventory(self)
+                if self._shutdown_requested():
+                    pass  # An owned restore finished; do not admit another batch.
+                elif self.verification_profile is not None:
                     await advance_parallel_locked(self, provider, last)
                 else:
-                    await self._advance_capture_locked(provider, last)
+                    await self._advance_capture_locked(provider, last, stop=self.shutdown_event)
                 history = None
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)
@@ -920,6 +929,8 @@ class RewardControlHistoryReader:
         # any prefix. Unchanged proof payloads are never read or hashed here.
         await run_owned_thread(self.checkpoints.recheck_many, values)
         for value in values:
+            if self._shutdown_requested():
+                break
             value = await self._ensure_checkpoint_export(value)
             self.progress.restored_completed += 1
             self._apply_checkpoint(value)
@@ -1046,6 +1057,9 @@ class RewardControlHistoryReader:
         async with self._advance_lock, self._lock:
             return await run_owned_thread(self._externalize_sources, maximum_records)
 
+    def _shutdown_requested(self):
+        return self.shutdown_event is not None and self.shutdown_event.is_set()
+
     async def _observed_advance(self, provider, *, through_block, maximum_blocks):
         stop = asyncio.Event()
         # Preserve native argument rejection before starting diagnostics.
@@ -1062,7 +1076,7 @@ class RewardControlHistoryReader:
             and not (self.export_archive is not None and self.export_archive.legacy_read_through)
         )
         try:
-            if replicate_sources:
+            if replicate_sources and not self._shutdown_requested():
                 self.progress.stage = "history_source_replication"
                 self.progress.report(self, "running", force=True)
                 async with self._lock:
@@ -1070,7 +1084,7 @@ class RewardControlHistoryReader:
             result = await self._advance(
                 provider, through_block=through_block, maximum_blocks=maximum_blocks
             )
-            if replicate_sources:
+            if replicate_sources and not self._shutdown_requested():
                 self.progress.stage = "history_source_replication"
                 self.progress.report(self, "running", force=True)
                 async with self._lock:
@@ -1098,6 +1112,8 @@ class RewardControlHistoryReader:
         finally:
             stop.set()
             self.progress.finish()
+            if self._shutdown_requested():
+                self.progress.report(self, self.progress.state, force=True)
             # Diagnostic failures never mask native errors or abandon native
             # cancellation cleanup; the monitor owns no protocol work.
             if failed:
