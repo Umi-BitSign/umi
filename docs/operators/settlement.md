@@ -2952,6 +2952,16 @@ entire stream, every declared file, and the license/provenance documents. A
 model cannot enter participation or artifact acceptance before those checks and
 the standing review complete.
 
+Retained completion metadata is a signed intent, not a completed-object verdict.
+If provider completion fails and both the multipart generation and object are
+absent, completion returns HTTP503 with
+`X-UMI-Reason-Code: model_upload_provider_generation_unavailable`. The supported
+client authenticates a restart, waits for the original attempt lease, then resends
+parts under a new generation. The owner preserves the original completion and
+signed restart/supersession records. Existing completed or verified objects cannot
+be replaced; an existing provider object reconciles a lost response. Provider
+outages or unknown object status remain retry holds and never authorize replacement.
+
 The direct host reuses the admission owner's hotkey and key file. Configure a
 separate private metadata `directory`, the R2 credential file and bucket, plus
 the standing review policy. The credential export must be an absolute,
@@ -2959,6 +2969,37 @@ non-linked owner-private file containing exactly `TOKEN_VALUE`, `ACCESS_KEY_ID`,
 `SECRET_ACCESS_KEY` and `DEFAULT_ENDPOINT`; the account token is ignored by this
 runtime. The endpoint must be the account's HTTPS R2 S3 origin. Keep the direct
 metadata journal, R2 objects and review records across restart or migration.
+
+Provider generations have no independent lifetime attempt-count cutoff. The
+published `maximum_attempts_per_upload` field remains accepted for configuration
+compatibility; retained retry history is bounded by `maximum_metadata_bytes_per_cohort`.
+The per-cohort upload count still bounds distinct signed requests, including
+completed requests. Provision both allowances for the entire cohort and retries;
+completed deliveries release payload storage, not their signed request history.
+Polling reports retained uploads/attempts, highest generation and used, remaining
+and maximum metadata bytes. Metadata exhaustion returns retryable HTTP503 with
+`X-UMI-Reason-Code: model_upload_metadata_capacity_pending`; increasing the
+configured metadata allowance preserves the original journal and reservations.
+
+The supported owner upgrades the original direct-upload journal to capability6
+atomically, deriving one current-attempt row per original request without rewriting
+signed records. Perform the ordinary preserving stopped-owner upgrade and backup
+before selecting this runtime. Earlier readers and writers refuse capability6,
+including already constructed older writers on their next operation. Keep the
+previous runtime and backup for recovery; do not downgrade an active capability6
+store or reset its journal. These migration instructions remain required while
+supported installations retain capability0 direct-upload journals.
+
+Missing or damaged current-attempt metadata is a repair hold, not a new upload
+or malformed miner request. The service-owned maintenance path explicitly selects
+`repair_attempt_index=True` when constructing `DirectModelUploadOwner`; ordinary
+startup never silently repairs existing capability6 indexes. Repair reconstructs
+only derived rows in one transaction from original intents and indexes, with
+counted migration/repair progress, elapsed time and an ETA. Missing original records,
+gaps or changed identities refuse repair and require restoration of the original
+retained metadata. Clients receive retryable HTTP503 with
+`X-UMI-Reason-Code: model_upload_metadata_repair_required` throughout that hold.
+
 The public delivery-discovery route resolves the owner's authenticated published
 history. New reservations additionally require fresh finalized-chain authority.
 An unfinished adoption fences new reservations and acceptance intents; the legacy

@@ -122,6 +122,7 @@ class DirectModelUploadHostConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
     maximum_uploads_per_cohort: Annotated[int, Field(ge=1, le=4096)] = 1024
+    # Compatibility declaration only; current retry history is metadata-bounded.
     maximum_attempts_per_upload: Annotated[int, Field(ge=2, le=64)] = 16
     maximum_metadata_bytes_per_cohort: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
     attempt_lease_seconds: Annotated[int, Field(ge=30, le=900)] = 120

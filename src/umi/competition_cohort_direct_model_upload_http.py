@@ -11,7 +11,12 @@ from functools import partial
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from .competition_cohort_direct_model_attempts import (
+    DirectModelAttemptRepairRequired,
+    DirectModelMetadataCapacityPending,
+)
 from .competition_cohort_direct_model_owner import (
+    DirectModelProviderUnavailable,
     DirectModelUploadOwner,
     DirectModelUploadPending,
 )
@@ -51,6 +56,19 @@ async def _json_body(request: Request, *, maximum_bytes: int) -> bytes:
         raise HTTPException(408, "direct model upload request timed out") from error
 
 
+def _metadata_pending(error):
+    reason = (
+        "model_upload_metadata_repair_required"
+        if isinstance(error, DirectModelAttemptRepairRequired)
+        else "model_upload_metadata_capacity_pending"
+    )
+    return HTTPException(
+        503,
+        "direct model upload metadata pending; retry unchanged",
+        headers={"X-UMI-Reason-Code": reason},
+    )
+
+
 def direct_model_upload_routes(
     owners: DirectModelUploadOwner | Mapping[str, DirectModelUploadOwner],
     *,
@@ -88,6 +106,8 @@ def direct_model_upload_routes(
             raise HTTPException(
                 503, "direct model upload creation pending; retry unchanged"
             ) from error
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
             raise HTTPException(422, "invalid direct model upload reservation") from error
         except (OSError, RuntimeError, sqlite3.Error) as error:
@@ -107,6 +127,8 @@ def direct_model_upload_routes(
             return await run_owned_thread(
                 partial(owner.issue_capabilities, value, now_unix_ms=now_unix_ms())
             )
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
             raise HTTPException(422, "invalid direct model upload part request") from error
         except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
@@ -124,6 +146,14 @@ def direct_model_upload_routes(
             if value.completion.reservation_sha256 != reservation:
                 raise ValueError("direct model upload completion path differs")
             return await owner.complete(value, now_unix_ms=now_unix_ms())
+        except DirectModelProviderUnavailable as error:
+            raise HTTPException(
+                503,
+                "direct model provider generation expired; signed restart required",
+                headers={"X-UMI-Reason-Code": "model_upload_provider_generation_unavailable"},
+            ) from error
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
             raise HTTPException(422, "invalid direct model upload completion") from error
         except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
@@ -143,6 +173,8 @@ def direct_model_upload_routes(
             return await owner.restart(value, now_unix_ms=now_unix_ms())
         except DirectModelUploadPending as error:
             raise HTTPException(503, "direct model upload restart pending") from error
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
         except (ValidationError, ValueError) as error:
             raise HTTPException(422, "invalid direct model upload restart") from error
         except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
@@ -158,6 +190,8 @@ def direct_model_upload_routes(
             if digest(value.reservation.reservation) != reservation:
                 raise ValueError("direct model upload status identity differs")
             return value
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
         except FileNotFoundError as error:
             raise HTTPException(404, "direct model upload reservation not found") from error
         except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
