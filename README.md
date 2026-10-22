@@ -1,21 +1,21 @@
 # UMI
 
-UMI develops ASL-to-English translation through endpoint competition and
-reproducible public model contributions. Endpoint miners may keep their models
-private; contributors can submit runnable, licensed artifacts for promotion
-into successive public baselines.
+UMI develops ASL-to-English translation through reproducible public model
+contributions and evaluation. Contributors submit runnable, licensed artifacts
+for promotion into successive public baselines.
 
 ## Miners: start here
 
-- **New to SN78?** Follow the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) using subnet **78**, then read [what UMI miners should run now](docs/CURRENT_MINER_OPERATION.md).
-- **Already running an endpoint?** Apply the [current connection update](docs/miners/connection.md). An accepted receipt can remain valid while your service still needs this update.
-- **Set up and submit an endpoint:** [connect your model](docs/miners/model.md), [Apple Silicon setup](docs/miners/macos.md), and [competition intake instructions](docs/reference/commands.md#live-first-round-intake). On-chain registration and competition intake are separate steps.
+- **Submit a public model for C6:** follow the [model submission steps](docs/miners/model.md#model-files-for-recoverable-cohorts), including the separate admission-status check. Install the [published model client](docs/miners/connection.md#install-or-update-the-model-submission-client), even if you already run an endpoint miner.
+- **Check what is required now:** [current miner operation](docs/CURRENT_MINER_OPERATION.md) distinguishes live C5 rewards, C6 intake and successor preparation.
+- **Register a hotkey:** use the official [Bittensor registration guide](https://www.bittensor.com/docs/guides/mining) for subnet **78**. Registration alone does not submit a model or earn a competition reward.
+- **Maintain an existing endpoint:** use the [connection guide](docs/miners/connection.md) and [model integration guide](docs/miners/model.md). Endpoint enrollment is not a public-model submission for C6.
 
 ## Validators: start here
 
 - **Install:** [validator supervisor setup](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#install).
 - **Already installed?** [Check the service](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#check-the-service), [understand automatic updates](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#what-is-automatic), or [troubleshoot a hold or failed update](docs/PERMANENT_VALIDATOR_SUPERVISOR.md#troubleshooting).
-- **Check weights and eligibility:** [current bridge rules](docs/operators/bridge.md) and [finalized-row diagnostics](docs/operators/bridge.md#check-current-rows).
+- **Check results and reward state:** [public results API](docs/reference/competition-results-api.md) and the finalized chain allocation. Admission, scoring and active rewards are separate states.
 
 ## Documentation
 
@@ -27,37 +27,30 @@ into successive public baselines.
 
 ## Network phase
 
-The temporary registration bridge uses live HTTPS health checks and shared
-coldkey/IP/funding groups. It does not score translations. The ongoing bridge policy has no scheduled calendar sunset;
-historical finite policies retain their original expiry.
+C5 certification is complete and C5 competition rewards are live. C6 remains in
+public-model intake while its release preparation completes. Its evaluation and
+cohort certification have not started. The intake cutoff will be announced
+separately; an expired nominal block target is not a new cutoff announcement.
 
-Public competition intake is live. Use the [current connection
-guide](docs/miners/connection.md) for the exact miner release, policy files,
-binary downloads and service configuration. Check public status and readiness
-for the active phase, accepted tracks and whether admission accepts new
-submissions. The active cohort's published phase blocks are nominal progression
-targets, not non-extendable
-deadlines; liveness recovery retains original work, with a certified miner-tail
-cutoff described in the launch guide. Accepted submissions remain subject to the signed terms,
-registration, validity and selection rules.
-Open-competition rewards have not replaced the bridge. An
-`accepted_no_weight` receipt records an admitted submission; it does not prove
-evaluation, settlement or payment. See the
-[live competition status](https://api.umi.vision/v1/competition/status) and the
-[launch configuration](docs/competition/launch.md) for the exact policy and
-current phase. The [current upgrade manifest](deploy/miner-upgrade/current.json)
-binds the canonical competition and transport files, runtime revision and
-allowed participation tracks. The status also publishes an operator-declared repository revision and
-the UMI source-tree digest. Intake startup recomputes and enforces the source-tree
-digest. Release verification must separately confirm that the declared revision
-is the commit from which that exact tree was deployed.
+C6 uses direct R2 model delivery. Prepare public-model contributions for C6 and
+later cohorts; do not start an endpoint enrollment as a substitute. Later cohorts
+still require their authenticated successor plans before opening. Read the
+[current miner operation guide](docs/CURRENT_MINER_OPERATION.md), the
+[cohort catalog](https://api.umi.vision/v1/competition/cohorts) and the selected
+cohort's signed history/readiness before submitting.
 
-The `main` branch is reviewed source, not an activation signal. Launch-facing
-documentation on `main` must describe deployed behavior; incomplete features
-must be gated and labeled. Live behavior is defined by the exact signed policy,
-release and finalized chain row reported through the public status and release
-channels. Code, tests, a running process and staged artifacts do not activate
-rewards.
+The original submission receipt always says `pending_attestation`. It does not
+change when a certificate is issued. Run `query-cohort-admission` with the original
+signed request to read the current `admission_certified` status. Neither status
+means the model has been scored or has active rewards. The
+[submission guide](docs/miners/model.md#check-admission-after-upload) provides the
+exact command and explains each stage.
+
+The [current upgrade manifest](deploy/miner-upgrade/current.json) selects the
+published client and its authenticated policy/runtime bindings. The `main` branch
+is reviewed source, not an activation signal. Live behavior is defined by the
+signed deployment, cohort history and finalized chain state. Historical bridge
+instructions do not describe current C5 competition payouts.
 
 ## Development
 
