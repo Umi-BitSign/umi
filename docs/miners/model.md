@@ -46,7 +46,12 @@ offsets; direct delivery reuses its retained reservation and may safely resend
 idempotent parts. If the object store has expired an old unfinished multipart
 generation, the command obtains a signed replacement generation and restarts
 the parts automatically. The original signed model request and local source do
-not change.
+not change. Provider outages do not impose a lifetime generation limit on your
+upload. If intake reports `model_upload_metadata_capacity_pending` or
+`model_upload_metadata_repair_required` in the `X-UMI-Reason-Code` response header,
+keep retrying the same signed request; the operator must provision metadata
+capacity or repair the retained index. Changing your nonce or signing a new
+participation does not repair server metadata.
 An upgraded client checks for a retained legacy reservation for the exact same
 signed request before starting direct R2 delivery. A certified legacy original
 keeps its original protocol; already preserved remote bytes need no reupload.

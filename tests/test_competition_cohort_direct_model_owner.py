@@ -1032,3 +1032,92 @@ async def test_remote_verification_rechecks_only_changed_context(direct, monkeyp
         direct.multipart, key, bundle, payload, root=root, context=context
     )
     assert direct.multipart.read_calls > reads
+
+
+@pytest.mark.asyncio
+async def test_more_than_legacy_generation_limit_resumes_original_signed_upload(direct):
+    import itertools
+
+    counter = itertools.count(1)
+    direct.owner.new_attempt_id = lambda: f"{next(counter):064x}"
+    direct.multipart.fail_creates = 70
+    original_request = canonical_json_bytes(direct.request)
+    original_payload = canonical_json_bytes(direct.payload)
+    epoch = 1_800_000_000_000
+    for generation in range(70):
+        with pytest.raises(OSError, match="provider offline"):
+            await direct.owner.reserve(
+                direct.request, direct.payload, now_unix_ms=epoch + generation * 121_000
+            )
+    signed = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=epoch + 70 * 121_000
+    )
+    assert signed.reservation.generation == 71
+    assert len(direct.authorizations) == 1
+    assert canonical_json_bytes(direct.request) == original_request
+    assert canonical_json_bytes(direct.payload) == original_payload
+    reopened = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    retry = await reopened.reserve(direct.request, direct.payload, now_unix_ms=epoch + 71 * 121_000)
+    assert retry == signed
+    assert len(direct.multipart.create_calls) == 71
+    await reopened.complete(
+        signed_completion(signed, direct.payload.payload), now_unix_ms=epoch + 72 * 121_000
+    )
+    verified = await reopened.verify(digest(signed.reservation), now_unix_ms=epoch + 73 * 121_000)
+    assert verified.reservation_sha256 == digest(signed.reservation)
+    reads = direct.multipart.read_calls
+    assert (
+        await reopened.verify(digest(signed.reservation), now_unix_ms=epoch + 73 * 121_000)
+        == verified
+    )
+    assert direct.multipart.read_calls == reads
+    snapshot = reopened.journal.metadata_snapshot()
+    assert snapshot["retained_uploads"] == 1
+    assert snapshot["retained_attempts"] == 71
+    assert snapshot["highest_generation"] == 71
+    assert snapshot["metadata_bytes"] < snapshot["maximum_metadata_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_http_metadata_damage_is_retryable_and_repair_preserves_reservation(direct):
+    signed = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    with direct.owner.journal.transaction() as db:
+        db.execute("DELETE FROM direct_upload_attempt_heads")
+    app = FastAPI()
+    app.include_router(
+        direct_model_upload_routes(direct.owner, now_unix_ms=lambda: 1_800_000_200_000)
+    )
+    request = DirectModelUploadReservationRequest(
+        schema="umi-direct-model-upload-reservation-request/1",
+        request=direct.request,
+        payload=direct.payload,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://intake.test"
+    ) as client:
+        response = await client.post(
+            f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/direct-model-uploads",
+            content=canonical_json_bytes(request),
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 503
+    assert response.headers["X-UMI-Reason-Code"] == "model_upload_metadata_repair_required"
+    fixed = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        repair_attempt_index=True,
+    )
+    assert (
+        await fixed.reserve(direct.request, direct.payload, now_unix_ms=1_800_000_200_000) == signed
+    )
+    assert len(direct.authorizations) == 1
+    assert len(direct.multipart.create_calls) == 1
