@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from umi.competition_reward_coverage_collector import _log_retry
+from umi.competition_reward_coverage_source import NativeRewardCoverageSource
 from umi.competition_reward_eligibility import (
     RewardEligibilityRuntime,
     RewardRuntimeCodeMismatch,
@@ -95,3 +97,31 @@ def test_nested_code_drift_retry_logs_safe_numeric_identity_only(caplog):
     assert "reward_eligibility_runtime_code_mismatch" in caplog.text
     assert "ee" * 32 in caplog.text and "aa" * 32 in caplog.text
     assert "never-log-this" not in caplog.text and "provider.invalid" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_drift_is_detected_at_native_head_before_history_replay(eligibility_case):
+    t = eligibility_case
+    source = object.__new__(NativeRewardCoverageSource)
+    source.provider = t.provider
+    source.history = SimpleNamespace(hotkey=t.hotkey)
+    source.profile = t.profile.model_copy(update={"runtime_code_sha256": "ff" * 32})
+    source.runtime_selection = None
+    # No history advance, journal, package or model is available. The native
+    # preflight must report the exact code drift without invoking any of them.
+    with pytest.raises(RewardRuntimeCodeMismatch) as caught:
+        await source.finalized_height()
+    assert caught.value.expected_runtime_code_sha256 == "ff" * 32
+    assert caught.value.observed_runtime_code_sha256 == t.profile.runtime_code_sha256
+
+    # A supported selected profile resolves the head without discarding any
+    # retained history. Native collection/proof validation still runs.
+    selected_blocks = []
+
+    def selected(block):
+        selected_blocks.append(block)
+        return t.profile, "ab" * 32
+
+    source.runtime_selection = SimpleNamespace(recheck=lambda: None, selected=selected)
+    height = await source.finalized_height()
+    assert selected_blocks == [height]

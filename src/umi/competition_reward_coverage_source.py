@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_digest, checked_size
+from .competition_reward_control import validate_owned_reward_control
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, review_reward_coverage
 from .competition_reward_coverage_capture import capture_reward_eligibility
@@ -18,7 +19,7 @@ from .competition_reward_coverage_prepared import (
     RetainedCoveragePackage,
 )
 from .competition_reward_decisions import DecisionSource
-from .competition_reward_eligibility import RewardEligibilityRuntime
+from .competition_reward_eligibility import RewardEligibilityRuntime, validate_reward_runtime_code
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
@@ -90,6 +91,21 @@ class NativeRewardCoverageSource:
 
     async def finalized_height(self) -> int:
         control = await self.provider.collect_control(self.history.hotkey)
+        # A routine chain upgrade can change code while saved history and
+        # package verdicts remain valid. Detect it at the already collected
+        # native head, before starting an expensive fresh-history catch-up.
+        # Keep the collector retryable; only an authenticated, qualified
+        # adoption may change the selected profile. Never infer one from RPC.
+        validate_owned_reward_control(
+            control,
+            expected_control_hotkey=self.history.hotkey,
+            expected_chain_config_sha256=digest(self.provider.config),
+        )
+        profile = self.profile
+        if self.runtime_selection is not None:
+            self.runtime_selection.recheck()
+            profile, _ = self.runtime_selection.selected(control.snapshot.block_number)
+        validate_reward_runtime_code(control.runtime, profile)
         return control.snapshot.block_number
 
     async def _history(self, height):

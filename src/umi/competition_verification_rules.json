@@ -374,7 +374,7 @@
     "competition_reward_coverage_models.py": "01cdd44f8f9d8a5b447959c95304170eb51a121ee5669962e4908ea041652f4c",
     "competition_reward_coverage_prepared.py": "3646bb04561dc611b736d5e19d5e4dd0df72673559741f60bf717f935291ec84",
     "competition_reward_coverage_service.py": "eaf1927c5f6c059381661677f1c360d68cc506ebf19399b913d1a7aeab9d41fa",
-    "competition_reward_coverage_source.py": "7de25258eec581d9a8fad7e137687a77dd88120b7575f0e31cbbc1b7d0329d53",
+    "competition_reward_coverage_source.py": "12a8276a879fe3981703abdbc6737ca5b15e3a1fcf043b4ea4ae45e3fe5ed681",
     "competition_reward_cutover.py": "5279e9fc0ff753863102d75aaa5f5e45eb9500de1e448f49f904dfe5b352c0ad",
     "competition_reward_cutover_cli.py": "1f258889aba8f14a5ffc1e63dbaaace32fab71b35e8c6a282751fe7a360c1417",
     "competition_reward_cutover_ownership.py": "24fce270852971c4f0f9daa193dc9e722efce5727f67264ef278125173d4bb35",
