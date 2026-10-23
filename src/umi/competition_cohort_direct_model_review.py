@@ -335,7 +335,8 @@ class DirectModelArtifactReviewer:
                 self.verify_materialization_filesystem(Path(archive).parent)
             with (
                 TransferProgress(
-                    "model_materialization", payload.total_bytes,
+                    "model_materialization",
+                    payload.total_bytes,
                     total_operations=len(bundle.files) + 1,
                 ) as progress,
                 cache.allocation_lease() if cache is not None else nullcontext(),
@@ -364,7 +365,7 @@ class DirectModelArtifactReviewer:
         self.verify_materialization_filesystem(archive.parent)
         if cache is not None:
             with TransferProgress("model_cache_space_preparation", 1, unit="objects") as space:
-                cache.prepare(bundle)
+                cache.prepare(bundle, archive=archive)
                 space.advance(1)
         source = remote_identity(self.multipart, object_key, head)
         document_paths = tuple(
@@ -408,6 +409,7 @@ class DirectModelArtifactReviewer:
                 ),
                 reserve_bytes=self.config.materialization_free_space_reserve_bytes,
                 check_write=None if cache is None else cache.check_write,
+                check_file_write=None if cache is None else cache.check_file_write,
             )
             if await self.multipart.head(object_key) != head:
                 raise ValueError("direct model object changed during materialization")

@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .open_competition import digest
 from .private_files import Directory, ensure_private_directory, lock_private_file, private_path
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
@@ -43,6 +44,12 @@ class BootDiskModelCache:
         self.reserve_bytes = reserve_bytes
         self.metadata_bytes = 0
         self.last_report = 0.0
+        self.leased = False
+        self.archive = None
+        self.write_limits = {}
+        self.allocations = None
+        self.allocated = 0
+        self.incremental = False
 
     def validate_root(self, selected: Path):
         private_path(str(selected))
@@ -51,7 +58,19 @@ class BootDiskModelCache:
         ensure_private_directory(self.root)
         ensure_private_directory(selected)
 
-    def _measure(self, selected=None):
+    @staticmethod
+    def _entry_size(info, *, device, unit):
+        if (
+            info.st_dev != device
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+            or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+            or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        ):
+            raise ValueError("boot-disk cache contains an unsafe allocation")
+        return max(info.st_blocks * 512, ((info.st_size + unit - 1) // unit) * unit)
+
+    def _measure(self, selected=None, *, entries=None):
         """Read metadata only; sparse files cannot hide their potential allocation."""
         root = self.root.stat()
         unit = max(4096, os.statvfs(self.root).f_frsize)
@@ -60,15 +79,9 @@ class BootDiskModelCache:
         while pending:
             path = pending.pop()
             info = path.lstat()
-            if (
-                info.st_dev != root.st_dev
-                or info.st_uid != os.getuid()
-                or info.st_mode & 0o077
-                or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
-                or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
-            ):
-                raise ValueError("boot-disk cache contains an unsafe allocation")
-            size = max(info.st_blocks * 512, ((info.st_size + unit - 1) // unit) * unit)
+            size = self._entry_size(info, device=root.st_dev, unit=unit)
+            if entries is not None:
+                entries[path] = size
             total += size
             if selected is not None and (path == selected or selected in path.parents):
                 selected_bytes += size
@@ -81,6 +94,30 @@ class BootDiskModelCache:
     def _allocation(self):
         total, unit, _ = self._measure()
         return total, unit
+
+    def _managed_layout(self):
+        # Only the two sandbox slots have exclusive, allocation-lease-owned
+        # writers and read-only CPU consumers. Older boot roots can also hold
+        # invocation scratch or other consumers; retain full accounting there.
+        cache = self.root / "direct-model-cache"
+        return (
+            self.archive in (cache / "archive", cache / "standby")
+            and {p.name for p in self.root.iterdir()} <= {".allocation.lock", cache.name}
+            and cache.is_dir()
+            and {p.name for p in cache.iterdir()} <= {"archive", "standby"}
+        )
+
+    def _current_allocation(self):
+        if not self.incremental or not self._managed_layout():
+            self.incremental = False
+            self.allocations = None
+            return self._allocation()
+        if self.allocations is None:
+            entries = {}
+            self.allocated, unit, _ = self._measure(entries=entries)
+            self.allocations = entries
+            return self.allocated, unit
+        return self.allocated, max(4096, os.statvfs(self.root).f_frsize)
 
     @staticmethod
     def _metadata_bytes(bundle, unit):
@@ -113,7 +150,7 @@ class BootDiskModelCache:
 
     def available_bytes(self, *, minimum_growth_bytes=0):
         started = time.monotonic()
-        allocated, _ = self._allocation()
+        allocated, _ = self._current_allocation()
         usage = shutil.disk_usage(self.root)
         available = min(
             usage.free - self.reserve_bytes - self.metadata_bytes,
@@ -140,6 +177,9 @@ class BootDiskModelCache:
                         else "withdrawn_capacity_unavailable",
                         "eta_scope": "space_check_only_not_materialization",
                         "allocated_bytes": allocated,
+                        "allocation_basis": "exclusive_transfer_path_accounting"
+                        if self.incremental
+                        else "complete_metadata_scan",
                         "maximum_allocated_bytes": self.maximum_bytes,
                         "filesystem_free_bytes": usage.free,
                         "filesystem_reserve_bytes": self.reserve_bytes,
@@ -156,27 +196,87 @@ class BootDiskModelCache:
         # The existing transfer interface subtracts the physical reserve itself.
         return available + self.reserve_bytes
 
-    def prepare(self, bundle):
+    def prepare(self, bundle, *, archive=None):
         # Direct R2 materialization splits the concatenated payload into signed
         # files. There is no compressed archive or second payload/extraction
         # copy. Charge path creation, manifest/receipt publication and filesystem
         # rounding as well as the exact file bytes, including empty files.
-        _, unit = self._allocation()
+        unit = max(4096, os.statvfs(self.root).f_frsize)
         self.metadata_bytes = self._metadata_bytes(bundle, unit)
+        self.archive = None if archive is None else Path(archive)
+        self.write_limits = (
+            {}
+            if self.archive is None
+            else {
+                self.archive / digest(bundle) / "model" / f.path: f.size_bytes for f in bundle.files
+            }
+        )
+        self.allocations = None
+        # The first capacity read follows interrupted-file cleanup and captures
+        # actual allocation once. No payload is read or rehashed for accounting.
+        self.incremental = self.leased and self._managed_layout()
 
     def check_write(self, size):
         # Recheck actual free space immediately before every bounded write.
         # Independent non-cache activity can consume the boot filesystem during
         # a transfer; exhaustion is a retry, retaining completed file receipts.
+        # This older port has no path identity, so it cannot charge the next
+        # write incrementally. Preserve its existing complete-scan semantics.
+        self.incremental = False
+        self.allocations = None
         unit = max(4096, os.statvfs(self.root).f_frsize)
         required = ((size + unit - 1) // unit) * unit
         self.available_bytes(minimum_growth_bytes=required)
+
+    def check_file_write(self, path, size):
+        """Charge a signed file's next bounded append under the allocation lease.
+
+        The native restorers alone write these managed slots. Each holds the
+        same exclusive lease, enforces its signed paths/lengths, and reserves all
+        publication metadata up front. Read-only CPU consumers cannot mutate a
+        peer. Every write still checks real filesystem free space; older or
+        shared-with-scratch layouts keep the complete scan above.
+        """
+        path = Path(path)
+        if not self.leased or path not in self.write_limits or type(size) is not int or size < 1:
+            raise ValueError("model file write lacks its prepared exclusive allocation lease")
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size + size > self.write_limits[path]:
+            raise ValueError("model file write exceeds its signed allocation")
+        if not self.incremental or not self._managed_layout():
+            self.check_write(size)
+            return
+        self._current_allocation()
+        root = self.root.stat()
+        unit = max(4096, os.statvfs(self.root).f_frsize)
+        # Reconcile only this writer's affected file and ancestors. A repaired
+        # partial file can have a new inode/size; untouched peer files need no
+        # repeated directory walk. Metadata publication has its full reserved
+        # allowance, including new zero-length files and atomic temporary names.
+        for selected in (path, *path.parents):
+            if selected != self.root and self.root not in selected.parents:
+                break
+            current = info if selected == path else selected.lstat()
+            amount = self._entry_size(current, device=root.st_dev, unit=unit)
+            if selected != path and not stat.S_ISDIR(current.st_mode):
+                raise ValueError("model file write traverses an unsafe allocation")
+            self.allocated += amount - self.allocations.get(selected, 0)
+            self.allocations[selected] = amount
+        required = ((size + unit - 1) // unit) * unit
+        self.available_bytes(minimum_growth_bytes=required)
+        projected = max(info.st_blocks * 512, ((info.st_size + size + unit - 1) // unit) * unit)
+        self.allocated += projected - self.allocations[path]
+        self.allocations[path] = projected
 
     @contextmanager
     def allocation_lease(self):
         ensure_private_directory(self.root)
         descriptor = lock_private_file(self.root / ".allocation.lock")
         try:
+            self.leased = True
             yield self
         finally:
+            self.leased = self.incremental = False
+            self.allocations = None
+            self.write_limits = {}
             os.close(descriptor)

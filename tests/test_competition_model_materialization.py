@@ -75,13 +75,22 @@ def transfer(tmp_path, monkeypatch):
     reserve = 64
     monkeypatch.setattr(materialization, "MAXIMUM_RANGE_BYTES", 16)
 
-    async def run(*, available=None, selected_source=None, check_write=None):
+    async def run(
+        *,
+        available=None,
+        selected_source=None,
+        check_write=None,
+        check_file_write=None,
+        selected_archive=None,
+    ):
         with TransferProgress(
-            "model_materialization", len(body), events.append,
+            "model_materialization",
+            len(body),
+            events.append,
             total_operations=len(bundle.files) + 1,
         ) as progress:
             result = await materialization.materialize_model_files(
-                archive=archive,
+                archive=archive if selected_archive is None else selected_archive,
                 bundle=bundle,
                 payload=payload,
                 multipart=multipart,
@@ -98,6 +107,7 @@ def transfer(tmp_path, monkeypatch):
                 available_bytes=(lambda: 1024**3) if available is None else available,
                 reserve_bytes=reserve,
                 check_write=check_write,
+                check_file_write=check_file_write,
             )
             progress.advance_operations(1)
             return result
@@ -275,6 +285,43 @@ async def test_boot_cache_restarts_partial_transfer_evicts_and_restores_without_
         (transfer.model / name).read_bytes() == expected
         for name, expected in transfer.contents.items()
     )
+
+
+async def test_managed_path_accounting_runs_actual_direct_restoration_and_resumes(transfer):
+    from umi.private_files import ensure_private_directory
+
+    archive = transfer.archive.parent / "direct-model-cache" / "archive"
+    ensure_private_directory(archive.parent.parent)
+    ensure_private_directory(archive.parent)
+    config = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(archive.parent.parent),
+        maximum_allocated_bytes=2 * 1024**2,
+    )
+    counts = []
+
+    async def restore():
+        budget = BootDiskModelCache(config, reserve_bytes=transfer.reserve)
+        calls = []
+        with budget.allocation_lease():
+            budget.prepare(transfer.bundle, archive=archive)
+
+            def check(path, size):
+                calls.append((path, size))
+                budget.check_file_write(path, size)
+
+            result = await transfer.run(
+                available=budget.available_bytes, check_file_write=check, selected_archive=archive
+            )
+            assert budget.incremental
+            counts.append(len(calls))
+            return result
+
+    await restore()
+    before = tuple(transfer.multipart.reads)
+    await restore()
+    assert tuple(transfer.multipart.reads) == before
+    assert counts[0] > 0 and counts[1] == 0
 
 
 async def test_boot_reserve_exhaustion_retains_checkpoint_and_resumes_only_affected_file(transfer):

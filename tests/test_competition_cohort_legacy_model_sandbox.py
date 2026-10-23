@@ -321,6 +321,62 @@ async def test_alternating_pair_keeps_both_models_without_repeated_remote_reads(
     assert tuple(installed.remote.reads) == reads
 
 
+async def test_managed_legacy_cache_uses_path_accounting_and_retains_original_bytes(
+    installed, monkeypatch
+):
+    used = []
+    original = BootDiskModelCache.check_file_write
+
+    def check(cache, path, size):
+        original(cache, path, size)
+        used.append(cache.incremental)
+
+    monkeypatch.setattr(BootDiskModelCache, "check_file_write", check)
+    port = DirectCohortCpuSandbox(
+        installed.case.policy,
+        archive=installed.case.owner.archive,
+        videos=installed.root / "videos",
+        workspace=installed.root / "separate-cpu",
+        artifacts=installed.artifacts,
+        request=lambda _: installed.request,
+        legacy_artifacts=LegacyCohortModelCache(installed.artifacts, installed.sources),
+    )
+    cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    await port.invoke(job, attempt(job, 1))
+    assert used and all(used)
+    reads = tuple(installed.remote.reads)
+    await port.invoke(job, attempt(job, number=2))
+    await port.invoke(job, attempt(job, 1, number=2))
+    assert tuple(installed.remote.reads) == reads
+
+
+async def test_restart_lru_retains_round_reference_when_selecting_new_candidate(installed):
+    port = sandbox(installed)
+    reference = port.cache / "archive"
+    candidate = port.cache / "standby"
+    # Existing slot names and signed model identities survive a process restart;
+    # an empty in-memory LRU must not evict the shared reference first.
+    for path, model in (
+        (reference, installed.job.incumbent),
+        (candidate, installed.job.submission.submission.model_bundle),
+    ):
+        path.mkdir(mode=0o700)
+        (path / digest(model)).mkdir(mode=0o700)
+
+    class NewSource:
+        async def resumable(self, request, archive):
+            return False
+
+    assert (
+        await port._select_archive(
+            None, installed.incumbent, NewSource(), "new-source", digest(installed.job.incumbent)
+        )
+        == candidate
+    )
+
+
 async def test_pair_capacity_releases_only_idle_managed_slot(installed, monkeypatch):
     port = sandbox(installed)
     cpu_readback(port, installed, monkeypatch)
