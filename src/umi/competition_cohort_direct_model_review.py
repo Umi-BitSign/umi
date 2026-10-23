@@ -245,7 +245,7 @@ class DirectModelArtifactReviewer:
         )
         for record in bundle.files:
             if record.path in documents and not (
-                1 <= record.size_bytes <= standing.maximum_document_bytes
+                0 <= record.size_bytes <= standing.maximum_document_bytes
             ):
                 raise StaticModelReviewHeld("review_document_size_outside_policy")
         if (

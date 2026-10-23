@@ -1047,3 +1047,56 @@ def test_distinct_signed_requests_share_one_charge_and_cannot_inherit_a_refund(d
     with pytest.raises(OSError, match="fenced"):
         owner.reserve(request_at(212), capture_at(212))
     assert owner.journal.keys("upload") == sorted([original_key, second_key])
+
+
+@pytest.mark.parametrize("empty_license", [False, True])
+def test_legacy_empty_document_hold_is_repaired_without_changing_original_hold(
+    delivery, tmp_path, empty_license
+):
+    from umi.competition_artifacts import preserve_bundle
+    from umi.open_competition import BundleFile
+
+    h = delivery
+    bundle = h.request.signed_submission.submission.model_bundle
+    empty = BundleFile(
+        path="zz-empty.txt", role="provenance", size_bytes=0, sha256=hashlib.sha256(b"").hexdigest()
+    )
+    (h.source / empty.path).write_bytes(b"")
+    bundle = bundle.model_copy(update={"files": (*bundle.files, empty)})
+    if empty_license:
+        files = []
+        for record in bundle.files:
+            if record.role == "license":
+                (h.source / record.path).write_bytes(b"")
+                record = record.model_copy(
+                    update={"size_bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+                )
+            files.append(record)
+        bundle = bundle.model_copy(update={"files": tuple(files)})
+    preserve_bundle(bundle, h.source, h.owner.archive, h.intake.policy)
+    standing = standing_review_policy(h)
+    owner = CohortModelUploads(
+        h.owner.config.model_copy(
+            update={
+                "directory": str(tmp_path / "empty-hold-owner"),
+                "admission_reviews_directory": str(tmp_path / "empty-hold-reviews"),
+                "standing_review_policy": standing,
+            }
+        ),
+        h.intake,
+        h.owner.archive,
+    )
+    key = digest(bundle) + "-" + digest(standing)
+    hold = {
+        "schema": "umi-standing-model-artifact-review-hold/1",
+        "model_sha256": digest(bundle),
+        "review_policy_sha256": digest(standing),
+        "reason_code": "review_document_size_outside_policy",
+    }
+    owner.journal.put_many((("review_hold", key, hold),))
+    expected = ("held", "declared_license_document_missing") if empty_license else ("ready", "")
+    assert owner._ensure_review(bundle) == expected
+    assert owner.journal.get("review_hold", key) == hold
+    reopened = CohortModelUploads(owner.config, h.intake, owner.archive)
+    assert reopened._ensure_review(bundle, allow_local=empty_license) == expected
+    assert len(owner.journal.keys("review_hold")) == (2 if empty_license else 1)

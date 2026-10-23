@@ -41,6 +41,7 @@ class ModelAcceptanceWorker:
         batch_size=16,
         reviewers=(),
         promote=None,
+        prepare_review=None,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("model acceptance batch is outside bounds")
@@ -49,6 +50,7 @@ class ModelAcceptanceWorker:
         self.cursors = {}
         self.reviewers = tuple(reviewers)
         self.promote = promote
+        self.prepare_review = prepare_review
         if (
             len(self.reviewers) > 64
             or any(
@@ -57,6 +59,7 @@ class ModelAcceptanceWorker:
             )
             or len({identity(p.signer) for p in self.reviewers}) != len(self.reviewers)
             or (self.promote is not None and not callable(self.promote))
+            or (prepare_review is not None and not callable(prepare_review))
         ):
             raise ValueError("model reviewers change policy, cohorts or repeat a signer")
 
@@ -159,14 +162,32 @@ class ModelAcceptanceWorker:
                 # bytes. Existing intents retain their original inputs, so their
                 # recovery never depends on this external delivery file.
                 if not await run_owned_thread(self.owner.has_intent, cohort, key):
-                    selected = await run_owned_thread(
-                        partial(
-                            read_private_model,
-                            self.inputs / "model-reviews" / (sub.model_revision + ".json"),
-                            ModelArtifactReviewInputs,
-                            maximum_bytes=MAX_PUBLICATION_BYTES,
+                    path = self.inputs / "model-reviews" / (sub.model_revision + ".json")
+                    try:
+                        selected = await run_owned_thread(
+                            partial(
+                                read_private_model,
+                                path,
+                                ModelArtifactReviewInputs,
+                                maximum_bytes=MAX_PUBLICATION_BYTES,
+                            )
                         )
-                    )
+                    except FileNotFoundError:
+                        if self.prepare_review is None:
+                            raise
+                        selected = await self.prepare_review(cohort, sub)
+                        if selected.model_sha256 != sub.model_revision:
+                            raise ValueError(
+                                "prepared model review differs from selected bundle"
+                            ) from None
+                        await run_owned_thread(
+                            partial(
+                                publish_private_model,
+                                path,
+                                selected,
+                                maximum_bytes=MAX_PUBLICATION_BYTES,
+                            )
+                        )
             with self._stage(cohort, key, "payload"):
                 await self.owner.ensure_payload(cohort, key)
             with self._stage(cohort, key, "intent_lookup"):

@@ -686,6 +686,14 @@ class ServiceAdmissionHost:
                 )
             self.direct_uploads = DirectModelUploadOwners(owners)
         self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
+
+        async def prepare_legacy_review(cohort, sub):
+            if not self.legacy_payloads.sources.has_cohort(cohort):
+                raise FileNotFoundError("model review requires its private review input")
+            return await self.legacy_payloads.sources.review_inputs(
+                cohort, sub.model_bundle, c.direct_model_uploads.standing_review_policy
+            )
+
         self.models = (
             ModelAcceptanceWorker(
                 CohortModelAcceptances(
@@ -707,6 +715,11 @@ class ServiceAdmissionHost:
                 Path(c.inputs_directory),
                 promotion.directory,
                 promote=(None if self.direct_uploads is None else self.direct_uploads.promote),
+                prepare_review=(
+                    prepare_legacy_review
+                    if self.legacy_payloads is not None and c.direct_model_uploads is not None
+                    else None
+                ),
             )
             if model_authority
             else None

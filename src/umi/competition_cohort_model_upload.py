@@ -36,6 +36,8 @@ from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review,
+    obsolete_empty_document_hold,
+    review_hold_key,
     verify_standing_review_policy,
 )
 from .competition_cohort_model_transport import authenticated_model_delivery
@@ -662,8 +664,11 @@ class CohortModelUploads:
         if standing is None:
             return "pending", ""
         review_policy_sha256 = digest(standing)
-        hold_key = model + "-" + review_policy_sha256
+        hold_key = review_hold_key(model, standing)
         hold = self.journal.get("review_hold", hold_key)
+        legacy_hold = hold is None
+        if hold is None:
+            hold = self.journal.get("review_hold", model + "-" + review_policy_sha256)
         if hold is not None:
             if (
                 not isinstance(hold, dict)
@@ -673,7 +678,10 @@ class CohortModelUploads:
                 or not isinstance(hold.get("reason_code"), str)
             ):
                 raise ValueError("retained model review hold differs")
-            return "held", hold["reason_code"]
+            if not legacy_hold or not obsolete_empty_document_hold(
+                bundle, standing, hold["reason_code"]
+            ):
+                return "held", hold["reason_code"]
         try:
             review = build_standing_model_review(bundle, self.archive, self.intake.policy, standing)
         except StaticModelReviewHeld as error:
@@ -749,7 +757,17 @@ class CohortModelUploads:
             reason = ""
             standing = self.config.standing_review_policy
             if standing is not None:
-                hold = self.journal.get("review_hold", sub.model_revision + "-" + digest(standing))
+                hold = self.journal.get(
+                    "review_hold", review_hold_key(sub.model_revision, standing)
+                )
+                if hold is None:
+                    hold = self.journal.get(
+                        "review_hold", sub.model_revision + "-" + digest(standing)
+                    )
+                    if isinstance(hold, dict) and obsolete_empty_document_hold(
+                        sub.model_bundle, standing, hold.get("reason_code")
+                    ):
+                        hold = None
                 if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str):
                     reason = ": " + hold["reason_code"]
             raise PendingModelReview(

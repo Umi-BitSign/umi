@@ -795,3 +795,39 @@ def test_verified_seal_reuse_never_hides_changed_model_acceptance(prepared, dama
             )
     with pytest.raises((ValueError, PendingModelArtifacts)):
         owner.intake.sealed(cohort, tip)
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+async def test_private_review_preparation_repairs_missing_only_and_is_reused(
+    prepared, tmp_path, damage
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    sub = subs[0]
+    path = root / "model-reviews" / (sub.model_revision + ".json")
+    if damage == "malformed":
+        path.parent.mkdir(mode=0o700, parents=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+    calls = []
+
+    async def prepare(selected_cohort, selected_sub):
+        calls.append((selected_cohort, selected_sub))
+        return inputs
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, prepare_review=prepare)
+    if damage == "malformed":
+        with pytest.raises(ValueError):
+            await worker._one(cohort, sub)
+        assert not calls and path.read_bytes() == b"{}"
+    else:
+        with pytest.raises(FileNotFoundError):
+            await worker._one(cohort, sub)  # Independent publication has not arrived.
+        assert calls == [(cohort, sub)]
+        assert path.exists() and owner.has_intent(cohort, digest(sub))
+        with pytest.raises(FileNotFoundError):
+            await worker._one(cohort, sub)
+        assert calls == [(cohort, sub)]

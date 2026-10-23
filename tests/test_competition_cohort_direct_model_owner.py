@@ -1333,3 +1333,94 @@ async def test_completion_expiry_http_reports_signed_restart_reason(direct, monk
     assert direct.owner.journal.get(
         "direct-completion", digest(first.reservation)
     ) == completion.model_dump(mode="json", by_alias=True)
+
+
+async def test_direct_empty_supporting_file_repairs_retained_hold_without_zero_byte_R2_read(
+    direct, tmp_path, policy
+):
+    from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+    from umi.open_competition import BundleFile
+
+    old_sub = direct.request.signed_submission.submission
+    empty = BundleFile(
+        path="zz-empty.txt", role="provenance", size_bytes=0, sha256=hashlib.sha256(b"").hexdigest()
+    )
+    bundle = old_sub.model_bundle.model_copy(update={"files": (*old_sub.model_bundle.files, empty)})
+    sub = old_sub.model_copy(update={"model_bundle": bundle, "model_revision": digest(bundle)})
+    signed = direct.request.signed_submission.model_copy(
+        update={
+            "submission": sub,
+            "signature": sign_object(sub, wallet("Alice")),
+        }
+    )
+    consent = direct.request.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    request = direct.request.model_copy(
+        update={
+            "signed_submission": signed,
+            "consent": direct.request.consent.model_copy(
+                update={
+                    "consent": consent,
+                    "signature": sign_object(consent, wallet("Alice")),
+                }
+            ),
+        }
+    )
+    payload = direct.payload.payload.model_copy(
+        update={
+            "upload_sha256": digest(request),
+            "model_sha256": digest(bundle),
+            "file_count": len(bundle.files),
+        }
+    )
+    signed_payload = direct.payload.model_copy(
+        update={
+            "payload": payload,
+            "signature": sign_object(payload, wallet("Alice")),
+        }
+    )
+    standing = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(policy),
+        contribution_terms_sha256=policy.contribution_terms_sha256,
+        standing_approval_record_sha256="ab" * 32,
+        approved_by="fixture operator",
+        approved_at_utc="2026-10-01T00:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+    owner = DirectModelUploadOwner(
+        direct.owner.config.model_copy(
+            update={
+                "directory": str(tmp_path / "empty-direct"),
+                "admission_reviews_directory": str(tmp_path / "empty-reviews"),
+                "standing_review_policy": standing,
+            }
+        ),
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+    reservation = await owner.reserve(request, signed_payload, now_unix_ms=1_800_000_000_000)
+    completed = await owner.complete(
+        signed_completion(reservation, payload), now_unix_ms=1_800_000_010_000
+    )
+    await owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    hold = {
+        "reason_code": "review_document_size_outside_policy",
+        "review_policy_sha256": digest(standing),
+    }
+    owner.journal.put("direct-review-hold", digest(bundle), hold)
+    assert owner.status(completed.reservation_sha256).hold_reason_code is None
+    old_read = direct.multipart.read_range
+
+    async def bounded(*args, **kwargs):
+        assert kwargs["size_bytes"] > 0
+        return await old_read(*args, **kwargs)
+
+    direct.multipart.read_range = bounded
+    result = await owner.poll_once(now_unix_ms=1_800_000_012_000)
+    assert result["reviews_held"] == result["objects_failed"] == 0
+    assert owner.journal.get("direct-review-hold", digest(bundle)) == hold
+    assert (tmp_path / "empty-reviews" / (digest(bundle) + ".json")).exists()
