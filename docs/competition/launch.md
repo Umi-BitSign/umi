@@ -95,6 +95,12 @@ owned per-participation results rather than repeating historical proof work.
 Final freshness checks use the verifier-owned finalized height; they do not
 collect a new subnet membership snapshot when only the height is needed.
 
+Preparation publishes the selected incumbent's small model declaration alongside
+the round. A successor's newly certified baseline can therefore supply benchmark
+orders without a manual setup-file copy. Missing declarations are restored from
+the retained cohort-baseline certificate; model payloads stay in R2. Existing
+immutable declarations are reused, and damaged declarations require repair.
+
 `GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
 current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
 `eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,

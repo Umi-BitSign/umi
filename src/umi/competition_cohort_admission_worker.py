@@ -28,6 +28,7 @@ from .competition_cohort_preparation_publisher import (
     CohortPreparationPublicationConfig,
     CohortPreparationPublisher,
 )
+from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import AdmissionCapacity, CompetitionStore
 from .concurrency import run_owned_thread
@@ -77,6 +78,11 @@ class CohortAdmissionWorkerConfig(StrictProtocolModel):
                 for p in (
                     self.preparation.promotion_directory,
                     self.preparation.output_directory,
+                    *(
+                        (self.preparation.objects_directory,)
+                        if self.preparation.objects_directory
+                        else ()
+                    ),
                 )
             )
         if any(
@@ -270,6 +276,11 @@ async def run_admission_worker(
                 ),
                 provider,
                 Path(selected.output_directory),
+                objects=(
+                    None
+                    if selected.objects_directory is None
+                    else SettlementEvidenceFiles(Path(selected.objects_directory))
+                ),
             )
         if own_stop:
             for sig in (signal.SIGINT, signal.SIGTERM):
