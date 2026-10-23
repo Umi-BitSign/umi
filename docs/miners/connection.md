@@ -440,7 +440,9 @@ declarations using the same wallet; do not edit or re-sign the original request.
 Admission review follows byte delivery, so an uploaded payload alone does not
 mean the model has been admitted.
 Direct R2 transfers retry temporary network failures, throttling and expired
-capabilities. A connection with no read/write progress for five minutes returns
+capabilities. If R2 loses a multipart upload before completion, the client
+authenticates a replacement upload and retries with the original signed request.
+A connection with no read/write progress for five minutes returns
 to that retry loop; this is an inactivity timeout, not a deadline for the whole
 model. An interrupted multipart delivery can retransmit parts when rerun with
 the same request. A completed, verified payload is reused without uploading it
