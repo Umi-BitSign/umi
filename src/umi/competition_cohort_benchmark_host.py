@@ -18,6 +18,7 @@ from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_legacy_model_cache import LegacyCohortModelCache
 from .competition_cohort_model_acceptance import ModelAcceptanceIntent, ModelReviewRequest
+from .competition_cohort_model_execution_source import CertifiedModelExecutionSources
 from .competition_cohort_order_http import order_routes
 from .competition_cohort_order_inbox import CohortOrderInbox, CohortOrderInboxConfig
 from .competition_cohort_order_signer import (
@@ -141,11 +142,11 @@ class BenchmarkHost:
             self.sandbox = CohortCpuSandbox(**sandbox)
         else:
 
-            def request(job):
+            async def request(job):
                 slot = job.round.cohort_sha256 + ":" + digest(job.submission.submission)
                 raw = model_reviewer.journal.get("model_request", slot)
                 if raw is None:
-                    raise OSError("direct model review request is unavailable")
+                    return await self.model_sources.request(job)
                 value = ModelReviewRequest.model_validate_json(canonical_json_bytes(raw))
                 if value.record.request.signed_submission != job.submission:
                     raise ValueError("direct model review request differs from execution")
@@ -221,6 +222,15 @@ class BenchmarkHost:
         )
         self.files = RequestCompletionFiles(
             Path(c.request_export_directory), maximum_bytes=config.request_replay_bytes
+        )
+        self.model_sources = CertifiedModelExecutionSources(
+            client,
+            config.owner_origin,
+            token=owner_token,
+            policy=config.policy,
+            cohorts=self.execution.cohorts,
+            journal=self.journal,
+            timeout_seconds=timeout,
         )
         self.exporter = RequestExportWorker(
             (self.execution,), provider, sign, self.files, self.journal, batch_size=c.batch_size

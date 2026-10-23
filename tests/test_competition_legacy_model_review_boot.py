@@ -394,3 +394,28 @@ def test_shared_byte_store_rejects_reviewer_cache_signing_and_credentials(select
             PhaseReviewServiceConfig.model_validate_json(
                 canonical_json_bytes(c.model_copy(update={"legacy_model_storage": (source,)}))
             )
+
+
+async def test_execution_uses_certified_metadata_without_inventing_local_review(
+    selected, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    c, i = selected.config, selected.installed
+    async with boot.phase_review_app(c) as app:
+        host = app.state.benchmark
+        # Independent certification is tested through the actual HTTP reader in
+        # test_competition_cohort_model_execution_source. Here retain the actual
+        # old installation, empty review journal, sandbox and R2/cache path.
+        restored = AsyncMock(return_value=i.request)
+        monkeypatch.setattr(host.model_sources, "request", restored)
+        cpu_readback(host.sandbox, i, monkeypatch)
+        assert await host.sandbox.invoke(i.job, attempt(i.job)) == "inert-cpu-result"
+        restored.assert_awaited_once_with(i.job)
+        slot = i.case.cohort + ":" + digest(i.job.submission.submission)
+        with sqlite3.connect(Path(c.model_signing.directory) / "rounds.sqlite3") as db:
+            assert db.execute(
+                "SELECT COUNT(*) FROM records WHERE kind IN ('model_request','model_vote') "
+                "AND id=?",
+                (slot,),
+            ).fetchone() == (0,)
