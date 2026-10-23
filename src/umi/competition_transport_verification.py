@@ -15,9 +15,11 @@ import tempfile
 import time
 from contextlib import suppress
 from contextvars import ContextVar
+from itertools import count
 from pathlib import Path
 from threading import Event, RLock, Thread
 
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
 from .competition_reward_proof_archive import _publication_clock_ns
 from .competition_verification_rules import runtime_identity
 from .file_identity import file_fingerprint
@@ -26,6 +28,7 @@ from .private_files import ensure_private_directory, lock_private_file, private_
 _LOG = logging.getLogger("umi.competition.progress")
 _CURRENT = ContextVar("umi_transport_progress", default=None)
 BYTE_VERIFIER_ABI = "umi-local-byte-verification/1"
+_PUBLIC_WORK_IDS = count(1)
 
 
 def verifier_semantics():
@@ -111,6 +114,8 @@ class TransferProgress:
         self.lock, self.stop = RLock(), Event()
         self.thread = None
         self.child = None
+        self.public_cohort = PUBLIC_COHORT_SCOPE.get()
+        self.public_work_id = -next(_PUBLIC_WORK_IDS)
 
     def __enter__(self):
         self.token = _CURRENT.set(self)
@@ -346,6 +351,24 @@ class TransferProgress:
                     native_bytes=self.native,
                     restored_bytes=self.completed - self.native,
                 )
+            PUBLIC_COHORT_PROGRESS.record(
+                "work",
+                {
+                    **event,
+                    "cohort_sha256": self.public_cohort,
+                    "work_id": self.public_work_id,
+                    "state": "running"
+                    if not self.stop.is_set()
+                    and state in {"started", "running", "repair_completed", "retrying", "waiting"}
+                    else "completed"
+                    if state == "completed"
+                    else "interrupted",
+                    "completed": self.completed,
+                    "total": self.total,
+                    "stalled_or_retrying": stalled
+                    or state in {"retrying", "refused", "repair_required", "waiting"},
+                },
+            )
             if self.report is None:
                 _LOG.info(json.dumps(event, separators=(",", ":")))
             else:

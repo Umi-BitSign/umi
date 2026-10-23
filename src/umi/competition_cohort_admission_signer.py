@@ -137,6 +137,7 @@ class CohortAdmissionSigner:
                 check_selected(
                     raw, current, self.journal.policy, result.registration.replayed_at.block_number
                 )
+                await run_owned_thread(self.journal.remember_participation_review, raw)
                 await run_owned_thread(
                     self.journal.remember_history,
                     current.history,

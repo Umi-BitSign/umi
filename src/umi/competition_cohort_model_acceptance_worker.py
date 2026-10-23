@@ -44,6 +44,7 @@ class ModelAcceptanceWorker:
         reviewers=(),
         promote=None,
         prepare_review=None,
+        priority_cohorts=None,
     ):
         if type(batch_size) is not int or not 1 <= batch_size <= 256:
             raise ValueError("model acceptance batch is outside bounds")
@@ -53,6 +54,13 @@ class ModelAcceptanceWorker:
         self.reviewers = tuple(reviewers)
         self.promote = promote
         self.prepare_review = prepare_review
+        self.priority_cohorts = tuple(priority_cohorts or ())
+        known = {binding.cohort_sha256 for binding in owner.intake.config.cohorts}
+        if (
+            len(set(self.priority_cohorts)) != len(self.priority_cohorts)
+            or not set(self.priority_cohorts) <= known
+        ):
+            raise ValueError("model acceptance priority must name distinct configured cohorts")
         if (
             len(self.reviewers) > 64
             or any(
@@ -286,8 +294,24 @@ class ModelAcceptanceWorker:
     async def poll_once(self):
         ready = pending = 0
         error_type = ""
+        priority_entries = {}
+        for cohort in self.priority_cohorts:
+            try:
+                priority_entries[cohort] = await run_owned_thread(
+                    partial(
+                        self.owner.pending_latest_entries, cohort, limit=min(self.batch_size, 16)
+                    )
+                )
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                # A diagnostic scheduling hint never suppresses the native scan.
+                continue
+        urgent = any(priority_entries.values())
         for binding in self.owner.intake.config.cohorts:
             cohort = binding.cohort_sha256
+            # While released intake has unfinished latest models, still advance
+            # held cohorts, but do not make it wait behind their full batches.
+            # Once that backlog clears all cohorts regain the normal fair scan.
+            batch = self.batch_size if not urgent or cohort in self.priority_cohorts else 1
             try:
                 await self._report_inventory(cohort)
                 entries = await run_owned_thread(
@@ -295,16 +319,18 @@ class ModelAcceptanceWorker:
                         self.owner.entries,
                         cohort,
                         after=self.cursors.get(cohort, ""),
-                        limit=self.batch_size,
+                        limit=batch,
                     )
                 )
-                priority = await run_owned_thread(
-                    partial(
-                        self.owner.pending_latest_entries,
-                        cohort,
-                        limit=min(self.batch_size, 16),
+                priority = priority_entries.get(cohort)
+                if priority is None:
+                    priority = await run_owned_thread(
+                        partial(
+                            self.owner.pending_latest_entries,
+                            cohort,
+                            limit=min(batch, 16),
+                        )
                     )
-                )
                 # Latest uncertified candidates run before old exports. Keep
                 # the original fair cursor independent of this bounded prefix.
                 work = dict((*priority, *entries))
@@ -316,7 +342,7 @@ class ModelAcceptanceWorker:
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
                         error_type = type(error).__name__
-                self.cursors[cohort] = entries[-1][0] if len(entries) == self.batch_size else ""
+                self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
                 await self._report_inventory(cohort)
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1

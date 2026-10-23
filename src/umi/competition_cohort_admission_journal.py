@@ -20,6 +20,7 @@ from .competition_cohort_intake_records import read_participation, replay_partic
 from .competition_cohort_participation import CohortParticipantAdmission
 from .competition_registration_archive import RegistrationArchive
 from .competition_round_journal import RoundJournal
+from .competition_verification_rules import runtime_identity
 from .open_competition import (
     CompetitionPolicy,
     Hotkey,
@@ -195,6 +196,77 @@ class CohortAdmissionJournal:
         ):
             raise ValueError("admission vote differs from this signer's reserved body")
         verify_signature(vote.admission, vote.signature)
+
+    def reviewed_participation(self, raw: bytes) -> bool:
+        """Reuse this owner's committed review without loading its proof payload.
+
+        The immutable intent binds the exact original record and registration
+        evidence. Only a valid vote by this journal's own signer establishes a
+        completed review. Current history, finality and seal membership remain
+        the phase reviewer's responsibility.
+        """
+        record = read_participation(raw)
+        cohort = record.proposed_admission.cohort_sha256
+        if cohort not in self.cohorts:
+            raise ValueError("retained participation is outside this admission journal")
+        key, expected = self._participation_review_identity(raw)
+        slot = admission_slot(raw)
+        with self.journal.read_transaction() as db:
+            receipt = self.journal.get("participation_review", key, db=db)
+            completed = self.journal.get("participation_review_complete", key, db=db)
+            value = self.journal.get("admission_intent", slot, db=db)
+            committed = self.journal.get("admission_vote", slot, db=db)
+        if receipt is not None or completed is not None:
+            if receipt != expected or completed != {"review_sha256": key}:
+                raise ValueError("completed participation review needs metadata repair")
+            return True
+        if value is None:
+            if committed is not None:
+                raise ValueError("committed admission review lacks its retained intent")
+            return False
+        intent = CohortAdmissionIntent.model_validate_json(canonical_json_bytes(value))
+        if (
+            intent.record_sha256 != hashlib.sha256(raw).hexdigest()
+            or intent.admission != record.proposed_admission
+            or intent.registration_sha256 != record.observation.evidence_sha256
+        ):
+            raise ValueError("retained admission review differs from its exact original record")
+        if committed is None:
+            return False
+        self.check_vote(
+            intent, CohortAdmissionVote.model_validate_json(canonical_json_bytes(committed))
+        )
+        # Historical /1 intents predate explicit native-review checkpoints.
+        # Their committed votes are qualified only for the unchanged /1
+        # semantics; a future semantic change needs its own native result.
+        return (
+            expected["verifier_semantics"]
+            == hashlib.sha256(b"umi-native-request-verification/1").hexdigest()
+        )
+
+    def _participation_review_identity(self, raw: bytes):
+        record = read_participation(raw)
+        cohort = record.proposed_admission.cohort_sha256
+        if self.cohorts.get(cohort) != record.request.consent.consent.authority_sha256:
+            raise ValueError("participation review differs from the journal's cohort authority")
+        body = {
+            "schema": "umi-owned-participation-review/1",
+            "record_sha256": hashlib.sha256(raw).hexdigest(),
+            "policy_sha256": digest(self.policy),
+            "authority_sha256": self.cohorts[cohort],
+            "verifier_semantics": runtime_identity(),
+        }
+        return digest(body), body
+
+    def remember_participation_review(self, raw: bytes) -> None:
+        """Checkpoint a successful native phase review before advancing its count."""
+        key, body = self._participation_review_identity(raw)
+        self.journal.put_many(
+            (
+                ("participation_review", key, body),
+                ("participation_review_complete", key, {"review_sha256": key}),
+            )
+        )
 
     def reserve(self, admission, raw, evidence, metadata) -> CohortAdmissionIntent:
         record = read_participation(raw)

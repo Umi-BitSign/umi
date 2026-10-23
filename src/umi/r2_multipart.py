@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import time
 import xml.etree.ElementTree as ET
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
@@ -16,6 +20,17 @@ from .r2_sigv4 import R2SigV4
 
 _MAXIMUM_RESPONSE_BYTES = 64 * 1024
 MAXIMUM_RANGE_BYTES = 64 * 1024**2
+_LOG = logging.getLogger("umi.competition.progress")
+
+
+class _R2HTTPFailure(OSError):
+    def __init__(self, status, retry_after):
+        super().__init__(f"R2 multipart request failed with HTTP {status}")
+        self.http_status = status
+        try:
+            self.retry_after = min(30, max(0, float(retry_after)))
+        except (TypeError, ValueError):
+            self.retry_after = 0
 
 
 def _element(root: ET.Element, name: str) -> str:
@@ -64,7 +79,45 @@ class R2MultipartClient:
         """Reuse connections until all overlapping scopes and requests drain."""
         return self._connections.scope()
 
-    async def _exchange(
+    async def _exchange(self, method: str, key: str, **options) -> httpx.Response:
+        started = time.monotonic()
+        for attempt in range(1, 4):
+            try:
+                return await self._exchange_once(method, key, **options)
+            except _R2HTTPFailure as error:
+                retry = (
+                    method in {"HEAD", "GET"}
+                    and error.http_status in {429, 500, 502, 503, 504}
+                    and attempt < 3
+                )
+                delay = max(0.25 * 2 ** (attempt - 1), error.retry_after) if retry else None
+                _LOG.warning(
+                    "r2_request_status %s",
+                    json.dumps(
+                        dict(
+                            stage="r2_request",
+                            method=method,
+                            http_status=error.http_status,
+                            attempt=attempt,
+                            maximum_attempts=3 if method in {"HEAD", "GET"} else 1,
+                            completed=0,
+                            total=1,
+                            elapsed_seconds=time.monotonic() - started,
+                            eta_seconds=None,
+                            eta_basis="bounded_read_retry" if retry else "provider_refusal",
+                            stalled_or_retrying=retry,
+                            retry_seconds=delay,
+                            certification_authority=False,
+                        ),
+                        separators=(",", ":"),
+                    ),
+                )
+                if not retry:
+                    raise
+                await asyncio.sleep(delay)
+        raise AssertionError("bounded R2 retry exhausted without result")
+
+    async def _exchange_once(
         self,
         method: str,
         key: str,
@@ -114,7 +167,7 @@ class R2MultipartClient:
                 ) as streamed,
             ):
                 if streamed.status_code not in expected_status:
-                    raise OSError(f"R2 multipart request failed with HTTP {streamed.status_code}")
+                    raise _R2HTTPFailure(streamed.status_code, streamed.headers.get("retry-after"))
                 if streamed.headers.get("content-encoding") not in {None, "identity"}:
                     raise ValueError("R2 multipart response used content encoding")
                 content = bytearray()

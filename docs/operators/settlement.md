@@ -3357,6 +3357,16 @@ waits for active requests to release their responses before closing it, includin
 when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
 queue or timeout budget. Idle connection retention remains bounded.
+
+Direct-object first verification reads adjacent manifest files through bounded
+contiguous ranges of at most 64 MiB, retaining the same per-file checkpoints,
+ordered stream digest and provider-generation checks. Completed byte facts remain
+reusable when read geometry changes. Transient HEAD/GET HTTP429/500/502/503/504
+responses receive at most three attempts with bounded backoff; read retry logs
+include the numeric status and delay, without provider bodies, keys or credentials.
+Mutation requests are never automatically replayed. While released intake has
+uncertified latest models, held cohorts still advance in smaller batches; they
+regain normal batches after that backlog clears. Progression holds stay intact.
 Standalone requests and independently
 supplied providers retain their previous transport ownership. A runtime upgrade
 must preserve the selected byte stores and compatible verifier ABI; connection

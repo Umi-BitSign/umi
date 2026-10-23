@@ -8,6 +8,7 @@ restart; an empty view is unknown rather than zero or completed.
 import re
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from copy import deepcopy
 from threading import RLock
 
@@ -21,6 +22,7 @@ _FIELDS = (
     "percent",
     "elapsed_seconds",
     "eta_seconds",
+    "planning_eta_seconds",
     "eta_basis",
     "eta_scope",
     "eta_assumptions",
@@ -66,6 +68,15 @@ class CohortProgressSnapshots:
             if kind == "lifecycle" and (old is None or old[1].get("phase") != public.get("phase")):
                 entry["phase_started"] = now
             entry[kind] = (now, public)
+            if kind == "work" and type(public.get("work_id")) is int:
+                active = entry.setdefault("active_work", OrderedDict())
+                work_id = public["work_id"]
+                if public.get("state") in {"started", "running", "waiting"}:
+                    active[work_id] = (now, public)
+                    while len(active) > 32:
+                        active.popitem(last=False)
+                else:
+                    active.pop(work_id, None)
             self.entries.move_to_end(cohort)
             while len(self.entries) > self.maximum_cohorts:
                 self.entries.popitem(last=False)
@@ -74,6 +85,12 @@ class CohortProgressSnapshots:
         now = time.monotonic()
         with self.lock:
             entry = deepcopy(self.entries.get(cohort, {}))
+        active = entry.get("active_work", {})
+        if active:
+            # Keep an unfinished copy visible between unrelated short completed
+            # operations. Insertion order follows substage starts, not heartbeat
+            # ordering; nested work takes precedence over its enclosing meter.
+            entry["work"] = next(reversed(active.values()))
         parts = {}
         for kind in ("lifecycle", "certification", "intake_certification", "acceptance", "work"):
             if kind in entry:
@@ -89,8 +106,27 @@ class CohortProgressSnapshots:
         if phase in (None, "intake"):
             for kind in ("certification", "intake_certification"):
                 if kind in parts:
-                    selected = parts[kind]
-                    stage = "model_certification"
+                    certification = parts[kind]
+                    complete = (
+                        type(certification.get("total")) is int
+                        and certification.get("completed") == certification["total"]
+                    )
+                    if not (complete and stage in {"progress_review", "decision_certification"}):
+                        selected = certification
+                        stage = "model_certification"
+                    break
+        quorum_stage = {
+            "progress_review": f"{phase}_progress_quorum",
+            "decision_certification": f"{phase}_decision_quorum",
+        }.get(stage)
+        if quorum_stage is not None:
+            # Concurrent model exports must not hide the phase transition that
+            # follows completed certification. Keep its own meter and ETA.
+            for observed, work in reversed(active.values()):
+                if work.get("stage") == quorum_stage and observed >= entry.get("phase_started", 0):
+                    entry["work"] = (observed, work)
+                    age = max(0, now - observed)
+                    parts["work"] = dict(work, age_seconds=round(age, 3), stale=age > 120)
                     break
         if stage != "model_certification" and "work" in parts:
             observed, work = entry["work"]
@@ -98,6 +134,7 @@ class CohortProgressSnapshots:
             if observed >= entry.get("phase_started", 0) and work.get("state") in {
                 "started",
                 "running",
+                "waiting",
             }:
                 selected = parts["work"]
                 stage = selected["stage"]
@@ -161,3 +198,4 @@ class CohortProgressSnapshots:
 
 
 PUBLIC_COHORT_PROGRESS = CohortProgressSnapshots()
+PUBLIC_COHORT_SCOPE = ContextVar("umi_public_cohort_progress", default=None)

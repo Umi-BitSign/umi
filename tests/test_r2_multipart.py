@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
+from umi import r2_multipart as module
 from umi.competition_cohort_direct_model_upload import DirectModelUploadPart
 from umi.r2_multipart import R2MultipartClient
 from umi.r2_sigv4 import R2Credentials, R2SigV4
@@ -110,6 +111,58 @@ async def test_provider_errors_are_bounded_and_do_not_echo_body():
     with pytest.raises(OSError, match="HTTP 503") as observed:
         await client.create(KEY, at=AT)
     assert "credential-bearing" not in str(observed.value)
+
+
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_transient_reads_retry_same_scope_without_echoing_provider_body(
+    monkeypatch, caplog, method, status
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    async def send(request):
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(status, content=b"credential-bearing provider detail")
+        return httpx.Response(200, content=b"verified response")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    response = await client._exchange(method, KEY, at=AT)
+    assert response.status_code == 200 and len(requests) == 3
+    assert waits == [0.25, 0.5]
+    assert all(request.url == requests[0].url for request in requests)
+    assert all(
+        request.headers["authorization"] == requests[0].headers["authorization"]
+        for request in requests
+    )
+    assert f'"http_status":{status}' in caplog.text
+    assert "credential-bearing" not in caplog.text and KEY not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "method,status,attempts", [("GET", 503, 3), ("GET", 403, 1), ("POST", 503, 1), ("PUT", 503, 1)]
+)
+async def test_read_retries_are_bounded_and_never_replay_mutations(
+    monkeypatch, method, status, attempts
+):
+    calls = []
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        return httpx.Response(status, content=b"private provider body")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match=f"HTTP {status}"):
+        await client._exchange(method, KEY, at=AT)
+    assert len(calls) == attempts
 
 
 @pytest.mark.asyncio

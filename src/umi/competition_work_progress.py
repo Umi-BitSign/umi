@@ -18,7 +18,7 @@ from itertools import count
 from threading import RLock
 from typing import TypeVar
 
-from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -117,6 +117,7 @@ class WorkProgress:
         except Exception:
             self.forecast_error = "repair_required"
         self.closed = False
+        self.public_scope_token = None
         self.active_meters = _ACTIVE_METERS.get()
         if self.active_meters is not None:
             with self.active_meters[0]:
@@ -124,13 +125,20 @@ class WorkProgress:
         self.emit("started")
 
     def __enter__(self):
+        cohort = self.cohort or _cohort(self.context.get("cohort_sha256"))
+        if cohort is not None:
+            self.public_scope_token = PUBLIC_COHORT_SCOPE.set(cohort)
         return self
 
     def __exit__(self, exception_type, exception, traceback):
-        if exception_type is None:
-            self.finish()
-        else:
-            self.interrupt()
+        try:
+            if exception_type is None:
+                self.finish()
+            else:
+                self.interrupt()
+        finally:
+            if self.public_scope_token is not None:
+                PUBLIC_COHORT_SCOPE.reset(self.public_scope_token)
         return False
 
     def emit(self, state: str) -> None:
@@ -380,6 +388,8 @@ async def await_progress(work: Awaitable[_T], *, stage: str, cohort: str | None 
     and adds no task or cleanup await that could alter native cancellation.
     """
     meter = WorkProgress(stage, 1, unit="responses", cohort=cohort)
+    public_scope = meter.cohort or _cohort(meter.context.get("cohort_sha256"))
+    public_token = PUBLIC_COHORT_SCOPE.set(public_scope) if public_scope is not None else None
     loop = asyncio.get_running_loop()
     timer = None
 
@@ -400,3 +410,5 @@ async def await_progress(work: Awaitable[_T], *, stage: str, cohort: str | None 
         if timer is not None:
             timer.cancel()
         meter.interrupt()
+        if public_token is not None:
+            PUBLIC_COHORT_SCOPE.reset(public_token)

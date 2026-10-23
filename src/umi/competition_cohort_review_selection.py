@@ -3,6 +3,7 @@
 from functools import partial
 from pathlib import Path
 
+from .competition_cohort_admission_journal import CohortAdmissionJournal
 from .competition_cohort_history_http import CohortHistoryHTTPClient, CohortHistoryReader
 from .competition_cohort_intake_export import RemoteIntakeProgressReviewer
 from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
@@ -47,6 +48,7 @@ class SelectedPhaseReviewer:
         token: str,
         archive,
         promotion: CompetitionStore,
+        admission: CohortAdmissionJournal | None = None,
     ):
         self.config, self.provider = config, provider
         self.policy, self.cohorts = config.policy, config.signing.cohorts
@@ -64,6 +66,16 @@ class SelectedPhaseReviewer:
             IntakeReviewHTTPClient(client, config.owner_origin, token=token, **common),
             archive,
             maximum_sample_gap_blocks=config.maximum_sample_gap_blocks,
+            reviewed_participation=(
+                None
+                if admission is None
+                else partial(run_owned_thread, admission.reviewed_participation)
+            ),
+            remember_participation_review=(
+                None
+                if admission is None
+                else partial(run_owned_thread, admission.remember_participation_review)
+            ),
             **common,
         )
         self.preparation = RemotePreparationProgressReviewer(
