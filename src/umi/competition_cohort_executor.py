@@ -24,6 +24,7 @@ from .competition_cohort_order_signer import (
     CohortOrderHistory,
     OrderFinality,
     order_slot,
+    remember_closed_order_history,
     remember_order_history,
     review_order,
 )
@@ -32,7 +33,8 @@ from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
 from .competition_transport_verification import TransferProgress
-from .competition_work_progress import await_progress
+from .competition_verification_reuse import VerificationReuse
+from .competition_work_progress import await_progress, review_scope
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -59,6 +61,23 @@ class CohortExecutionAuthority:
         if provider.policy != journal.policy:
             raise ValueError("execution finality belongs to another policy")
         self.journal, self.provider, self.history = journal, provider, history
+        self.verification_reuse = VerificationReuse(
+            journal.journal.root / "authority-verification",
+            owner={
+                "schema": "umi-execution-authority-verification/1",
+                "policy": digest(journal.policy),
+                "cohorts": journal.cohorts,
+                "signer": identity(journal.config.signer),
+            },
+        )
+
+    def _verified(self, function, *args):
+        source = next(value for value in args if isinstance(value, CohortOrderHistory))
+        with (
+            review_scope("execution_authority", digest(source.history.plan), reads=0),
+            self.verification_reuse.selected(),
+        ):
+            return function(*args)
 
     async def current(
         self, assignment: CohortExecutionAssignment
@@ -84,6 +103,20 @@ class CohortExecutionAuthority:
             stage="execution_owner_history",
             cohort=cohort,
         )
+        closed = await await_progress(
+            run_owned_thread(
+                self._verified,
+                remember_closed_order_history,
+                self.journal.journal,
+                self.journal.cohorts,
+                self.journal.policy,
+                source,
+            ),
+            stage="execution_history_phase",
+            cohort=cohort,
+        )
+        if closed:
+            raise ValueError("new order signatures require an open request phase")
         boundary = execution_boundary(
             await await_progress(
                 wait_for_owned(self.provider.collect(), timeout=timeout),
@@ -95,6 +128,7 @@ class CohortExecutionAuthority:
         # timeout here would repeatedly discard a valid but slow verification.
         await await_progress(
             run_owned_thread(
+                self._verified,
                 remember_order_history,
                 self.journal.journal,
                 self.journal.cohorts,
@@ -107,6 +141,7 @@ class CohortExecutionAuthority:
         )
         await await_progress(
             run_owned_thread(
+                self._verified,
                 review_order,
                 assignment.certificate.order,
                 assignment.participant,
@@ -127,6 +162,7 @@ class CohortExecutionAuthority:
                 await wait_for_owned(self.provider.collect(), timeout=timeout)
             )
             await run_owned_thread(
+                self._verified,
                 remember_order_history,
                 self.journal.journal,
                 self.journal.cohorts,
