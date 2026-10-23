@@ -82,6 +82,23 @@ def test_poll_deduplicates_before_decoding_beyond_cache_and_restart(delivery, mo
     assert not calls
 
 
+def test_local_retry_reconciliation_reuses_references_after_restart(delivery, monkeypatch):
+    from umi.competition_cohort_model_upload_delivery import ModelUploadDelivery
+
+    h = delivery
+    keys = duplicates(h)
+    for key in keys:
+        assert h.owner.retained_model(key) == h.request.signed_submission.submission.model_revision
+    restarted = CohortModelUploads(h.owner.config, h.intake, h.owner.archive)
+    restarted._retained_reuse = AssignmentVerificationReuse(maximum_entries=2)
+    calls = decode_counter(monkeypatch)
+    delivery = ModelUploadDelivery(restarted)
+    for _ in range(2):
+        for key in keys:
+            assert delivery._remote_request(key) is None
+    assert not calls
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "binding"])
 def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, caplog, damage):
     h = delivery

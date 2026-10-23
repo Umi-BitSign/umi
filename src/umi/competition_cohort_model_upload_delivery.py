@@ -63,10 +63,12 @@ class ModelUploadDelivery:
         )
 
     def _remote_request(self, key: str) -> CohortParticipationRequest | None:
-        request = self.uploads.retained(key)
-        model = request.signed_submission.submission.model_revision
+        # Local allocations need only the exact model reference and fresh
+        # allocation fence. Decode the complete request only for remote work.
+        model = self.uploads.retained_model(key)
         if self.uploads.allocations.state(model) not in {"release_prepared", "released"}:
             return None
+        request = self.uploads.retained(key)
         self._payload_owner(request)
         return request
 
