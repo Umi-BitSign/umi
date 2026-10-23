@@ -37,10 +37,14 @@ def profile():
     )
 
 
-def test_exact481_pair_and_original479_bytes_remain_supported():
+def test_exact_reviewed_pairs_preserve_prior_profile_bytes():
     value = profile()
     validate_qualified_reward_runtime(value)
-    for name in ["runtime479-qualification.json", "runtime481-qualification.json"]:
+    for name in [
+        "runtime479-qualification.json",
+        "runtime481-qualification.json",
+        "runtime483-qualification.json",
+    ]:
         data = json.loads(FIXTURE.with_name(name).read_bytes())
         selected = value.model_copy(
             update={
@@ -51,6 +55,27 @@ def test_exact481_pair_and_original479_bytes_remain_supported():
         raw = canonical_json_bytes(selected)
         validate_qualified_reward_runtime(selected)
         assert canonical_json_bytes(RewardEligibilityRuntime.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize("change", ["code", "source", "schema"])
+def test_runtime483_trust_selection_still_rejects_unselected_code_and_semantics(change):
+    data = json.loads(FIXTURE.with_name("runtime483-qualification.json").read_bytes())
+    value = profile().model_copy(
+        update={
+            "runtime_code_sha256": data["runtime_code_sha256"],
+            "epoch_source_revision": data["epoch_source_revision"],
+        }
+    )
+    assert not data["qualification"]["independent_reproducible_build_claimed"]
+    if change == "code":
+        value = value.model_copy(update={"runtime_code_sha256": "fe" * 32})
+    elif change == "source":
+        value = value.model_copy(update={"epoch_source_revision": profile().epoch_source_revision})
+    else:
+        value = value.model_copy(update={"schema_": "umi-reward-eligibility-runtime/1"})
+    with pytest.raises(ValueError):
+        parsed = RewardEligibilityRuntime.model_validate_json(canonical_json_bytes(value))
+        validate_qualified_reward_runtime(parsed)
 
 
 @pytest.mark.parametrize(

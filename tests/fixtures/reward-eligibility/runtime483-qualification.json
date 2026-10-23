@@ -1,0 +1,28 @@
+{
+  "schema": "umi-runtime-scoped-eligibility-qualification/1",
+  "runtime_code_sha256": "1016a0f8c23aa1cfb88a37c723fd0440bfe7b8141490b77ae793dfd7be7540eb",
+  "epoch_source_revision": "b335b5ef339ceb4366e5452d24c22978821c595f",
+  "profile_schema": "umi-reward-eligibility-runtime/2",
+  "netuid": 78,
+  "scope": "same-root Yuma pre-consensus row eligibility",
+  "upstream_source": "https://github.com/RaoFoundation/subtensor/pull/3278",
+  "qualification": {
+    "native_code_identity": "Independent native code, runtime metadata and control proofs at finalized block 9342646.",
+    "source_attribution": "Operator explicitly accepts OTF upstream runtime attribution without an independent reproducible build. The pinned reviewed upstream source is a trust anchor; exact deployed source/build correspondence is not independently established.",
+    "independent_reproducible_build_claimed": false,
+    "exact_deployed_source_build_correspondence_independently_established": false,
+    "predicate": "Twelve selected helpers and four selected whole files are byte-identical to the qualified 481 source, as are the first 1174 lines of run_epoch.rs containing the pre-consensus masks. Later emission-apportionment changes are outside this scope.",
+    "source_review_report_sha256": "6ed0198df2c4368d3c8c6d28631752022812407843aee1861e8d50e651fd9576",
+    "native_code_proof_block": 9342646
+  },
+  "required_conditions": [
+    "Explicit authenticated selection of this exact code/source profile; preserve all original signed inputs, allocations and clocks.",
+    "Every endpoint must independently prove native same-root runtime code, complete state and finality.",
+    "SubnetEpochConsensus(78) must prove Yuma at every endpoint; proved absence uses executed metadata Default. Null refuses.",
+    "Other runtime hashes and source pairs remain unsupported; this is not wildcard approval of future upgrades."
+  ],
+  "limits": [
+    "Upstream runtime attribution is an explicit trust assumption, not an independent build-correspondence result.",
+    "No whole-runtime, consensus, execution or emission-allocation equivalence is claimed."
+  ]
+}

@@ -943,10 +943,16 @@ requires an explicitly qualified runtime code/source pair and a native proof of
 is supported; an absent value uses that runtime's proved metadata default.
 Unknown code, Null or malformed consensus state refuses with an explicit reason.
 A release or source label alone does not establish runtime equivalence. The
-qualified `/2` profiles cover exact runtime479/f4786f and runtime481/6a9726
+qualified `/2` profiles cover exact runtime479/f4786f, runtime481/6a9726 and runtime483/b335b5
 code/source pairs; their artifact and predicate scopes are recorded in
 `tests/fixtures/reward-eligibility/runtime479-qualification.json` and
-`tests/fixtures/reward-eligibility/runtime481-qualification.json`. Runtime481's
+`tests/fixtures/reward-eligibility/runtime481-qualification.json`, with runtime483's
+explicit upstream-trust basis in
+`tests/fixtures/reward-eligibility/runtime483-qualification.json`. Runtime483 was
+selected on the operator's acceptance of OTF upstream attribution without an
+independent reproducible build; no independent deployed-source/build match is
+claimed. Exact native code, same-root state and consensus proofs remain mandatory.
+Runtime481's
 emission split changes are outside the unchanged Yuma eligibility predicate;
 this qualification makes no general emission-equivalence claim. Code drift
 refuses current capture and archive review with
@@ -967,7 +973,10 @@ connections are not retained across references, finality checks or restarts.
 Missing or changed receipt metadata still requires explicit repair. Receipt
 connection counts and metadata-only timing are not a full recovery ETA.
 
-When an upstream release artifact is unavailable, the manual `Successor host
+An independent rebuild is optional when the operator explicitly accepts upstream
+runtime attribution; it is not a mandatory delay for every runtime upgrade. Keep
+that trust basis distinct from independently demonstrated build correspondence.
+When an independent rebuild is required, the manual `Successor host
 recovery checks` workflow accepts an exact `runtime_source_sha`, the independently
 proved `runtime_code_sha256`, and `runtime_spec_version`. That selection runs
 only the isolated source-build job on a disposable hosted runner, with read-only
