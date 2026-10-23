@@ -52,6 +52,7 @@ from .competition_cohort_participation import (
 from .competition_cohort_recovery import CohortRecoveryTransition, ModelRewardCohortAuthority
 from .competition_cohort_recovery_store import CohortRecoveryStore
 from .competition_execution import execution_boundary
+from .competition_model_certification_progress import ModelCertificationProgress
 from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import check_stage_json, stage_count
@@ -181,6 +182,7 @@ class CohortIntake:
         # not consume the external-lock timeout while one sibling owns it.
         self._process_lock = ThreadGate()
         self._seal_reuse = AssignmentVerificationReuse(8 * 1024**2, 64)
+        self.model_certification_progress = ModelCertificationProgress()
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")

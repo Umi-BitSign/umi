@@ -133,11 +133,39 @@ def _transport_transaction(db):
         raise
 
 
-def model_acceptances_for_seal(db, seal, history, policy, records):
+def model_acceptances_for_seal(db, seal, history, policy, records, *, report=None):
     """A missing or changed acceptance cannot close an opted-in cohort."""
     if not isinstance(history.authority.authority, ModelRewardCohortAuthority):
         return ()
     acceptance_tables(db)
+    selected_models = tuple(s for s in seal.selected if s.track == "model")
+    keys = tuple(s.submission_sha256 for s in selected_models)
+    available = set()
+    if keys:
+        available = {
+            row[0]
+            for row in db.execute(
+                "SELECT submission FROM cohort_model_acceptances WHERE cohort=? AND submission IN ("
+                + ",".join("?" for _ in keys)
+                + ")",
+                (seal.cohort_sha256, *keys),
+            )
+        }
+    pending = tuple(key for key in keys if key not in available)
+    inventory = dict(
+        cohort_sha256=seal.cohort_sha256,
+        roster_sha256=digest([s.model_dump(mode="json") for s in selected_models]),
+        completed=len(available),
+        total=len(keys),
+        pending_submission_sha256s=pending,
+    )
+    if report is not None:
+        report(inventory)
+    if pending:
+        error = PendingModelArtifacts("selected model artifact acceptance is pending")
+        error.submission_sha256 = pending[0]
+        error.inventory = inventory
+        raise error
     certificates = []
     for selected in seal.selected:
         if selected.track != "model":

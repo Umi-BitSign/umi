@@ -73,6 +73,13 @@ class CohortIntakePhaseObserver:
             epoch=self.epoch,
         )
 
+    def _certification_report(self, inventory):
+        report = self.intake.model_certification_progress.report(inventory)
+        _LOG.info(
+            "cohort_model_certification_progress %s", json.dumps(report, separators=(",", ":"))
+        )
+        return report
+
     def sample_service(
         self, state: CohortRecoveryState, capture: RegistrationCapture, *, serving: bool
     ) -> CohortAvailabilityObservation | None:
@@ -224,6 +231,7 @@ class CohortIntakePhaseObserver:
                         history,
                         self.intake.policy,
                         self.intake._records(db, history, track="model"),
+                        report=self._certification_report,
                     )
                 except (EmptyCohortIntake, PendingModelArtifacts) as error:
                     _LOG.info(
@@ -243,8 +251,13 @@ class CohortIntakePhaseObserver:
                                 "serving": service.serving,
                                 "observed_at_block": observation.block,
                                 "earliest_seal_block": earliest,
-                                "completed": 0,
-                                "total": 1,
+                                "completed": getattr(error, "inventory", {}).get("completed", 0),
+                                "total": getattr(error, "inventory", {}).get("total", 1),
+                                "percent": (
+                                    100 * error.inventory["completed"] / error.inventory["total"]
+                                    if getattr(error, "inventory", {}).get("total")
+                                    else 0
+                                ),
                                 "elapsed_seconds": round(time.monotonic() - started, 3),
                                 "eta_seconds": None,
                                 "eta_basis": "awaiting_required_intake_evidence",

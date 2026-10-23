@@ -273,14 +273,32 @@ def test_intake_waits_for_every_model_and_closes_after_delayed_certification(pre
     assert waits[-1]["pending_submission_sha256"] in {digest(sub) for sub in subs}
     assert waits[-1]["serving"] is True
     assert waits[-1]["observed_at_block"] >= waits[-1]["earliest_seal_block"]
+    assert (waits[-1]["completed"], waits[-1]["total"], waits[-1]["percent"]) == (0, 2, 0)
     first = certify(owner, cohort, subs[0], inputs, block=300)
     owner.publish(first, capture_at(300))
     assert observe(phase, cohort, 305).seal is None
+    latest = json.loads(
+        next(
+            r.getMessage().split(" ", 1)[1]
+            for r in reversed(caplog.records)
+            if r.getMessage().startswith("cohort_intake_wait ")
+        )
+    )
+    assert (latest["completed"], latest["total"], latest["percent"]) == (1, 2, 50)
     second = certify(owner, cohort, subs[1], inputs, block=4000)
     assert second.certificate.acceptance.accepted_ordinal == 2
     owner.publish(second, capture_at(4000))
     closed = observe(phase, cohort, 4000)
     assert closed.seal is not None and len(closed.seal.selected) == 2
+    completed = json.loads(
+        next(
+            r.getMessage().split(" ", 1)[1]
+            for r in reversed(caplog.records)
+            if r.getMessage().startswith("cohort_model_certification_progress ")
+        )
+    )
+    assert (completed["completed"], completed["total"], completed["percent"]) == (2, 2, 100)
+    assert completed["certification_authority"] is False
     reopened = CohortIntakePhaseObserver(
         CohortIntake(
             owner.intake.config, owner.intake.policy, eligible_tracks=("endpoint", "model")

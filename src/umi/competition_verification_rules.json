@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change. Profile3 binds its explicit native-runtime Yuma predicate through a distinct profile digest; historical profile1/2 signed bytes, accepted grammar and eligibility calculations remain unchanged. Runtime adoption, native online/archive proof, interruption, upgrade and retained history consumer parity qualify this additive reader without discarding unchanged historical verdicts.",
+  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change. Profile3 binds its explicit native-runtime Yuma predicate through a distinct profile digest; historical profile1/2 signed bytes, accepted grammar and eligibility calculations remain unchanged. Runtime adoption, native online/archive proof, interruption, upgrade and retained history consumer parity qualify this additive reader without discarding unchanged historical verdicts. Selected-roster certificate counters and redacted stage diagnostics do not authorize admission; complete native certificate and seal verification is unchanged.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -83,9 +83,9 @@
     "competition_cohort_grant_delivery.py": "cb6b147618d9fc4e9a31804f8c32195835bd015f2f1025cf8aaef5882936d4ba",
     "competition_cohort_history.py": "7918bc89214b01a62a87f181e29c7aa435aec7219a496ca74c73cd0f5b72c38f",
     "competition_cohort_history_http.py": "a3341b1645ab1e162dbb398e5aeed3fdc9e41cb617bb6b7421d86f7758ca3557",
-    "competition_cohort_intake.py": "e118e164af1dfae2a9c1a8a9c102ebd9b1dcca844af2ced95afea8c30d78bfc6",
+    "competition_cohort_intake.py": "85515c1cc4bdc6baca4c17a51cbea1ba064ed47a058fb3f4fc64a25fd36a8ade",
     "competition_cohort_intake_export.py": "598c0284483541526dddfc8d86ba6cfabdf35d3a53b833b0e594a5870a15d965",
-    "competition_cohort_intake_phase.py": "f50ca86593dcd3ba763184aeffbef22dbd3a6e0054f720c86757554d92e2af1a",
+    "competition_cohort_intake_phase.py": "8e172790747041adf277f8f1bf49d9f1676f5ea9229a59c1dbc169f281c82646",
     "competition_cohort_intake_records.py": "2ae9197209f2b31519227fd0e75865298b15304b9494c42386e9c8427c1438d7",
     "competition_cohort_intake_review.py": "16498750e4d935311b460dce549804e1718e2ddd6dd6d2fe82a276b4609fd21d",
     "competition_cohort_intake_review_http.py": "96c8db6ef75dc4bf555e2cf4beb47e14b7f0ad3f227284bb2cc692eb81b17b9e",
@@ -103,8 +103,8 @@
     "competition_cohort_miner_contracts.py": "eb08376f378ba1105dedc1b00eb2f4cceff11db315e65d2cc7d52835830002d5",
     "competition_cohort_miner_startup.py": "7511a633c1530da5c378b54ac74e8ff95314c11fda2c3c0c8438284271666c4d",
     "competition_cohort_model_acceptance.py": "42e3fd6126dee2926e5dcf463a710a186e0148949e6361529328f00d44445725",
-    "competition_cohort_model_acceptance_store.py": "ad3a13d82dbc213345bdee9f6b668c60b8d436037834a47ac013b89474a09807",
-    "competition_cohort_model_acceptance_worker.py": "b84eda771dd487b93d98dbd220e4403a8c15a54f59aec0dfbee4d1b4479c9279",
+    "competition_cohort_model_acceptance_store.py": "c13853bbb99c68b0307cb65f5591af5911b56de7426c4b3d68bc0df85e5e7371",
+    "competition_cohort_model_acceptance_worker.py": "fa50d1ceceb57a251a9861ab525e249e84dbab444121874d8cb77433f07116af",
     "competition_cohort_model_award.py": "36bfd53900852e44b33ef91b1d1dd5077d4b361c7c0df1c7dd8b721777632eec",
     "competition_cohort_model_client.py": "342e23fdab029b6b83e4f71ef11026e58b300c00de0de9b5730654f524463cca",
     "competition_cohort_model_delivery_api.py": "be99f5e493de0014d62cd2eaf8c6bea1591308e449b4b3524a7bf960ac90dff9",
@@ -613,7 +613,8 @@
     "validator_transcript_effects.py": "e7e8ec2cd72b01d5decc8173aa9b6284c0f0fb1be0ba35f707b8f46b10390e47",
     "video.py": "dba863c934267fe565bea65914644da8cc1d43f6b661c494521c80a7504ebf4b",
     "weight_storage.py": "5959225e2c57c7895b7762a86df717d09eea4e9f07cd6d56978767a6d22d15a8",
-    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6"
+    "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6",
+    "competition_model_certification_progress.py": "402c914fb8bd92bf1e3e7682a1f2a0c3ee6f26a90a7237fdcf5de4c53895fe6d"
   },
   "external_distributions": {
     "annotated-doc": [

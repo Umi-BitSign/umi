@@ -21,6 +21,7 @@ from .competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
+from .competition_progress import _failure_details
 from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
@@ -98,6 +99,10 @@ class ModelAcceptanceWorker:
                 yield
                 progress.advance()
         except BaseException as error:
+            if stage != "retained_lookup" or not isinstance(error, PendingModelArtifacts):
+                self.owner.intake.model_certification_progress.operation(
+                    cohort, key, stage, error_type=type(error).__name__
+                )
             _LOG.info(
                 "model_acceptance_stage %s",
                 canonical_json_bytes(
@@ -108,11 +113,13 @@ class ModelAcceptanceWorker:
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "stalled_or_retrying": True,
                         "error_type": type(error).__name__,
+                        "causes": _failure_details(error),
                     }
                 ).decode(),
             )
             raise
         else:
+            self.owner.intake.model_certification_progress.operation(cohort, key, stage)
             _LOG.info(
                 "model_acceptance_stage %s",
                 canonical_json_bytes(
@@ -193,26 +200,28 @@ class ModelAcceptanceWorker:
             with self._stage(cohort, key, "intent_lookup"):
                 intent = await run_owned_thread(self.owner.intent, cohort, key)
             if intent is None:
-                if selected is None:
-                    selected = await run_owned_thread(
-                        partial(
-                            read_private_model,
-                            self.inputs / "model-reviews" / (sub.model_revision + ".json"),
-                            ModelArtifactReviewInputs,
-                            maximum_bytes=MAX_PUBLICATION_BYTES,
+                with self._stage(cohort, key, "intent_preparation"):
+                    if selected is None:
+                        selected = await run_owned_thread(
+                            partial(
+                                read_private_model,
+                                self.inputs / "model-reviews" / (sub.model_revision + ".json"),
+                                ModelArtifactReviewInputs,
+                                maximum_bytes=MAX_PUBLICATION_BYTES,
+                            )
                         )
+                    capture = await self.capture()
+                    await run_owned_thread(self.owner.prepare, cohort, key, selected, capture)
+                    intent = await run_owned_thread(self.owner.intent, cohort, key)
+            with self._stage(cohort, key, "proposal_publication"):
+                await run_owned_thread(
+                    partial(
+                        publish_private_model,
+                        self.output / "model-acceptance-proposals" / cohort / (key + ".json"),
+                        intent,
+                        maximum_bytes=MAX_PUBLICATION_BYTES,
                     )
-                capture = await self.capture()
-                await run_owned_thread(self.owner.prepare, cohort, key, selected, capture)
-                intent = await run_owned_thread(self.owner.intent, cohort, key)
-            await run_owned_thread(
-                partial(
-                    publish_private_model,
-                    self.output / "model-acceptance-proposals" / cohort / (key + ".json"),
-                    intent,
-                    maximum_bytes=MAX_PUBLICATION_BYTES,
                 )
-            )
             with self._stage(cohort, key, "review_quorum"):
                 approved = (
                     await self._review(cohort, key)
