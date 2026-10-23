@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .competition_cohort_admission_review import review_cohort_participation
+from .competition_cohort_admission_review import review_original_participation
 from .competition_cohort_coordinator import (
     CohortDecisionInput,
     CohortPhaseProgress,
@@ -38,7 +38,7 @@ from .competition_cohort_review_export import (
     review_export_limits,
     review_selection,
 )
-from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_execution import ExecutionBoundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_settlement import PromotionHeadBinding
 from .competition_store import CompetitionStore
@@ -230,6 +230,8 @@ class RemotePreparationProgressReviewer:
         maximum_bytes: int = MAX_EXPORT_BYTES,
         maximum_promotion_bytes: int = 16 * 1024**2,
         timeout_seconds: int = 2400,
+        reviewed_participation: Callable[[bytes], Awaitable[bool]] | None = None,
+        remember_participation_review: Callable[[bytes], Awaitable[None]] | None = None,
     ):
         review_export_limits(maximum_bytes, timeout_seconds)
         self.policy, self.cohorts, self.owner = review_selection(provider.policy, cohorts, owner)
@@ -250,6 +252,8 @@ class RemotePreparationProgressReviewer:
         ):
             raise ValueError("preparation promotion evidence bound is invalid")
         self.provider, self.fetch, self.archive = provider, fetch, archive
+        self.reviewed_participation = reviewed_participation
+        self.remember_participation_review = remember_participation_review
         self.promotion, self.tracks = promotion_store, tuple(eligible_tracks)
         self.maximum_bytes, self.maximum_promotion_bytes, self.timeout_seconds = (
             maximum_bytes,
@@ -331,16 +335,17 @@ class RemotePreparationProgressReviewer:
             unit="participations",
             cohort=progress.cohort_sha256,
         ):
-            proof = await self.archive(record.observation)
-            await review_cohort_participation(
-                canonical_json_bytes(record),
+            await review_original_participation(
+                record,
                 original.history,
                 self.policy,
                 self.provider,
+                self.archive,
                 expected_tip_sha256=progress.recovery_tip_sha256,
-                registration_archive=proof,
+                reviewed_participation=self.reviewed_participation,
+                remember_participation_review=self.remember_participation_review,
             )
-        if execution_boundary(await self.provider.collect()).block < progress.observed_at_block:
+        if await self.provider.current_finalized_block() < progress.observed_at_block:
             raise ValueError("preparation progress is ahead of owned finality")
         repeated, _ = await self._read(progress)
         if repeated != exported:

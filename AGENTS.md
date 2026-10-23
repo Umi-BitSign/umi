@@ -75,3 +75,11 @@
   process, service, configuration, symlink, and environment dependencies first.
   Preserve wallets, private data, model assets, and recovery state. Never delete
   by a broad home-directory glob. Report retained dependencies and cleanup results.
+
+- Check upcoming cohort stages against the actual selected downstream services
+  while current work is running: inspect live configured limits, remaining local
+  and remote capacity, retained completion records and the supported update path.
+  Use owner diagnostics and bounded metadata for this readiness work. Persist
+  successful results and reuse them; avoid repeated payload verification or
+  creating an extra manual release gate. Resolve identified capacity and reuse
+  defects before their consumer stage starts.

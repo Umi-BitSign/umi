@@ -90,7 +90,10 @@ original record, policy, cohort authority and verifier semantics; damaged comple
 metadata requires repair. Existing signed admission journals remain supported.
 Decision signing reuses the same signer's committed exact-progress review while
 still checking the proposed transition and current owner history. Seal registration
-and current finality remain independently verified.
+and current finality remain independently verified. Preparation consumes the same
+owned per-participation results rather than repeating historical proof work.
+Final freshness checks use the verifier-owned finalized height; they do not
+collect a new subnet membership snapshot when only the height is needed.
 
 `GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
 current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
@@ -201,8 +204,12 @@ cohort or authorize its evidence to be discarded.
   upgrades preserve the original journals, cutoff file and directory bindings.
 - The previous certified reward row remains effective until a newer cohort is
   certified and activated.
-- A five-hour rest starts after request closure is certified. The next cohort
-  cannot start requests earlier.
+- The selected cutover-clock rule measures the five-hour minimum from cohort
+  cutover, recording that observation during intake. Time spent on intake review
+  and preparation counts toward it; restart does not start another interval.
+  The predecessor must still have certified request closure. Legacy installations
+  retain their certification-clock journals until their supported upgrade selects
+  the cutover clock; explicit historical cutovers bind their retained source.
 - Each designated validator must receive at least 24 hours of verified
   opportunity to submit the certified row. Offline time does not count toward
   that opportunity.

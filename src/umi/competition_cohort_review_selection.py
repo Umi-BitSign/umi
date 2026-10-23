@@ -85,6 +85,8 @@ class SelectedPhaseReviewer:
             promotion,
             eligible_tracks=config.eligible_tracks,
             maximum_promotion_bytes=config.maximum_promotion_bytes,
+            reviewed_participation=self.intake.reviewed_participation,
+            remember_participation_review=self.intake.remember_participation_review,
             **common,
         )
         self.request_fetch = RequestReviewHTTPClient(

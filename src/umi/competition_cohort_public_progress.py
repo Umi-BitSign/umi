@@ -40,6 +40,13 @@ _FIELDS = (
     "scope",
     "unit",
     "work_id",
+    "ready",
+    "not_before_unix_ms",
+    "chain_timestamp_ms",
+    "observed_at_block",
+    "target_block",
+    "rest_clock",
+    "cutover_unix_ms",
 )
 
 
@@ -53,7 +60,14 @@ class CohortProgressSnapshots:
         cohort = body.get("cohort_sha256")
         if not isinstance(cohort, str) or re.fullmatch(r"[0-9a-f]{64}", cohort) is None:
             return
-        if kind not in {"lifecycle", "certification", "intake_certification", "acceptance", "work"}:
+        if kind not in {
+            "lifecycle",
+            "certification",
+            "intake_certification",
+            "acceptance",
+            "work",
+            "request_start",
+        }:
             return
         now = time.monotonic()
         public = {key: body[key] for key in _FIELDS if key in body}
@@ -92,7 +106,14 @@ class CohortProgressSnapshots:
             # ordering; nested work takes precedence over its enclosing meter.
             entry["work"] = next(reversed(active.values()))
         parts = {}
-        for kind in ("lifecycle", "certification", "intake_certification", "acceptance", "work"):
+        for kind in (
+            "lifecycle",
+            "certification",
+            "intake_certification",
+            "acceptance",
+            "work",
+            "request_start",
+        ):
             if kind in entry:
                 observed, value = entry[kind]
                 age = max(0, now - observed)
@@ -103,6 +124,9 @@ class CohortProgressSnapshots:
         phase = parts.get("lifecycle", {}).get("phase")
         selected = parts.get("lifecycle", {})
         stage = selected.get("stage", "awaiting_observation")
+        if phase == "preparation" and selected.get("status") == "waiting_request_rest":
+            selected = parts.get("request_start", selected)
+            stage = "waiting_request_rest"
         if phase in (None, "intake"):
             for kind in ("certification", "intake_certification"):
                 if kind in parts:
@@ -128,7 +152,7 @@ class CohortProgressSnapshots:
                     age = max(0, now - observed)
                     parts["work"] = dict(work, age_seconds=round(age, 3), stale=age > 120)
                     break
-        if stage != "model_certification" and "work" in parts:
+        if stage not in {"model_certification", "waiting_request_rest"} and "work" in parts:
             observed, work = entry["work"]
             # Do not call the previous phase's last 100% substage current work.
             if observed >= entry.get("phase_started", 0) and work.get("state") in {
