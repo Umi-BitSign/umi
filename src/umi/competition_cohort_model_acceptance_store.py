@@ -110,7 +110,9 @@ def _read(db, table, cohort, submission):
 def read_publication(db, cohort, submission):
     raw = _read(db, "cohort_model_acceptances", cohort, submission)
     if raw is None:
-        raise PendingModelArtifacts("selected model artifact acceptance is pending")
+        error = PendingModelArtifacts("selected model artifact acceptance is pending")
+        error.submission_sha256 = submission
+        raise error
     publication = ModelAcceptancePublication.model_validate_json(raw)
     if canonical_json_bytes(publication) != raw:
         raise ValueError("retained model acceptance changed its canonical bytes")

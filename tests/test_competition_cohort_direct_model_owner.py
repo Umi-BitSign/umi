@@ -37,6 +37,7 @@ from umi.competition_cohort_model_acceptance import (
 from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_cohort_service_host import CohortModelPayloadRouter
 from umi.open_competition import digest, model_content_digest, sign_object
+from umi.private_files import publish_private_model
 from umi.protocol import canonical_json_bytes
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
@@ -549,6 +550,90 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
     assert status.model_dump(mode="json", by_alias=True)["hold_reason_code"] == (
         "direct_model_verification_failed"
     )
+
+
+@pytest.mark.asyncio
+async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop(
+    direct, tmp_path, monkeypatch, policy
+):
+    import threading
+
+    from umi import competition_model_review_file as review_file
+    from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
+
+    standing = StandingModelReviewPolicy(
+        schema="umi-standing-model-artifact-review-policy/1",
+        competition_policy_sha256=digest(policy),
+        contribution_terms_sha256=policy.contribution_terms_sha256,
+        standing_approval_record_sha256="cd" * 32,
+        approved_by="fixture operator",
+        approved_at_utc="2026-10-23T00:00:00Z",
+        complete_declared_bundle_rights_approved=True,
+        licenses_and_notices_reviewed=True,
+        public_redistribution_and_evaluation_approved=True,
+    )
+
+    config = direct.owner.config.model_copy(
+        update={
+            "admission_reviews_directory": str(tmp_path / "reviews"),
+            "directory": str(tmp_path / "reviewed-direct"),
+            "standing_review_policy": standing,
+        }
+    )
+    direct.owner = DirectModelUploadOwner(
+        config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+    reservation = await direct.owner.reserve(
+        direct.request,
+        direct.payload,
+        now_unix_ms=1_800_000_000_000,
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    model = direct.payload.payload.model_sha256
+    path = tmp_path / "reviews" / (model + ".json")
+    publish_private_model(
+        path,
+        ModelArtifactReviewInputs(
+            model_sha256=model,
+            rights_evidence={"license": "MIT"},
+            reconstruction_evidence={"complete": True},
+        ),
+    )
+    loop_thread = threading.get_ident()
+    original = review_file.read_private_model
+
+    def owned_read(*args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(review_file, "read_private_model", owned_read)
+    assert (await direct.owner.poll_once(now_unix_ms=1_800_000_012_000))["reviews_ready"] == 1
+    reads = direct.multipart.read_calls
+    resumed = DirectModelUploadOwner(
+        config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("completed review must not be reread after restart")
+
+    monkeypatch.setattr(review_file, "read_private_model", fail)
+    assert (await resumed.poll_once(now_unix_ms=1_800_000_013_000))["reviews_ready"] == 1
+    assert direct.multipart.read_calls == reads
+    path.unlink()
+    damaged = await resumed.poll_once(now_unix_ms=1_800_000_014_000)
+    assert damaged["objects_failed"] == 1 and damaged["reviews_ready"] == 0
 
 
 @pytest.mark.asyncio

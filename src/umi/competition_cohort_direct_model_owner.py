@@ -60,7 +60,9 @@ from .competition_cohort_model_static_review import (
 )
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
+from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
     Directory,
@@ -1355,17 +1357,18 @@ class DirectModelUploadOwner:
             reviewed = self.config.standing_review_policy is None
             if self.config.admission_reviews_directory is not None:
                 try:
-                    retained = read_private_model(
+                    reviewed = await run_owned_thread(
+                        reviewed_file_ready,
+                        self.journal,
                         Path(self.config.admission_reviews_directory) / (model_sha256 + ".json"),
-                        ModelArtifactReviewInputs,
-                        maximum_bytes=MAX_PUBLICATION_BYTES,
+                        model_sha256,
                     )
-                    if retained.model_sha256 != model_sha256:
-                        raise ValueError("direct model review changed")
-                    reviewed = True
-                    reviews_ready += 1
-                except FileNotFoundError:
-                    pass
+                    if reviewed:
+                        reviews_ready += 1
+                except (OSError, ValueError) as error:
+                    failed += 1
+                    last_error = type(error).__name__
+                    continue
             if verified:
                 ready += 1
             if verified and reviewed:
