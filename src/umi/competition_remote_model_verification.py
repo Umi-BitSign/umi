@@ -23,6 +23,36 @@ from .r2_multipart import MAXIMUM_RANGE_BYTES, R2ObjectHead
 REMOTE_MODEL_ABI = "umi-r2-model-bytes/1"
 
 
+class _RemoteModelRanges:
+    """Read adjacent manifest files through one bounded contiguous range.
+
+    A range may span files, but callers consume and hash bytes in the original
+    manifest order. No prefetch task or unbounded working set survives a caller.
+    """
+
+    def __init__(self, multipart, key, total_bytes):
+        self.multipart, self.key, self.total = multipart, key, total_bytes
+        self.buffer = b""
+        self.position = self.offset = 0
+
+    async def read(self, maximum):
+        if self.position == len(self.buffer):
+            size = min(self.total - self.offset, MAXIMUM_RANGE_BYTES)
+            if size <= 0:
+                raise ValueError("direct model verification range differs")
+            self.buffer = await self.multipart.read_range(
+                self.key, offset=self.offset, size_bytes=size
+            )
+            if len(self.buffer) != size:
+                raise ValueError("direct model verification range differs")
+            self.position = 0
+        size = min(maximum, len(self.buffer) - self.position)
+        data = memoryview(self.buffer)[self.position : self.position + size]
+        self.position += size
+        self.offset += size
+        return data
+
+
 class RemoteModelBytes(StrictProtocolModel):
     """Small original documents are retained; model weights never enter this record."""
 
@@ -168,6 +198,7 @@ async def verify_remote_model(
             stream_hash = hashlib.sha256()
             documents = {}
             offset = 0
+            ranges = _RemoteModelRanges(multipart, key, payload.total_bytes)
             for record in bundle.files:
                 identity = {"source": source, "offset": offset, "size_bytes": record.size_bytes}
                 verified = None if saved is None else saved.load(["file", record.path], identity)
@@ -178,10 +209,8 @@ async def verify_remote_model(
                 document = bytearray() if record.path in document_paths else None
                 remaining = record.size_bytes
                 while remaining:
-                    size = min(remaining, MAXIMUM_RANGE_BYTES)
-                    data = await multipart.read_range(key, offset=offset, size_bytes=size)
-                    if len(data) != size:
-                        raise ValueError("direct model verification range differs")
+                    data = await ranges.read(remaining)
+                    size = len(data)
                     stream_hash.update(data)
                     if file_hash is not None:
                         file_hash.update(data)
@@ -190,6 +219,7 @@ async def verify_remote_model(
                     offset += size
                     remaining -= size
                     progress.advance(size)
+                    del data
                 if file_hash is not None and file_hash.hexdigest() != record.sha256:
                     raise ValueError("direct model file differs from its manifest")
                 if saved is not None and verified is None:

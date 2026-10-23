@@ -1052,6 +1052,7 @@ async def test_remote_completed_verification_repairs_are_visible(direct, damage)
 async def test_remote_incomplete_stream_keeps_completed_file_checkpoints(direct, monkeypatch):
     from pathlib import Path
 
+    from umi import competition_remote_model_verification as remote
     from umi.competition_remote_model_verification import verify_remote_model
     from umi.competition_transport_verification import ByteCheckpoints
 
@@ -1063,6 +1064,9 @@ async def test_remote_incomplete_stream_keeps_completed_file_checkpoints(direct,
     root = Path(direct.owner.config.directory) / "remote-test"
     original_read = direct.multipart.read_range
     boundary = bundle.files[0].size_bytes
+    # Inject interruption at an actual range boundary, independently of the
+    # production read geometry, which now spans adjacent small files.
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", boundary)
     remembered = []
     original_remember = ByteCheckpoints.remember
 
@@ -1117,6 +1121,81 @@ async def test_remote_verification_rechecks_only_changed_context(direct, monkeyp
         direct.multipart, key, bundle, payload, root=root, context=context
     )
     assert direct.multipart.read_calls > reads
+
+
+@pytest.mark.parametrize("range_bytes", [1, 17, 64, 4096])
+async def test_remote_ranges_span_files_and_reuse_completed_verification(
+    direct, monkeypatch, tmp_path, range_bytes
+):
+    from umi import competition_remote_model_verification as remote
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/coalesced-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    reads = []
+    original = direct.multipart.read_range
+
+    async def read(key, *, offset, size_bytes):
+        reads.append((offset, size_bytes))
+        return await original(key, offset=offset, size_bytes=size_bytes)
+
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes)
+    monkeypatch.setattr(direct.multipart, "read_range", read)
+    docs = (bundle.files[0].path, bundle.files[-1].path)
+    arguments = dict(root=tmp_path / "ranges", context={"authority": "a" * 64}, document_paths=docs)
+    documents, _ = await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, **arguments
+    )
+    assert reads == [
+        (offset, min(range_bytes, payload.total_bytes - offset))
+        for offset in range(0, payload.total_bytes, range_bytes)
+    ]
+    offset = 0
+    for record in bundle.files:
+        if record.path in docs:
+            assert (
+                documents[record.path]
+                == direct.multipart.payload_bytes[offset : offset + record.size_bytes]
+            )
+        offset += record.size_bytes
+    # Read geometry changes do not change native byte semantics or require a
+    # second payload pass after a completed immutable-object verification.
+    reads.clear()
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes + 1)
+    restored, _ = await remote.verify_remote_model(
+        direct.multipart, key, bundle, payload, **arguments
+    )
+    assert restored == documents and not reads
+
+
+@pytest.mark.parametrize("damage", ["short_range", "changed_second_file"])
+async def test_coalesced_remote_ranges_preserve_integrity_failures(
+    direct, monkeypatch, tmp_path, damage
+):
+    from umi.competition_remote_model_verification import verify_remote_model
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    key = "preservation/damaged-coalesced-object"
+    direct.multipart.objects[key] = (payload.total_bytes, "version-one")
+    original = direct.multipart.read_range
+    boundary = bundle.files[0].size_bytes
+
+    async def read(key, *, offset, size_bytes):
+        raw = await original(key, offset=offset, size_bytes=size_bytes)
+        if damage == "short_range":
+            return raw[:-1]
+        if offset <= boundary < offset + len(raw):
+            position = boundary - offset
+            raw = raw[:position] + bytes([raw[position] ^ 1]) + raw[position + 1 :]
+        return raw
+
+    monkeypatch.setattr(direct.multipart, "read_range", read)
+    with pytest.raises(ValueError, match=r"range differs|file differs"):
+        await verify_remote_model(
+            direct.multipart, key, bundle, payload, root=tmp_path / "damaged", context={}
+        )
 
 
 @pytest.mark.asyncio

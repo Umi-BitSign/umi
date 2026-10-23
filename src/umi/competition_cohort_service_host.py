@@ -721,6 +721,16 @@ class ServiceAdmissionHost:
                     if self.legacy_payloads is not None and c.direct_model_uploads is not None
                     else None
                 ),
+                priority_cohorts=(
+                    tuple(
+                        binding.cohort_sha256
+                        for binding in intake.config.cohorts
+                        if binding.cohort_sha256
+                        not in c.lifecycle.automatic_progression_hold_cohorts
+                    )
+                    if c.lifecycle is not None
+                    else None
+                ),
             )
             if model_authority
             else None
