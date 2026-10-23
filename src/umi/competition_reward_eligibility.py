@@ -1,9 +1,9 @@
-"""Current proof-backed eligibility under an independently qualified runtime.
+"""Proof-backed eligibility with preserved historical runtime bindings.
 
-The code-hash profile must be selected by the installed series qualification.
-Supplying a hash does not establish a source/build correspondence. Unsupported
-code or missing proofs holds collection; a permit or old epoch output is never
-substituted. This consumer does not accrue coverage or authorize transactions.
+Profile3 discovers finalized native code and metadata and evaluates the declared
+UMI Yuma predicate against same-root proved state. Historical exact-code profiles
+remain readable for their signed selections and retained evidence. Missing proofs
+or unsupported state refuse collection; no old epoch output is substituted.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import _hotkey, _uint
 from .competition_chain_state import (
@@ -56,28 +56,66 @@ _QUALIFIED_YUMA_RUNTIMES: frozenset[tuple[str, str]] = frozenset(
 
 
 class RewardEligibilityRuntime(StrictProtocolModel):
-    """Selected code and reviewed pre-consensus semantics, never a code wildcard.
+    """Explicit eligibility semantics under authenticated native runtime state.
 
-    /1 preserves historical c004 evidence exactly. /2 supports the reviewed
-    reviewed Yuma paths only: each endpoint must also prove its epoch mode. The
-    source revision alone cannot select that mutable subnet state.
+    /1 and /2 preserve historical exact code/source bindings. /3 discovers code
+    from finalized native proofs; its declared UMI predicate and proved Yuma
+    mode determine eligibility, independently of a runtime release number.
     """
 
-    schema_: Literal["umi-reward-eligibility-runtime/1", "umi-reward-eligibility-runtime/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-reward-eligibility-runtime/1",
+        "umi-reward-eligibility-runtime/2",
+        "umi-reward-eligibility-runtime/3",
+    ] = Field(alias="schema")
     genesis_hash: Literal[FINNEY_GENESIS_HASH]
     netuid: Literal[78]
-    runtime_code_sha256: Hex32
-    epoch_source_revision: Literal[
-        "c004cebf360f4088187ee49d851dfb1a1eaaf710",
-        "f4786f9087cac84cfab37cbdf1e01c399042653a",
-        "6a972693ae9580541225bd37696ac2fee26b8ae9",
-        "b335b5ef339ceb4366e5452d24c22978821c595f",
-    ]
+    runtime_code_sha256: Hex32 | None = None
+    epoch_source_revision: (
+        Literal[
+            "c004cebf360f4088187ee49d851dfb1a1eaaf710",
+            "f4786f9087cac84cfab37cbdf1e01c399042653a",
+            "6a972693ae9580541225bd37696ac2fee26b8ae9",
+            "b335b5ef339ceb4366e5452d24c22978821c595f",
+        ]
+        | None
+    ) = None
+    runtime_binding: Literal["native_finalized_executed_code/1"] | None = None
+    epoch_semantics: Literal["umi-yuma-eligibility/1"] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_profile_bytes(self, handler):
+        value = handler(self)
+        for name in (
+            "runtime_code_sha256",
+            "epoch_source_revision",
+            "runtime_binding",
+            "epoch_semantics",
+        ):
+            if getattr(self, name) is None:
+                value.pop(name, None)
+        return value
 
     @model_validator(mode="after")
     def selected_semantics(self):
+        if self.discovers_runtime:
+            if (
+                {"runtime_code_sha256", "epoch_source_revision"} & self.model_fields_set
+                or self.runtime_code_sha256 is not None
+                or self.epoch_source_revision is not None
+                or self.runtime_binding != "native_finalized_executed_code/1"
+                or self.epoch_semantics != "umi-yuma-eligibility/1"
+            ):
+                raise ValueError("runtime discovery requires explicit native binding and semantics")
+            return self
+        if (
+            {"runtime_binding", "epoch_semantics"} & self.model_fields_set
+            or self.runtime_code_sha256 is None
+            or self.epoch_source_revision is None
+            or self.runtime_binding is not None
+            or self.epoch_semantics is not None
+        ):
+            raise ValueError("historical runtime profiles require their original exact binding")
         original = "c004cebf360f4088187ee49d851dfb1a1eaaf710"
         yuma_sources = {
             "f4786f9087cac84cfab37cbdf1e01c399042653a",
@@ -95,7 +133,11 @@ class RewardEligibilityRuntime(StrictProtocolModel):
 
     @property
     def requires_epoch_consensus_proof(self) -> bool:
-        return self.schema_ == "umi-reward-eligibility-runtime/2"
+        return self.schema_ != "umi-reward-eligibility-runtime/1"
+
+    @property
+    def discovers_runtime(self) -> bool:
+        return self.schema_ == "umi-reward-eligibility-runtime/3"
 
 
 class RewardRuntimeCodeMismatch(ValueError):
@@ -112,6 +154,12 @@ class RewardRuntimeCodeMismatch(ValueError):
 def validate_reward_runtime_code(runtime, profile: RewardEligibilityRuntime) -> None:
     if type(runtime) is not ExecutedRuntimeContext:
         raise ValueError("reward eligibility requires an owned executed runtime context")
+    if profile.discovers_runtime:
+        # The provider authenticates this context's code proof and executed
+        # metadata at the owned finalized root before this boundary. Profile3
+        # authorizes an explicit UMI predicate, not an upstream source revision.
+        # Same-root typed state and proved Yuma mode remain mandatory below.
+        return
     observed = hashlib.sha256(runtime.code_evidence.value).hexdigest()
     if observed != profile.runtime_code_sha256:
         raise RewardRuntimeCodeMismatch(expected=profile.runtime_code_sha256, observed=observed)
@@ -130,13 +178,15 @@ class UnsupportedRewardEligibilityRuntime(ValueError):
 
 
 def validate_qualified_reward_runtime(profile: RewardEligibilityRuntime) -> None:
-    """Require qualification separately from authorization for new semantics.
+    """Validate supported predicate semantics separately from signed selection.
 
-    This gate is for newly authorized profiles. Existing /1 native consumers
-    retain their original installed qualification and signed selector instead;
-    a new adoption cannot use /1 to authorize an arbitrary replacement hash.
+    Legacy exact-code records retain their original qualification. Profile3's
+    version-independent predicate still requires native code/metadata, typed
+    same-root storage and epoch-mode proofs in each actual consumer.
     """
     profile = RewardEligibilityRuntime.model_validate_json(canonical_json_bytes(profile))
+    if profile.discovers_runtime:
+        return
     if (
         not profile.requires_epoch_consensus_proof
         or (profile.runtime_code_sha256, profile.epoch_source_revision)

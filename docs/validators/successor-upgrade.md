@@ -901,6 +901,28 @@ installing the exact successor approval that names the retained predecessor
 approval digest; an empty host or a newly added validator cannot claim
 predecessor authority.
 
+New supported reward-runtime selections use eligibility profile
+`umi-reward-eligibility-runtime/3`, with
+`runtime_binding: native_finalized_executed_code/1` and
+`epoch_semantics: umi-yuma-eligibility/1`. The native provider discovers code and
+executes metadata from the finalized `:code` proof. Runtime release numbers and
+an expanding code allowlist do not gate this profile. Each eligibility endpoint
+still proves its complete typed inputs and Yuma consensus mode at the same root;
+missing proofs, unsupported storage or another consensus mode refuse collection.
+This declares the UMI eligibility predicate; it does not claim that every future
+upstream epoch implementation is identical. Current and retained-proof consumers
+use the same boundary, with the actual code bound through their native chain
+evidence. A changed code identity never relabels already completed evidence.
+
+Profile1/2 readers remain necessary while retained signed inputs and native proofs
+name those exact historical bindings. Preserve their original bytes and accepted
+grammar. Upgrade the writer, coordinator and reviewer readers before selecting
+profile3; an older reader refuses the unsupported profile before execution.
+Publishing source alone does not select it. Use the preserving authenticated
+adoption and installed-host upgrade paths below; keep journals, original clocks
+and completed verification in place. Model participation/history schemas and the
+public reference-row follower protocol do not change with this profile.
+
 Standing runtime compatibility uses the optional `runtime_adoptions` selection
 in writer, coordinator and reviewer configurations. Keep `eligibility`, the
 signed series, manifest, policy, reward allocation and clocks unchanged. Each
@@ -937,7 +959,7 @@ the existing supported boot, authenticates the additive selection and reports
 three counted checks before returning a candidate. It does not write a control,
 stop a service, change a capacity approval or authorize a transaction.
 
-Authorization and code qualification remain separate. New profile version 2
+For retained profile version 2, authorization and code qualification remain separate. It
 requires an explicitly qualified runtime code/source pair and a native proof of
 `SubnetEpochConsensus(78)` at every endpoint's exact state root. Only proved Yuma
 is supported; an absent value uses that runtime's proved metadata default.

@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.",
+  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change. Profile3 binds its explicit native-runtime Yuma predicate through a distinct profile digest; historical profile1/2 signed bytes, accepted grammar and eligibility calculations remain unchanged. Runtime adoption, native online/archive proof, interruption, upgrade and retained history consumer parity qualify this additive reader without discarding unchanged historical verdicts.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -383,7 +383,7 @@
     "competition_reward_cutover_runtime.py": "07941daff622a0f67ca219bb1e7141cfd581bf55019856c876eae0b2b23fd2f8",
     "competition_reward_decision_review.py": "f2a746d1cd474270eb736b0d8bad324e75bf8be78dd64c058fd2697f1f56ba8b",
     "competition_reward_decisions.py": "51a55621fa77919fc0773a0df08bc8251ff0bcd4e534a693ca79eb54d4c2fdbf",
-    "competition_reward_eligibility.py": "a231f5b3e25004491ffe71dbf35c06f2ce981931f4fba409cb6fe74973c592b1",
+    "competition_reward_eligibility.py": "a516b3c558eba716ec2d6cfcb5512d9c7b2e74d7c32df8345e3bd9aa5ac2baaf",
     "competition_reward_eligibility_archive.py": "a10e0eee0cdaa64479604dfc0f045ae57b2d5f5505a81021ff48703080634d02",
     "competition_reward_eligibility_math.py": "b41ee7df4122dfed8bdd5fbe3e335e950ca1cfdb117c8e01f80a4cd0b21983d6",
     "competition_reward_exchange.py": "fb6f75b1b6e33664f0be43b35cbe8d10c6f0999b5030969d908bacce43471239",
