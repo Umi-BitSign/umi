@@ -321,7 +321,7 @@ class DirectModelArtifactReviewer:
 
     async def materialize(self, request: ModelReviewRequest, archive: Path) -> Path:
         """Transfer into one bounded cache and preserve remote results on eviction."""
-        _, payload, _ = self._source(request, preserved=True)
+        bundle, payload, _ = self._source(request, preserved=True)
         async with self.materialization_serial, r2_connection_scope(self.multipart):
             boot = self.config.materialization_boot_disk_cache
             cache = (
@@ -334,7 +334,10 @@ class DirectModelArtifactReviewer:
             if cache is not None:
                 self.verify_materialization_filesystem(Path(archive).parent)
             with (
-                TransferProgress("model_materialization", payload.total_bytes) as progress,
+                TransferProgress(
+                    "model_materialization", payload.total_bytes,
+                    total_operations=len(bundle.files) + 1,
+                ) as progress,
                 cache.allocation_lease() if cache is not None else nullcontext(),
             ):
                 return await self._materialize(request, archive, progress, cache=cache)
@@ -382,6 +385,7 @@ class DirectModelArtifactReviewer:
         if archive.exists():
             if await self._materialized(request, archive):
                 progress.advance(payload.total_bytes, restored=True)
+                progress.advance_operations(len(bundle.files) + 1, restored=True)
                 return archive / digest(bundle)
             if not await self.resumable(request, archive):
                 raise ValueError("direct model scratch archive differs")
@@ -437,6 +441,7 @@ class DirectModelArtifactReviewer:
             )
             await run_owned_thread(publish_private_model, archive / "materialization.json", marker)
             (archive / "materialization-pending.json").unlink(missing_ok=True)
+            progress.advance_operations(1)
             return target
         except (OSError, asyncio.CancelledError):
             progress.emit("retrying", reason="materialization_retains_completed_files")

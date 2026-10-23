@@ -30,14 +30,25 @@ class _RemoteModelRanges:
     manifest order. No prefetch task or unbounded working set survives a caller.
     """
 
-    def __init__(self, multipart, key, total_bytes):
+    def __init__(
+        self, multipart, key, total_bytes, *, start_offset=0,
+        maximum_range_bytes=None,
+    ):
+        if maximum_range_bytes is None:
+            maximum_range_bytes = MAXIMUM_RANGE_BYTES
+        if (
+            not 0 <= start_offset <= total_bytes
+            or not 1 <= maximum_range_bytes <= MAXIMUM_RANGE_BYTES
+        ):
+            raise ValueError("direct model range bounds differ")
         self.multipart, self.key, self.total = multipart, key, total_bytes
+        self.maximum_range_bytes = maximum_range_bytes
         self.buffer = b""
-        self.position = self.offset = 0
+        self.position, self.offset = 0, start_offset
 
     async def read(self, maximum):
         if self.position == len(self.buffer):
-            size = min(self.total - self.offset, MAXIMUM_RANGE_BYTES)
+            size = min(self.total - self.offset, self.maximum_range_bytes)
             if size <= 0:
                 raise ValueError("direct model verification range differs")
             self.buffer = await self.multipart.read_range(
