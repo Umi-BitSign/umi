@@ -64,6 +64,7 @@ from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
+from .competition_work_progress import WorkProgress
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
@@ -1234,20 +1235,27 @@ class DirectModelUploadOwner:
                 try:
                     parts: list[DirectModelUploadPart] = []
                     offset = 0
-                    for part_number in range(1, payload.total_parts + 1):
-                        size = min(payload.part_size_bytes, payload.total_bytes - offset)
-                        parts.append(
-                            await self.multipart.copy_part(
-                                preserved_key,
-                                source_key=source_key,
-                                upload_id=upload_id,
-                                part_number=part_number,
-                                offset=offset,
-                                size_bytes=size,
-                                source_size_bytes=payload.total_bytes,
+                    with WorkProgress(
+                        "model_promotion_copy",
+                        payload.total_parts,
+                        unit="parts",
+                        cohort=acceptance.cohort_sha256,
+                    ) as progress:
+                        for part_number in range(1, payload.total_parts + 1):
+                            size = min(payload.part_size_bytes, payload.total_bytes - offset)
+                            parts.append(
+                                await self.multipart.copy_part(
+                                    preserved_key,
+                                    source_key=source_key,
+                                    upload_id=upload_id,
+                                    part_number=part_number,
+                                    offset=offset,
+                                    size_bytes=size,
+                                    source_size_bytes=payload.total_bytes,
+                                )
                             )
-                        )
-                        offset += size
+                            offset += size
+                            progress.advance()
                     if offset != payload.total_bytes:
                         raise ValueError("direct model promotion part geometry differs")
                     provider_etag = await self.multipart.complete(

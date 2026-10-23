@@ -1,6 +1,8 @@
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from umi import competition_cohort_api as api
@@ -139,3 +141,87 @@ async def test_progress_api_is_available_without_capture_or_database(monkeypatch
         assert response.json()["completed"] == 92
         assert response.json()["certification_authority"] is False
         assert (await client.get(f"/v1/competition/cohorts/{'d' * 64}/progress")).status_code == 404
+
+
+def test_active_transfer_stays_visible_between_short_completed_work(monkeypatch):
+    from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
+    from umi.competition_transport_verification import TransferProgress
+    from umi.competition_work_progress import WorkProgress
+
+    monkeypatch.setattr(PUBLIC_COHORT_PROGRESS, "entries", OrderedDict())
+    with (
+        WorkProgress("model_promotion", 1, unit="models", cohort=C),
+        TransferProgress("remote_model_verification", 100, report=lambda _: None) as transfer,
+    ):
+        transfer.advance(50)
+        transfer.emit("running")
+        with WorkProgress("history_publication", 1, unit="histories", cohort=C) as short:
+            short.advance()
+        snapshot = PUBLIC_COHORT_PROGRESS.snapshot(C)
+        work = snapshot["components"]["work"]
+        assert work["stage"] == "remote_model_verification"
+        assert (work["completed"], work["total"], work["percent"]) == (50, 100, 50)
+        assert PUBLIC_COHORT_SCOPE.get() == C
+    assert PUBLIC_COHORT_SCOPE.get() is None
+    assert not PUBLIC_COHORT_PROGRESS.entries[C]["active_work"]
+
+
+def test_active_work_inventory_remains_bounded():
+    state = CohortProgressSnapshots()
+    for number in range(100):
+        state.record("work", dict(cohort_sha256=C, work_id=number, state="running", stage="copy"))
+    assert len(state.entries[C]["active_work"]) == 32
+
+
+def test_completed_certification_yields_to_phase_review_despite_concurrent_export():
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="intake", stage="progress_review"))
+    state.record(
+        "certification", dict(cohort_sha256=C, completed=103, total=103, percent=100, eta_seconds=0)
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="intake_progress_quorum",
+            state="waiting",
+            completed=0,
+            total=1,
+            percent=0,
+            eta_seconds=30,
+            eta_basis="measured",
+        ),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=2,
+            stage="model_acceptance_export",
+            state="running",
+            completed=1,
+            total=1,
+            percent=100,
+            eta_seconds=0,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "intake_progress_quorum"
+    assert result["percent"] == 0 and 0 < result["eta_seconds"] <= 30
+    assert result["components"]["certification"]["percent"] == 100
+
+
+async def test_awaited_transfer_inherits_cohort_and_restores_scope_on_failure():
+    from umi.competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
+    from umi.competition_transport_verification import TransferProgress
+    from umi.competition_work_progress import await_progress
+
+    async def transfer():
+        with TransferProgress("verify", 10, report=lambda _: None) as progress:
+            assert progress.public_cohort == C
+            raise RuntimeError("provider unavailable")
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await await_progress(transfer(), stage="promotion", cohort=C)
+    assert PUBLIC_COHORT_SCOPE.get() is None

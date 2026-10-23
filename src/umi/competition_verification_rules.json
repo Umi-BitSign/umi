@@ -55,7 +55,7 @@
     "competition_cohort_coordinator.py": "ee665cedf44dd75cccc13bb463a5ccbb8faa96dd14276e91350caf8a4cd0be75",
     "competition_cohort_direct_model_attempts.py": "db70212522732a2259e78ac2eb4522a96a805976305673f6ba561d2a9e3b9c54",
     "competition_cohort_direct_model_client.py": "7b9a663277d7ecea25dde97fca365c8162c4fddd6d2b3efedffbdfe71820abe1",
-    "competition_cohort_direct_model_owner.py": "94a8c7c0d08d6f1444d5ea598a9678ab6681f9cf7d86e9bb7e1ebfae59cc9a15",
+    "competition_cohort_direct_model_owner.py": "eec1158f3cd9268a94af9b2abc0698623c2359737a7263d97140ef0b6e673b13",
     "competition_cohort_direct_model_review.py": "5c8d9451c0372207ece6257ffd301973a7276fac37196256651fc87b3ee53543",
     "competition_cohort_direct_model_upload.py": "72fe689aaf703db9f4be63ef26d051e8fd938451c79291dd422f5e5d68127789",
     "competition_cohort_dispatch_host.py": "040cefe94d009b9228f65dd11f299bbbce18af559334a0734a015171c04d836f",
@@ -493,7 +493,7 @@
     "competition_supervisor_runtime.py": "9cb7326f98d6cb44222c5b5b113c0ad7a1762c5e8e005b0c8a8bc5a130db9515",
     "competition_switch_recovery.py": "f01531a3b9b72c2a513095411ddf466bde4fa87b65249b6bebcd559d43b1e2ff",
     "competition_transport_finality.py": "ee27d14c787a64e2752747c5b45b02f89e4cdb999c22573a68e498afc392bc5e",
-    "competition_transport_verification.py": "44f917469f18da2f9642a0e971bd160b1b492f0c269bd13e77cdce113a15b6b9",
+    "competition_transport_verification.py": "7cc5097e90faa5eca72ebcf5c9fd2e573e15486dc73cadd92996e73e37672d67",
     "competition_upgrade.py": "f41fc4953d0a728276164d48a0554052d7995b10a70298e1b60db30279cc86cf",
     "competition_upgrade_namespace.py": "2bc4d4bd79ebcf679154e600235c553b62208a6a27254af91bde2e8d2e74775d",
     "competition_verification_reuse.py": "8cec5f6f63dc0b4c3f26d4177f84fdae626f2a6645ff3eea16cc00572906b1b9",
@@ -507,7 +507,7 @@
     "competition_weights.py": "21ce05fb1ff79c653d9db5250f9ac0d3d33f635f21cdec8bcdb5d7040281639f",
     "competition_work_admission.py": "74c54e66a5f2ac36ecfd9cfd3519f5b960aec6b2b2e7a7a49f7af30a56c2b4d3",
     "competition_work_plans.py": "afeb0a2f65a16c2272053f6160ea79aa3454c4660e7d932367d86c598118169c",
-    "competition_work_progress.py": "8a0ad72336c779a15b0c6323557d306ba79e55873ff3a1456375bd7aeb3f989d",
+    "competition_work_progress.py": "266e91bc7c912b6d2c6122ae448681b8ecf8a033c3e86ac3bef6359ff5197ddb",
     "competition_work_queue.py": "c243825d9815e3116b6983592fc8bfe0b7f607f94302bea3e84f414607345d44",
     "competition_work_signing.py": "5232fc0edf0d7d4def66d426ed3bb2fc4477e0f53c182f32a5d948ec718f6e96",
     "competition_work_transport.py": "6525cf2b7ac7e3bfac3e3bfd9b5ebaa936d0f6b8abfca14d4aa8e4c4a5d89af6",
@@ -615,7 +615,7 @@
     "weight_storage.py": "5959225e2c57c7895b7762a86df717d09eea4e9f07cd6d56978767a6d22d15a8",
     "window.py": "b5e7b682e5a4bf3fafc5115aa3d1375fa2b2e981b5e028a2ae1be27d55eb22c6",
     "competition_model_certification_progress.py": "f19c211f30c1966624bdd038da40dcf6aeb59e47793a7eeebd6d02b715543254",
-    "competition_cohort_public_progress.py": "11e52791a2a9f7d4276c66188fec2ac24fb908dd89959da7ad096881e942e49c"
+    "competition_cohort_public_progress.py": "42cde7d8b50e6a7176ce6b4802f1e12f2d65987b1ab59c9b24112dd44e91506a"
   },
   "external_distributions": {
     "annotated-doc": [

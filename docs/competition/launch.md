@@ -88,6 +88,10 @@ current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
 `eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,
 and stalled/retrying status. `components` separates intake certification,
 selected-roster certification, the current acceptance operation and measured work.
+After selected-roster certification completes, the current stage follows phase
+review and decision certification. Their waiting heartbeats and ETAs remain
+visible while unrelated uploads or exports run concurrently. R2 verification
+reports bytes and promotion copies report parts within their cohort's work.
 Intake counts cover latest accepted model submissions before registration
 filtering; selected-roster counts cover the native seal's actual selection.
 Percentages and ETAs apply to their stated stage, not the whole cohort.
