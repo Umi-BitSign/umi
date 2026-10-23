@@ -31,6 +31,7 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
+from .competition_transport_verification import TransferProgress
 from .competition_work_progress import await_progress
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
@@ -157,6 +158,41 @@ class CohortExecutor(CohortExecutionAuthority):
     ):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
+
+    async def advance_batch(
+        self, assignment: CohortExecutionAssignment
+    ) -> RecoverableExecutionEvidence | None:
+        """Drain one resident paired job, preserving the ordinary per-step path."""
+        scope = getattr(self.sandbox, "execution_scope", None)
+        if scope is None:
+            return await self.advance(assignment)
+        slot = order_slot(assignment.certificate.order)
+        evidence = await self._completed(assignment, slot)
+        if evidence is not None:
+            return evidence
+        async with scope(assignment.certificate.order) as enabled:
+            if not enabled:
+                return await self.advance(assignment)
+            job = await run_owned_thread(self.journal.validate_assignment, assignment)
+            total = step_count(job)
+            restored = await run_owned_thread(self.journal.checkpoint_count, job)
+            with TransferProgress(
+                "model_pair_execution",
+                total,
+                unit="case_role_steps",
+                planning_unit_seconds=(1, job_policy_timeout(self.journal)),
+            ) as progress:
+                progress.advance(restored, restored=True)
+                # Each ordinary advance finishes at most one step. The extra
+                # iteration covers an already-complete retained job; this is a
+                # finite scheduling batch, not a new deadline or protocol gate.
+                for _ in range(total - restored + 1):
+                    result = await self.advance(assignment)
+                    if progress.completed < total:
+                        progress.advance(1)
+                    if result is not None:
+                        return result
+                raise RuntimeError("paired execution batch did not finish its retained steps")
 
     async def _completed(
         self, assignment: CohortExecutionAssignment, slot: str
@@ -346,7 +382,8 @@ class CohortExecutionWorker:
                         # request become terminal before beginning a long local
                         # inference so the two workers cannot starve each other.
                         return slot, "deferred", "endpoint_terminal_pending"
-                result = await self.executor.advance(assignment)
+                advance = getattr(self.executor, "advance_batch", self.executor.advance)
+                result = await advance(assignment)
                 return slot, "complete" if result is not None else "progress", ""
             except (
                 OSError,

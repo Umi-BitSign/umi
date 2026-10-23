@@ -509,6 +509,23 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
+With an explicit boot-disk model cache, CPU model evaluation retains at most two
+model archives under the existing shared allocation and filesystem reserves. It
+finishes a paired assignment's case/role steps before rotating to another model,
+keeping candidate and reference bytes resident when they fit. Each step still
+uses its original authority checks, inference deadline and durable result; paired
+model observations are never borrowed from another assignment. The original
+`archive` slot and interrupted transfers stay in place across upgrades. The idle
+`standby` slot may be evicted when a pair cannot fit; unrelated cache entries are
+never removed. Legacy installations without an explicit boot cache retain their
+single-slot, one-step scheduling.
+
+`model_pair_queue`, `model_pair_capacity` and `model_pair_execution` expose queue,
+space admission and case/role progress separately. Completed steps restored from
+the journal count separately from newly executed steps. The ETA covers that job,
+not all cohort scoring or reward activation. Cancellation drains the current
+invocation and releases scheduling ownership; restart reuses existing checkpoints.
+
 Accepted inbox receipts confirm delivery, not model execution. The recoverable
 worker reports owner-history retrieval, registration capture, history and order
 review, fresh-history confirmation and sandbox execution as separate

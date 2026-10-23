@@ -129,6 +129,31 @@ def test_aggregate_cache_bound_counts_other_candidates_and_sparse_allocations(co
     assert path.exists() and path.stat().st_size == budget.maximum_bytes
 
 
+def test_complete_slot_projection_counts_partial_bytes_once_and_keeps_other_allocations(
+    config, tmp_path, monkeypatch
+):
+    from .test_open_competition import bundle_at
+
+    selected = boot(config, tmp_path)
+    budget = BootDiskModelCache(selected.materialization_boot_disk_cache, reserve_bytes=1024**2)
+    budget.validate_root(budget.root)
+    bundle = bundle_at(tmp_path / "original", "projection")
+    archive = budget.root / "archive"
+    archive.mkdir(mode=0o700)
+    partial = archive / "partial"
+    partial.write_bytes(b"retained")
+    partial.chmod(0o600)
+    assert budget.fits_materialization(bundle, archive)
+    before = partial.stat()
+    monkeypatch.setattr(
+        space.shutil, "disk_usage", lambda path: SimpleNamespace(free=budget.reserve_bytes)
+    )
+    assert not budget.fits_materialization(bundle, archive)
+    assert partial.stat() == before
+    with pytest.raises(ValueError, match="outside"):
+        budget.fits_materialization(bundle, budget.root.parent / "outside")
+
+
 @pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "public", "mount"])
 def test_cache_accounting_refuses_unsafe_entries(config, tmp_path, monkeypatch, unsafe):
     selected = boot(config, tmp_path)
