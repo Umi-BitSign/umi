@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
 from umi.competition_cohort_model_reservations import (
     ModelAllocationRepairRequired,
     repair_model_allocation_index,
+    repair_model_allocation_verification,
 )
 from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 from umi.competition_cohort_model_upload import (
@@ -393,6 +395,98 @@ def test_capacity_reservation_can_be_increased_without_state_reset(delivery):
     assert bounded.journal.keys("upload") == []
     key = h.owner.reserve(h.request, capture_at(210))
     assert h.owner.retained(key) == h.request
+
+
+def test_allocation_bundle_facts_reused_for_polls_and_restart(delivery, monkeypatch):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    expected = h.owner.allocations.snapshot()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completed reservation bundle validation repeated")
+
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    for _ in range(3):
+        assert h.owner.allocations.snapshot() == expected
+    resumed = CohortModelUploads(h.owner.config, h.intake, h.owner.archive)
+    assert resumed.allocations.snapshot() == expected
+    assert resumed.reserve(h.request, capture_at(210)) == digest(h.request)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_completed_allocation_verification_damage_requires_repair(
+    delivery, monkeypatch, caplog, damage
+):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    (receipt,) = h.owner.allocations._bundle_verification.directory.glob("*.json")
+    if damage == "missing":
+        receipt.unlink()
+    else:
+        receipt.write_bytes(b"{}")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("damaged completed verification was silently discarded")
+
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    with monkeypatch.context() as guarded:
+        guarded.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+        with pytest.raises(ModelAllocationRepairRequired, match="verification requires repair"):
+            h.owner.allocations.snapshot()
+    assert "repair_required" in caplog.text
+    reports = []
+    repaired = repair_model_allocation_verification(h.owner.journal, report=reports.append)
+    assert repaired == {"status": "completed", "verification_receipts_repaired": 1}
+    assert any(
+        r["stage"] == "model_allocation_bundle_verification_repair" and r["status"] == "completed"
+        for r in reports
+    )
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    assert h.owner.allocations.snapshot()["models"] == 1
+
+
+def test_changed_current_bundle_cannot_reuse_old_allocation_facts(delivery):
+    h = delivery
+    h.owner.reserve(h.request, capture_at(210))
+    model = h.request.signed_submission.submission.model_revision
+    bundle = h.request.signed_submission.submission.model_bundle.model_copy(
+        update={"license_id": "changed"}
+    )
+    with h.owner.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='bundle' AND id=?",
+            (canonical_json_bytes(bundle), model),
+        )
+    with pytest.raises(ModelAllocationRepairRequired, match="original bundle changed"):
+        h.owner.allocations.snapshot()
+
+
+def test_completed_allocation_check_survives_lost_acknowledgement(delivery, monkeypatch):
+    from umi import competition_cohort_model_reservations as allocations
+
+    h = delivery
+    verifier = h.owner.allocations._bundle_verification
+    original = verifier.remember
+
+    def lost_ack(*args):
+        original(*args)
+        raise OSError("completion acknowledgement lost")
+
+    monkeypatch.setattr(verifier, "remember", lost_ack)
+    with pytest.raises(OSError, match="acknowledgement lost"):
+        h.owner.reserve(h.request, capture_at(210))
+    monkeypatch.setattr(verifier, "remember", original)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completed static check repeated after lost acknowledgement")
+
+    monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
+    h.owner.reserve(h.request, capture_at(210))
+    assert h.owner.allocations.snapshot()["models"] == 1
 
 
 def test_links_and_concurrent_writers_cannot_replace_originals(delivery, tmp_path):
