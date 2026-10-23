@@ -428,6 +428,41 @@ class CohortModelAcceptances:
                 result.append((key, record.request.signed_submission.submission))
             return tuple(result)
 
+    def certification_inventory(self, cohort):
+        """Cheap diagnostic count during intake, without replay or payload reads.
+
+        These are latest accepted submissions, before the native seal applies
+        its finalized-registration filter. They never grant roster authority.
+        """
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            rows = tuple(
+                db.execute(
+                    "SELECT c.hotkey,c.sequence,"
+                    "json_extract(CAST(c.body AS TEXT),"
+                    "'$.request.consent.consent.submission_sha256'),"
+                    "EXISTS (SELECT 1 FROM cohort_model_acceptances a WHERE a.cohort=c.cohort "
+                    "AND a.submission=json_extract(CAST(c.body AS TEXT),"
+                    "'$.request.consent.consent.submission_sha256')) "
+                    "FROM cohort_consents c WHERE c.cohort=? AND c.track='model' "
+                    "AND NOT EXISTS (SELECT 1 FROM cohort_consents newer "
+                    "WHERE newer.cohort=c.cohort AND newer.hotkey=c.hotkey "
+                    "AND newer.track=c.track AND newer.sequence>c.sequence) "
+                    "ORDER BY c.hotkey,c.consent LIMIT ?",
+                    (cohort, self.intake.capacity.maximum_records + 1),
+                )
+            )
+        if len(rows) > self.intake.capacity.maximum_records:
+            raise ValueError("diagnostic inventory exceeds intake capacity")
+        return dict(
+            cohort_sha256=cohort,
+            roster_sha256=digest([list(row[:3]) for row in rows]),
+            selection_scope="latest_model_submissions",
+            completed=sum(row[3] for row in rows),
+            total=len(rows),
+            pending_submission_sha256s=tuple(row[2] for row in rows if not row[3]),
+        )
+
     def pending_latest_entries(self, cohort, *, limit=16):
         """Prioritize likely seal blockers without granting roster authority.
 

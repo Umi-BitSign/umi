@@ -592,11 +592,10 @@ async def test_latest_pending_candidate_runs_before_old_export_cursor_wraps(prep
     assert (out / "model-reward-acceptances" / cohort / (digest(subs[0]) + ".json")).exists()
 
 
-def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepared):
+def replace_model_submission(owner, cohort, original_sub):
     from umi.competition_cohort_intake_records import read_participation
 
-    owner, cohort, subs, _ = prepared
-    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == subs[0])
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == original_sub)
     original = read_participation(CohortAdmissionQueue(owner.intake).record(cohort, key)).request
     sub = original.signed_submission.submission.model_copy(update={"sequence": 2})
     signed = original.signed_submission.model_copy(
@@ -614,10 +613,66 @@ def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepar
     owner.intake.retain(
         request, capture_at(210 + owner.intake.policy.minimum_submission_interval_blocks)
     )
+    return sub
+
+
+def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepared):
+    owner, cohort, subs, _ = prepared
+    sub = replace_model_submission(owner, cohort, subs[0])
     priority = {digest(s) for _, s in owner.pending_latest_entries(cohort)}
     assert digest(sub) in priority and digest(subs[0]) not in priority
     assert digest(subs[1]) in priority
     assert {digest(s) for _, s in owner.entries(cohort)} == priority | {digest(subs[0])}
+
+
+async def test_intake_certifies_replacement_before_closure_and_reuses_after_restart(
+    prepared, tmp_path, monkeypatch
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    original_history = canonical_json_bytes(owner.intake.history(cohort))
+    for sub in subs:
+        owner.publish(certify(owner, cohort, sub, inputs), capture_at(220))
+    assert owner.certification_inventory(cohort)["completed"] == 2
+    replacement = replace_model_submission(owner, cohort, subs[0])
+    inventory = owner.certification_inventory(cohort)
+    assert (inventory["completed"], inventory["total"]) == (1, 2)
+    assert inventory["pending_submission_sha256s"] == (digest(replacement),)
+    assert inventory["selection_scope"] == "latest_model_submissions"
+    queue = CohortAdmissionQueue(owner.intake)
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == replacement)
+    record = acceptance_module.read_participation(queue.record(cohort, key))
+    for signature in signatures(record.proposed_admission):
+        queue.publish_vote(
+            CohortAdmissionVote(admission=record.proposed_admission, signature=signature),
+            capture_at(220),
+        )
+    publication = certify(owner, cohort, replacement, inputs)
+    publish_private_model(
+        root / "model-acceptance-publications" / cohort / (digest(replacement) + ".json"),
+        publication,
+    )
+
+    async def capture():
+        return capture_at(220)
+
+    # Restarts retain the original proposal, votes and certificate. No lifecycle
+    # controller is run: certification must happen while intake remains open.
+    worker = ModelAcceptanceWorker(owner, capture, root, out)
+    assert (await worker.poll_once())["entries_pending"] == 0
+    assert canonical_json_bytes(owner.intake.history(cohort)) == original_history
+    assert owner.certification_inventory(cohort)["completed"] == 2
+    root.rename(tmp_path / "inputs-offline")
+    owner.archive.rename(tmp_path / "archive-offline")
+
+    async def offline():
+        raise AssertionError("completed intake certificates must not repeat RPC or payload work")
+
+    restored = CohortModelAcceptances(owner.intake, owner.archive)
+    monkeypatch.setattr(restored, "prepare", offline)
+    resumed = ModelAcceptanceWorker(restored, offline, root, out)
+    assert (await resumed.poll_once())["entries_pending"] == 0
+    assert restored.retained(cohort, digest(replacement)).certificate == publication.certificate
 
 
 def test_priority_refuses_changed_native_sequence_index(prepared):

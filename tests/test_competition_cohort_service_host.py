@@ -624,3 +624,34 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
     with pytest.raises(RuntimeError, match="reconciliation failed"):
         await asyncio.wait_for(host._poll(asyncio.Event()), 120)
     assert all(event.is_set() for event in closed.values())
+
+
+async def test_reconciliation_mutex_contention_retries_without_restarting_owner(
+    lifecycle, tmp_path, caplog
+):
+    from umi.private_files import PrivateStateBusyError
+
+    h = lifecycle
+    host = ServiceAdmissionHost(
+        host_config(h, tmp_path / "host"),
+        h.intake,
+        h.owner.promotion,
+        h.provider.collect,
+        h.provider.retained_archive,
+    )
+    stop = asyncio.Event()
+    calls = 0
+
+    async def callback():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PrivateStateBusyError("round_journal_lock", "a" * 64, 11)
+        stop.set()
+        return {"status": "resumed_from_checkpoint"}
+
+    with caplog.at_level("INFO"):
+        await asyncio.wait_for(host._poll_component(stop, "models", callback), timeout=30)
+    assert calls == 2
+    assert "service_reconciliation_retry" in caplog.text
+    assert "resumed_from_checkpoint" in caplog.text

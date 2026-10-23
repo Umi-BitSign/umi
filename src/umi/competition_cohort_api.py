@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Protocol
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 
 from .competition_chain import RegistrationCapture
@@ -18,6 +18,7 @@ from .competition_cohort_intake import CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
 from .competition_cohort_participation_status import participation_status
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import intake_readiness
 from .competition_execution import ExecutionBoundary
 from .competition_store import AdmissionCapacityError
@@ -125,6 +126,12 @@ def cohort_routes(
         except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
             raise HTTPException(503, "cohort intake readiness unavailable") from error
         return value.model_dump(mode="json", by_alias=True)
+
+    @router.get("/v1/competition/cohorts/{cohort}/progress")
+    async def progress(cohort: str, response: Response):
+        allowed(cohort)
+        response.headers["Cache-Control"] = "no-store"
+        return PUBLIC_COHORT_PROGRESS.snapshot(cohort)
 
     @router.get("/v1/competition/cohorts/{cohort}/admissions/{consent}")
     async def admission(cohort: str, consent: str):

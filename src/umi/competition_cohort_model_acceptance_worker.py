@@ -21,6 +21,7 @@ from .competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_progress import _failure_details
 from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import run_owned_thread
@@ -80,6 +81,7 @@ class ModelAcceptanceWorker:
             "eta_scope": "current_acceptance_substage",
             "certification_authority": False,
         }
+        PUBLIC_COHORT_PROGRESS.record("acceptance", {**body, "status": "running"})
         _LOG.info(
             "model_acceptance_stage %s",
             canonical_json_bytes(
@@ -99,6 +101,15 @@ class ModelAcceptanceWorker:
                 yield
                 progress.advance()
         except BaseException as error:
+            PUBLIC_COHORT_PROGRESS.record(
+                "acceptance",
+                {
+                    **body,
+                    "status": "pending",
+                    "error_type": type(error).__name__,
+                    "stalled_or_retrying": True,
+                },
+            )
             if stage != "retained_lookup" or not isinstance(error, PendingModelArtifacts):
                 self.owner.intake.model_certification_progress.operation(
                     cohort, key, stage, error_type=type(error).__name__
@@ -119,6 +130,7 @@ class ModelAcceptanceWorker:
             )
             raise
         else:
+            PUBLIC_COHORT_PROGRESS.record("acceptance", {**body, "status": "completed"})
             self.owner.intake.model_certification_progress.operation(cohort, key, stage)
             _LOG.info(
                 "model_acceptance_stage %s",
@@ -254,12 +266,30 @@ class ModelAcceptanceWorker:
         with self._stage(cohort, key, "export"):
             await run_owned_thread(self.owner.export, cohort, key, self.output)
 
+    async def _report_inventory(self, cohort):
+        try:
+            inventory = await run_owned_thread(self.owner.certification_inventory, cohort)
+            report = self.owner.intake.model_certification_progress.report(inventory)
+            _LOG.info(
+                "cohort_intake_model_certification_progress %s",
+                canonical_json_bytes(report).decode(),
+            )
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+            # Diagnostics cannot alter certification, reserve another writer or
+            # turn missing measurement into a native admission failure.
+            _LOG.warning(
+                "cohort_intake_model_progress_unavailable cohort=%s error_type=%s",
+                cohort,
+                type(error).__name__,
+            )
+
     async def poll_once(self):
         ready = pending = 0
         error_type = ""
         for binding in self.owner.intake.config.cohorts:
             cohort = binding.cohort_sha256
             try:
+                await self._report_inventory(cohort)
                 entries = await run_owned_thread(
                     partial(
                         self.owner.entries,
@@ -287,6 +317,7 @@ class ModelAcceptanceWorker:
                         pending += 1
                         error_type = type(error).__name__
                 self.cursors[cohort] = entries[-1][0] if len(entries) == self.batch_size else ""
+                await self._report_inventory(cohort)
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__

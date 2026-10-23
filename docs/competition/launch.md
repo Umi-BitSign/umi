@@ -75,6 +75,28 @@ because its implementation exists.
 
 ## Certification progress
 
+Model artifact acceptance runs continuously during intake, including while an
+operator holds automatic progression. Latest replacement submissions take
+priority over the ordinary export scan. Keep the upload, acceptance and reviewer
+owners running during intake; do not defer this work until roster closure.
+Completed certificates and votes survive restart and are reused. Closure still
+uses the native finalized-registration filter and exact certificates; a last-minute
+upload or an unresolved review can leave unfinished work at closure.
+
+`GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
+current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
+`eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,
+and stalled/retrying status. `components` separates intake certification,
+selected-roster certification, the current acceptance operation and measured work.
+Intake counts cover latest accepted model submissions before registration
+filtering; selected-roster counts cover the native seal's actual selection.
+Percentages and ETAs apply to their stated stage, not the whole cohort.
+Unmeasured, blocked, overdue or stale forecasts have a null ETA with a reason.
+Overall ETA stays null until an end-to-end forecast is established. Responses
+include observation age, disable caching, and never trigger verification or RPC.
+After restart an unknown observation is null, not zero or complete. This separate
+endpoint leaves signed history, readiness and existing client schemas unchanged.
+
 Intake logs `cohort_model_certification_progress` from the same current roster
 used to seal intake. `completed`, `total`, `remaining` and `percent` count model
 artifact certificates for the selected latest submissions, excluding superseded

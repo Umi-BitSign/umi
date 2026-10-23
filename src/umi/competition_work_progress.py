@@ -18,6 +18,7 @@ from itertools import count
 from threading import RLock
 from typing import TypeVar
 
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -215,6 +216,7 @@ class WorkProgress:
                     ),
                     "certification_authority": False,
                 }
+            PUBLIC_COHORT_PROGRESS.record("work", body)
             _LOG.info(json.dumps(body, separators=(",", ":")))
             self.last_emitted = now
 
