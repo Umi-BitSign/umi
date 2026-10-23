@@ -959,6 +959,14 @@ profile before starting fresh history catch-up. A mismatch stays pending under
 the collector's normal retry loop and leaves completed evidence intact. Supported
 authenticated adoption is still required; discovery cannot approve a new hash.
 
+History checkpoint restoration reuses successful native block checks and reads
+receipt metadata without proof payloads. Each reference validation checks its
+completion, original receipt and producer damage hold in one fresh read-only
+transaction; an independent consumer also checks its own damage hold. These
+connections are not retained across references, finality checks or restarts.
+Missing or changed receipt metadata still requires explicit repair. Receipt
+connection counts and metadata-only timing are not a full recovery ETA.
+
 When an upstream release artifact is unavailable, the manual `Successor host
 recovery checks` workflow accepts an exact `runtime_source_sha`, the independently
 proved `runtime_code_sha256`, and `runtime_spec_version`. That selection runs

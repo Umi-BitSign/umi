@@ -331,29 +331,33 @@ class RemoteProofStore:
     def _retained(self, key: str) -> RemoteProofReference | None:
         journal = self.receipt_source or self.journal
         with journal.read_transaction() as db:
-            completed = self._completion(key, db)
-            try:
-                raw = self.journal.get_raw(
-                    "remote_proof_object", hashlib.sha256(key.encode()).hexdigest(), db=db
-                )
-                reference = None if raw is None else RemoteProofReference.model_validate_json(raw)
-            except (TypeError, ValueError) as error:
+            return self._retained_snapshot(key, db)
+
+    def _retained_snapshot(self, key: str, db) -> RemoteProofReference | None:
+        """Read completion and original receipt from one caller-owned snapshot."""
+        completed = self._completion(key, db)
+        try:
+            raw = self.journal.get_raw(
+                "remote_proof_object", hashlib.sha256(key.encode()).hexdigest(), db=db
+            )
+            reference = None if raw is None else RemoteProofReference.model_validate_json(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "remote proof replication receipt damaged; "
+                "explicit original-generation repair required"
+            ) from error
+        if completed is None:
+            if reference is not None:
                 raise ValueError(
-                    "remote proof replication receipt damaged; "
-                    "explicit original-generation repair required"
-                ) from error
-            if completed is None:
-                if reference is not None:
-                    raise ValueError(
-                        "remote proof completion ledger missing; restore original metadata"
-                    )
-                return None
-            if reference != completed:
-                raise ValueError(
-                    "remote proof replication receipt is missing or damaged; "
-                    "explicit original-generation repair required"
+                    "remote proof completion ledger missing; restore original metadata"
                 )
-            return completed
+            return None
+        if reference != completed:
+            raise ValueError(
+                "remote proof replication receipt is missing or damaged; "
+                "explicit original-generation repair required"
+            )
+        return completed
 
     def _remember(self, reference: RemoteProofReference) -> None:
         if self.receipt_source is not None:
@@ -391,14 +395,20 @@ class RemoteProofStore:
             self.config.prefix + "/"
         ):
             raise ValueError("remote proof reference selects another authenticated namespace")
-        if self._retained(reference.key) != reference:
-            raise ValueError("remote proof replication receipt is missing or damaged")
-        for journal in (self.journal, self.receipt_source):
-            if (
-                journal is not None
-                and journal.get("remote_proof_damage", self._damage_key(reference)) is not None
-            ):
+        # Reuse the receipt owner's connection for its independent damage hold.
+        # Each call still opens fresh snapshots; no receipt or hold is cached
+        # across references, checkpoint batches, finality checks or restarts.
+        owner = self.receipt_source or self.journal
+        with owner.read_transaction() as db:
+            if self._retained_snapshot(reference.key, db) != reference:
+                raise ValueError("remote proof replication receipt is missing or damaged")
+            if owner.get("remote_proof_damage", self._damage_key(reference), db=db) is not None:
                 raise ValueError("remote proof requires explicit original-generation repair")
+        if (
+            self.receipt_source is not None
+            and self.journal.get("remote_proof_damage", self._damage_key(reference)) is not None
+        ):
+            raise ValueError("remote proof requires explicit original-generation repair")
         return reference
 
     def repair_reference(self, value: dict) -> None:
