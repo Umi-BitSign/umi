@@ -3032,6 +3032,17 @@ objects are private copies. Failures, evictions and inherited fork results requi
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
 
+Upload polling first resolves a small durable request-to-model reference, then
+decodes one representative request per model. A duplicate request still reads its
+current canonical row and conflict fence on every pass. Its first reference uses
+the complete native signature, bundle and request-identity checks; subsequent
+polls and restarts reuse the result bound to exact bytes, owner and verifier
+semantics. Reference metadata is sharded by upload prefix. Missing or damaged
+completed references report `UploadReferenceRepairRequired`; with the poll owner
+drained, `CohortModelUploads.repair_retained_references(report=...)` restores only
+affected derived facts with counted progress and an ETA. It preserves signed
+requests, allocations, payload and review checks, and all admission authority.
+
 Legacy reservation accounting keeps completed static bundle checks in the
 existing private verification-receipt store. Exact current canonical bundle
 bytes, the owner binding and verifier semantics select each result, including

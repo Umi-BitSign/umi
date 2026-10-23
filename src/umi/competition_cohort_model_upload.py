@@ -43,8 +43,10 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
     admit_recovery_participant,
 )
+from .competition_cohort_upload_references import UploadModelReferences
 from .competition_execution import execution_boundary
 from .competition_round_journal import RoundJournal
+from .competition_transport_verification import TransferProgress
 from .open_competition import (
     ModelBundle,
     Signature,
@@ -240,18 +242,20 @@ class CohortModelUploads:
             ensure_private_directory(review_root)
         if self.config.standing_review_policy is not None:
             verify_standing_review_policy(self.config.standing_review_policy, intake.policy)
+        binding = {
+            "schema": "umi-cohort-model-delivery/1",
+            "policy_sha256": digest(intake.policy),
+            "cohorts": [b.model_dump(mode="json") for b in intake.config.cohorts],
+            "archive": str(archive),
+        }
         self.journal = RoundJournal(
             self.root / "journal",
-            {
-                "schema": "umi-cohort-model-delivery/1",
-                "policy_sha256": digest(intake.policy),
-                "cohorts": [b.model_dump(mode="json") for b in intake.config.cohorts],
-                "archive": str(archive),
-            },
+            binding,
             maximum_bytes=config.maximum_metadata_bytes,
         )
         ensure_private_directory(self.root / "files")
         self._retained_reuse = AssignmentVerificationReuse()
+        self._model_references = UploadModelReferences(self.journal, binding)
         self.allocations = ModelReservationLedger(self.journal)
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
@@ -305,6 +309,10 @@ class CohortModelUploads:
         raw = self.journal.get_raw("upload", key)
         if raw is None:
             raise FileNotFoundError("model delivery is not reserved")
+        return self._decode_retained(key, raw)
+
+    @canonical_json_reuse()
+    def _decode_retained(self, key: str, raw: bytes) -> CohortParticipationRequest:
         identity = hashlib.sha256(raw).digest()
         cached = self._retained_reuse.lookup(key, identity)
         if cached is not None:
@@ -314,6 +322,32 @@ class CohortModelUploads:
             raise ValueError("retained model delivery changed")
         self._retained_reuse.remember(key, identity, request)
         return request
+
+    def repair_retained_references(self, *, report=None):
+        """Repair only derived references; preserve signed rows and allocations."""
+        keys = self.journal.keys("upload")
+        repaired = 0
+        with TransferProgress(
+            "upload_model_references_repair",
+            len(keys),
+            report,
+            unit="requests",
+            planning_unit_seconds=(0.001, 2.0),
+        ) as progress:
+            for key in keys:
+                raw = self.journal.get_raw("upload", key)
+                if raw is None:
+                    raise FileNotFoundError("model delivery is not reserved")
+                _, changed = self._model_references.model(
+                    key,
+                    raw,
+                    self._decode_retained,
+                    repair=True,
+                    report=report,
+                )
+                repaired += int(changed)
+                progress.advance(1)
+        return {"status": "completed", "verification_receipts_repaired": repaired}
 
     def retry(self, request: CohortParticipationRequest) -> str | None:
         key = digest(request)
@@ -515,12 +549,17 @@ class CohortModelUploads:
         seen = set()
         for key in self.journal.keys("upload"):
             try:
-                request = self.retained(key)
-                bundle = request.signed_submission.submission.model_bundle
-                model = digest(bundle)
+                # Preserve fresh current bytes/conflict checks for every row,
+                # but materialize only one representative request per model.
+                raw = self.journal.get_raw("upload", key)
+                if raw is None:
+                    raise FileNotFoundError("model delivery is not reserved")
+                model, _ = self._model_references.model(key, raw, self._decode_retained)
                 if model in seen:
                     continue
                 seen.add(model)
+                request = self._decode_retained(key, raw)
+                bundle = request.signed_submission.submission.model_bundle
                 if self.allocations.state(model) in {"release_prepared", "released"}:
                     if remote_payloads is None:
                         raise OSError("released model awaits its authenticated remote poll owner")
