@@ -3042,6 +3042,10 @@ completed references report `UploadReferenceRepairRequired`; with the poll owner
 drained, `CohortModelUploads.repair_retained_references(report=...)` restores only
 affected derived facts with counted progress and an ETA. It preserves signed
 requests, allocations, payload and review checks, and all admission authority.
+The legacy retry reconciler uses the same reference for its fresh local-allocation
+check, so requests still reserved locally need no full decoding on every sweep.
+Released allocations retain their complete request and current remote-authority
+checks before status, retry or polling can use remote storage.
 
 Legacy reservation accounting keeps completed static bundle checks in the
 existing private verification-receipt store. Exact current canonical bundle

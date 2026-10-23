@@ -323,6 +323,16 @@ class CohortModelUploads:
         self._retained_reuse.remember(key, identity, request)
         return request
 
+    def retained_model(self, key: str) -> str:
+        """Resolve exact current model identity without loading a full request."""
+        if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError("invalid model delivery identity")
+        raw = self.journal.get_raw("upload", key)
+        if raw is None:
+            raise FileNotFoundError("model delivery is not reserved")
+        model, _ = self._model_references.model(key, raw, self._decode_retained)
+        return model
+
     def repair_retained_references(self, *, report=None):
         """Repair only derived references; preserve signed rows and allocations."""
         keys = self.journal.keys("upload")
