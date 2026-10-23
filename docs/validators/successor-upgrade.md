@@ -954,6 +954,24 @@ refuses current capture and archive review with
 expected and proved code hashes, never provider credentials. Select an
 independently qualified, authenticated profile before retrying that work.
 
+Coverage head discovery checks the already-proved code against the selected
+profile before starting fresh history catch-up. A mismatch stays pending under
+the collector's normal retry loop and leaves completed evidence intact. Supported
+authenticated adoption is still required; discovery cannot approve a new hash.
+
+When an upstream release artifact is unavailable, the manual `Successor host
+recovery checks` workflow accepts an exact `runtime_source_sha`, the independently
+proved `runtime_code_sha256`, and `runtime_spec_version`. That selection runs
+only the isolated source-build job on a disposable hosted runner, with read-only
+repository access and no production credentials. It reproduces the pinned
+upstream srtool production build and retains actual Wasm, source/build digest,
+logs and a comparison result. The source commit, package, compiler, profile,
+spec version and actual bytes must all match. A matching rebuild establishes
+source/build correspondence only; predicate qualification, authenticated profile
+adoption and native same-root verification remain separate gates. Empty runtime
+inputs preserve the workflow's ordinary recovery checks. Build progress includes
+explicit phase planning ranges; it is not a reward activation estimate.
+
 Choose the first adopted block no later than the earliest endpoint still needed
 by the collector, using retained native runtime evidence for that range. Finding
 the chain's exact upgrade boundary is unnecessary when required capture starts
