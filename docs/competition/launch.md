@@ -73,6 +73,23 @@ acceptance before its intake opens. The prospective procedure in
 [private holdout operation](../operators/private-holdout.md) is not active merely
 because its implementation exists.
 
+## Certification progress
+
+Intake logs `cohort_model_certification_progress` from the same current roster
+used to seal intake. `completed`, `total`, `remaining` and `percent` count model
+artifact certificates for the selected latest submissions, excluding superseded
+entries and other cohorts. These are diagnostics, not admission authority or a
+quality score. The full native certificate/seal verification still follows.
+
+The report includes elapsed time, the measured completion rate, ETA scope and
+assumptions. Rates restart when the process or selected roster changes. A known
+failed acceptance stage withdraws the estimate and appears in `blocked`; a
+missing previously observed certificate requires repair. `model_acceptance_stage`
+identifies payload, intent preparation, proposal publication and reviewer steps,
+with redacted failure frames. Missing samples and unresolved holds have no
+measured finish time. Certification ETA excludes preparation, challenges,
+scoring and reward activation; report those stages separately.
+
 ## Timing and recovery
 
 Published cohort dates are operating targets. Liveness failures do not expire a
