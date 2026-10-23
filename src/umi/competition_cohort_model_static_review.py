@@ -55,6 +55,17 @@ class StaticModelReviewHeld(ValueError):
         self.reason_code = reason_code
 
 
+def review_hold_key(model_sha256: str, standing: StandingModelReviewPolicy) -> str:
+    """Version negative decisions independently of successful native byte facts."""
+    return digest(
+        {
+            "schema": "umi-standing-model-artifact-review-rules/2",
+            "model_sha256": model_sha256,
+            "review_policy_sha256": digest(standing),
+        }
+    )
+
+
 def verify_standing_review_policy(
     standing: StandingModelReviewPolicy, policy: CompetitionPolicy
 ) -> None:
@@ -65,7 +76,7 @@ def verify_standing_review_policy(
 
 
 def _read_document(root_fd: int, record, standing: StandingModelReviewPolicy) -> str:
-    if not 1 <= record.size_bytes <= standing.maximum_document_bytes:
+    if not 0 <= record.size_bytes <= standing.maximum_document_bytes:
         raise StaticModelReviewHeld("review_document_size_outside_policy")
     with _artifact(root_fd, record) as (stream, before):
         raw = stream.read(standing.maximum_document_bytes + 1)
@@ -81,9 +92,24 @@ def _read_document(root_fd: int, record, standing: StandingModelReviewPolicy) ->
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise StaticModelReviewHeld("review_document_not_utf8") from error
-    if not text.strip() or "\x00" in text:
+    if (raw and not text.strip()) or "\x00" in text:
         raise StaticModelReviewHeld("review_document_not_plain_text")
     return text
+
+
+def obsolete_empty_document_hold(bundle, standing, reason_code: str) -> bool:
+    """Reconsider only the old lower-bound rule, preserving genuine holds.
+
+    Previously accepted reviews remain byte-identical. A legacy hold is retained
+    as evidence; a new review must still authenticate every file and require
+    substantive license and provenance documents.
+    """
+    documents = [r for r in bundle.files if r.role in {"license", "provenance"}]
+    return (
+        reason_code == "review_document_size_outside_policy"
+        and any(r.size_bytes == 0 for r in documents)
+        and all(r.size_bytes <= standing.maximum_document_bytes for r in documents)
+    )
 
 
 def _review_from_documents(
@@ -106,7 +132,7 @@ def _review_from_documents(
         if record.role not in {"license", "provenance"}:
             continue
         raw = raw_documents[record.path]
-        if not 1 <= record.size_bytes <= standing.maximum_document_bytes:
+        if not 0 <= record.size_bytes <= standing.maximum_document_bytes:
             raise StaticModelReviewHeld("review_document_size_outside_policy")
         if len(raw) != record.size_bytes or hashlib.sha256(raw).hexdigest() != record.sha256:
             raise ValueError("review document differs from its manifest")
@@ -114,7 +140,7 @@ def _review_from_documents(
             text = raw.decode("utf-8")
         except UnicodeDecodeError as error:
             raise StaticModelReviewHeld("review_document_not_utf8") from error
-        if not text.strip() or "\x00" in text:
+        if (raw and not text.strip()) or "\x00" in text:
             raise StaticModelReviewHeld("review_document_not_plain_text")
         encoded_document_bytes += len(canonical_json_bytes(text))
         if encoded_document_bytes > standing.maximum_total_document_bytes:
@@ -128,9 +154,9 @@ def _review_from_documents(
                 "text": text,
             }
         )
-    if not any(item["role"] == "license" for item in documents):
+    if not any(item["role"] == "license" and item["text"].strip() for item in documents):
         raise StaticModelReviewHeld("declared_license_document_missing")
-    if not any(item["role"] == "provenance" for item in documents):
+    if not any(item["role"] == "provenance" and item["text"].strip() for item in documents):
         raise StaticModelReviewHeld("declared_provenance_document_missing")
 
     model_sha256 = digest(bundle)

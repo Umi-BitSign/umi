@@ -159,3 +159,92 @@ async def test_missing_authenticated_original_refuses_instead_of_using_archive(r
     with pytest.raises(ValueError, match="missing; repair required"):
         await r.create().attest(i.request)
     assert not i.remote.reads and not r.state.signatures
+
+
+@pytest.mark.parametrize("facts", ["complete", "missing"])
+async def test_standing_review_reads_only_documents_from_completed_R2_facts(installed, facts):
+    i = installed
+    bundle = i.request.record.request.signed_submission.submission.model_bundle
+    standing = i.artifacts.config.standing_review_policy
+    resolution = i.sources.resolve(i.case.cohort, request_sha256=digest(i.request.record.request))
+    if facts == "complete":
+        await i.sources.reader(resolution).verify()
+        i.remote.reads.clear()
+        review = await i.sources.review_inputs(i.case.cohort, bundle, standing)
+        assert review.model_sha256 == digest(bundle)
+        allowed = {
+            i.object_key_prefix + "chunks/sha256/" + r.sha256
+            for r in bundle.files
+            if r.role in {"license", "provenance"}
+        }
+        assert set(i.remote.reads) <= allowed
+        assert len(i.remote.reads) == 2
+    else:
+        with pytest.raises(OSError, match="completed native bytes"):
+            await i.sources.review_inputs(i.case.cohort, bundle, standing)
+        assert not i.remote.reads
+
+
+@pytest.mark.parametrize("installed", ["new_acceptance"], indirect=True)
+async def test_private_standing_policy_repairs_absent_approval_and_preserves_native_vote(
+    installed, tmp_path
+):
+    i = installed
+    bundle = i.request.record.request.signed_submission.submission.model_bundle
+    selected = i.sources.resolve(i.case.cohort, request_sha256=digest(i.request.record.request))
+    await i.sources.reader(selected).verify()
+    inputs = await i.sources.review_inputs(
+        i.case.cohort, bundle, i.artifacts.config.standing_review_policy
+    )
+    acceptance = i.request.acceptance.model_copy(
+        update={
+            "rights_evidence_sha256": digest(inputs.rights_evidence),
+            "reconstruction_evidence_sha256": digest(inputs.reconstruction_evidence),
+            "accepted_at_block": 230,
+        }
+    )
+    request = i.request.model_copy(update={"acceptance": acceptance})
+    config = ModelReviewConfig(
+        schema="umi-cohort-model-review-config/1",
+        directory=str(tmp_path / "standing-review-journal"),
+        approvals_directory=str(tmp_path / "standing-review-approvals"),
+        archive_directory=str(i.case.owner.archive),
+        policy_sha256=digest(i.case.policy),
+        signer=wallet("Dave").hotkey.ss58_address,
+        cohorts=i.case.owner.intake.config.cohorts,
+    )
+    state = SimpleNamespace(online=True, signatures=[])
+
+    async def capture():
+        assert state.online
+        return capture_at(230)
+
+    async def history(cohort):
+        assert state.online
+        return CohortAdmissionQueue(i.case.owner.intake).history(cohort)
+
+    async def sign(body):
+        state.signatures.append(body)
+        return sign_object(body, wallet("Dave"))
+
+    def create():
+        return ModelArtifactReviewer(
+            config,
+            i.case.policy,
+            capture,
+            history,
+            sign,
+            legacy_readers=i.sources,
+            legacy_standing_policy=i.artifacts.config.standing_review_policy,
+        )
+
+    reviewer = create()
+    approval = Path(config.approvals_directory) / (digest(bundle) + ".json")
+    assert not approval.exists()
+    vote = await reviewer.attest(request)
+    assert vote.acceptance == acceptance and approval.exists()
+    first = approval.read_bytes()
+    i.remote.objects.clear()
+    state.online = False
+    assert await create().attest(request) == vote
+    assert approval.read_bytes() == first and len(state.signatures) == 1

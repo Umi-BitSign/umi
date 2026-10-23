@@ -56,6 +56,8 @@ from .competition_cohort_model_static_review import (
     StandingModelReviewPolicy,
     StaticModelReviewHeld,
     build_standing_model_review_from_documents,
+    obsolete_empty_document_hold,
+    review_hold_key,
     verify_standing_review_policy,
 )
 from .competition_cohort_participation import CohortParticipationRequest
@@ -646,6 +648,35 @@ class DirectModelUploadOwner:
             capabilities=values,
         )
 
+    def _current_review_hold(self, reservation):
+        payload = reservation.reservation.payload
+        if self.config.standing_review_policy is not None:
+            current = self.journal.get(
+                "direct-review-hold",
+                review_hold_key(payload.model_sha256, self.config.standing_review_policy),
+            )
+            if current is not None:
+                return current
+        hold = self.journal.get("direct-review-hold", payload.model_sha256)
+        if hold is None or self.config.standing_review_policy is None:
+            return hold
+        if not isinstance(hold, dict) or not isinstance(hold.get("reason_code"), str):
+            raise ValueError("retained direct model review hold differs")
+        raw = self.journal.get("direct-request", payload.upload_sha256)
+        if raw is None:
+            raise ValueError("held direct model review request is unavailable")
+        request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(raw))
+        bundle = request.signed_submission.submission.model_bundle
+        if bundle is None or digest(bundle) != payload.model_sha256:
+            raise ValueError("held direct model review bundle changed")
+        return (
+            None
+            if obsolete_empty_document_hold(
+                bundle, self.config.standing_review_policy, hold["reason_code"]
+            )
+            else hold
+        )
+
     def status(self, reservation_sha256: str) -> DirectModelUploadStatus:
         reservation = self._reservation_by_digest(reservation_sha256)
         verification_raw = self.journal.get("direct-verification", reservation_sha256)
@@ -658,7 +689,7 @@ class DirectModelUploadOwner:
         )
         body = reservation.reservation
         verification_hold = self.journal.get("direct-verification-hold", reservation_sha256)
-        review_hold = self.journal.get("direct-review-hold", body.payload.model_sha256)
+        review_hold = self._current_review_hold(reservation)
         hold = verification_hold if verification_hold is not None else review_hold
         hold_reason_code = None if hold is None else hold.get("reason_code")
         return DirectModelUploadStatus(
@@ -706,7 +737,7 @@ class DirectModelUploadOwner:
                     maximum_bytes=MAX_PUBLICATION_BYTES,
                 )
             except FileNotFoundError as error:
-                hold = self.journal.get("direct-review-hold", submission.model_revision)
+                hold = self._current_review_hold(reservation)
                 reason = (
                     ": " + hold["reason_code"]
                     if isinstance(hold, dict) and isinstance(hold.get("reason_code"), str)
@@ -787,10 +818,14 @@ class DirectModelUploadOwner:
         try:
             for record in bundle.files:
                 if record.role in {"license", "provenance"}:
-                    if not 1 <= record.size_bytes <= standing.maximum_document_bytes:
+                    if not 0 <= record.size_bytes <= standing.maximum_document_bytes:
                         raise StaticModelReviewHeld("review_document_size_outside_policy")
-                    documents[record.path] = await self.multipart.read_range(
-                        attempt.object_key, offset=offset, size_bytes=record.size_bytes
+                    documents[record.path] = (
+                        await self.multipart.read_range(
+                            attempt.object_key, offset=offset, size_bytes=record.size_bytes
+                        )
+                        if record.size_bytes
+                        else b""
                     )
                 offset += record.size_bytes
             if self.policy is None:
@@ -804,7 +839,7 @@ class DirectModelUploadOwner:
         except StaticModelReviewHeld as error:
             self.journal.put(
                 "direct-review-hold",
-                payload.model_sha256,
+                review_hold_key(payload.model_sha256, standing),
                 {"reason_code": error.reason_code, "review_policy_sha256": digest(standing)},
             )
             raise
@@ -1353,7 +1388,6 @@ class DirectModelUploadOwner:
             reservation = self._reservation_by_digest(reservation_sha256)
             model_sha256 = reservation.reservation.payload.model_sha256
             verification_hold = self.journal.get("direct-verification-hold", reservation_sha256)
-            review_hold = self.journal.get("direct-review-hold", model_sha256)
             reviewed = self.config.standing_review_policy is None
             if self.config.admission_reviews_directory is not None:
                 try:
@@ -1373,6 +1407,7 @@ class DirectModelUploadOwner:
                 ready += 1
             if verified and reviewed:
                 continue
+            review_hold = self._current_review_hold(reservation)
             if verification_hold is not None:
                 failed += 1
                 last_error = verification_hold["reason_code"]
@@ -1487,7 +1522,9 @@ class DirectModelUploadOwner:
                 reason_code = "direct_model_review_failed"
                 self.journal.put(
                     "direct-review-hold",
-                    model_sha256,
+                    review_hold_key(model_sha256, self.config.standing_review_policy)
+                    if self.config.standing_review_policy is not None
+                    else model_sha256,
                     {"reason_code": reason_code},
                 )
                 reviews_held += 1

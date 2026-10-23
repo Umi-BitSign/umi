@@ -283,6 +283,11 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                     sign,
                     direct_review=(None if direct_artifacts is None else direct_artifacts.review),
                     legacy_readers=legacy_readers,
+                    legacy_standing_policy=(
+                        config.direct_model_review.standing_review_policy
+                        if legacy_readers is not None and config.direct_model_review is not None
+                        else None
+                    ),
                 )
                 await run_owned_thread(
                     models.journal.put,
