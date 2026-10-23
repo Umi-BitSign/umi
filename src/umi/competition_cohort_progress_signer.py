@@ -156,12 +156,26 @@ class CohortProgressSigner:
         evidence = CohortDecisionInput.model_validate_json(canonical_json_bytes(evidence))
 
         async def review():
-            record = await self.reviewer.review(evidence.progress.progress)
+            progress = evidence.progress.progress
+            retained, signature = await run_owned_thread(
+                self._saved, "phase_progress", digest(progress), progress
+            )
+            if signature is None:
+                record = await self.reviewer.review(progress)
+                source = record.model_dump(mode="json", by_alias=True)
+            else:
+                # This signer's own committed exact-progress review survives
+                # restart. The separate decision review below checks the current
+                # owner history and proposed transition; repeating the original
+                # proof pass adds no new authority.
+                source = retained["review"]
+                if source.get("progress") != progress.model_dump(mode="json", by_alias=True):
+                    raise ValueError("retained phase review differs from its signed progress")
             history = await self.reviewer.decision(transition, evidence)
-            if history != record.history_sha256:
+            if history != source["history_sha256"]:
                 raise OSError("cohort history changed before decision signing")
             return {
-                "source": record.model_dump(mode="json", by_alias=True),
+                "source": source,
                 "decision": evidence.model_dump(mode="json", by_alias=True),
             }
 

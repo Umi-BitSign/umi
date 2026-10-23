@@ -160,6 +160,11 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             return await run_owned_thread(SettlementRegistrationFiles._read, proofs, observation)
 
         promotion_store = CompetitionStore(Path(config.promotion_directory), config.policy)
+        admission = (
+            None
+            if config.admission_signing is None
+            else CohortAdmissionJournal(config.admission_signing, config.policy)
+        )
         reviewer = SelectedPhaseReviewer(
             config,
             provider,
@@ -167,6 +172,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             owner_token,
             archive,
             promotion_store,
+            admission=admission,
         )
         signer = CohortProgressSigner(config.signing, reviewer, sign)
         # Capacity, credentials and network placement can change on recovery;
@@ -231,7 +237,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
             )
         if config.admission_signing is not None:
-            admission = CohortAdmissionJournal(config.admission_signing, config.policy)
+            assert admission is not None
             await run_owned_thread(
                 admission.journal.put,
                 "admission_review_host",

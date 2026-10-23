@@ -83,6 +83,15 @@ Completed certificates and votes survive restart and are reused. Closure still
 uses the native finalized-registration filter and exact certificates; a last-minute
 upload or an unresolved review can leave unfinished work at closure.
 
+Roster reviewers reuse their own committed admission verdicts for exact original
+participations. Unfinished records receive native proof review and an atomic
+checkpoint before their progress count advances. These private results bind the
+original record, policy, cohort authority and verifier semantics; damaged completed
+metadata requires repair. Existing signed admission journals remain supported.
+Decision signing reuses the same signer's committed exact-progress review while
+still checking the proposed transition and current owner history. Seal registration
+and current finality remain independently verified.
+
 `GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
 current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
 `eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,

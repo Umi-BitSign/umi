@@ -123,6 +123,75 @@ async def test_two_independent_votes_form_a_native_admission_certificate(harness
         certify_admission([votes[0], votes[0]], h.archive.chain.policy)
 
 
+async def test_completed_participation_review_reuses_metadata_after_restart(harness, monkeypatch):
+    h = harness
+    worker = h.worker()
+    assert not worker.journal.reviewed_participation(h.raw)
+    await worker.attest(h.raw)
+    restarted = h.worker()
+
+    def no_payload(*args, **kwargs):
+        raise AssertionError("completed review must not load its registration payload")
+
+    monkeypatch.setattr(restarted.journal, "_artifact", no_payload)
+    assert restarted.journal.reviewed_participation(h.raw)
+    changed = json.loads(h.raw)
+    changed["observation"]["evidence_sha256"] = "ab" * 32
+    with pytest.raises(ValueError, match="exact original record"):
+        restarted.journal.reviewed_participation(canonical_json_bytes(changed))
+
+
+async def test_legacy_committed_vote_reuses_qualified_review_without_proof_read(
+    harness, monkeypatch
+):
+    h = harness
+    worker = h.worker()
+    await worker.attest(h.raw)
+    # Model the original /1 layout, before phase-review checkpoints existed.
+    with worker.journal.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind LIKE 'participation_review%'")
+    monkeypatch.setattr(worker.journal, "_artifact", lambda *args: pytest.fail("proof reread"))
+    assert worker.journal.reviewed_participation(h.raw)
+    from umi import competition_cohort_admission_journal as module
+
+    monkeypatch.setattr(module, "runtime_identity", lambda: "ab" * 32)
+    assert not worker.journal.reviewed_participation(h.raw)
+
+
+async def test_missing_completed_participation_metadata_requires_repair(harness):
+    h = harness
+    worker = h.worker()
+    await worker.attest(h.raw)
+    with worker.journal.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='participation_review'")
+    with pytest.raises(ValueError, match="metadata repair"):
+        worker.journal.reviewed_participation(h.raw)
+
+
+async def test_native_participation_checkpoint_survives_interruption_before_vote(
+    harness, monkeypatch
+):
+    from umi.competition_cohort_admission_review import review_cohort_participation
+
+    h = harness
+    worker = h.worker()
+    assert not worker.journal.reviewed_participation(h.raw)
+    await review_cohort_participation(
+        h.raw,
+        h.source.history,
+        h.archive.chain.policy,
+        h.archive.reviewer,
+        expected_tip_sha256=history_tip(h.source.history),
+        registration_archive=(h.archive.raw, h.archive.metadata),
+    )
+    worker.journal.remember_participation_review(h.raw)
+    # No signing intent or vote is needed to keep completed verification.
+    assert worker.journal.load(admission_slot(h.raw)) is None
+    restarted = h.worker()
+    monkeypatch.setattr(restarted.journal, "_artifact", lambda *args: pytest.fail("proof reread"))
+    assert restarted.journal.reviewed_participation(h.raw)
+
+
 async def test_four_hour_outage_after_lost_signature_reuses_intent_and_original_evidence(harness):
     h = harness
     first = h.worker()

@@ -336,6 +336,8 @@ class RemoteIntakeProgressReviewer:
         maximum_sample_gap_blocks: int = 10,
         maximum_bytes: int = MAX_EXPORT_BYTES,
         timeout_seconds: int = 2400,
+        reviewed_participation: Callable[[bytes], Awaitable[bool]] | None = None,
+        remember_participation_review: Callable[[bytes], Awaitable[None]] | None = None,
     ):
         _bounds(maximum_bytes, timeout_seconds)
         if type(maximum_sample_gap_blocks) is not int or not 1 <= maximum_sample_gap_blocks <= 300:
@@ -347,6 +349,8 @@ class RemoteIntakeProgressReviewer:
             maximum_bytes,
             timeout_seconds,
         )
+        self.reviewed_participation = reviewed_participation
+        self.remember_participation_review = remember_participation_review
 
     async def _read(
         self, progress: CohortPhaseProgress
@@ -411,15 +415,22 @@ class RemoteIntakeProgressReviewer:
                 unit="participations",
                 cohort=progress.cohort_sha256,
             ):
+                raw = canonical_json_bytes(record)
+                if self.reviewed_participation is not None and await self.reviewed_participation(
+                    raw
+                ):
+                    continue
                 proof = await self.archive(record.observation)
                 await review_cohort_participation(
-                    canonical_json_bytes(record),
+                    raw,
                     original.history,
                     self.policy,
                     self.provider,
                     expected_tip_sha256=progress.recovery_tip_sha256,
                     registration_archive=proof,
                 )
+                if self.remember_participation_review is not None:
+                    await self.remember_participation_review(raw)
         current = execution_boundary(await self.provider.collect())
         if current.block < progress.observed_at_block:
             raise ValueError("intake progress is ahead of owned finality")
