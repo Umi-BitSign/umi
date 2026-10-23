@@ -153,19 +153,34 @@ class ModelAcceptanceWorker:
                 approved = await run_owned_thread(self.owner.retained, cohort, key)
         except PendingModelArtifacts:
             retained = False
+            selected = None
+            with self._stage(cohort, key, "input_readiness"):
+                # A missing external review cannot be repaired by reading model
+                # bytes. Existing intents retain their original inputs, so their
+                # recovery never depends on this external delivery file.
+                if not await run_owned_thread(self.owner.has_intent, cohort, key):
+                    selected = await run_owned_thread(
+                        partial(
+                            read_private_model,
+                            self.inputs / "model-reviews" / (sub.model_revision + ".json"),
+                            ModelArtifactReviewInputs,
+                            maximum_bytes=MAX_PUBLICATION_BYTES,
+                        )
+                    )
             with self._stage(cohort, key, "payload"):
                 await self.owner.ensure_payload(cohort, key)
             with self._stage(cohort, key, "intent_lookup"):
                 intent = await run_owned_thread(self.owner.intent, cohort, key)
             if intent is None:
-                selected = await run_owned_thread(
-                    partial(
-                        read_private_model,
-                        self.inputs / "model-reviews" / (sub.model_revision + ".json"),
-                        ModelArtifactReviewInputs,
-                        maximum_bytes=MAX_PUBLICATION_BYTES,
+                if selected is None:
+                    selected = await run_owned_thread(
+                        partial(
+                            read_private_model,
+                            self.inputs / "model-reviews" / (sub.model_revision + ".json"),
+                            ModelArtifactReviewInputs,
+                            maximum_bytes=MAX_PUBLICATION_BYTES,
+                        )
                     )
-                )
                 capture = await self.capture()
                 await run_owned_thread(self.owner.prepare, cohort, key, selected, capture)
                 intent = await run_owned_thread(self.owner.intent, cohort, key)
@@ -223,7 +238,17 @@ class ModelAcceptanceWorker:
                         limit=self.batch_size,
                     )
                 )
-                for _, sub in entries:
+                priority = await run_owned_thread(
+                    partial(
+                        self.owner.pending_latest_entries,
+                        cohort,
+                        limit=min(self.batch_size, 16),
+                    )
+                )
+                # Latest uncertified candidates run before old exports. Keep
+                # the original fair cursor independent of this bounded prefix.
+                work = dict((*priority, *entries))
+                for sub in work.values():
                     try:
                         with work_heartbeats():
                             await self._one(cohort, sub)

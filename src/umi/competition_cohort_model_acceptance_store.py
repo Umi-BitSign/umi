@@ -400,6 +400,59 @@ class CohortModelAcceptances:
                 result.append((key, record.request.signed_submission.submission))
             return tuple(result)
 
+    def pending_latest_entries(self, cohort, *, limit=16):
+        """Prioritize likely seal blockers without granting roster authority.
+
+        Current native sealing still verifies the complete inventory and live
+        registration. The ordinary fair scan retains superseded/recovery work.
+        """
+        self.intake._allowed(cohort)
+        if type(limit) is not int or not 1 <= limit <= 16:
+            raise ValueError("model acceptance priority scan exceeds its page bound")
+        with self.intake._connection() as (db, store):
+            state, _ = store.status(cohort)
+            if state.phase != "intake":
+                return ()
+            history = store.published_history(cohort)
+            rows = db.execute(
+                "SELECT c.consent,c.hotkey,c.sequence,substr(c.body,1,4194305) "
+                "FROM cohort_consents c WHERE c.cohort=? AND c.track='model' "
+                "AND NOT EXISTS (SELECT 1 FROM cohort_consents newer "
+                "WHERE newer.cohort=c.cohort AND newer.hotkey=c.hotkey "
+                "AND newer.track=c.track AND newer.sequence>c.sequence) "
+                "AND NOT EXISTS (SELECT 1 FROM cohort_model_acceptances a "
+                "WHERE a.cohort=c.cohort AND a.submission="
+                "json_extract(CAST(c.body AS TEXT),'$.request.consent.consent.submission_sha256')) "
+                "ORDER BY c.hotkey,c.consent LIMIT ?",
+                (cohort, limit),
+            )
+            result = []
+            for key, hotkey, sequence, raw in rows:
+                record = read_participation(raw)
+                sub = record.request.signed_submission.submission
+                replay_participation(record, history, self.intake.policy)
+                if (
+                    digest(record.request.consent.consent) != key
+                    or identity(sub.hotkey) != hotkey
+                    or sub.sequence != sequence
+                    or sub.track != "model"
+                ):
+                    raise ValueError("model priority index differs from original consent")
+                result.append((key, sub))
+            return tuple(result)
+
+    def has_intent(self, cohort, submission):
+        """Availability hint only; native intent/transport validation stays separate."""
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            return (
+                db.execute(
+                    "SELECT 1 FROM cohort_model_acceptance_intents WHERE cohort=? AND submission=?",
+                    (cohort, submission),
+                ).fetchone()
+                is not None
+            )
+
     def intent(self, cohort, submission):
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):

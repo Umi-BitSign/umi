@@ -3070,11 +3070,23 @@ deletion.
 Intake logs `cohort_intake_wait` when an eligible sealing attempt still lacks
 model artifact acceptance. It identifies the first missing submission and the
 actual observation, compensated cutoff and readiness. `model_acceptance_stage`
+also reports `input_readiness`: a new proposal loads its required review input
+before model-byte work. Missing or malformed input stays pending without repeated
+R2 byte checks. An existing intent recovers from its retained original inputs
+without requiring the external review file; payload, native transport, quorum
+and publication checks still run before a new certificate is committed. It also
 reports each submission's retained lookup, payload, quorum, promotion,
 publication and export separately, before the batch finishes. Stage elapsed time
 and heartbeat diagnostics do not establish an end-to-end launch ETA. They carry
 only public digests and exception types, never private review documents or error
 messages. No miner or validator client flags or signed wire formats change.
+
+Each acceptance sweep gives up to 16 latest uncertified model entries a priority
+pass before its ordinary page. Native signatures, indexes and current intake
+history are checked; sealing still verifies the complete inventory and current
+registration. The ordinary cursor continues processing prior versions and export
+recovery. Restart therefore gives current candidates a turn immediately, while
+retained admission blocks, completion ordinals and signed records remain intact.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture

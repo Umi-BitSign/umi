@@ -446,7 +446,10 @@ async def test_worker_promotes_before_publication_and_retries_retained_acceptanc
 async def test_worker_reports_actual_pending_item_before_whole_batch_finishes(
     prepared, tmp_path, monkeypatch, caplog
 ):
-    owner, cohort, _, _ = prepared
+    owner, cohort, _, inputs = prepared
+    publish_private_model(
+        tmp_path / "inputs/model-reviews" / (inputs.model_sha256 + ".json"), inputs
+    )
     started, release = asyncio.Event(), asyncio.Event()
 
     async def held_payload(*_args):
@@ -480,6 +483,132 @@ async def test_worker_reports_actual_pending_item_before_whole_batch_finishes(
         release.set()
         if not task.done():
             await task
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+async def test_missing_review_inputs_do_not_trigger_remote_payload_work(
+    prepared, tmp_path, monkeypatch, damage
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    if damage == "malformed":
+        path = root / "model-reviews" / (inputs.model_sha256 + ".json")
+        path.parent.mkdir(mode=0o700, parents=True)
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+
+    async def forbidden(*args):
+        raise AssertionError("unavailable review input caused model byte work or new finality")
+
+    monkeypatch.setattr(owner, "ensure_payload", forbidden)
+    worker = ModelAcceptanceWorker(owner, forbidden, root, out)
+    for _ in range(2):
+        result = await worker.poll_once()
+        assert result["entries_pending"] == 2
+        assert result["entries_exported"] == 0
+    for sub in subs:
+        assert not owner.has_intent(cohort, digest(sub))
+
+
+async def test_retained_intent_recovers_without_external_review_file_but_requires_payload(
+    prepared, tmp_path, monkeypatch
+):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    for sub in subs:
+        publication = certify(owner, cohort, sub, inputs)
+        assert owner.has_intent(cohort, digest(sub))
+        publish_private_model(
+            root / "model-acceptance-publications" / cohort / (digest(sub) + ".json"), publication
+        )
+    assert not (root / "model-reviews").exists()
+    calls = []
+
+    async def unavailable(*args):
+        calls.append(args)
+        raise OSError("remote byte verification unavailable")
+
+    monkeypatch.setattr(owner, "ensure_payload", unavailable)
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out)
+    result = await worker.poll_once()
+    assert result["entries_pending"] == len(calls) == 2
+    for sub in subs:
+        with pytest.raises(PendingModelArtifacts):
+            owner.retained(cohort, digest(sub))
+
+    async def available(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(owner, "ensure_payload", available)
+    assert (await worker.poll_once())["entries_exported"] == 2
+    assert len(calls) == 4
+
+
+async def test_latest_pending_candidate_runs_before_old_export_cursor_wraps(prepared, tmp_path):
+    owner, cohort, subs, inputs = prepared
+    root, out = tmp_path / "inputs", tmp_path / "output"
+    published = certify(owner, cohort, subs[0], inputs)
+    owner.publish(published, capture_at(220))
+    pending = certify(owner, cohort, subs[1], inputs)
+    publish_private_model(
+        root / "model-acceptance-publications" / cohort / (digest(subs[1]) + ".json"), pending
+    )
+    keys = [key for key, _ in owner.entries(cohort)]
+    assert [digest(sub) for _, sub in owner.pending_latest_entries(cohort)] == [digest(subs[1])]
+
+    async def capture():
+        return capture_at(220)
+
+    worker = ModelAcceptanceWorker(owner, capture, root, out, batch_size=1)
+    worker.cursors[cohort] = max(keys)
+    assert (await worker.poll_once())["entries_exported"] == 1
+    assert owner.retained(cohort, digest(subs[1])).certificate == pending.certificate
+    assert not owner.pending_latest_entries(cohort)
+    # The ordinary cursor remains fair: existing publication exports still run.
+    for _ in range(2):
+        await worker.poll_once()
+    assert (out / "model-reward-acceptances" / cohort / (digest(subs[0]) + ".json")).exists()
+
+
+def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepared):
+    from umi.competition_cohort_intake_records import read_participation
+
+    owner, cohort, subs, _ = prepared
+    key, _ = next((k, s) for k, s in owner.entries(cohort) if s == subs[0])
+    original = read_participation(CohortAdmissionQueue(owner.intake).record(cohort, key)).request
+    sub = original.signed_submission.submission.model_copy(update={"sequence": 2})
+    signed = original.signed_submission.model_copy(
+        update={"submission": sub, "signature": sign_object(sub, wallet("Alice"))}
+    )
+    consent = original.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    request = original.model_copy(
+        update={
+            "signed_submission": signed,
+            "consent": original.consent.model_copy(
+                update={"consent": consent, "signature": sign_object(consent, wallet("Alice"))}
+            ),
+        }
+    )
+    owner.intake.retain(
+        request, capture_at(210 + owner.intake.policy.minimum_submission_interval_blocks)
+    )
+    priority = {digest(s) for _, s in owner.pending_latest_entries(cohort)}
+    assert digest(sub) in priority and digest(subs[0]) not in priority
+    assert digest(subs[1]) in priority
+    assert {digest(s) for _, s in owner.entries(cohort)} == priority | {digest(subs[0])}
+
+
+def test_priority_refuses_changed_native_sequence_index(prepared):
+    owner, cohort, _, _ = prepared
+    key, _ = owner.entries(cohort)[0]
+    with owner.intake._connection() as (db, _):
+        db.execute("UPDATE cohort_consents SET sequence=999 WHERE consent=?", (key,))
+    with pytest.raises(ValueError, match="index differs"):
+        owner.pending_latest_entries(cohort)
 
 
 def test_missing_payload_cannot_reserve_a_model_position(prepared):
