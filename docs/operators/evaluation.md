@@ -534,6 +534,13 @@ accounting on retained stores. Capture persistence can then count retained
 evidence without scanning large payload rows. This additive index preserves
 the cache identity, capacity allowance and every original proof.
 
+The recoverable executor's outer attempt wait includes the configured
+`execution.read_timeout_seconds` for metadata, restoration and cache queues,
+followed by the signed inference budget and cleanup allowance. The CPU runner
+still enforces the original per-inference limit independently. Queue or transfer
+time must not consume that model execution budget. Changing the local wait does
+not renew signed cohort clocks or extend a model's inference deadline.
+
 Repeated observation of the journal's current finalized block uses a read-only
 snapshot. A newer block rechecks the previous value while owning the writer
 transaction, and a regression remains an error. The high-water field has a fixed

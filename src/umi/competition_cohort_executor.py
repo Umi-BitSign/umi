@@ -220,8 +220,9 @@ class CohortExecutor(CohortExecutionAuthority):
                     )
                     await run_owned_thread(self.journal.observe, job, attempt, result)
 
-                # The signed per-inference limit is enforced by the sandbox. This
-                # outer transport/cleanup allowance never expires the whole job.
+                # Restoration and shared cache queues precede inference. Give
+                # them the configured read budget without consuming the signed
+                # inference limit, which the sandbox enforces independently.
                 await wait_for_owned(invoke_and_retain(), timeout=job_policy_timeout(self.journal))
             _, finished = await self.current(assignment)
             await run_owned_thread(self.journal.finish, job, attempt, finished)
@@ -229,7 +230,7 @@ class CohortExecutor(CohortExecutionAuthority):
 
 
 def job_policy_timeout(journal: CohortExecutionJournal) -> float:
-    return journal.policy.maximum_inference_ms / 1000 + 60
+    return journal.config.read_timeout_seconds + journal.policy.maximum_inference_ms / 1000 + 60
 
 
 class CohortExecutionWorker:
