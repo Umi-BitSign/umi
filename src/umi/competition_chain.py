@@ -145,7 +145,8 @@ class CompetitionChainConfig(StrictProtocolModel):
     collection_timeout_seconds: Annotated[int, Field(ge=1, le=600)] = 120
     startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 1800
     finality_segment_startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] | None = None
-    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=20 * 1024**3)] = 256 * 1024**2
+    maximum_cache_bytes: Annotated[int, Field(ge=1024, le=2**53 - 1)] = 256 * 1024**2
+    previous_maximum_cache_bytes: Annotated[int, Field(ge=1024, le=2**53 - 1)] | None = None
     storage_codec_metadata_path: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     runtime_metadata_binary_sha256: Hex32 | None = None
@@ -164,6 +165,8 @@ class CompetitionChainConfig(StrictProtocolModel):
             value.pop("finality_segment_startup_timeout_seconds", None)
         if not self.proof_rpc_fallback_urls:
             value.pop("proof_rpc_fallback_urls", None)
+        if self.previous_maximum_cache_bytes is None:
+            value.pop("previous_maximum_cache_bytes", None)
         return value
 
     @field_validator("storage_codec_metadata_path", "runtime_metadata_binary")
@@ -677,6 +680,7 @@ class FinalizedRegistrationProvider:
             "collection_timeout_seconds",
             "startup_timeout_seconds",
             "finality_segment_startup_timeout_seconds",
+            "previous_maximum_cache_bytes",
         ):
             body.pop(field, None)
         return digest({"chain_config_without_policy": body})
@@ -685,6 +689,7 @@ class FinalizedRegistrationProvider:
     def _legacy_policy_free_config_binding_hash(config: CompetitionChainConfig) -> str:
         body = config.model_dump(mode="json", by_alias=True)
         body.pop("policy_sha256", None)
+        body.pop("previous_maximum_cache_bytes", None)
         return digest({"chain_config_without_policy": body})
 
     def _legacy_operational_profiles(
@@ -732,6 +737,15 @@ class FinalizedRegistrationProvider:
         have carried under the live policy or any honored predecessor."""
         accepted = {self._cache_binding_hash()}
         configs = [self.config]
+        if self.config.previous_maximum_cache_bytes is not None:
+            previous = self.config.model_copy(
+                update={
+                    "maximum_cache_bytes": self.config.previous_maximum_cache_bytes,
+                    "previous_maximum_cache_bytes": None,
+                }
+            )
+            configs.append(previous)
+            accepted.add(self._config_binding_hash(previous))
         if self.config.proof_rpc_fallback_urls:
             # Explicit addition only: preserve the original primary RPC, every
             # chain/proof pin and every other field. Never adopt another primary.
