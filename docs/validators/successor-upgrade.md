@@ -3032,6 +3032,16 @@ objects are private copies. Failures, evictions and inherited fork results requi
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
 
+Legacy reservation accounting keeps completed static bundle checks in the
+existing private verification-receipt store. Exact current canonical bundle
+bytes, the owner binding and verifier semantics select each result, including
+after restart. Allocation snapshots still read current conflict fences,
+accounting indexes and release transitions. Missing or damaged completed receipts
+require explicit repair through `repair_model_allocation_verification`; that
+operation restores only affected derived receipts from native original bundles,
+with progress and an ETA, and cannot change capacity charges or grant a release.
+The upload journal, signed artifacts and miner/validator wire formats are unchanged.
+
 Direct-upload polling records successful private review-file shape checks in its
 existing metadata journal. Unchanged owned file identities reuse those checks
 across polls and restart, without rereading documents on the event loop. Missing
