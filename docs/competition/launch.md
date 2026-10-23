@@ -149,6 +149,11 @@ cohort or authorize its evidence to be discarded.
   `original_request_12h_with_completed_miner/1`: after the same 12 hours, closure
   may proceed once at least one original miner has completed all its selected
   work. If every original miner remains unfinished, requests stay open.
+  For C6 and later, the owner also waits for every selected public model's
+  execution and terminal certification before selecting this cutoff. Central
+  evaluation backlog cannot make an uploaded model lose its evaluation. Once
+  model work is complete, unfinished endpoint work follows the same signed
+  rule and original clock. Historical certified tails remain replayable.
   Benchmark and accepted paid-work miners count in one union; multiple entries,
   cases or retries cannot enlarge the denominator or make a miner complete while
   its other original work remains unfinished. Legacy plans retain the 10% rule
