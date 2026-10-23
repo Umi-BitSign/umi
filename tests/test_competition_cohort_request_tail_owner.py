@@ -1,6 +1,7 @@
 """Owner inventory joins before native closure; no finality or scoring claims."""
 
 from types import SimpleNamespace as NS
+from typing import Literal
 
 import pytest
 
@@ -19,6 +20,7 @@ from .test_open_competition import wallet
 class Submission(StrictProtocolModel):
     hotkey: Hotkey
     entry: int
+    track: Literal["endpoint", "model"] = "endpoint"
 
 
 def inventory(
@@ -151,6 +153,64 @@ def hard_tail(args, *, sequence=6):
         }
     )
     return args
+
+
+def set_track(args, entry, track):
+    # Signed wrapper stand-ins are shared by the native inventory ports.
+    signed = args["roster"].participants[entry].record.request.signed_submission
+    signed.submission = signed.submission.model_copy(update={"track": track})
+
+
+@pytest.mark.parametrize("sequence", [6, 7, 10, 11])
+def test_central_model_backlog_never_becomes_twelve_hour_miner_absence(
+    monkeypatch, sequence, caplog
+):
+    import json
+    import logging
+
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    args = hard_tail(
+        inventory(monkeypatch, miners=10, benchmark_missing=tuple(range(1, 10))), sequence=sequence
+    )
+    args["catalogs"] = args["seals"] = ()
+    for index in range(10):
+        set_track(args, index, "model")
+    args["capture"].provenance["timestamp_ms"] += 3 * 24 * 60 * 60 * 1000
+    assert select_request_tail(**args) is None
+    event = json.loads(caplog.records[-1].message)
+    assert event["pending_model_submissions"] == 9 and event["completed_model_submissions"] == 1
+    assert event["eta_scope"] == "readiness_check_only_not_model_scoring"
+    args["terminals"] = lambda *_: object()
+    assert select_request_tail(**args).unfinished_hotkeys == ()
+
+
+def test_completed_models_leave_endpoint_tail_rule_and_original_clock_intact(monkeypatch):
+    args = hard_tail(inventory(monkeypatch, miners=10, benchmark_missing=(0, 1)))
+    set_track(args, 0, "model")
+    assert select_request_tail(**args) is None
+    args["terminals"] = lambda order, evaluator: (
+        None if order.order.submission.submission.entry == 1 else object()
+    )
+    result = select_request_tail(**args)
+    assert len(result.unfinished_hotkeys) == 1 and result.opened_timestamp_ms == 1000
+
+
+def test_C5_original_model_tail_selection_is_preserved(monkeypatch):
+    args = inventory(monkeypatch, miners=11, benchmark_missing=(0,))
+    set_track(args, 0, "model")
+    assert len(select_request_tail(**args).unfinished_hotkeys) == 1
+
+
+def test_waiting_for_model_cannot_hide_retained_paid_work_corruption(monkeypatch):
+    args = hard_tail(inventory(monkeypatch, miners=10, benchmark_missing=(0,)))
+    set_track(args, 0, "model")
+
+    def corrupt(assignment):
+        raise ValueError("retained paid terminal is corrupt")
+
+    args["service_terminals"] = corrupt
+    with pytest.raises(ValueError, match="corrupt"):
+        select_request_tail(**args)
 
 
 @pytest.mark.parametrize("sequence", [6, 7, 11, 2**32 - 1])
