@@ -3032,6 +3032,25 @@ objects are private copies. Failures, evictions and inherited fork results requi
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
 
+Direct-upload polling records successful private review-file shape checks in its
+existing metadata journal. Unchanged owned file identities reuse those checks
+across polls and restart, without rereading documents on the event loop. Missing
+completed documents or receipts report repair; an identical restoration checks
+only the changed file identity. This receipt grants no rights approval, model
+acceptance, evaluation result or reward. Keep documents needed by active review
+consumers available. Remote retention and consumer-release evidence are required
+before evicting a local review file; the shape receipt alone does not authorize
+deletion.
+
+Intake logs `cohort_intake_wait` when an eligible sealing attempt still lacks
+model artifact acceptance. It identifies the first missing submission and the
+actual observation, compensated cutoff and readiness. `model_acceptance_stage`
+reports each submission's retained lookup, payload, quorum, promotion,
+publication and export separately, before the batch finishes. Stage elapsed time
+and heartbeat diagnostics do not establish an end-to-end launch ETA. They carry
+only public digests and exception types, never private review documents or error
+messages. No miner or validator client flags or signed wire formats change.
+
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
 may be below that block; the owner requests a minimum-height refresh through the

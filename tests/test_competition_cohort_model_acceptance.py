@@ -1,6 +1,8 @@
 """Owned artifact admission and real intake fencing with synthetic finality."""
 
 import asyncio
+import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from types import SimpleNamespace
@@ -255,12 +257,22 @@ def observe(phase, cohort, block):
     )
 
 
-def test_intake_waits_for_every_model_and_closes_after_delayed_certification(prepared):
+def test_intake_waits_for_every_model_and_closes_after_delayed_certification(prepared, caplog):
     owner, cohort, subs, inputs = prepared
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     phase = CohortIntakePhaseObserver(owner.intake)
     for block in range(200, 301, 5):
         result = observe(phase, cohort, block)
     assert result.seal is None
+    waits = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("cohort_intake_wait ")
+    ]
+    assert waits[-1]["reason_code"] == "selected_model_artifact_acceptance_pending"
+    assert waits[-1]["pending_submission_sha256"] in {digest(sub) for sub in subs}
+    assert waits[-1]["serving"] is True
+    assert waits[-1]["observed_at_block"] >= waits[-1]["earliest_seal_block"]
     first = certify(owner, cohort, subs[0], inputs, block=300)
     owner.publish(first, capture_at(300))
     assert observe(phase, cohort, 305).seal is None
@@ -429,6 +441,45 @@ async def test_worker_promotes_before_publication_and_retries_retained_acceptanc
     assert second["entries_pending"] == 0
     assert calls.count(failed) == 2
     assert calls.count(digest(subs[1])) == 2
+
+
+async def test_worker_reports_actual_pending_item_before_whole_batch_finishes(
+    prepared, tmp_path, monkeypatch, caplog
+):
+    owner, cohort, _, _ = prepared
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def held_payload(*_args):
+        started.set()
+        await release.wait()
+        raise OSError("private document diagnostic must not leak")
+
+    monkeypatch.setattr(owner, "ensure_payload", held_payload)
+    worker = ModelAcceptanceWorker(owner, None, tmp_path / "inputs", tmp_path / "output")
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    task = asyncio.create_task(worker.poll_once())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert not task.done()
+        messages = [r.getMessage() for r in caplog.records]
+        stages = [
+            json.loads(m.split(" ", 1)[1])
+            for m in messages
+            if m.startswith("model_acceptance_stage ")
+        ]
+        active = next(s for s in stages if s["stage"] == "payload")
+        assert active["cohort_sha256"] == cohort
+        assert len(active["submission_sha256"]) == 64
+        assert active["completed"] == 0 and active["status"] == "running"
+        release.set()
+        assert (await task)["entries_pending"] == 2
+        assert "private document diagnostic" not in caplog.text
+        assert '"error_type":"OSError"' in caplog.text
+        assert '"state":"accounting_mismatch"' not in caplog.text
+    finally:
+        release.set()
+        if not task.done():
+            await task
 
 
 def test_missing_payload_cannot_reserve_a_model_position(prepared):

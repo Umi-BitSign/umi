@@ -5,7 +5,10 @@ exchange directory. Partial delivery remains pending; committed work recovers
 before finality, source inputs or reviewers are contacted again.
 """
 
+import logging
 import sqlite3
+import time
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 
@@ -18,9 +21,13 @@ from .competition_cohort_model_acceptance_store import (
     CohortModelAcceptances,
     PendingModelArtifacts,
 )
+from .competition_work_progress import WorkProgress, work_heartbeats
 from .concurrency import run_owned_thread
 from .open_competition import digest, identity
 from .private_files import publish_private_model, read_private_model
+from .protocol import canonical_json_bytes
+
+_LOG = logging.getLogger("umi.competition.progress")
 
 
 class ModelAcceptanceWorker:
@@ -53,6 +60,71 @@ class ModelAcceptanceWorker:
         ):
             raise ValueError("model reviewers change policy, cohorts or repeat a signer")
 
+    @contextmanager
+    def _stage(self, cohort, key, stage):
+        # Stage identity is public digest metadata; exception text can contain
+        # private review documents and must never enter these diagnostics.
+        started = time.monotonic()
+        body = {
+            "schema": "umi-model-acceptance-stage/1",
+            "cohort_sha256": cohort,
+            "submission_sha256": key,
+            "stage": stage,
+            "total": 1,
+            "eta_seconds": None,
+            "eta_basis": "awaiting_owned_operation",
+            "eta_scope": "current_acceptance_substage",
+            "certification_authority": False,
+        }
+        _LOG.info(
+            "model_acceptance_stage %s",
+            canonical_json_bytes(
+                {
+                    **body,
+                    "status": "running",
+                    "completed": 0,
+                    "elapsed_seconds": 0,
+                    "stalled_or_retrying": False,
+                }
+            ).decode(),
+        )
+        try:
+            with WorkProgress(
+                "model_acceptance_" + stage, 1, unit="submissions", cohort=cohort, estimate=False
+            ) as progress:
+                yield
+                progress.advance()
+        except BaseException as error:
+            _LOG.info(
+                "model_acceptance_stage %s",
+                canonical_json_bytes(
+                    {
+                        **body,
+                        "status": "pending",
+                        "completed": 0,
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "stalled_or_retrying": True,
+                        "error_type": type(error).__name__,
+                    }
+                ).decode(),
+            )
+            raise
+        else:
+            _LOG.info(
+                "model_acceptance_stage %s",
+                canonical_json_bytes(
+                    {
+                        **body,
+                        "status": "completed",
+                        "completed": 1,
+                        "eta_seconds": 0,
+                        "eta_basis": "completed_scope",
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "stalled_or_retrying": False,
+                    }
+                ).decode(),
+            )
+
     async def _review(self, cohort, key):
         try:
             return await run_owned_thread(self.owner.certified_votes, cohort, key)
@@ -77,11 +149,14 @@ class ModelAcceptanceWorker:
         key = digest(sub)
         retained = True
         try:
-            approved = await run_owned_thread(self.owner.retained, cohort, key)
+            with self._stage(cohort, key, "retained_lookup"):
+                approved = await run_owned_thread(self.owner.retained, cohort, key)
         except PendingModelArtifacts:
             retained = False
-            await self.owner.ensure_payload(cohort, key)
-            intent = await run_owned_thread(self.owner.intent, cohort, key)
+            with self._stage(cohort, key, "payload"):
+                await self.owner.ensure_payload(cohort, key)
+            with self._stage(cohort, key, "intent_lookup"):
+                intent = await run_owned_thread(self.owner.intent, cohort, key)
             if intent is None:
                 selected = await run_owned_thread(
                     partial(
@@ -102,18 +177,22 @@ class ModelAcceptanceWorker:
                     maximum_bytes=MAX_PUBLICATION_BYTES,
                 )
             )
-            approved = (
-                await self._review(cohort, key)
-                if self.reviewers
-                else await run_owned_thread(
-                    partial(
-                        read_private_model,
-                        self.inputs / "model-acceptance-publications" / cohort / (key + ".json"),
-                        ModelAcceptancePublication,
-                        maximum_bytes=MAX_PUBLICATION_BYTES,
+            with self._stage(cohort, key, "review_quorum"):
+                approved = (
+                    await self._review(cohort, key)
+                    if self.reviewers
+                    else await run_owned_thread(
+                        partial(
+                            read_private_model,
+                            self.inputs
+                            / "model-acceptance-publications"
+                            / cohort
+                            / (key + ".json"),
+                            ModelAcceptancePublication,
+                            maximum_bytes=MAX_PUBLICATION_BYTES,
+                        )
                     )
                 )
-            )
             if (
                 approved.certificate.acceptance != intent.acceptance
                 or approved.inputs != intent.inputs
@@ -122,10 +201,13 @@ class ModelAcceptanceWorker:
                     "delivered model acceptance differs from the selected original proposal"
                 ) from None
         if self.promote is not None:
-            await self.promote(approved)
+            with self._stage(cohort, key, "promotion"):
+                await self.promote(approved)
         if not retained:
-            await run_owned_thread(self.owner.publish, approved, await self.capture())
-        await run_owned_thread(self.owner.export, cohort, key, self.output)
+            with self._stage(cohort, key, "publication"):
+                await run_owned_thread(self.owner.publish, approved, await self.capture())
+        with self._stage(cohort, key, "export"):
+            await run_owned_thread(self.owner.export, cohort, key, self.output)
 
     async def poll_once(self):
         ready = pending = 0
@@ -143,7 +225,8 @@ class ModelAcceptanceWorker:
                 )
                 for _, sub in entries:
                     try:
-                        await self._one(cohort, sub)
+                        with work_heartbeats():
+                            await self._one(cohort, sub)
                         ready += 1
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
