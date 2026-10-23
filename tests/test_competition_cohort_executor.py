@@ -4,6 +4,7 @@ No test here proves an installed sandbox, reward admission or on-chain effects.
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -120,6 +121,100 @@ async def test_inbox_to_complete_replay_and_offline_restart(execution):
     with e.journal().locked(e.r.slot):
         assert canonical_json_bytes(await e.executor().advance(e.assignment)) == original
     assert len(e.calls) == step_count(e.job) and not e.stops
+
+
+async def test_resident_batch_reuses_completed_steps_and_native_evidence(execution, caplog):
+    import json
+    import logging
+
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
+    e = execution
+    executor = e.executor()
+    await executor.advance(e.assignment)
+    original = canonical_json_bytes(executor.journal.step(e.job, 0))
+    scopes = []
+
+    @asynccontextmanager
+    async def execution_scope(order):
+        scopes.append(order)
+        yield True
+
+    e.port.execution_scope = execution_scope
+    e.r.h.block += 1
+    evidence = await executor.advance_batch(e.assignment)
+    assert evidence is not None and len(e.calls) == step_count(e.job)
+    assert canonical_json_bytes(executor.journal.step(e.job, 0)) == original
+    observe(e.r.h.batch["scenarios"][0], evidence)
+    e.r.h.fail_collect = True
+    assert canonical_json_bytes(await executor.advance_batch(e.assignment)) == canonical_json_bytes(
+        evidence
+    )
+    assert len(scopes) == 1
+    events = [json.loads(r.message) for r in caplog.records if r.message.startswith("{")]
+    batch = [event for event in events if event.get("stage") == "model_pair_execution"]
+    assert batch[-1]["completed_units"] == batch[-1]["total_units"] == step_count(e.job)
+    assert batch[-1]["restored_units"] == 1
+    assert batch[-1]["status"] == "completed"
+    assert all("eta_basis" in event and "elapsed_seconds" in event for event in batch)
+
+
+async def test_batch_cancellation_releases_scope_and_resumes_same_journal(execution):
+    e = execution
+    executor = e.executor()
+    mutex = asyncio.Lock()
+    entered = asyncio.Event()
+
+    @asynccontextmanager
+    async def execution_scope(order):
+        async with mutex:
+            entered.set()
+            yield True
+
+    e.port.execution_scope = execution_scope
+    original = e.port.invoke
+    first = True
+
+    async def invoke(job, attempt):
+        nonlocal first
+        if first:
+            first = False
+            await asyncio.Event().wait()
+        return await original(job, attempt)
+
+    e.port.invoke = invoke
+    task = asyncio.create_task(executor.advance_batch(e.assignment))
+    await asyncio.wait_for(entered.wait(), 2)
+    # Allow the first attempt to reach its cancellable sandbox.
+    for _ in range(200):
+        if not first:
+            break
+        await asyncio.sleep(0.01)
+    assert not first
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not mutex.locked()
+    evidence = await executor.advance_batch(e.assignment)
+    assert evidence is not None and len(e.calls) == step_count(e.job)
+    assert len(e.stops) == 1
+
+
+async def test_worker_finishes_resident_pair_without_rotating_after_each_step(execution):
+    e = execution
+
+    @asynccontextmanager
+    async def execution_scope(order):
+        yield order.submission.submission.track == "model"
+
+    e.port.execution_scope = execution_scope
+    report = await e.worker().poll_once()
+    assert report["retry_count"] == 0
+    if e.job.mode == "paired_model":
+        assert report["jobs_complete"] == 1
+        assert len(e.calls) == step_count(e.job)
+    else:
+        assert report["steps_advanced"] == 1
+        assert len(e.calls) == 1
 
 
 async def test_completed_execution_uses_bounded_snapshots_and_fresh_conflict_checks(

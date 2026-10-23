@@ -678,3 +678,38 @@ async def test_direct_cache_waits_for_all_leases_before_changing_same_bundle_sou
     waits = [event for event in events if event["stage"] == "model_cache_lease_wait"]
     assert any(event["status"] == "waiting" and event["planning_eta_seconds"] for event in waits)
     assert waits[-1]["status"] == "completed" and waits[-1]["eta_seconds"] == 0
+
+
+async def test_resident_pair_scope_cancellation_releases_real_scheduler(cpu):
+    from umi.competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
+
+    job, _, _ = cpu
+    # Scope ownership is independent of payload materialization. Exercise the
+    # real lock/context implementation without adding another remote fixture.
+    port = object.__new__(sandbox.DirectCohortCpuSandbox)
+    port.boot = object()
+    port.paired_execution = asyncio.Lock()
+    order = SimpleNamespace(submission=job.submission, round=job.round)
+    if job.mode != "paired_model":
+        async with port.execution_scope(order) as enabled:
+            assert enabled is False and not port.paired_execution.locked()
+        return
+    entered = asyncio.Event()
+    initial = PUBLIC_COHORT_SCOPE.get()
+
+    async def owner():
+        async with port.execution_scope(order) as enabled:
+            assert enabled and PUBLIC_COHORT_SCOPE.get() == job.round.cohort_sha256
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(owner())
+    await asyncio.wait_for(entered.wait(), 2)
+    assert port.paired_execution.locked()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not port.paired_execution.locked() and PUBLIC_COHORT_SCOPE.get() == initial
+    async with port.execution_scope(order):
+        assert port.paired_execution.locked()
+    assert PUBLIC_COHORT_SCOPE.get() == initial

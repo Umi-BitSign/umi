@@ -390,6 +390,26 @@ class CohortExecutionJournal:
             schema="umi-recoverable-execution-evidence/1", job=job, steps=evidence.steps
         )
 
+    def checkpoint_count(self, job: RecoverableExecutionJob) -> int:
+        """Metadata-only progress; execution still validates each retained step."""
+        job_sha256 = digest(job)
+        keys = [
+            digest({"schema": "umi-cohort-execution-step/1", "job": job_sha256, "index": i})
+            for i in range(step_count(job))
+        ]
+        completed = 0
+        with self.journal.read_transaction() as db:
+            for offset in range(0, len(keys), 128):
+                batch = keys[offset : offset + 128]
+                placeholders = ",".join("?" for _ in batch)
+                completed += db.execute(
+                    "SELECT COUNT(*) FROM records WHERE kind='step' AND id IN ("
+                    + placeholders
+                    + ")",
+                    batch,
+                ).fetchone()[0]
+        return completed
+
     def step(self, job: RecoverableExecutionJob, index: int, *, db=None) -> ExecutionStep | None:
         if db is None:
             with self.journal.read_transaction() as db:

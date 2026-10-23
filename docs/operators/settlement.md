@@ -3427,9 +3427,12 @@ For original `/1` requests, the phase reviewer still requires its independent
 private rights and reconstruction approval before checking the selected remote
 bytes. It retains the original request, intent, vote and journal bindings; a
 completed vote is reusable after restart without fetching the model again. The
-benchmark host requires that same private intent and uses the authenticated
-legacy source for the candidate and explicitly pinned baseline or incumbent.
-All share the bounded one-model cache and its invocation leases. Keep source
+benchmark host uses its retained reviewed request or the quorum-certified
+execution-source export and authenticated legacy bytes for the candidate and
+round-selected baseline or incumbent. Its bounded cache retains a model pair
+when the explicit boot-disk budget permits; older isolated layouts retain one
+model. See [evaluation scheduling and progress](evaluation.md) for invocation
+leases, capacity fallback and checkpoint recovery. Keep source
 metadata directories outside the entire disposable cache root, not merely
 outside its current working directory. Missing originals or private approvals
 require repair; an R2 inventory cannot substitute for either.

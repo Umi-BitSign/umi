@@ -211,7 +211,7 @@ def cpu_readback(port, installed, monkeypatch):
 
     async def invoke(job, selected, archive):
         _, role, bundle = case_role_model(job, selected.step_index)
-        assert archive == port.cache / "archive"
+        assert archive in (port.cache / "archive", port.cache / "standby")
         assert archive != port.archive
         assert verify_preserved_bundle(bundle, archive, installed.case.policy) == digest(bundle)
         root = archive / digest(bundle) / "model"
@@ -293,12 +293,60 @@ async def test_restart_keeps_current_cache_without_get_and_eviction_keeps_durabl
     assert durable <= {
         p.relative_to(installed.verification) for p in installed.verification.rglob("*")
     }
-    assert not (restarted.cache / "archive" / installed.case.subs[0].model_revision).exists()
+    assert (restarted.cache / "archive" / installed.case.subs[0].model_revision).exists()
     before = len(installed.remote.reads)
     await restarted.invoke(job, attempt(job))
-    assert set(installed.remote.reads[before:]) == {
-        "chunks/sha256/" + f.sha256 for f in installed.case.subs[0].model_bundle.files
-    }
+    assert len(installed.remote.reads) == before
+
+
+async def test_alternating_pair_keeps_both_models_without_repeated_remote_reads(
+    installed, monkeypatch
+):
+    port = sandbox(installed)
+    seen = cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    await port.invoke(job, attempt(job, 1))
+    reads = tuple(installed.remote.reads)
+    for number in (2, 3):
+        await port.invoke(job, attempt(job, number=number))
+        await port.invoke(job, attempt(job, 1, number=number))
+    assert len(seen) == 6 and tuple(installed.remote.reads) == reads
+    assert (port.cache / "archive" / digest(job.submission.submission.model_bundle)).is_dir()
+    assert (port.cache / "standby" / digest(job.incumbent)).is_dir()
+    restarted = sandbox(installed)
+    cpu_readback(restarted, installed, monkeypatch)
+    await restarted.invoke(job, attempt(job, number=4))
+    await restarted.invoke(job, attempt(job, 1, number=4))
+    assert tuple(installed.remote.reads) == reads
+
+
+async def test_pair_capacity_releases_only_idle_managed_slot(installed, monkeypatch):
+    port = sandbox(installed)
+    cpu_readback(port, installed, monkeypatch)
+    job = installed.job
+    await port.invoke(job, attempt(job))
+    config = installed.artifacts.config
+    budget = BootDiskModelCache(config.materialization_boot_disk_cache, reserve_bytes=0)
+    archive = port.cache / "standby"
+    allocated, unit = budget._allocation()
+    expected = budget._metadata_bytes(job.incumbent, unit) + sum(
+        ((f.size_bytes + unit - 1) // unit) * unit for f in job.incumbent.files
+    )
+    # Leave enough space for the new model alone but not its current peer.
+    sentinel = budget.root / "unrelated-consumer"
+    sentinel.write_bytes(b"preserve")
+    sentinel.chmod(0o600)
+    sentinel_size = (budget.maximum_bytes - expected - allocated // 2) // unit * unit
+    with sentinel.open("r+b") as stream:
+        stream.truncate(sentinel_size)
+    assert not budget.fits_materialization(job.incumbent, archive)
+    await port.invoke(job, attempt(job, 1))
+    assert not (port.cache / "archive").exists()
+    assert (archive / digest(job.incumbent)).is_dir()
+    assert sentinel.stat().st_size == sentinel_size
+    assert sentinel.read_bytes()[:8] == b"preserve"
+    assert budget._allocation()[0] < budget.maximum_bytes
 
 
 async def test_interrupted_materialization_resumes_completed_files(installed, monkeypatch):

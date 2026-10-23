@@ -51,11 +51,11 @@ class BootDiskModelCache:
         ensure_private_directory(self.root)
         ensure_private_directory(selected)
 
-    def _allocation(self):
+    def _measure(self, selected=None):
         """Read metadata only; sparse files cannot hide their potential allocation."""
         root = self.root.stat()
         unit = max(4096, os.statvfs(self.root).f_frsize)
-        total = 0
+        total = selected_bytes = 0
         pending = [self.root]
         while pending:
             path = pending.pop()
@@ -68,12 +68,48 @@ class BootDiskModelCache:
                 or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
             ):
                 raise ValueError("boot-disk cache contains an unsafe allocation")
-            total += max(info.st_blocks * 512, ((info.st_size + unit - 1) // unit) * unit)
+            size = max(info.st_blocks * 512, ((info.st_size + unit - 1) // unit) * unit)
+            total += size
+            if selected is not None and (path == selected or selected in path.parents):
+                selected_bytes += size
             if total > self.maximum_bytes:
                 raise OSError("boot-disk model cache allocation exceeds its configured bound")
             if stat.S_ISDIR(info.st_mode):
                 pending.extend(path.iterdir())
+        return total, unit, selected_bytes
+
+    def _allocation(self):
+        total, unit, _ = self._measure()
         return total, unit
+
+    @staticmethod
+    def _metadata_bytes(bundle, unit):
+        directories = {str(parent) for f in bundle.files for parent in Path(f.path).parents}
+        return (
+            (len(directories) + len(bundle.files) + 32) * unit
+            + 4 * len(canonical_json_bytes(bundle))
+            + 1024 * len(bundle.files)
+        )
+
+    def fits_materialization(self, bundle, archive):
+        """Project a complete slot using one metadata scan, without reading payloads.
+
+        Existing partial files count once. Other slots and unrelated entries keep
+        their allocation; only the sandbox's lease owner may release a slot.
+        Per-write checks still protect against subsequent external consumption.
+        """
+        archive = Path(archive)
+        if not archive.is_relative_to(self.root) or archive == self.root:
+            raise ValueError("model slot is outside its shared cache root")
+        allocated, unit, selected = self._measure(archive)
+        expected = self._metadata_bytes(bundle, unit) + sum(
+            ((f.size_bytes + unit - 1) // unit) * unit for f in bundle.files
+        )
+        growth = max(0, expected - selected)
+        return (
+            allocated + growth <= self.maximum_bytes
+            and shutil.disk_usage(self.root).free - self.reserve_bytes >= growth
+        )
 
     def available_bytes(self, *, minimum_growth_bytes=0):
         started = time.monotonic()
@@ -126,12 +162,7 @@ class BootDiskModelCache:
         # copy. Charge path creation, manifest/receipt publication and filesystem
         # rounding as well as the exact file bytes, including empty files.
         _, unit = self._allocation()
-        directories = {str(parent) for f in bundle.files for parent in Path(f.path).parents}
-        self.metadata_bytes = (
-            (len(directories) + len(bundle.files) + 32) * unit
-            + 4 * len(canonical_json_bytes(bundle))
-            + 1024 * len(bundle.files)
-        )
+        self.metadata_bytes = self._metadata_bytes(bundle, unit)
 
     def check_write(self, size):
         # Recheck actual free space immediately before every bounded write.
