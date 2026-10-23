@@ -28,8 +28,10 @@ from .competition_cohort_order_signer import (
     review_order,
 )
 from .competition_execution import ExecutionBoundary, execution_boundary
+from .competition_progress import report_execution_retry
 from .competition_round_journal import FinalizedHeadRegression
 from .competition_runner import OfflineCaseExecution
+from .competition_work_progress import await_progress
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import digest, identity
 from .protocol import canonical_json_bytes
@@ -76,29 +78,49 @@ class CohortExecutionAuthority:
     ) -> tuple[CohortOrderHistory, ExecutionBoundary]:
         timeout = self.journal.config.read_timeout_seconds
         cohort = assignment.certificate.order.round.cohort_sha256
-        source = await wait_for_owned(self.history(cohort), timeout=timeout)
+        source = await await_progress(
+            wait_for_owned(self.history(cohort), timeout=timeout),
+            stage="execution_owner_history",
+            cohort=cohort,
+        )
         boundary = execution_boundary(
-            await wait_for_owned(self.provider.collect(), timeout=timeout)
+            await await_progress(
+                wait_for_owned(self.provider.collect(), timeout=timeout),
+                stage="execution_registration_capture",
+                cohort=cohort,
+            )
         )
         # Local authenticated replay must be allowed to finish. An overall
         # timeout here would repeatedly discard a valid but slow verification.
-        await run_owned_thread(
-            remember_order_history,
-            self.journal.journal,
-            self.journal.cohorts,
-            self.journal.policy,
-            source,
-            boundary.block,
+        await await_progress(
+            run_owned_thread(
+                remember_order_history,
+                self.journal.journal,
+                self.journal.cohorts,
+                self.journal.policy,
+                source,
+                boundary.block,
+            ),
+            stage="execution_history_review",
+            cohort=cohort,
         )
-        await run_owned_thread(
-            review_order,
-            assignment.certificate.order,
-            assignment.participant,
-            source,
-            self.journal.policy,
-            boundary.block,
+        await await_progress(
+            run_owned_thread(
+                review_order,
+                assignment.certificate.order,
+                assignment.participant,
+                source,
+                self.journal.policy,
+                boundary.block,
+            ),
+            stage="execution_order_review",
+            cohort=cohort,
         )
-        current = await wait_for_owned(self.history(cohort), timeout=timeout)
+        current = await await_progress(
+            wait_for_owned(self.history(cohort), timeout=timeout),
+            stage="execution_history_freshness",
+            cohort=cohort,
+        )
         if current != source:
             boundary = execution_boundary(
                 await wait_for_owned(self.provider.collect(), timeout=timeout)
@@ -191,7 +213,11 @@ class CohortExecutor(CohortExecutionAuthority):
                 attempt = await run_owned_thread(self.journal.begin, job, index, source, started)
 
                 async def invoke_and_retain():
-                    result = await self.sandbox.invoke(job, attempt)
+                    result = await await_progress(
+                        self.sandbox.invoke(job, attempt),
+                        stage="execution_sandbox",
+                        cohort=job.round.cohort_sha256,
+                    )
                     await run_owned_thread(self.journal.observe, job, attempt, result)
 
                 # The signed per-inference limit is enforced by the sandbox. This
@@ -328,6 +354,7 @@ class CohortExecutionWorker:
                 sqlite3.Error,
                 asyncio.TimeoutError,
             ) as error:
+                report_execution_retry(slot=slot, error=error)
                 return slot, "pending", type(error).__name__
 
     async def _rolling_poll(self, active):
