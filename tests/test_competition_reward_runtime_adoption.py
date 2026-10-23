@@ -81,6 +81,46 @@ def test_original_boot_and_point_bytes_are_unchanged(inputs):
     assert canonical_json_bytes(CoveragePoint.model_validate_json(raw)) == raw
 
 
+def test_authenticated_runtime_discovery_preserves_original_boot_and_has_no_release_horizon(inputs):
+    original = inputs.value
+    profile = RewardEligibilityRuntime(
+        schema="umi-reward-eligibility-runtime/3",
+        genesis_hash=original.eligibility.genesis_hash,
+        netuid=78,
+        runtime_binding="native_finalized_executed_code/1",
+        epoch_semantics="umi-yuma-eligibility/1",
+    )
+    first = original.series.recovery.authority.issued_at_block + 1
+    body = RewardRuntimeAdoption(
+        schema="umi-standing-reward-runtime-adoption/1",
+        series_sha256=digest(original.series),
+        manifest_sha256=digest(original.manifest),
+        policy_sha256=digest(original.policy),
+        authority_sha256=digest(original.series.recovery.authority),
+        original_runtime_profile_sha256=digest(original.eligibility),
+        effective_profile=profile,
+        first_block=first,
+        last_block=2**53 - 1,
+        issued_at_block=first,
+        revision=1,
+        predecessor_adoption_sha256=None,
+        original_signed_inputs_unchanged=True,
+    )
+    selection = RewardRuntimeAdoptionSelection(
+        schema="umi-standing-reward-runtime-adoption-selection/1",
+        adoptions=(SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),),
+    )
+    upgraded = extend_boot_runtime_adoptions(original, selection)
+    restored = type(upgraded).model_validate_json(canonical_json_bytes(upgraded))
+    selected = select_boot_runtime(restored)
+    for block in (first, first + 1_000_000, 2**53 - 1):
+        assert selected.selected(block) == (profile, digest(body))
+    assert selected.selected(first - 1) == (original.eligibility, None)
+    assert canonical_json_bytes(upgraded.model_copy(update={"runtime_adoptions": None})) == (
+        canonical_json_bytes(original)
+    )
+
+
 def test_adoption_preserves_signed_series_and_selects_only_exact_scoped_profile(inputs, adopted):
     parsed = StandingRewardBootConfig.model_validate_json(canonical_json_bytes(adopted))
     for name in ("series", "policy", "manifest", "handoff", "eligibility"):
@@ -272,6 +312,65 @@ def gap_repaired(adopted):
         ),
     )
     return extend_boot_runtime_adoptions(adopted, selection)
+
+
+@pytest.fixture
+def discovery_adopted(gap_repaired):
+    selection = gap_repaired.runtime_adoptions
+    last = selection.adoptions[-1].adoption
+    first = max(v.adoption.last_block for v in selection.adoptions) + 1
+    profile = RewardEligibilityRuntime(
+        schema="umi-reward-eligibility-runtime/3",
+        genesis_hash=gap_repaired.eligibility.genesis_hash,
+        netuid=78,
+        runtime_binding="native_finalized_executed_code/1",
+        epoch_semantics="umi-yuma-eligibility/1",
+    )
+    body = last.model_copy(
+        update={
+            "effective_profile": profile,
+            "first_block": first,
+            "last_block": 2**53 - 1,
+            "issued_at_block": last.issued_at_block + 1,
+            "revision": last.revision + 1,
+            "predecessor_adoption_sha256": digest(last),
+        }
+    )
+    updated = selection.model_copy(
+        update={
+            "adoptions": (
+                *selection.adoptions,
+                SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body)),
+            )
+        }
+    )
+    return extend_boot_runtime_adoptions(gap_repaired, updated)
+
+
+@pytest.mark.parametrize("role", ["writer", "coordinator", "reviewer"])
+async def test_discovery_upgrade_reaches_existing_native_role_assemblies(
+    inputs, config_case, discovery_adopted, monkeypatch, role
+):
+    if role == "writer":
+        from .test_competition_reward_boot import (
+            test_native_assembly_preserves_configuration_and_closes_owned_providers,
+        )
+
+        inputs.value = discovery_adopted
+        await test_native_assembly_preserves_configuration_and_closes_owned_providers(
+            inputs, monkeypatch, None, False
+        )
+    else:
+        from .test_competition_reward_coordinator_boot import (
+            test_boot_loads_only_role_keys_and_closes_provider_on_every_exit,
+        )
+
+        config_case.config = extend_boot_runtime_adoptions(
+            config_case.config, discovery_adopted.runtime_adoptions
+        )
+        await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
+            config_case, monkeypatch, role, None, False, successor=False
+        )
 
 
 def test_gap_repair_is_explicit_additive_and_preserves_earlier_signed_bytes(adopted, gap_repaired):

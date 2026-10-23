@@ -1,5 +1,15 @@
 # Maintenance
 
+- Carry each change through affected miner and validator implementations,
+  published release selections and supported automatic update paths. Verify
+  actual published/installed behavior before claiming rollout, including older
+  supported layouts. Source-only fixes do not establish update delivery.
+- Treat Bittensor runtime upgrades as routine. Discover the runtime from native
+  finalized code/metadata proofs; do not gate new operation on fixed runtime
+  versions or an expanding release allowlist. Preserve historical signed bytes
+  and their original bindings for recovery, and require explicit supported state
+  semantics and proofs rather than silently trusting RPC assertions.
+
 - For C6 and later cohorts, retain the entire finalized block range and complete
   native replay proofs throughout intake, work and certification. Verify
   independent blocks in bounded spawned workers, persist each completed result,
