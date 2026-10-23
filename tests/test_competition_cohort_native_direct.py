@@ -6,6 +6,7 @@ ports. These cases do not select or rewrite any production cohort plan.
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections import Counter
 from contextlib import suppress
@@ -422,6 +423,8 @@ class NativeDirect:
                 # the native materialization path, even after evaluator restart.
                 assert archive == sandbox.cache / "archive"
                 request = sandbox.request(job)
+                if inspect.isawaitable(request):
+                    request = await request
                 assert request.direct_artifact is not None
                 payload = request.direct_artifact.reservation.payload
                 assert model == request.record.request.signed_submission.submission.model_bundle

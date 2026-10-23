@@ -287,6 +287,9 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     interrupted_cache = scratch / "interrupted-materialization"
     original_read = source.read_range
     first_file_bytes = bundle.files[0].size_bytes
+    import umi.competition_model_materialization as transfers
+
+    monkeypatch.setattr(transfers, "MAXIMUM_RANGE_BYTES", first_file_bytes)
 
     async def interrupt_second_file(key, *, offset, size_bytes, **kwargs):
         if offset >= first_file_bytes:
@@ -339,8 +342,6 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         patch.setattr(direct_review, "publish_private_model", lose_final_marker)
         with pytest.raises(OSError, match="lost final materialization publication"):
             await durable.materialize(direct_request, interrupted_cache)
-    import umi.competition_model_materialization as transfers
-
     async def no_transfer(*args, **kwargs):
         raise AssertionError("completed payload was downloaded during finalization recovery")
 

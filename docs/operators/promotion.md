@@ -83,6 +83,15 @@ the disposable cache and survives eviction and restart. Each active invocation
 holds the cache lease, including inherited references, so another model cannot
 evict its bytes. Materialization progress counts chunk/file-finalization work as
 well as bytes; the last payload byte does not mean publication is finished.
+Direct-object restoration combines adjacent missing files into bounded R2 reads
+while retaining the original file and payload checks. Retained local files split
+those ranges, so interrupted restoration never downloads their bytes again.
+Its ETA includes completed file operations and final publication; restored work
+does not inflate the measured transfer rate.
+Legacy chunk restoration overlaps up to four missing 8 MiB chunks (32 MiB of
+payload buffers), then writes and checkpoints files in manifest order. Pending
+reads are cancelled and drained before releasing the cache lease on failure;
+already completed local files are excluded from prefetch after restart.
 
 Original baselines without an authenticated remote source continue to require
 their canonical preserved archive. Bounded-cache selection alone never authorizes

@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_artifacts import _artifact, _directory, _file_identity
+from .competition_remote_model_verification import _RemoteModelRanges
 from .competition_transport_verification import ByteCheckpoints, verifier_semantics
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -157,6 +158,7 @@ async def materialize_model_files(
                     if record.path not in reusable:
                         saved.remember(record.path, local[record.path], record.sha256)
                 progress.advance(payload.total_bytes, restored=True)
+                progress.advance_operations(len(bundle.files), restored=True)
                 await run_owned_thread(publish_private_model, target / "manifest.json", bundle)
                 return target, documents, [[name, stamp["file"]] for name, stamp in identities]
         # Owned partial files cannot contribute completed bytes. Reclaim them
@@ -176,6 +178,17 @@ async def materialize_model_files(
         if available_bytes() < payload.total_bytes - retained_bytes + reserve_bytes:
             raise OSError("direct model scratch capacity is unavailable")
         offset = 0
+        # Coalesce only adjacent missing files. A retained file splits the
+        # remote range so restart never downloads its completed bytes again.
+        missing_ends = {}
+        position = end = payload.total_bytes
+        for record in reversed(bundle.files):
+            position -= record.size_bytes
+            if record.path in local:
+                end = position
+            else:
+                missing_ends[record.path] = end
+        ranges = None
         stream_hash = hashlib.sha256()
         documents, written_files = {}, []
         with _directory(model) as model_fd:
@@ -193,9 +206,18 @@ async def materialize_model_files(
                 reader = None
                 try:
                     if local_file:
+                        ranges = None
                         reader = _artifact(model_fd, record)
                         stream, _ = reader.__enter__()
                     else:
+                        if ranges is None:
+                            ranges = _RemoteModelRanges(
+                                multipart,
+                                key,
+                                missing_ends[record.path],
+                                start_offset=offset,
+                                maximum_range_bytes=MAXIMUM_RANGE_BYTES,
+                            )
                         if destination.exists():
                             if _identity(destination, root) != info:
                                 raise ValueError("partial model cache changed before repair")
@@ -212,10 +234,11 @@ async def materialize_model_files(
                         data = (
                             await run_owned_thread(stream.read, size)
                             if local_file
-                            else await multipart.read_range(key, offset=offset, size_bytes=size)
+                            else await ranges.read(size)
                         )
-                        if len(data) != size:
+                        if local_file and len(data) != size:
                             raise ValueError("direct model materialization range differs")
+                        size = len(data)
                         if output is not None and check_write is not None:
                             await run_owned_thread(check_write, size)
                         if (
@@ -231,6 +254,7 @@ async def materialize_model_files(
                         offset += size
                         remaining -= size
                         progress.advance(size, restored=restored)
+                        del data
                     if output is not None:
                         await run_owned_thread(output.flush)
                         os.fchmod(output.fileno(), 0o400)
@@ -260,6 +284,7 @@ async def materialize_model_files(
                     if document is not None:
                         documents[record.path] = bytes(document)
                         document[:] = b"\x00" * len(document)
+                    progress.advance_operations(1, restored=restored)
                 finally:
                     if output is not None:
                         output.close()

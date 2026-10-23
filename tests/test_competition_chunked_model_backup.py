@@ -654,11 +654,86 @@ async def test_interrupted_materialization_preserves_completed_files(backup, tmp
     backup.remote.fail = "chunks/sha256/" + sha256_hex(b"processor")
     with pytest.raises(OSError):
         await restore(reader(backup, tmp_path), archive)
-    completed_reads = tuple(backup.remote.reads)
+    completed_reads = [
+        "chunks/sha256/" + sha256_hex(raw)
+        for name, raw in backup.contents.items()
+        if (archive / digest(backup.bundle) / "model" / name).is_file()
+        and (archive / digest(backup.bundle) / "model" / name).stat().st_mode & 0o200 == 0
+    ]
     backup.remote.fail = None
     await restore(reader(backup, tmp_path), archive)
     assert all(backup.remote.reads.count(key) == 1 for key in completed_reads)
     assert verify_preserved_bundle(backup.bundle, archive, backup.policy) == digest(backup.bundle)
+
+
+async def test_materialization_overlaps_bounded_reads_and_writes_in_manifest_order(
+    backup, tmp_path, monkeypatch
+):
+    original = backup.remote.read_range
+    active = peak = 0
+    finished = []
+    keys = list(backup.remote.objects)
+
+    async def unordered(key, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.002 * (len(keys) - keys.index(key)))
+            raw = await original(key, **kwargs)
+            finished.append(key)
+            return raw
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(backup.remote, "read_range", unordered)
+    target = await restore(reader(backup, tmp_path), tmp_path / "cache")
+    assert peak == chunked.MATERIALIZATION_PREFETCH_CHUNKS and active == 0
+    assert finished != keys
+    assert all(
+        (target / "model" / name).read_bytes() == raw for name, raw in backup.contents.items()
+    )
+    assert verify_preserved_bundle(backup.bundle, target.parent, backup.policy) == digest(
+        backup.bundle
+    )
+
+
+@pytest.mark.parametrize("failure", ["cancel", "read_error", "changed_generation"])
+async def test_materialization_drains_prefetch_on_failure(backup, tmp_path, monkeypatch, failure):
+    original = backup.remote.read_range
+    active = set()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    first = next(iter(backup.remote.objects))
+
+    async def blocked(key, **kwargs):
+        active.add(key)
+        try:
+            if len(active) == chunked.MATERIALIZATION_PREFETCH_CHUNKS:
+                started.set()
+            await release.wait()
+            if key == first and failure == "read_error":
+                raise OSError("prefetch read unavailable")
+            if key == first and failure == "changed_generation":
+                backup.remote.etags[key] = "changed-generation"
+            return await original(key, **kwargs)
+        finally:
+            active.remove(key)
+
+    monkeypatch.setattr(backup.remote, "read_range", blocked)
+    archive = tmp_path / "cache"
+    task = asyncio.create_task(restore(reader(backup, tmp_path), archive))
+    await asyncio.wait_for(started.wait(), 5)
+    if failure == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        release.set()
+        with pytest.raises((OSError, ValueError), match=r"unavailable|changed during transfer"):
+            await task
+    assert not active
+    assert not (archive / digest(backup.bundle) / "manifest.json").exists()
 
 
 @pytest.mark.asyncio
@@ -771,7 +846,7 @@ async def test_interruption_before_sealing_repairs_complete_file_without_redownl
             await restore(reader(backup, tmp_path), archive)
     assert target.read_bytes() == b"config"
     assert target.stat().st_mode & 0o777 == 0o600
-    completed_reads = tuple(backup.remote.reads)
+    completed_reads = ("chunks/sha256/" + sha256_hex(b"config"),)
     events = []
     await restore(reader(backup, tmp_path), archive, report=events.append)
     assert all(backup.remote.reads.count(key) == 1 for key in completed_reads)
