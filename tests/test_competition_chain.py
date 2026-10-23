@@ -664,6 +664,44 @@ def test_released_operational_timeout_binding_is_upgraded_in_place(chain):
     )
 
 
+async def test_capacity_growth_adopts_exact_predecessor_and_preserves_captures(chain):
+    captured = await chain.provider.collect()
+    values = chain.config.model_dump(mode="json", by_alias=True)
+    values.update(
+        maximum_cache_bytes=24 * 1024**3,
+        previous_maximum_cache_bytes=chain.config.maximum_cache_bytes + 1,
+    )
+    changed = CompetitionChainConfig.model_validate(values)
+    with pytest.raises(ValueError, match="another chain configuration"):
+        FinalizedRegistrationProvider(
+            changed, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    values["previous_maximum_cache_bytes"] = chain.config.maximum_cache_bytes
+    changed = CompetitionChainConfig.model_validate(values)
+    wrong_chain = changed.model_copy(update={"rpc_url": "wss://another.example/"})
+    with pytest.raises(ValueError, match="another chain configuration"):
+        FinalizedRegistrationProvider(
+            wrong_chain, chain.policy, finality=chain.finality, proofs=chain.proofs
+        )
+    provider = FinalizedRegistrationProvider(
+        changed,
+        chain.policy,
+        finality=chain.finality,
+        proofs=chain.proofs,
+        now_ms=lambda: chain.clock.now,
+    )
+    assert (await provider.collect()).snapshot == captured.snapshot
+    repeated = changed.model_copy(update={"previous_maximum_cache_bytes": None})
+    provider = FinalizedRegistrationProvider(
+        repeated,
+        chain.policy,
+        finality=chain.finality,
+        proofs=chain.proofs,
+        now_ms=lambda: chain.clock.now,
+    )
+    assert (await provider.collect()).snapshot == captured.snapshot
+
+
 async def test_prefetch_cancellation_drains_bounded_child_reads():
     started = asyncio.Event()
     state = SimpleNamespace(active=0, peak=0)

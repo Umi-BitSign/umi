@@ -24,7 +24,7 @@
     "competition_authorization.py": "83dfe9231d482cc11adb45f1697a87c7620d71d59b6f525d49835a58b209be8e",
     "competition_bridge_reconciliation.py": "6a35cd5fb4fcd7ed4d33dac887aa35bc37e007dd1a3095968d580c62b64d6799",
     "competition_bridge_recovery.py": "8f0107848a6504b0f76672f8ae3407f3f0aef50a1a525b7f6e6367708a40da9a",
-    "competition_chain.py": "31b03fd537d0a1f8d970fb63077ea3cd525624bf1e1606dc2c8e286778ccee43",
+    "competition_chain.py": "e400718e3969def23e904bb186be3cd48e364b050192c21561af709beb377d63",
     "competition_chain_capacity.py": "0f4f22e372e100983d00b7dabf642f8a1dc38583538d51d37545c7d8ab2cc7ad",
     "competition_chain_resource_preflight.py": "2ffb8229c1bd2b23a325fe935d8fc6d1b51657a27f572144a68c18d99f06a0b2",
     "competition_chain_resources.py": "8f42b2c5485083057210d3dd4df25f684be1823b45a53723658f1241a36e63ac",

@@ -710,6 +710,17 @@ An example selection is:
 }
 ```
 
+Registration capture storage is bounded by the operator’s explicit
+`chain.maximum_cache_bytes` allowance and the host storage reserve. The default
+remains 256 MiB. Larger existing archives may need a larger local allowance;
+there is no separate 20 GiB schema ceiling. Increasing this allowance does not
+change proof limits, native verification, retention or admission authority.
+Preserve the operating/startup reserve and retained evidence before changing it.
+When adopting an existing cache with a changed allowance, set
+`chain.previous_maximum_cache_bytes` to its exact prior allowance. The native
+reader migrates only that matching configuration in place; other chain/proof
+bindings must still match. The predecessor field can be removed afterward.
+
 Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
 `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable
 or replicated stores and separate from direct-model credentials. Provision
