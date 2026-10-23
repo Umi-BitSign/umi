@@ -629,3 +629,15 @@ async def test_execution_stages_report_current_cohort_and_preserve_native_result
     assert expected <= {r["stage"] for r in reports if r["state"] == "completed"}
     assert all(r["cohort_sha256"] == e.job.round.cohort_sha256 for r in reports)
     assert all(r["certification_authority"] is False for r in reports)
+
+
+def test_case_wait_preserves_preparation_and_full_signed_inference_budgets(policy):
+    from umi.competition_cohort_executor import job_policy_timeout
+
+    signed = canonical_json_bytes(policy)
+    for read_budget in (120, 3600):
+        journal = SimpleNamespace(
+            policy=policy, config=SimpleNamespace(read_timeout_seconds=read_budget)
+        )
+        assert job_policy_timeout(journal) >= read_budget + policy.maximum_inference_ms / 1000
+    assert canonical_json_bytes(policy) == signed
