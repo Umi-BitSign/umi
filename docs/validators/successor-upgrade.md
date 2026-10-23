@@ -1636,15 +1636,21 @@ through the lifecycle's `request_start` argument before enabling dispatch. Its p
 from the qualified predecessor closure and the announced launch notice. The
 gate cannot infer a legacy closure from a current score or weight row.
 
-Later cohorts remain in preparation until the preceding cohort has a verified
-request-closing certificate and at least five hours have passed. The gate samples
-fresh verified chain time after reading that certificate, preserving its first
-observation in the journal. It adds the provider's maximum head age and subtracts
-its allowed future skew when checking elapsed time; delayed certification cannot
-backdate the rest to an old signing intent. Missing or revoked history, unavailable
-finality and regressed observations hold the next request phase. Retry, restart
-and a migration preserving this journal reuse the same boundary without renewal.
-This gate does not change current reward execution or its separate coverage rule.
+For C6 and subsequent cohorts, including successor series, select
+`rest_clock: "cohort_cutover"` in `request_start`. The lifecycle records each
+cohort's cutover during active intake, before artifact or preparation work.
+Requests require the preceding cohort's verified request-closing certificate and
+five hours from that cutover. The provider's head-age and future-skew margins
+still apply. Restart reuses the recorded boundary; preparation does not start a
+new interval. Already-preparing cohorts need a `cutover_overrides` entry binding
+the historical timestamp to its retained source SHA256. A missing observation
+holds with `waiting_cutover_observation` rather than inventing a later cutover.
+
+Older installations omitting `rest_clock` retain the certification-clock rule
+and its original journals for compatibility. Upgrade by selecting the cutover
+clock while preserving those journals and directory bindings. Missing or revoked
+predecessor history, unavailable finality and regressed observations still hold
+requests. This gate does not change reward execution or its separate coverage rule.
 
 The enclosing host owns process locks, finality lifetimes, admission and execution
 workers, readiness probes and authenticated reviewer delivery. Configure all

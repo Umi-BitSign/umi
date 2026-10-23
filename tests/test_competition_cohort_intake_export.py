@@ -324,9 +324,19 @@ async def test_original_participations_reuse_own_admission_verdict(remote, tmp_p
     async def no_repeat(*args, **kwargs):
         raise AssertionError("admission proof already reviewed by this owner")
 
-    from umi import competition_cohort_intake_export as module
+    from umi import competition_cohort_admission_review as module
 
     monkeypatch.setattr(module, "review_cohort_participation", no_repeat)
+    assert await h.reviewer.review(h.result.progress)
+
+
+async def test_final_intake_freshness_does_not_collect_new_membership(remote, monkeypatch):
+    h = remote
+
+    async def no_membership():
+        raise AssertionError("freshness only requires the existing verifier-owned head")
+
+    monkeypatch.setattr(h.archive.reviewer, "collect", no_membership)
     assert await h.reviewer.review(h.result.progress)
 
 

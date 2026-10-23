@@ -173,6 +173,41 @@ def test_active_work_inventory_remains_bounded():
     assert len(state.entries[C]["active_work"]) == 32
 
 
+def test_request_rest_clock_is_not_hidden_by_unrelated_work():
+    state = CohortProgressSnapshots()
+    state.record(
+        "lifecycle",
+        dict(
+            cohort_sha256=C,
+            phase="preparation",
+            stage="request_start",
+            status="waiting_request_rest",
+        ),
+    )
+    state.record(
+        "request_start",
+        dict(
+            cohort_sha256=C,
+            ready=False,
+            not_before_unix_ms=12345,
+            completed=10,
+            total=100,
+            percent=10,
+            eta_seconds=90,
+            eta_scope="request_rest_wait_only",
+        ),
+    )
+    state.record(
+        "work",
+        dict(cohort_sha256=C, stage="model_acceptance_publication", state="started", work_id=1),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "waiting_request_rest"
+    assert result["not_before_unix_ms"] == 12345
+    assert result["percent"] == 10 and 0 < result["eta_seconds"] <= 90
+    assert result["overall_eta_seconds"] is None
+
+
 def test_completed_certification_yields_to_phase_review_despite_concurrent_export():
     state = CohortProgressSnapshots()
     state.record("lifecycle", dict(cohort_sha256=C, phase="intake", stage="progress_review"))

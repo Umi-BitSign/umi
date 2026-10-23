@@ -298,9 +298,12 @@ class CohortLifecycleService:
                 await self.before_tick()
             history, state, _, _ = self.controller._history()
             self._remember_state(state)
+            if state.phase == "intake" and self.request_start is not None:
+                await self.request_start.observe_cutover(self.cohort)
             if state.phase == "preparation" and self.request_start is not None:
                 self.stage = "request_start"
                 readiness = await self.request_start.check(self.cohort)
+                PUBLIC_COHORT_PROGRESS.record("request_start", readiness)
                 if not readiness["ready"]:
                     self.last_report = dict(
                         self.controller._report(state, readiness["status"]),

@@ -25,6 +25,38 @@ class ReviewedCohortParticipation:
     registration: HistoricalRegistration
 
 
+async def review_original_participation(
+    record,
+    history,
+    policy,
+    provider,
+    archive,
+    *,
+    expected_tip_sha256,
+    reviewed_participation=None,
+    remember_participation_review=None,
+):
+    """Reuse the configured owner's exact verdict across closure/preparation.
+
+    The caller separately replays the current export/history and seal. Only
+    configured owner-private completion ports may skip the historical proof.
+    """
+    raw = canonical_json_bytes(record)
+    if reviewed_participation is not None and await reviewed_participation(raw):
+        return
+    proof = await archive(record.observation)
+    await review_cohort_participation(
+        raw,
+        history,
+        policy,
+        provider,
+        expected_tip_sha256=expected_tip_sha256,
+        registration_archive=proof,
+    )
+    if remember_participation_review is not None:
+        await remember_participation_review(raw)
+
+
 async def review_cohort_participation(
     raw: bytes,
     history: CohortRecoveryHistory,

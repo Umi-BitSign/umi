@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from functools import partial
 
 import httpx
 import pytest
@@ -43,6 +44,7 @@ from umi.competition_cohort_progress_signer import (
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.competition_execution import execution_boundary
 from umi.competition_store import CompetitionStore
+from umi.concurrency import run_owned_thread
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -422,7 +424,7 @@ async def test_remote_transport_cancel_drains_before_signer_releases_ownership(r
 
 @pytest.mark.parametrize("damaged", [False, True])
 async def test_separate_reviewer_replays_native_archives_with_owned_headers(
-    relay, tmp_path, damaged
+    relay, tmp_path, damaged, monkeypatch
 ):
     h = relay
     await submit(h)
@@ -469,6 +471,22 @@ async def test_separate_reviewer_replays_native_archives_with_owned_headers(
             fetch,
             original,
             peer_store,
+            reviewed_participation=partial(
+                run_owned_thread, h.reviewer("Charlie").signer.journal.reviewed_participation
+            ),
+        )
+
+        async def no_new_membership():
+            raise AssertionError("freshness does not need new membership collection")
+
+        async def no_duplicate_participation(*args, **kwargs):
+            raise AssertionError("preparation must reuse its owner's admission verdict")
+
+        from umi import competition_cohort_admission_review as admission_review
+
+        monkeypatch.setattr(h.archive.reviewer, "collect", no_new_membership)
+        monkeypatch.setattr(
+            admission_review, "review_cohort_participation", no_duplicate_participation
         )
         before = len(h.archive.chain.verifier.checked)
         if damaged:

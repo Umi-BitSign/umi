@@ -437,3 +437,59 @@ def test_successor_request_start_rejects_changed_predecessor_inputs(rest, tmp_pa
     config = gate.config.model_copy(update={"predecessor_plan": changed})
     with pytest.raises(ValueError, match="predecessor differs"):
         SeriesRequestStart(config, series, rest.provider, gate.history)
+
+
+async def test_cutover_clock_credits_elapsed_intake_without_rewriting_legacy_timer(rest):
+    h = rest
+    h.timestamp = 100_000_000
+    h.closed()
+    cohort = h.gate.cohorts[1]
+    assert not (await h.gate.check(cohort))["ready"]
+    original = h.gate.journal.get("request_rest", cohort)
+    override = dict(
+        schema="umi-cohort-cutover-observation/1",
+        cohort_sha256=cohort,
+        cutover_unix_ms=h.timestamp - 10 * 60 * 60 * 1000,
+        source_sha256="ab" * 32,
+    )
+    gate = h.reopen(rest_clock="cohort_cutover", cutover_overrides=(override,))
+    ready = await gate.check(cohort)
+    assert ready["ready"] and ready["rest_clock"] == "cohort_cutover"
+    assert (
+        ready["not_before_unix_ms"]
+        == override["cutover_unix_ms"] + REST_MS + h.provider.config.maximum_head_age_ms
+    )
+    assert gate.journal.get("request_rest", cohort) == original
+    again = h.reopen(rest_clock="cohort_cutover", cutover_overrides=(override,))
+    assert (await again.check(cohort))["not_before_unix_ms"] == ready["not_before_unix_ms"]
+    changed = dict(override, cutover_unix_ms=override["cutover_unix_ms"] + 1)
+    with pytest.raises(ValueError, match="conflicts"):
+        await h.reopen(rest_clock="cohort_cutover", cutover_overrides=(changed,)).check(cohort)
+
+
+@pytest.mark.parametrize("cohort_index", range(1, 6))
+async def test_automatic_cutover_observation_survives_intake_and_restart(rest, cohort_index):
+    h = rest
+    cohort = h.gate.cohorts[cohort_index]
+    gate = h.reopen(rest_clock="cohort_cutover")
+    saved = await gate.observe_cutover(cohort)
+    h.timestamp += (
+        REST_MS
+        + h.provider.config.maximum_head_age_ms
+        + h.provider.config.maximum_future_skew_ms
+        + 1
+    )
+    h.block += 100
+    h.closed(index=cohort_index - 1)
+    again = h.reopen(rest_clock="cohort_cutover")
+    result = await again.check(cohort)
+    assert result["ready"] and result["cutover_unix_ms"] == saved.cutover_unix_ms
+    assert (await again.observe_cutover(cohort)) == saved
+
+
+async def test_preparation_never_starts_a_late_cutover_timer(rest):
+    h = rest
+    h.closed()
+    gate = h.reopen(rest_clock="cohort_cutover")
+    result = await gate.check(gate.cohorts[1])
+    assert not result["ready"] and result["status"] == "waiting_cutover_observation"

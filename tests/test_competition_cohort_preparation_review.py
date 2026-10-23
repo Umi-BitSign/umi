@@ -78,6 +78,11 @@ def reviewed(preparation, tmp_path, monkeypatch):
                 raise OSError("RPC unavailable")
             return capture_at(h.block)
 
+        async def current_finalized_block(self):
+            if h.offline:
+                raise OSError("RPC unavailable")
+            return h.block
+
         async def review_archive(self, observation, raw, metadata):
             h.proofs.append(observation)
             if h.bad or (raw, metadata) != (b"proof", b"metadata"):
