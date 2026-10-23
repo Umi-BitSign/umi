@@ -509,6 +509,14 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
+Accepted inbox receipts confirm delivery, not model execution. The recoverable
+worker reports owner-history retrieval, registration capture, history and order
+review, fresh-history confirmation and sandbox execution as separate
+`execution_*` progress stages. Wait heartbeats retain elapsed time and the scoped
+ETA basis; they do not cancel work. An `execution_retry` event records the
+assignment slot and bounded native cause frames without exception text. Check
+these diagnostics before treating an accepted assignment as a running challenge.
+
 Repeated observation of the journal's current finalized block uses a read-only
 snapshot. A newer block rechecks the previous value while owning the writer
 transaction, and a regression remains an error. The high-water field has a fixed

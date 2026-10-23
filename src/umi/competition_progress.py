@@ -71,6 +71,9 @@ _REASONS = {
     "weight observation was not issued by the owned proof adapter": "owned_proof_rejected",
     "materializer activation permit or interval is unavailable": "activation_unavailable",
     "materializer finalized observation rolled back or forked": "finality_rollback_or_fork",
+    "cohort authority changed before execution progress": "execution_authority_changed",
+    "waiting for finalized block after cohort preparation": "execution_finality_after_preparation",
+    "shared incumbent source remains unfinished": "execution_incumbent_source_pending",
 }
 
 
@@ -219,6 +222,23 @@ def report_settlement_retry(*, cohort, role, stage, error):
             },
             failed=True,
         )
+
+
+def report_execution_retry(*, slot, error):
+    """Expose native execution failures without exception text or retained inputs."""
+    _emit(
+        {
+            "event": "execution_retry",
+            "slot": slot if type(slot) is str and re.fullmatch(r"[0-9a-f]{64}", slot) else None,
+            "reason_code": _reason(error),
+            "causes": _failure_details(error),
+            "state": "retrying",
+            "eta_seconds": None,
+            "eta_basis": "retry_requires_new_progress_sample",
+            "certification_authority": False,
+        },
+        failed=True,
+    )
 
 
 def report_container_command_failure(

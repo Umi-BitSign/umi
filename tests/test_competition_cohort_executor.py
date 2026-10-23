@@ -573,3 +573,59 @@ async def test_assignment_mutation_cannot_start_sandbox(execution, damage):
     with pytest.raises(ValueError):
         await e.executor().advance(a)
     assert not e.calls
+
+
+async def test_execution_retry_reports_native_boundary_without_exception_text(
+    execution, monkeypatch
+):
+    from umi import competition_progress
+
+    e = execution
+    reports = []
+    monkeypatch.setattr(competition_progress, "_emit", lambda body, **kw: reports.append(body))
+
+    async def unavailable(_):
+        raise OSError("https://private.example/secret-token")
+
+    worker = e.worker()
+    worker.executor.history = unavailable
+    assert (await worker.poll_once())["retry_count"] == 1
+    retry = next(r for r in reports if r["event"] == "execution_retry")
+    assert retry["slot"] == e.r.slot
+    assert retry["eta_basis"] == "retry_requires_new_progress_sample"
+    assert any(f["function"] == "_current" for f in retry["causes"][0]["source_frames"])
+    assert "secret-token" not in str(reports)
+    assert not e.calls
+
+
+async def test_execution_stages_report_current_cohort_and_preserve_native_result(
+    execution, monkeypatch
+):
+    import json
+    import logging
+
+    from umi import competition_work_progress
+
+    e = execution
+    reports = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            reports.append(json.loads(record.getMessage()))
+
+    logger = logging.Logger("execution-progress-test", level=logging.INFO)
+    logger.addHandler(Capture())
+    monkeypatch.setattr(competition_work_progress, "_LOG", logger)
+    result = await e.worker().poll_once()
+    assert result["retry_count"] == 0 and len(e.calls) == 1
+    expected = {
+        "execution_owner_history",
+        "execution_registration_capture",
+        "execution_history_review",
+        "execution_order_review",
+        "execution_history_freshness",
+        "execution_sandbox",
+    }
+    assert expected <= {r["stage"] for r in reports if r["state"] == "completed"}
+    assert all(r["cohort_sha256"] == e.job.round.cohort_sha256 for r in reports)
+    assert all(r["certification_authority"] is False for r in reports)
