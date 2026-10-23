@@ -5,6 +5,10 @@ claims to authorize live inference or prove an installed production service.
 """
 
 import asyncio
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +22,7 @@ from umi.competition_cohort_order_queue import (
 from umi.competition_cohort_order_signer import CohortOrderParticipant, order_slot
 from umi.competition_cohort_order_worker import CohortOrderWorker
 from umi.open_competition import digest, identity, sign_object
+from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_disposition import order as signed_order
@@ -124,8 +129,9 @@ async def relay(harness, tmp_path):
     return r
 
 
-async def test_native_queue_to_each_native_inbox_and_quiet_restart(relay):
+async def test_native_queue_to_each_native_inbox_and_quiet_restart(relay, caplog):
     r = relay
+    caplog.set_level(logging.INFO, logger="umi.competition.progress")
     result = await r.worker().poll_once()
     assert result["votes_retained"] == 2 and result["deliveries_acknowledged"] == 2
     assert result["retry_count"] == 0 and result["chain_submission_authorized"] is False
@@ -137,6 +143,58 @@ async def test_native_queue_to_each_native_inbox_and_quiet_restart(relay):
     r.h.fail_collect = True
     assert (await r.worker().poll_once())["retry_count"] == 0
     assert len(r.h.calls) == 2 and len(r.receipt_calls) == 2 and len(r.delivery_calls) == 2
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition.progress"
+        and json.loads(record.message).get("schema") == "umi-competition-work-progress/1"
+    ]
+    for stage in (
+        "order_owner_history",
+        "order_registration_capture",
+        "order_native_review",
+        "order_attestation",
+        "order_assignment_delivery",
+    ):
+        finished = [e for e in events if e["stage"] == stage and e["state"] == "completed"]
+        assert finished and all(e["completed"] == e["total"] == 1 for e in finished)
+        assert all(e["percent"] == 100 and e["eta_seconds"] == 0 for e in finished)
+        assert all(e["cohort_sha256"] == r.cohort for e in finished)
+
+
+async def test_shared_order_owner_queues_siblings_without_weakening_external_mutex(
+    relay, monkeypatch
+):
+    r = relay
+    queue, other = r.queue(), r.queue()
+    expected = queue.intent(r.slot)
+    entered, release, second_started = Event(), Event(), Event()
+    native = queue._intent
+
+    def held(slot):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5), "test did not release the first owned operation"
+        return native(slot)
+
+    def sibling():
+        second_started.set()
+        return queue.intent(r.slot)
+
+    monkeypatch.setattr(queue, "_intent", held)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(queue.intent, r.slot)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(PrivateStateBusyError):
+                other.intent(r.slot)
+            second = workers.submit(sibling)
+            assert second_started.wait(5)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.05)
+        finally:
+            release.set()
+        assert first.result(timeout=5) == second.result(timeout=5) == expected
 
 
 @pytest.mark.parametrize("conflict", [False, True])

@@ -287,7 +287,10 @@ class LifecycleHost:
     async def _preparation(self):
         source = NativePreparationProgressSource(self.service.preparation)
         publisher = CohortPreparationPublisher(
-            self.service.preparation, self.provider, Path(self.config.sources.round_directory)
+            self.service.preparation,
+            self.provider,
+            Path(self.config.sources.round_directory),
+            objects=SettlementEvidenceFiles(Path(self.config.sources.objects_directory)),
         )
         return CohortPhaseDriver(
             CertifiedPhaseObserver(source.sample, self._peers("preparation"), self.policy),

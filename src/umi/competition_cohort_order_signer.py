@@ -37,6 +37,7 @@ from .competition_cohort_participation import (
 from .competition_cohort_recovery import verify_recovery_quorum
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_round_journal import RecordReservation, RoundJournal
+from .competition_work_progress import await_progress
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import (
     CompetitionPolicy,
@@ -353,8 +354,13 @@ class CohortOrderSigner:
 
         # Unrelated selections can proceed while this one waits for authority
         # or finality. Only durable selection and signing own the global lease.
-        source = await self.history(order.round.cohort_sha256)
-        capture = await self.provider.collect()
+        cohort = order.round.cohort_sha256
+        source = await await_progress(
+            self.history(cohort), stage="order_owner_history", cohort=cohort
+        )
+        capture = await await_progress(
+            self.provider.collect(), stage="order_registration_capture", cohort=cohort
+        )
         boundary = execution_boundary(capture)
         async with self.serial:
             with self.journal.journal.locked():
@@ -362,8 +368,17 @@ class CohortOrderSigner:
                 if saved is not None and saved[1] is not None:
                     return saved[1]
                 await run_owned_thread(self.journal.remember, source, boundary.block)
-                await run_owned_thread(
-                    review_order, order, participant, source, self.journal.policy, boundary.block
+                await await_progress(
+                    run_owned_thread(
+                        review_order,
+                        order,
+                        participant,
+                        source,
+                        self.journal.policy,
+                        boundary.block,
+                    ),
+                    stage="order_native_review",
+                    cohort=cohort,
                 )
                 if saved is None:
                     await run_owned_thread(
