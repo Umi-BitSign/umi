@@ -39,6 +39,7 @@ from .competition_cohort_lifecycle_host import LifecycleHost
 from .competition_cohort_model_delivery_api import model_delivery_adoption_owner_routes
 from .competition_cohort_model_delivery_preflight import model_delivery_preflight_routes
 from .competition_cohort_model_delivery_reservation import model_delivery_reservation_routes
+from .competition_cohort_model_execution_source import model_execution_source_routes
 from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
@@ -290,6 +291,15 @@ async def admission_owner_app(
             ),
         )
         app.include_router(cohort_history_routes(app.state.history_exporter, token=token))
+        if service_host is not None and getattr(service_host, "models", None) is not None:
+            app.include_router(
+                model_execution_source_routes(
+                    service_host.models.owner,
+                    app.state.history_exporter.read,
+                    token=token,
+                    timeout_seconds=phase_export_timeout_seconds,
+                )
+            )
         if lifecycle is not None:
             app.include_router(request_tail_reservation_routes(lifecycle, token=token))
             app.include_router(model_delivery_reservation_routes(lifecycle, token=token))

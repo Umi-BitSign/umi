@@ -1483,3 +1483,29 @@ async def test_parallel_prefetch_retains_each_proofs_own_block_claims():
         rpc.values.clear()
 
     await asyncio.wait_for(asyncio.gather(first(), second()), 30)
+
+
+def test_registration_capacity_index_migrates_retained_cache_without_payload_scan(chain):
+    provider = chain.provider
+    with sqlite3.connect(provider._path) as db:
+        db.execute("DROP INDEX captures_evidence_lengths")
+        db.execute(
+            "INSERT INTO captures VALUES (?,?,?,?,?)",
+            (_HEIGHT, _hash(1), "{}", "ab" * 32, b"payload" * 1000),
+        )
+        before = db.execute(
+            "SELECT block,hash,snapshot,evidence_sha256,evidence FROM captures"
+        ).fetchall()
+    provider._initialize_cache()
+    provider._initialize_cache()
+    with sqlite3.connect(provider._path) as db:
+        assert (
+            db.execute(
+                "SELECT block,hash,snapshot,evidence_sha256,evidence FROM captures"
+            ).fetchall()
+            == before
+        )
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN SELECT block,length(evidence) FROM captures"
+        ).fetchall()
+        assert any("captures_evidence_lengths" in str(row) for row in plan)

@@ -31,6 +31,7 @@ from .competition_chain_resources import CompetitionChainResources
 from .competition_historical_blocks import HistoricalRequestBlocks
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
 from .finalized_ancestry import MAXIMUM_DISTANCE, HeaderPathCache, recover_header_path
@@ -827,6 +828,22 @@ class FinalizedRegistrationProvider:
             from .competition_chain_capacity import verify_cache_capacity_history
 
             verify_cache_capacity_history(connection, self.config, expected_binding=expected)
+            index = "CREATE INDEX captures_evidence_lengths ON captures(block,length(evidence))"
+            retained_index = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND name='captures_evidence_lengths'"
+            ).fetchone()
+            if retained_index is None:
+                with TransferProgress(
+                    "registration_capacity_index",
+                    1,
+                    unit="indexes",
+                    planning_unit_seconds=(0.01, 300.0),
+                ) as progress:
+                    connection.execute(index)
+                    progress.advance(1)
+            elif retained_index != (index,):
+                raise ValueError("registration capacity index differs; repair required")
             connection.commit()
         finally:
             connection.close()

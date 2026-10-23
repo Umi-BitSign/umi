@@ -517,6 +517,23 @@ ETA basis; they do not cancel work. An `execution_retry` event records the
 assignment slot and bounded native cause frames without exception text. Check
 these diagnostics before treating an accepted assignment as a running challenge.
 
+An assigned evaluator need not have cast an artifact-review vote. If its own
+review journal has no request, the benchmark host retrieves the owner's original
+request, acceptance certificate and native history through the authenticated
+`/internal/cohorts/model-artifacts/execution-source` export. It checks the exact
+submission, prepared admission, cohort authority, acceptance quorum, transport
+and intake clocks before atomically retaining the source and verification result
+in its benchmark journal. Reopening reuses that result for unchanged input and
+validation context. Missing or conflicting completion records require repair.
+This namespace records byte-source verification; it creates no review vote,
+acceptance or execution authority. Existing local reviewed requests keep their
+original path, including refusal when their retained intent is missing.
+
+Registration-cache startup installs a covering index for evidence-length
+accounting on retained stores. Capture persistence can then count retained
+evidence without scanning large payload rows. This additive index preserves
+the cache identity, capacity allowance and every original proof.
+
 Repeated observation of the journal's current finalized block uses a read-only
 snapshot. A newer block rechecks the previous value while owning the writer
 transaction, and a regression remains an error. The high-water field has a fixed

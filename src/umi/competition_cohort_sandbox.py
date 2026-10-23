@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -191,6 +192,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     ) -> OfflineCaseExecution:
         _, role, bundle = case_role_model(job, attempt.step_index)
         request = self.request(job) if role == "candidate" else None
+        if inspect.isawaitable(request):
+            request = await request
         source = (
             None
             if self.legacy_artifacts is None
