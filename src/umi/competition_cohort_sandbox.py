@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import shutil
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from .competition_cohort_direct_model_review import DirectModelArtifactReviewer
@@ -177,19 +177,30 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         finally:
             PUBLIC_COHORT_SCOPE.reset(token)
 
-    async def _evict_archive(self, archive):
+    async def _evict_archive(self, archive, *, leased=False):
         # These two fixed roots are the only disposable model slots. Capacity
         # pressure must never remove another consumer's cache or owner state.
         if archive not in (self.cache / "archive", self.cache / "standby"):
             raise ValueError("unmanaged model cache slot")
-        with TransferProgress("model_cache_eviction", 1, unit="objects") as progress:
+        budget = (
+            None
+            if self.boot is None
+            else BootDiskModelCache(
+                self.boot,
+                reserve_bytes=self.artifacts.config.materialization_free_space_reserve_bytes,
+            )
+        )
+        with (
+            budget.allocation_lease() if budget is not None and not leased else nullcontext(),
+            TransferProgress("model_cache_eviction", 1, unit="objects") as progress,
+        ):
             ensure_private_directory(archive)
             await run_owned_thread(shutil.rmtree, archive)
             self.slot_identities.pop(archive, None)
             self.slot_recency.pop(archive, None)
             progress.advance(1)
 
-    async def _select_archive(self, request, bundle, materializer, request_sha256):
+    async def _select_archive(self, request, bundle, materializer, request_sha256, protected_model):
         slots = (self.cache / "archive", self.cache / "standby")
         # Preserve the original path, including interrupted transfers. Prefer a
         # matching source over an empty slot; no payload scan is needed here.
@@ -198,10 +209,18 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                 archive.exists() and await materializer.resumable(request, archive)
             ):
                 return archive
-        return next(
-            (archive for archive in slots if not archive.exists()),
-            min(slots, key=lambda path: self.slot_recency.get(path, 0)),
+        empty = next((archive for archive in slots if not archive.exists()), None)
+        if empty is not None:
+            return empty
+        # Process-local LRU starts empty after an upgrade. Keep the current
+        # round's reference resident even then; this is scheduling only and the
+        # materializer still authenticates its exact source before invocation.
+        disposable = tuple(
+            archive
+            for archive in slots
+            if protected_model is None or not (archive / protected_model).is_dir()
         )
+        return min(disposable or slots, key=lambda path: self.slot_recency.get(path, 0))
 
     async def _admit_archive(self, archive, bundle):
         budget = BootDiskModelCache(
@@ -221,7 +240,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                 if other.exists():
                     # No invocations are active: capacity fallback may release
                     # the idle peer, then retain the original single-slot bound.
-                    await self._evict_archive(other)
+                    await self._evict_archive(other, leased=True)
                 if not await run_owned_thread(budget.fits_materialization, bundle, archive):
                     progress.emit("retrying", reason="model_pair_capacity_unavailable")
                     raise OSError(
@@ -229,7 +248,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
                     )
             progress.advance(1)
 
-    async def _candidate_archive(self, request, bundle, *, materializer=None) -> Path:
+    async def _candidate_archive(
+        self, request, bundle, *, materializer=None, protected_model=None
+    ) -> Path:
         materializer = self.artifacts if materializer is None else materializer
         request_sha256 = materializer.cache_identity(request)
         async with self.materializations:
@@ -245,7 +266,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             archive = (
                 self.cache / "archive"
                 if self.boot is None
-                else await self._select_archive(request, bundle, materializer, request_sha256)
+                else await self._select_archive(
+                    request, bundle, materializer, request_sha256, protected_model
+                )
             )
             selected = archive / digest(bundle)
             reusable = selected.is_dir() and (
@@ -305,6 +328,7 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             request if source is None else source,
             bundle,
             materializer=None if source is None else self.legacy_artifacts,
+            protected_model=job.round.incumbent_model_sha256,
         )
         try:
             result = await self._invoke(job, attempt, archive)

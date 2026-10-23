@@ -778,6 +778,7 @@ class ChunkedModelBackupReader:
         reserve_bytes: int,
         check_write: Callable[[int], None],
         report: Callable[[dict], None] | None = None,
+        check_file_write: Callable[[Path, int], None] | None = None,
     ) -> Path:
         """Restore a native archive under the caller's held cache/capacity lease.
 
@@ -915,7 +916,12 @@ class ChunkedModelBackupReader:
                             with os.fdopen(descriptor, "wb", buffering=0) as output:
                                 for chunk in item.chunks:
                                     raw = await read_chunk(chunk)
-                                    await run_owned_thread(check_write, len(raw))
+                                    if check_file_write is None:
+                                        await run_owned_thread(check_write, len(raw))
+                                    else:
+                                        await run_owned_thread(
+                                            check_file_write, destination, len(raw)
+                                        )
                                     if await run_owned_thread(output.write, raw) != len(raw):
                                         raise OSError("chunked model cache write was incomplete")
                                     hasher.update(raw)

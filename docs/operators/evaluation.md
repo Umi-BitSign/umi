@@ -526,6 +526,18 @@ the journal count separately from newly executed steps. The ETA covers that job,
 not all cohort scoring or reward activation. Cancellation drains the current
 invocation and releases scheduling ownership; restart reuses existing checkpoints.
 
+Managed boot-cache transfers take one allocation snapshot under the exclusive
+cache lock, then account for each signed file append and its directory metadata.
+They reserve publication metadata before writing and check actual filesystem free
+space before every append. Cache eviction uses that same lock. Read-only CPU
+consumers retain their model leases throughout invocation. Unknown cache entries,
+boot roots containing invocation scratch, and older pathless write ports retain
+full metadata scans. Capacity snapshots are discarded when the transfer lease
+ends; they are not durable verification or authorization records.
+After restart, eviction preference keeps the current signed round's reference
+when selecting a new candidate; exact source authentication still runs before
+invocation and capacity pressure can release any idle managed peer.
+
 Accepted inbox receipts confirm delivery, not model execution. The recoverable
 worker reports owner-history retrieval, registration capture, history and order
 review, fresh-history confirmation and sandbox execution as separate

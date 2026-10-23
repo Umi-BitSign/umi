@@ -66,6 +66,7 @@ async def materialize_model_files(
     available_bytes,
     reserve_bytes,
     check_write=None,
+    check_file_write=None,
 ):
     """Resume completed files and authenticate only affected local materializations.
 
@@ -226,7 +227,7 @@ async def materialize_model_files(
                         descriptor = os.open(
                             destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
                         )
-                        # Boot-disk accounting observes each write through stat;
+                        # Space accounting sees each append's actual file size;
                         # user-space buffering must not hide allocated bytes.
                         output = os.fdopen(descriptor, "wb", buffering=0)
                     while remaining:
@@ -239,8 +240,11 @@ async def materialize_model_files(
                         if local_file and len(data) != size:
                             raise ValueError("direct model materialization range differs")
                         size = len(data)
-                        if output is not None and check_write is not None:
-                            await run_owned_thread(check_write, size)
+                        if output is not None:
+                            if check_file_write is not None:
+                                await run_owned_thread(check_file_write, destination, size)
+                            elif check_write is not None:
+                                await run_owned_thread(check_write, size)
                         if (
                             output is not None
                             and await run_owned_thread(output.write, data) != size

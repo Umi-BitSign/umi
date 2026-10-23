@@ -150,7 +150,7 @@ class LegacyCohortModelCache:
                     with TransferProgress(
                         "legacy_model_cache_space_preparation", 1, unit="models"
                     ) as progress:
-                        cache.prepare(source.selection.bundle)
+                        cache.prepare(source.selection.bundle, archive=archive)
                         progress.advance(1)
                 return await self.sources.reader(source).materialize(
                     archive,
@@ -158,4 +158,5 @@ class LegacyCohortModelCache:
                     available_bytes=available if cache is None else cache.available_bytes,
                     reserve_bytes=c.materialization_free_space_reserve_bytes,
                     check_write=check_write if cache is None else cache.check_write,
+                    check_file_write=None if cache is None else cache.check_file_write,
                 )
