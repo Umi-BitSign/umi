@@ -1,0 +1,163 @@
+"""Bounded, process-local public diagnostics; never protocol authority.
+
+Only explicit public fields enter this view. Reading it does no RPC, model I/O,
+history replay or database work. Owners restore counts from their journals after
+restart; an empty view is unknown rather than zero or completed.
+"""
+
+import re
+import time
+from collections import OrderedDict
+from copy import deepcopy
+from threading import RLock
+
+_FIELDS = (
+    "phase",
+    "stage",
+    "status",
+    "state",
+    "completed",
+    "total",
+    "percent",
+    "elapsed_seconds",
+    "eta_seconds",
+    "eta_basis",
+    "eta_scope",
+    "eta_assumptions",
+    "estimated_finish_unix_ms",
+    "stalled_or_retrying",
+    "stalled",
+    "repair_required",
+    "blocked_count",
+    "roster_sha256",
+    "selection_scope",
+    "sample_certificates",
+    "certificates_per_second",
+    "submission_sha256",
+    "error_type",
+    "scope",
+    "unit",
+    "work_id",
+)
+
+
+class CohortProgressSnapshots:
+    def __init__(self, maximum_cohorts=256):
+        self.lock = RLock()
+        self.entries = OrderedDict()
+        self.maximum_cohorts = maximum_cohorts
+
+    def record(self, kind, body):
+        cohort = body.get("cohort_sha256")
+        if not isinstance(cohort, str) or re.fullmatch(r"[0-9a-f]{64}", cohort) is None:
+            return
+        if kind not in {"lifecycle", "certification", "intake_certification", "acceptance", "work"}:
+            return
+        now = time.monotonic()
+        public = {key: body[key] for key in _FIELDS if key in body}
+        public["observed_unix_ms"] = time.time_ns() // 1_000_000
+        if public.get("eta_seconds") is not None and public.get("estimated_finish_unix_ms") is None:
+            public["estimated_finish_unix_ms"] = public["observed_unix_ms"] + int(
+                public["eta_seconds"] * 1000
+            )
+        with self.lock:
+            entry = self.entries.setdefault(cohort, {})
+            old = entry.get("lifecycle")
+            if kind == "lifecycle" and (old is None or old[1].get("phase") != public.get("phase")):
+                entry["phase_started"] = now
+            entry[kind] = (now, public)
+            self.entries.move_to_end(cohort)
+            while len(self.entries) > self.maximum_cohorts:
+                self.entries.popitem(last=False)
+
+    def snapshot(self, cohort):
+        now = time.monotonic()
+        with self.lock:
+            entry = deepcopy(self.entries.get(cohort, {}))
+        parts = {}
+        for kind in ("lifecycle", "certification", "intake_certification", "acceptance", "work"):
+            if kind in entry:
+                observed, value = entry[kind]
+                age = max(0, now - observed)
+                value.update(age_seconds=round(age, 3), stale=age > 120)
+                if kind == "acceptance" and value.get("status") == "running":
+                    value["elapsed_seconds"] = round(age, 3)
+                parts[kind] = value
+        phase = parts.get("lifecycle", {}).get("phase")
+        selected = parts.get("lifecycle", {})
+        stage = selected.get("stage", "awaiting_observation")
+        if phase in (None, "intake"):
+            for kind in ("certification", "intake_certification"):
+                if kind in parts:
+                    selected = parts[kind]
+                    stage = "model_certification"
+                    break
+        if stage != "model_certification" and "work" in parts:
+            observed, work = entry["work"]
+            # Do not call the previous phase's last 100% substage current work.
+            if observed >= entry.get("phase_started", 0) and work.get("state") in {
+                "started",
+                "running",
+            }:
+                selected = parts["work"]
+                stage = selected["stage"]
+        result = dict(
+            schema="umi-public-cohort-progress/1",
+            cohort_sha256=cohort,
+            phase=phase,
+            stage=stage,
+            completed=None,
+            total=None,
+            percent=None,
+            elapsed_seconds=None,
+            eta_seconds=None,
+            eta_basis="awaiting_current_stage_measurement",
+            eta_scope="current_stage_only",
+            estimated_finish_unix_ms=None,
+            stalled_or_retrying=False,
+            overall_percent=None,
+            overall_eta_seconds=None,
+            overall_eta_basis="end_to_end_forecast_not_established",
+            certification_authority=False,
+            components=parts,
+        )
+        result.update({key: value for key, value in selected.items() if key != "stage"})
+        result["phase"] = phase
+        result["stage"] = stage
+        operation = parts.get("acceptance", {})
+        if (
+            stage == "model_certification"
+            and operation.get("status") == "pending"
+            and not (
+                operation.get("stage") == "retained_lookup"
+                and operation.get("error_type") == "PendingModelArtifacts"
+            )
+        ):
+            result["stalled_or_retrying"] = True
+        eta = selected.get("eta_seconds")
+        if selected.get("stale"):
+            result.update(
+                eta_seconds=None,
+                estimated_finish_unix_ms=None,
+                eta_basis="stale_observation",
+                stalled_or_retrying=True,
+            )
+        elif result.get("stalled_or_retrying") or result.get("stalled"):
+            result.update(
+                eta_seconds=None, estimated_finish_unix_ms=None, eta_basis="stalled_or_retrying"
+            )
+        elif eta is not None and eta > 0:
+            age = selected.get("age_seconds", 0)
+            if age >= eta:
+                result.update(
+                    eta_seconds=None,
+                    estimated_finish_unix_ms=None,
+                    eta_basis="forecast_overdue",
+                    stalled_or_retrying=True,
+                )
+            else:
+                result["eta_seconds"] = round(eta - age, 3)
+        return result
+
+
+PUBLIC_COHORT_PROGRESS = CohortProgressSnapshots()

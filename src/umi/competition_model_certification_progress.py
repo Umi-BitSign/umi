@@ -4,6 +4,8 @@ import time
 from collections import OrderedDict
 from threading import RLock
 
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+
 
 class ModelCertificationProgress:
     def __init__(self):
@@ -28,12 +30,13 @@ class ModelCertificationProgress:
         scope = inventory["roster_sha256"]
         done, total = inventory["completed"], inventory["total"]
         with self.lock:
-            prior = self.samples.get(cohort)
+            sample_key = (cohort, inventory.get("selection_scope", "native_selected_roster"))
+            prior = self.samples.get(sample_key)
             if prior is None or prior["scope"] != scope:
                 prior = dict(
                     scope=scope, started=now, baseline=done, last=done, high=done, last_progress=now
                 )
-                self.samples[cohort] = prior
+                self.samples[sample_key] = prior
             if done > prior["last"]:
                 prior["last_progress"] = now
             prior["high"] = max(prior["high"], done)
@@ -64,7 +67,7 @@ class ModelCertificationProgress:
                 if eta is not None
                 else "awaiting_current_roster_completion_samples"
             )
-            return dict(
+            result = dict(
                 schema="umi-model-certification-progress/1",
                 **inventory,
                 remaining=remaining,
@@ -74,10 +77,18 @@ class ModelCertificationProgress:
                 certificates_per_second=rate,
                 eta_seconds=eta,
                 eta_basis=basis,
-                eta_scope=("selected_model_certification_only; "
-                           "preparation, evaluation and activation remain separate"),
-                eta_assumptions=("remaining models have comparable cost; "
-                                 "no unresolved holds or new roster replacements"),
+                eta_scope=(
+                    (
+                        "latest_model_submission_certification_only; "
+                        if inventory.get("selection_scope") == "latest_model_submissions"
+                        else "selected_model_certification_only; "
+                    )
+                    + "preparation, evaluation and activation remain separate"
+                ),
+                eta_assumptions=(
+                    "remaining models have comparable cost; "
+                    "no unresolved holds or new roster replacements"
+                ),
                 estimated_finish_unix_ms=None if eta is None else int((time.time() + eta) * 1000),
                 blocked_count=len(holds),
                 blocked=holds,
@@ -88,3 +99,10 @@ class ModelCertificationProgress:
                 rate_scope="this observer process and unchanged selected roster",
                 certification_authority=False,
             )
+            kind = (
+                "intake_certification"
+                if inventory.get("selection_scope") == "latest_model_submissions"
+                else "certification"
+            )
+            PUBLIC_COHORT_PROGRESS.record(kind, result)
+            return result

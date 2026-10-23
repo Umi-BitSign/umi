@@ -32,6 +32,7 @@ from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_publisher import CohortPreparationPublisher
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import LiveIntakePhaseObserver
 from .competition_cohort_reference_preflight import preflight_service_references
 from .competition_cohort_request_export import RequestReviewExporter
@@ -536,6 +537,7 @@ class LifecycleHost:
                 while not stop.is_set():
                     result = {
                         "status": "automatic_progression_held",
+                        "stage": "automatic_progression_held",
                         "cohort_sha256": cohort,
                         "completed": 0,
                         "total": 1,
@@ -546,6 +548,7 @@ class LifecycleHost:
                         "signed_state_changed": False,
                     }
                     self.last_reports[cohort] = result
+                    PUBLIC_COHORT_PROGRESS.record("lifecycle", result)
                     logger.info("cohort_lifecycle_hold %s", canonical_json_bytes(result).decode())
                     with suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)

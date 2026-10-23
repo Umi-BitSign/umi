@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from functools import partial
@@ -74,7 +75,7 @@ from .concurrency import run_owned_thread
 from .host_memory_runtime import authorize_memory, requests_stage_policy
 from .named_hotkey import load_named_hotkey
 from .open_competition import Hotkey, digest, identity, sign_object
-from .private_files import Directory, lock_private_file, read_private_model
+from .private_files import Directory, PrivateStateBusyError, lock_private_file, read_private_model
 from .protocol import StrictProtocolModel, canonical_json_bytes
 from .r2_multipart import R2MultipartClient, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
@@ -1012,7 +1013,26 @@ class ServiceAdmissionHost:
 
     async def _poll_component(self, stop, component, callback):
         while not stop.is_set():
-            report = {**await callback(), "component": component}
+            started = time.monotonic()
+            try:
+                report = {**await callback(), "component": component}
+            except PrivateStateBusyError:
+                # A nonblocking journal mutex can be held by a concurrent
+                # request. Keep this reconciliation owner and its checkpoints;
+                # retry on the normal poll, without restarting all other work.
+                report = {
+                    "status": "service_reconciliation_retry",
+                    "component": component,
+                    "reason_code": "private_state_busy",
+                    "completed": 0,
+                    "total": 1,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "stalled_or_retrying": True,
+                    "eta_seconds": None,
+                    "eta_basis": "waiting_for_private_state_mutex",
+                    "retry_seconds": self.config.poll_seconds,
+                    "certification_authority": False,
+                }
             logger.info("cohort_service_admission %s", canonical_json_bytes(report).decode("ascii"))
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.config.poll_seconds)

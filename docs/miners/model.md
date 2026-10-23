@@ -57,6 +57,13 @@ when this query returns `admission_certified`. Do not wait for that saved receip
 to change. Admission certification is separate from quality scoring, final cohort
 certification and active chain rewards.
 
+For the cohort's current stage, percentage and ETA, query
+`GET /v1/competition/cohorts/<cohort_sha256>/progress` at the published API origin.
+This reports stage progress, not your model's quality score. A null ETA includes
+its reason; certification and scoring are separate stages. Artifact review runs
+during intake, including for replacements, and completed work resumes after
+restart rather than waiting until intake closes.
+
 The equivalent public read is
 `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
 Both digests appear under `proposed_admission` in the original receipt. Use the

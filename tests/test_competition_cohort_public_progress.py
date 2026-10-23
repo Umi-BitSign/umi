@@ -1,0 +1,141 @@
+from types import SimpleNamespace
+
+import httpx
+from fastapi import FastAPI
+
+from umi import competition_cohort_api as api
+from umi import competition_cohort_public_progress as module
+from umi.competition_cohort_public_progress import CohortProgressSnapshots
+
+C = "c" * 64
+
+
+def test_progress_is_bounded_redacted_and_returns_independent_snapshots():
+    state = CohortProgressSnapshots(maximum_cohorts=1)
+    state.record(
+        "certification",
+        dict(
+            cohort_sha256=C,
+            completed=2,
+            total=3,
+            percent=200 / 3,
+            eta_seconds=30,
+            eta_basis="measured",
+            private_input="secret",
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_certification" and result["completed"] == 2
+    assert 0 < result["eta_seconds"] <= 30
+    assert "secret" not in str(result)
+    result["components"]["certification"]["completed"] = 0
+    assert state.snapshot(C)["completed"] == 2
+    state.record("work", dict(cohort_sha256="d" * 64, stage="payload"))
+    assert state.snapshot(C)["percent"] is None
+
+
+def test_restart_is_unknown_and_stale_or_overdue_measurements_withdraw_eta(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    assert state.snapshot(C)["percent"] is None
+    state.record(
+        "certification",
+        dict(
+            cohort_sha256=C,
+            completed=1,
+            total=2,
+            percent=50,
+            eta_seconds=20,
+            estimated_finish_unix_ms=12345,
+        ),
+    )
+    now[0] = 31
+    assert state.snapshot(C)["eta_basis"] == "forecast_overdue"
+    assert state.snapshot(C)["eta_seconds"] is None
+    now[0] = 200
+    stale = state.snapshot(C)
+    assert stale["completed"] == 1 and stale["eta_basis"] == "stale_observation"
+    assert stale["estimated_finish_unix_ms"] is None
+    assert CohortProgressSnapshots().snapshot(C)["percent"] is None
+
+
+def test_later_phase_never_reuses_intake_percentage_or_finished_previous_work(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "certification", dict(cohort_sha256=C, completed=3, total=3, percent=100, eta_seconds=0)
+    )
+    state.record("work", dict(cohort_sha256=C, stage="prepare", state="completed", percent=100))
+    now[0] = 20
+    state.record("lifecycle", dict(cohort_sha256=C, phase="requests", stage="dispatch"))
+    result = state.snapshot(C)
+    assert result["phase"] == "requests" and result["stage"] == "dispatch"
+    assert result["percent"] is None and result["overall_percent"] is None
+    now[0] = 21
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            stage="challenge_batch",
+            state="running",
+            completed=2,
+            total=10,
+            percent=20,
+            eta_seconds=80,
+        ),
+    )
+    assert state.snapshot(C)["percent"] == 20
+    assert state.snapshot(C)["stage"] == "challenge_batch"
+
+
+def test_hold_does_not_hide_intake_certification_and_active_operation_elapsed(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=2,
+            total=4,
+            percent=50,
+            selection_scope="latest_model_submissions",
+        ),
+    )
+    state.record("acceptance", dict(cohort_sha256=C, stage="promotion", status="running"))
+    now[0] = 40
+    result = state.snapshot(C)
+    assert result["percent"] == 50
+    assert result["components"]["acceptance"]["elapsed_seconds"] == 30
+    assert result["overall_eta_seconds"] is None
+
+
+async def test_progress_api_is_available_without_capture_or_database(monkeypatch):
+    snapshots = CohortProgressSnapshots()
+    monkeypatch.setattr(api, "PUBLIC_COHORT_PROGRESS", snapshots)
+    monkeypatch.setattr(api, "CohortAdmissionQueue", lambda _: None)
+    snapshots.record(
+        "certification",
+        dict(cohort_sha256=C, completed=92, total=103, percent=100 * 92 / 103, eta_seconds=300),
+    )
+
+    async def forbidden():
+        raise AssertionError("progress must not query finality or owned journals")
+
+    app = FastAPI()
+    app.include_router(
+        api.cohort_routes(
+            SimpleNamespace(bindings={C: "authority"}), forbidden, maximum_body_bytes=1024
+        )
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://test"
+    ) as client:
+        response = await client.get(f"/v1/competition/cohorts/{C}/progress")
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+        assert response.json()["completed"] == 92
+        assert response.json()["certification_authority"] is False
+        assert (await client.get(f"/v1/competition/cohorts/{'d' * 64}/progress")).status_code == 404
