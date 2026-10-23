@@ -1,7 +1,7 @@
 [Unit]
 Description=UMI private native cohort phase reviewer (%i)
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target umi-cohort-cpu-namespace@%i.service
+After=network-online.target umi-cohort-cpu-namespace@%i.service
 StartLimitIntervalSec=0
 
 [Service]

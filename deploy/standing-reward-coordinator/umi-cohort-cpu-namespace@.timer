@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover UMI rootless CPU namespace readiness (%i)
+
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=umi-cohort-cpu-namespace@%i.service
+
+[Install]
+WantedBy=timers.target

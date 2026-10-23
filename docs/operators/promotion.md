@@ -93,6 +93,31 @@ payload buffers), then writes and checkpoints files in manifest order. Pending
 reads are cancelled and drained before releasing the cache lease on failure;
 already completed local files are excluded from prefetch after restart.
 
+### Rootless CPU namespace readiness
+
+CPU phase reviewers keep `NoNewPrivileges=yes`. Prepare their existing rootless
+Podman namespace in the separate `umi-cohort-cpu-namespace@.service`, which runs
+as the same unprivileged account and can use `newuidmap`. An OOM event or stopped
+user session can remove Podman's pause process; the timer recreates that namespace
+without resetting storage, pulling images or changing model results.
+
+Install `deploy/standing-reward-coordinator/ensure-cpu-namespace.py` root-owned
+at `/usr/local/lib/umi/ensure-cpu-namespace.py`, and render the companion service
+and timer for the reviewer. Use the reviewer's existing service user/group and
+numeric `SERVICE_UID`. Its `%i.cpu-runtime.env` file under `CONFIG_DIRECTORY`
+must preserve the installed `HOME`, `CONTAINERS_STORAGE_CONF`,
+`CONTAINERS_CONF_OVERRIDE`, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`.
+Inspect the supported installed layout first; do not substitute a fresh store
+or grant directory. Enable the companion timer for continuous recovery. The
+phase-reviewer template orders its initial startup after namespace preparation;
+phase-only reviewers without a CPU environment file skip that preparation.
+
+Healthy repeats check the private pause-process and readiness metadata without
+rerunning Podman inspection. Changed configuration, boot or process identity
+causes a new local check. Counted progress and bounded failure details go to the
+journal. A missing image, unsupported namespace or failed mapping remains an
+infrastructure retry; preserve the original model assignment and journals.
+
 Original baselines without an authenticated remote source continue to require
 their canonical preserved archive. Bounded-cache selection alone never authorizes
 canonical archive retirement, reservation release or a change to another live
