@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import subprocess
 import sys
+from contextlib import contextmanager
 
 import pytest
 
@@ -46,6 +47,58 @@ def test_observer_reads_original_metadata_and_new_receipts_without_network_or_co
     server.calls.clear()
     restarted = consumer(tmp_path / "observer", producer, server)
     assert restarted.validate_reference(reference).key == reference["key"]
+    assert server.calls == []
+
+
+@pytest.mark.parametrize("independent_consumer", [False, True])
+def test_validation_shares_only_its_current_receipt_owner_snapshot(
+    tmp_path, monkeypatch, independent_consumer
+):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    observer = (
+        consumer(tmp_path / "observer", producer, server) if independent_consumer else producer
+    )
+    snapshots = []
+    journals = [observer.journal]
+    if observer.receipt_source is not None:
+        journals.append(observer.receipt_source)
+    for journal in journals:
+        read = journal.read_transaction
+
+        @contextmanager
+        def counted(read=read, journal=journal):
+            with read() as db:
+                assert db.in_transaction
+                assert db.execute("PRAGMA query_only").fetchone() == (1,)
+                snapshots.append((journal, db))
+                yield db
+
+        monkeypatch.setattr(journal, "read_transaction", counted)
+    server.calls.clear()
+    for _ in range(2):
+        assert observer.validate_reference(reference).key == reference["key"]
+    assert len(snapshots) == 2 * len(journals)
+    assert len({id(db) for _, db in snapshots}) == len(snapshots)
+    assert server.calls == []
+
+
+@pytest.mark.parametrize("held_owner", ["producer", "consumer"])
+def test_repeated_validation_observes_new_independent_damage_holds(tmp_path, held_owner):
+    server = EvidenceServer()
+    producer = store(tmp_path / "producer", server)
+    reference = producer.put_bytes(b"source")
+    observer = consumer(tmp_path / "observer", producer, server)
+    parsed = observer.validate_reference(reference)
+    owner = producer if held_owner == "producer" else observer
+    owner._hold(parsed)
+    server.calls.clear()
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        observer.validate_reference(reference)
+    restarted = consumer(tmp_path / "observer", producer, server)
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        restarted.validate_reference(reference)
     assert server.calls == []
 
 

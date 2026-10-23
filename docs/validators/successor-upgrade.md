@@ -943,16 +943,51 @@ requires an explicitly qualified runtime code/source pair and a native proof of
 is supported; an absent value uses that runtime's proved metadata default.
 Unknown code, Null or malformed consensus state refuses with an explicit reason.
 A release or source label alone does not establish runtime equivalence. The
-qualified `/2` profiles cover exact runtime479/f4786f and runtime481/6a9726
+qualified `/2` profiles cover exact runtime479/f4786f, runtime481/6a9726 and runtime483/b335b5
 code/source pairs; their artifact and predicate scopes are recorded in
 `tests/fixtures/reward-eligibility/runtime479-qualification.json` and
-`tests/fixtures/reward-eligibility/runtime481-qualification.json`. Runtime481's
+`tests/fixtures/reward-eligibility/runtime481-qualification.json`, with runtime483's
+explicit upstream-trust basis in
+`tests/fixtures/reward-eligibility/runtime483-qualification.json`. Runtime483 was
+selected on the operator's acceptance of OTF upstream attribution without an
+independent reproducible build; no independent deployed-source/build match is
+claimed. Exact native code, same-root state and consensus proofs remain mandatory.
+Runtime481's
 emission split changes are outside the unchanged Yuma eligibility predicate;
 this qualification makes no general emission-equivalence claim. Code drift
 refuses current capture and archive review with
 `reward_eligibility_runtime_code_mismatch`; coverage retry logs include only the
 expected and proved code hashes, never provider credentials. Select an
 independently qualified, authenticated profile before retrying that work.
+
+Coverage head discovery checks the already-proved code against the selected
+profile before starting fresh history catch-up. A mismatch stays pending under
+the collector's normal retry loop and leaves completed evidence intact. Supported
+authenticated adoption is still required; discovery cannot approve a new hash.
+
+History checkpoint restoration reuses successful native block checks and reads
+receipt metadata without proof payloads. Each reference validation checks its
+completion, original receipt and producer damage hold in one fresh read-only
+transaction; an independent consumer also checks its own damage hold. These
+connections are not retained across references, finality checks or restarts.
+Missing or changed receipt metadata still requires explicit repair. Receipt
+connection counts and metadata-only timing are not a full recovery ETA.
+
+An independent rebuild is optional when the operator explicitly accepts upstream
+runtime attribution; it is not a mandatory delay for every runtime upgrade. Keep
+that trust basis distinct from independently demonstrated build correspondence.
+When an independent rebuild is required, the manual `Successor host
+recovery checks` workflow accepts an exact `runtime_source_sha`, the independently
+proved `runtime_code_sha256`, and `runtime_spec_version`. That selection runs
+only the isolated source-build job on a disposable hosted runner, with read-only
+repository access and no production credentials. It reproduces the pinned
+upstream srtool production build and retains actual Wasm, source/build digest,
+logs and a comparison result. The source commit, package, compiler, profile,
+spec version and actual bytes must all match. A matching rebuild establishes
+source/build correspondence only; predicate qualification, authenticated profile
+adoption and native same-root verification remain separate gates. Empty runtime
+inputs preserve the workflow's ordinary recovery checks. Build progress includes
+explicit phase planning ranges; it is not a reward activation estimate.
 
 Choose the first adopted block no later than the earliest endpoint still needed
 by the collector, using retained native runtime evidence for that range. Finding

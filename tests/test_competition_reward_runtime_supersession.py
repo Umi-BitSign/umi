@@ -35,6 +35,10 @@ def profile(config, version):
             "48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
             "6a972693ae9580541225bd37696ac2fee26b8ae9",
         ),
+        483: (
+            "1016a0f8c23aa1cfb88a37c723fd0440bfe7b8141490b77ae793dfd7be7540eb",
+            "b335b5ef339ceb4366e5452d24c22978821c595f",
+        ),
     }[version]
     return RewardEligibilityRuntime(
         schema="umi-reward-eligibility-runtime/2",
@@ -49,8 +53,8 @@ def signed(body):
     return SignedRewardRuntimeAdoption(adoption=body, signatures=signatures(body))
 
 
-@pytest.fixture
-def superseded(inputs):
+@pytest.fixture(params=[(479, 481), (481, 483)])
+def superseded(inputs, request):
     config = inputs.value
     first = config.series.recovery.authority.issued_at_block + 10
     old = RewardRuntimeAdoption(
@@ -60,7 +64,7 @@ def superseded(inputs):
         policy_sha256=digest(config.policy),
         authority_sha256=digest(config.series.recovery.authority),
         original_runtime_profile_sha256=digest(config.eligibility),
-        effective_profile=profile(config, 479),
+        effective_profile=profile(config, request.param[0]),
         first_block=first,
         last_block=first + 1000,
         issued_at_block=first,
@@ -73,7 +77,7 @@ def superseded(inputs):
             old.model_copy(
                 update={
                     "schema_": "umi-standing-reward-runtime-adoption/2",
-                    "effective_profile": profile(config, 481),
+                    "effective_profile": profile(config, request.param[1]),
                     "first_block": first + 100,
                     "issued_at_block": first + 200,
                     "revision": 2,

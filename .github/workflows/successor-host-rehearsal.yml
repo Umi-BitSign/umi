@@ -2,6 +2,19 @@ name: Successor host recovery checks
 
 on:
   workflow_dispatch:
+    inputs:
+      runtime_source_sha:
+        description: 'Optional exact Subtensor revision for isolated source/build comparison'
+        type: string
+        default: ''
+      runtime_code_sha256:
+        description: 'Exact code digest already established by an independent native proof'
+        type: string
+        default: ''
+      runtime_spec_version:
+        description: 'Native executed runtime spec version for source/build comparison'
+        type: string
+        default: ''
   pull_request:
     paths:
       - 'src/**'
@@ -26,7 +39,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime-source:
+    name: Isolated runtime source/build comparison
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime_source_sha != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: umi
+
+      - name: Validate immutable selection
+        env:
+          SOURCE_SHA: ${{ inputs.runtime_source_sha }}
+          CODE_SHA: ${{ inputs.runtime_code_sha256 }}
+          SPEC_VERSION: ${{ inputs.runtime_spec_version }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch('[0-9a-f]{40}', os.environ['SOURCE_SHA'])
+          assert re.fullmatch('[0-9a-f]{64}', os.environ['CODE_SHA'])
+          assert re.fullmatch('[1-9][0-9]{0,8}', os.environ['SPEC_VERSION'])
+          PY
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: RaoFoundation/subtensor
+          ref: ${{ inputs.runtime_source_sha }}
+          persist-credentials: false
+          path: subtensor
+
+      - name: Rebuild and compare exact native code
+        env:
+          SOURCE_SHA: ${{ inputs.runtime_source_sha }}
+          CODE_SHA: ${{ inputs.runtime_code_sha256 }}
+          SPEC_VERSION: ${{ inputs.runtime_spec_version }}
+        run: |
+          python3 umi/tools/qualify_runtime_source.py \
+            --source "$GITHUB_WORKSPACE/subtensor" \
+            --output "$RUNNER_TEMP/runtime-source-result" \
+            --revision "$SOURCE_SHA" --code-sha256 "$CODE_SHA" \
+            --spec-version "$SPEC_VERSION"
+
+      - name: Retain comparison evidence and bounded logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-source-${{ inputs.runtime_source_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/runtime-source-result/*.json
+            ${{ runner.temp }}/runtime-source-result/*.wasm
+            ${{ runner.temp }}/runtime-source-result/*.log
+          if-no-files-found: warn
+          retention-days: 30
+
   recovery:
+    if: github.event_name != 'workflow_dispatch' || inputs.runtime_source_sha == ''
     name: Recovery files and state (${{ matrix.architecture }})
     strategy:
       fail-fast: false
@@ -105,6 +174,7 @@ jobs:
           retention-days: 14
 
   rooted-services:
+    if: github.event_name != 'workflow_dispatch' || inputs.runtime_source_sha == ''
     name: Rooted OCI ${{ matrix.scenario }} (${{ matrix.architecture }})
     strategy:
       fail-fast: false

@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from umi.competition_reward_coverage_collector import _log_retry
+from umi.competition_reward_coverage_source import NativeRewardCoverageSource
 from umi.competition_reward_eligibility import (
     RewardEligibilityRuntime,
     RewardRuntimeCodeMismatch,
@@ -35,10 +37,14 @@ def profile():
     )
 
 
-def test_exact481_pair_and_original479_bytes_remain_supported():
+def test_exact_reviewed_pairs_preserve_prior_profile_bytes():
     value = profile()
     validate_qualified_reward_runtime(value)
-    for name in ["runtime479-qualification.json", "runtime481-qualification.json"]:
+    for name in [
+        "runtime479-qualification.json",
+        "runtime481-qualification.json",
+        "runtime483-qualification.json",
+    ]:
         data = json.loads(FIXTURE.with_name(name).read_bytes())
         selected = value.model_copy(
             update={
@@ -49,6 +55,27 @@ def test_exact481_pair_and_original479_bytes_remain_supported():
         raw = canonical_json_bytes(selected)
         validate_qualified_reward_runtime(selected)
         assert canonical_json_bytes(RewardEligibilityRuntime.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize("change", ["code", "source", "schema"])
+def test_runtime483_trust_selection_still_rejects_unselected_code_and_semantics(change):
+    data = json.loads(FIXTURE.with_name("runtime483-qualification.json").read_bytes())
+    value = profile().model_copy(
+        update={
+            "runtime_code_sha256": data["runtime_code_sha256"],
+            "epoch_source_revision": data["epoch_source_revision"],
+        }
+    )
+    assert not data["qualification"]["independent_reproducible_build_claimed"]
+    if change == "code":
+        value = value.model_copy(update={"runtime_code_sha256": "fe" * 32})
+    elif change == "source":
+        value = value.model_copy(update={"epoch_source_revision": profile().epoch_source_revision})
+    else:
+        value = value.model_copy(update={"schema_": "umi-reward-eligibility-runtime/1"})
+    with pytest.raises(ValueError):
+        parsed = RewardEligibilityRuntime.model_validate_json(canonical_json_bytes(value))
+        validate_qualified_reward_runtime(parsed)
 
 
 @pytest.mark.parametrize(
@@ -95,3 +122,31 @@ def test_nested_code_drift_retry_logs_safe_numeric_identity_only(caplog):
     assert "reward_eligibility_runtime_code_mismatch" in caplog.text
     assert "ee" * 32 in caplog.text and "aa" * 32 in caplog.text
     assert "never-log-this" not in caplog.text and "provider.invalid" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_drift_is_detected_at_native_head_before_history_replay(eligibility_case):
+    t = eligibility_case
+    source = object.__new__(NativeRewardCoverageSource)
+    source.provider = t.provider
+    source.history = SimpleNamespace(hotkey=t.hotkey)
+    source.profile = t.profile.model_copy(update={"runtime_code_sha256": "ff" * 32})
+    source.runtime_selection = None
+    # No history advance, journal, package or model is available. The native
+    # preflight must report the exact code drift without invoking any of them.
+    with pytest.raises(RewardRuntimeCodeMismatch) as caught:
+        await source.finalized_height()
+    assert caught.value.expected_runtime_code_sha256 == "ff" * 32
+    assert caught.value.observed_runtime_code_sha256 == t.profile.runtime_code_sha256
+
+    # A supported selected profile resolves the head without discarding any
+    # retained history. Native collection/proof validation still runs.
+    selected_blocks = []
+
+    def selected(block):
+        selected_blocks.append(block)
+        return t.profile, "ab" * 32
+
+    source.runtime_selection = SimpleNamespace(recheck=lambda: None, selected=selected)
+    height = await source.finalized_height()
+    assert selected_blocks == [height]

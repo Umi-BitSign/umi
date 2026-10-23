@@ -33,10 +33,16 @@ _ISSUER = object()
 _MAX_EVIDENCE_BYTES = 32 * 1024**2
 # Exact scoped predicate qualification, independently reviewed; this does not
 # claim build or contract-execution equivalence. Retained provenance and limits:
-# tests/fixtures/reward-eligibility/runtime{479,481}-qualification.json.
+# tests/fixtures/reward-eligibility/runtime{479,481,483}-qualification.json.
+# Runtime483 uses explicitly accepted upstream attribution, not an independent
+# reproducible build. Exact native code and per-root mode proofs still apply.
 # A signed transition still needs this gate and every endpoint's native proofs.
 _QUALIFIED_YUMA_RUNTIMES: frozenset[tuple[str, str]] = frozenset(
     {
+        (
+            "1016a0f8c23aa1cfb88a37c723fd0440bfe7b8141490b77ae793dfd7be7540eb",
+            "b335b5ef339ceb4366e5452d24c22978821c595f",
+        ),
         (
             "48225f3199bf317966d0214588bc45fb49c28c3e7bd510293bb4da7d6aea224b",
             "6a972693ae9580541225bd37696ac2fee26b8ae9",
@@ -53,7 +59,7 @@ class RewardEligibilityRuntime(StrictProtocolModel):
     """Selected code and reviewed pre-consensus semantics, never a code wildcard.
 
     /1 preserves historical c004 evidence exactly. /2 supports the reviewed
-    f4786f and 6a9726 Yuma paths only: each endpoint must also prove its epoch mode. The
+    reviewed Yuma paths only: each endpoint must also prove its epoch mode. The
     source revision alone cannot select that mutable subnet state.
     """
 
@@ -67,6 +73,7 @@ class RewardEligibilityRuntime(StrictProtocolModel):
         "c004cebf360f4088187ee49d851dfb1a1eaaf710",
         "f4786f9087cac84cfab37cbdf1e01c399042653a",
         "6a972693ae9580541225bd37696ac2fee26b8ae9",
+        "b335b5ef339ceb4366e5452d24c22978821c595f",
     ]
 
     @model_validator(mode="after")
@@ -75,6 +82,7 @@ class RewardEligibilityRuntime(StrictProtocolModel):
         yuma_sources = {
             "f4786f9087cac84cfab37cbdf1e01c399042653a",
             "6a972693ae9580541225bd37696ac2fee26b8ae9",
+            "b335b5ef339ceb4366e5452d24c22978821c595f",
         }
         supported = (
             self.epoch_source_revision == original
