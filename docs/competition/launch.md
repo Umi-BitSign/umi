@@ -101,6 +101,22 @@ orders without a manual setup-file copy. Missing declarations are restored from
 the retained cohort-baseline certificate; model payloads stay in R2. Existing
 immutable declarations are reused, and damaged declarations require repair.
 
+Execution owners retain private exact-input history and order verification under
+their existing execution journal's `authority-verification/` directory. The
+records bind policy, configured evaluator/authorities, verifier semantics and
+original signed inputs, and survive owner restart. Fresh finalized observations,
+the selected owner history and the journal's monotonic/conflict fences are still
+checked for each execution step. No miner reset or signed-history migration is
+required for this additive private working state.
+
+A natively verified closed request history is retained as a monotonic denial
+before collecting another registration snapshot. This does not advance finalized
+highwater, create an execution observation, complete an obligation or remove any
+endpoint response/retirement state. Existing endpoint retirement and evidence
+recovery remain separate consumers. `execution_history_phase` reports this
+substage with counted progress and a scoped ETA; native verification diagnostics
+distinguish first verification, retained results, reuse and required repairs.
+
 `GET /v1/competition/cohorts/{cohort_sha256}/progress` returns public diagnostics:
 current `phase`, `stage`, `completed`, `total`, `percent`, elapsed time,
 `eta_seconds`, its basis/scope, estimated UTC finish time in Unix milliseconds,

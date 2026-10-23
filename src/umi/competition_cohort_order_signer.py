@@ -34,9 +34,14 @@ from .competition_cohort_participation import (
     AttestedCohortParticipantAdmission,
     SignedCohortParticipationConsent,
 )
-from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_recovery import (
+    CohortRecoveryState,
+    CohortRecoveryTransition,
+    verify_recovery_quorum,
+)
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_round_journal import RecordReservation, RoundJournal
+from .competition_verification_reuse import verified_replay
 from .competition_work_progress import await_progress
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import (
@@ -103,24 +108,44 @@ def order_slot(order: RecoverableEvaluationOrder) -> str:
     )
 
 
-def review_order(
-    order: RecoverableEvaluationOrder,
-    participant: CohortOrderParticipant,
-    source: CohortOrderHistory,
-    policy: CompetitionPolicy,
-    block: int,
-) -> RecoverableEvaluationOrder:
-    source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
-    participant = CohortOrderParticipant.model_validate_json(canonical_json_bytes(participant))
-    history = source.history
-    view = verify_cohort_history(
-        history, policy, expected_tip_sha256=history_tip(history), current_block=block
+class OrderHistoryReview(StrictProtocolModel):
+    """Private immutable replay result; never current execution authority."""
+
+    state: CohortRecoveryState
+    preparation: CohortRecoveryTransition | None
+
+
+@verified_replay("execution_order_history", OrderHistoryReview)
+def verified_order_history(
+    order_history: CohortOrderHistory, policy: CompetitionPolicy
+) -> OrderHistoryReview:
+    history = order_history.history
+    observed = (
+        history.transitions[-1].transition.observed_at_block
+        if history.transitions
+        else history.genesis.admitted_at_block
     )
-    decisions = source.inputs()
-    state, _, _ = replay_cohort_decisions(history, policy, decisions.__getitem__)
-    if state != view.state or state.phase != "requests":
+    view = verify_cohort_history(
+        history, policy, expected_tip_sha256=history_tip(history), current_block=observed
+    )
+    state, _, _ = replay_cohort_decisions(history, policy, order_history.inputs().__getitem__)
+    if state != view.state:
+        raise ValueError("order history replay differs from its authenticated state")
+    return OrderHistoryReview(
+        state=state,
+        preparation=next((c for c in view.closed_phases if c.phase == "preparation"), None),
+    )
+
+
+@verified_replay("execution_order_body", RecoverableEvaluationOrder)
+def _review_order_body(order, participant, order_history, policy, reviewed):
+    # The public review below supplies its verified result. Carry it into this
+    # private receipt identity instead of replaying history a second time when
+    # a legacy caller has no durable verification scope selected.
+    preparation = reviewed.preparation
+    if reviewed.state.phase != "requests" or preparation is None:
         raise ValueError("new order signatures require an open request phase")
-    preparation = view.closure("preparation")
+    decisions = order_history.inputs()
     if decisions[preparation.evidence_sha256].progress.progress.phase_result_sha256 != digest(
         order.round
     ):
@@ -131,10 +156,27 @@ def review_order(
         participant.consent,
         participant.admission,
         participant.admission_snapshot,
-        history,
-        expected_tip_sha256=history_tip(history),
-        current_block=block,
+        order_history.history,
+        expected_tip_sha256=history_tip(order_history.history),
+        current_block=reviewed.state.observed_at_block,
     )
+
+
+def review_order(
+    order: RecoverableEvaluationOrder,
+    participant: CohortOrderParticipant,
+    source: CohortOrderHistory,
+    policy: CompetitionPolicy,
+    block: int,
+) -> RecoverableEvaluationOrder:
+    source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
+    participant = CohortOrderParticipant.model_validate_json(canonical_json_bytes(participant))
+    reviewed = verified_order_history(source, policy)
+    if type(block) is not int or not reviewed.state.observed_at_block <= block <= 2**53 - 1:
+        raise ValueError("recovery history is ahead of the owned finalized observation")
+    if reviewed.state.phase != "requests":
+        raise ValueError("new order signatures require an open request phase")
+    return _review_order_body(order, participant, source, policy, reviewed)
 
 
 _order_history_verification_reuse = AssignmentVerificationReuse()
@@ -160,14 +202,34 @@ def remember_order_history(
     proof_key = (digest(source), digest(policy))
     minimum_block = _order_history_verification_reuse.lookup(cohort, proof_key)
     if minimum_block is None:
-        view = verify_cohort_history(
-            history, policy, expected_tip_sha256=history_tip(history), current_block=block
-        )
-        replay_cohort_decisions(history, policy, source.inputs().__getitem__)
-        minimum_block = view.state.observed_at_block
+        minimum_block = verified_order_history(source, policy).state.observed_at_block
         _order_history_verification_reuse.remember(cohort, proof_key, minimum_block)
-    elif type(block) is not int or not minimum_block <= block <= 2**53 - 1:
+    if type(block) is not int or not minimum_block <= block <= 2**53 - 1:
         raise ValueError("recovery history is ahead of the owned finalized observation")
+    journal.observe(block)
+    _remember_order_history_head(journal, source)
+
+
+@canonical_json_reuse()
+def remember_closed_order_history(journal, cohorts, policy, source) -> bool:
+    """Retain a verified denial before spending fresh registration capacity.
+
+    This never creates an execution boundary or advances finalized highwater.
+    The same monotonic head prevents an older open history authorizing work.
+    Retained responses, selections and retirement records are left intact.
+    """
+    source = CohortOrderHistory.model_validate_json(canonical_json_bytes(source))
+    if cohorts.get(digest(source.history.plan)) != digest(source.history.authority.authority):
+        raise ValueError("order signer has no configured cohort authority")
+    if verified_order_history(source, policy).state.phase == "requests":
+        return False
+    _remember_order_history_head(journal, source)
+    return True
+
+
+def _remember_order_history_head(journal, source):
+    history = source.history
+    cohort, source_sha256 = digest(history.plan), digest(source)
 
     def index(db):
         row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
@@ -186,7 +248,6 @@ def remember_order_history(
             (cohort, digest(source)),
         )
 
-    journal.observe(block)
     # Reconfirm the exact current head from a fresh snapshot. Repeating an
     # already retained history must not acquire the writer or rescan capacity.
     # A changed head still takes the atomic monotonic update below, and signing
@@ -194,7 +255,7 @@ def remember_order_history(
     retained = False
     with journal.read_transaction() as db:
         row = db.execute("SELECT history FROM order_heads WHERE cohort=?", (cohort,)).fetchone()
-        if row == (proof_key[0],):
+        if row == (source_sha256,):
             raw = journal.get("order_history", row[0], db=db)
             if raw is None or canonical_json_bytes(raw) != canonical_json_bytes(source):
                 raise ValueError("retained order history changed or disappeared")
@@ -202,7 +263,7 @@ def remember_order_history(
     if retained:
         # Use the journal's existing exact-retry path for current reservation
         # checks, without replaying the index callback or its capacity scan.
-        journal.put("order_history", proof_key[0], source)
+        journal.put("order_history", source_sha256, source)
         return
     journal.put_many((("order_history", digest(source), source),), index=index)
 

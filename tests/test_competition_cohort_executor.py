@@ -455,6 +455,88 @@ async def test_closed_authority_stops_new_work_and_prevents_rollback(execution):
     assert len(e.calls) == 1
 
 
+async def test_static_authority_review_survives_new_heads_and_owner_restart(execution, monkeypatch):
+    from umi import competition_cohort_order_signer as native
+
+    e = execution
+    native_history = native.replay_cohort_decisions
+    native_body = native.verify_recoverable_order_body
+    calls = {"history": 0, "body": 0, "capture": 0}
+
+    def history(*args, **kwargs):
+        calls["history"] += 1
+        return native_history(*args, **kwargs)
+
+    def body(*args, **kwargs):
+        calls["body"] += 1
+        return native_body(*args, **kwargs)
+
+    executor = e.executor()
+    collect = executor.provider.collect
+
+    async def capture():
+        calls["capture"] += 1
+        return await collect()
+
+    monkeypatch.setattr(native, "replay_cohort_decisions", history)
+    monkeypatch.setattr(native, "verify_recoverable_order_body", body)
+    monkeypatch.setattr(executor.provider, "collect", capture)
+    await executor.current(e.assignment)
+    assert calls == {"history": 1, "body": 1, "capture": 1}
+    e.r.h.block += 1
+    await executor.current(e.assignment)
+    e.r.h.block += 1
+    await e.executor().current(e.assignment)
+    assert calls == {"history": 1, "body": 1, "capture": 3}
+    # Legacy callers without a selected durable owner still review the source
+    # only once within their operation.
+    native.review_order(
+        e.assignment.certificate.order,
+        e.assignment.participant,
+        e.r.h.source,
+        executor.journal.policy,
+        e.r.h.block,
+    )
+    assert calls == {"history": 2, "body": 2, "capture": 3}
+
+
+async def test_closed_history_is_a_durable_denial_without_fresh_registration(execution):
+    e = execution
+    await e.executor().advance(e.assignment)
+    old = e.r.h.source
+    prior = e.journal().step(e.job, 0)
+    with e.journal().journal.read_transaction() as db:
+        highwater = db.execute("SELECT block FROM highwater").fetchall()
+    e.r.h.source = source_for(e.r.h.batch, e.r.h.batch["history"])
+    e.r.h.fail_collect = True
+    for _ in range(2):
+        with pytest.raises(ValueError, match="open request phase"):
+            await e.executor().current(e.assignment)
+    assert e.journal().step(e.job, 0) == prior
+    assert e.journal().assignment(e.r.slot) == e.assignment
+    with e.journal().journal.read_transaction() as db:
+        assert db.execute("SELECT block FROM highwater").fetchall() == highwater
+    e.r.h.fail_collect = False
+    e.r.h.source = old
+    with pytest.raises(ValueError, match="rolled back"):
+        await e.executor().current(e.assignment)
+    assert len(e.calls) == 1
+
+
+async def test_cached_order_review_still_rejects_changed_participant(execution):
+    e = execution
+    executor = e.executor()
+    await executor.current(e.assignment)
+    participant = e.assignment.participant
+    snapshot = participant.admission_snapshot.model_copy(update={"block": 0})
+    changed = e.assignment.model_copy(
+        update={"participant": participant.model_copy(update={"admission_snapshot": snapshot})}
+    )
+    with pytest.raises(ValueError):
+        await executor.current(changed)
+    assert not e.calls
+
+
 async def test_regressed_finality_holds_pending_result(execution):
     e = execution
 
@@ -715,6 +797,7 @@ async def test_execution_stages_report_current_cohort_and_preserve_native_result
     assert result["retry_count"] == 0 and len(e.calls) == 1
     expected = {
         "execution_owner_history",
+        "execution_history_phase",
         "execution_registration_capture",
         "execution_history_review",
         "execution_order_review",
