@@ -27,7 +27,12 @@ from .test_open_competition import wallet
 
 def copy_originals(origin, target):
     for path in origin.rglob("*.json"):
-        destination = target / path.relative_to(origin)
+        relative = path.relative_to(origin)
+        # Local byte-verification receipts bind the producer's inode. Only
+        # immutable protocol exports cross an independent owner boundary.
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        destination = target / relative
         ensure_private_directory(destination.parent)
         if destination.exists():
             assert destination.read_bytes() == path.read_bytes()

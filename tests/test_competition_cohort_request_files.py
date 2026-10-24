@@ -1084,9 +1084,14 @@ async def test_partial_restart_reuses_verification_until_an_original_changes(
     monkeypatch.setattr(module, "review_partial_request", observed)
     assert await worker._export(owner, slot, h.block) is False
     assert calls == []
-    h.files.objects._path(manifest.steps[0].sha256).unlink()
+    missing = h.files.objects._path(manifest.steps[0].sha256)
+    original_bytes = missing.read_bytes()
+    missing.unlink()
     assert await worker._export(owner, slot, h.block) is False
-    assert calls == [key]
+    # The original native source and verdict did not change. Repairing its
+    # delivered copy must not repeat the completed semantic/proof review.
+    assert calls == []
+    assert missing.read_bytes() == original_bytes
     assert review_partial(h, worker.files, key, assignment) == assignment
 
 
