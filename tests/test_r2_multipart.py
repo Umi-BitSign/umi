@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 from datetime import datetime, timezone
 
@@ -8,6 +9,7 @@ import pytest
 
 from umi import r2_multipart as module
 from umi.competition_cohort_direct_model_upload import DirectModelUploadPart
+from umi.competition_transport_verification import TransferProgress
 from umi.r2_multipart import R2MultipartClient
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
@@ -21,6 +23,66 @@ def signer():
         bucket="umi-model-artifacts",
         credentials=R2Credentials("0123456789ABCDEF", "secret-access-key-value"),
     )
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_range_reports_partial_response_without_completing_parent(cancel):
+    entered, release = asyncio.Event(), asyncio.Event()
+    closed, requests, events = [], [], []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"ab"
+            entered.set()
+            await release.wait()
+            yield b"cd"
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def send(request):
+        requests.append(request)
+        return httpx.Response(
+            206, headers={"Content-Range": "bytes 0-3/4"}, stream=Stream()
+        )
+
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with TransferProgress("materialize", 4, events.append) as parent:
+        task = asyncio.create_task(client.read_range(KEY, offset=0, size_bytes=4, at=AT))
+        await entered.wait()
+        assert parent.completed == 0
+        assert parent.child["stage"] == "r2_response_read"
+        assert parent.child["completed_units"] == 2
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert parent.child["status"] == "retrying"
+        else:
+            release.set()
+            assert await task == b"abcd"
+            assert parent.child["status"] == "completed"
+        assert parent.completed == 0
+    assert len(requests) == len(closed) == 1
+    assert events[-1]["status"] == "retrying"
+
+
+async def test_response_diagnostics_cannot_fail_a_valid_read(monkeypatch):
+    from umi import competition_transport_verification as progress
+
+    client = R2MultipartClient(
+        signer(),
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, content=b"abcd")
+        ),
+    )
+    with TransferProgress("materialize", 4) as parent:
+        def unavailable(_):
+            raise RuntimeError("diagnostic thread unavailable")
+
+        monkeypatch.setattr(progress.Thread, "start", unavailable)
+        assert await client.read_range(KEY, offset=0, size_bytes=4, at=AT) == b"abcd"
+        assert progress._CURRENT.get() is parent
 
 
 @pytest.mark.asyncio

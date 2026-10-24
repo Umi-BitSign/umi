@@ -168,7 +168,7 @@ async def test_two_pairs_share_reference_and_keep_ready_reads_off_the_transfer_l
     assert not s.helper.pairs and s.admission.active == 0
 
 
-async def test_cancelling_pairs_releases_readers_and_expanded_slots(cache):
+async def test_cancelling_pairs_releases_readers_and_keeps_bounded_restart_work(cache):
     s, entered, release = cache, asyncio.Queue(), asyncio.Event()
 
     async def pair(name):
@@ -189,7 +189,12 @@ async def test_cancelling_pairs_releases_readers_and_expanded_slots(cache):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     assert not s.helper.pairs and not any(s.helper.readers.values()) and s.admission.active == 0
-    assert not (s.port.cache / "slot-0002").exists()
+    assert (s.port.cache / "slot-0002").is_dir()
+    before = list(s.calls)
+    s.port.slot_identities.clear()
+    restarted = ParallelModelCache(s.port, s.admission, 2)
+    async with restarted.scope(Job(name="a")), restarted.scope(Job(name="b")):
+        assert s.calls == before
 
 
 async def test_restart_reuses_original_slots_without_reloading_payload(cache):

@@ -323,14 +323,69 @@ def test_operation_tail_prevents_zero_eta_after_last_large_payload(monkeypatch):
     with transport.TransferProgress("bytes", 1000, events.append, total_operations=10) as progress:
         now[0] += 10
         progress.advance(1000)
+        now[0] += 2
         progress.advance_operations(2)
         progress.emit("running")
-        assert events[-1]["eta_seconds"] == 40
-        assert events[-1]["operation_eta_seconds"] == 40
+        assert events[-1]["eta_seconds"] == 8
+        assert events[-1]["operation_eta_seconds"] == 8
         now[0] += 10
         progress.advance_operations(8)
     assert events[-1]["status"] == "completed"
     assert events[-1]["eta_seconds"] == 0
+
+
+def test_bulk_weight_transfer_is_not_a_per_metadata_file_cost(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    p = transport.TransferProgress("materialize", 1000, events.append, total_operations=401)
+    now[0] += 1000
+    p.advance(900)
+    now[0] += 1
+    p.advance_operations(1)
+    p.emit("running")
+    event = events[-1]
+    assert event["native_byte_seconds"] == 1000
+    assert event["native_operation_seconds"] == 1
+    assert event["operation_eta_seconds"] == 400
+    assert event["eta_seconds"] == pytest.approx(100 / 0.9 + 400)
+    assert event["eta_basis"] == "separate_native_byte_time_and_operation_overhead"
+    # Tiny metadata operations measure their own cost, never the preceding
+    # thousand-second weight transfer. No byte or completion count is invented.
+    now[0] += 0.2
+    p.advance(20)
+    now[0] += 0.1
+    p.advance_operations(100)
+    p.emit("running")
+    assert events[-1]["operation_eta_seconds"] == pytest.approx(300 * 1.1 / 101)
+    assert events[-1]["completed_units"] == 920
+    assert events[-1]["completed_operations"] == 101
+
+
+def test_started_heartbeats_with_no_work_withdraw_forecast(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    p = transport.TransferProgress("read", 1000, events.append)
+    p.emit("started")
+    now[0] += 61
+    p.emit("started")
+    assert events[-1]["status"] == "stalled"
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["planning_eta_seconds"] is None
+
+
+def test_reset_discards_previous_byte_and_operation_rates(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    p = transport.TransferProgress("read", 1000, total_operations=10)
+    now[0] += 100
+    p.advance(500)
+    now[0] += 5
+    p.advance_operations(3)
+    p.set_completed(0)
+    assert p.byte_seconds == p.operation_seconds == 0
+    assert p.completed_operations == p.native_operations == 0
 
 
 def test_restored_operations_do_not_inflate_rate_and_incomplete_exit_retries(monkeypatch):

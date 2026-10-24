@@ -95,6 +95,7 @@ class ParallelModelCache:
         if any(budget.model_bytes(p.bundle) > budget.maximum_bytes for p in plans.values() if p):
             raise OSError("selected model exceeds the bounded boot cache")
         key = digest(job)
+        completed = False
         async with self.admission.hold(job.runtime, exclusive=exclusive):
             with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
                 async with self.condition:
@@ -125,6 +126,7 @@ class ParallelModelCache:
                         for path, plan in selected:
                             await self._load(path, plan)
                 yield True
+                completed = True
             finally:
 
                 async def release():
@@ -137,10 +139,15 @@ class ParallelModelCache:
                                 not self.readers[path]
                                 and not self.pins[self.assigned.get(path)]
                                 and path.name.startswith("slot-")
+                                and completed
+                                and plans["candidate"] is not None
+                                and self.assigned.get(path) == plans["candidate"].identity
                             ):
                                 # Keep the original two bounded slots warm,
                                 # including the shared reference. Expanded idle
-                                # slots are disposable after their last reader.
+                                # candidate slots are disposable after a finished
+                                # job's last reader. Unfinished jobs survive an
+                                # updater restart within the same bounded cache.
                                 # A busy accounting owner defers this eviction.
                                 with suppress(PrivateStateBusyError):
                                     await self._evict(path)
