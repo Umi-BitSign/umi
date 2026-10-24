@@ -28,6 +28,20 @@ from .protocol import canonical_json_bytes
 _Facts = RootModel[dict[str, JsonValue]]
 _MAX_BYTES = 16 * 1024**2
 _SCHEMA = "umi-private-execution-progress/1"
+_COUNTS = (
+    "completed",
+    "total",
+    "exported_executions",
+    "exported_comparisons",
+    "delivered_orders",
+    "delivered_order_executions",
+    "projected_executions",
+    "projection_basis",
+)
+
+
+class _PendingExport(Exception):
+    """A new delivered reference precedes its not-yet-delivered object."""
 
 
 def _hex(value):
@@ -52,6 +66,12 @@ class ExecutionExportProgress:
         self.started = time.monotonic()
         self.rate_origin = None
         self.rate_epoch = None
+        try:
+            self.clock_identity = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except OSError:
+            self.clock_identity = None
+        self.saved = None
+        self.last_snapshot = {}
         self.required_producers = set()
         self.forecast = None
         self.forecast_epoch = None
@@ -112,7 +132,40 @@ class ExecutionExportProgress:
         return value
 
     def _object(self, key, kind):
-        return self._fact("objects/" + _hex(key) + ".json", kind)
+        relative = "objects/" + _hex(key) + ".json"
+        try:
+            return self._fact(relative, kind)
+        except FileNotFoundError:
+            if kind + ":" + relative in self.facts:
+                raise  # Disappearance of an already checked original is repair.
+            raise _PendingExport from None
+
+    def _persist(self):
+        origin = None
+        if self.rate_origin is not None and self.rate_epoch is not None and self.clock_identity:
+            origin = dict(
+                epoch=self.rate_epoch,
+                clock=self.clock_identity,
+                monotonic_ms=round(self.rate_origin[0] * 1000),
+                completed=self.rate_origin[1],
+            )
+        saved = dict(
+            schema=_SCHEMA,
+            round=self.round,
+            facts=self.facts,
+            last_snapshot=self.last_snapshot,
+            rate_origin=origin,
+        )
+        if saved != self.saved:
+            ensure_private_directory(self.checkpoint.parent)
+            private_path(str(self.checkpoint))
+            raw = canonical_json_bytes(_Facts(saved))
+            if len(raw) > _MAX_BYTES:
+                raise ValueError("execution progress checkpoint exceeds its byte budget")
+            atomic_write(self.checkpoint, raw, immutable=False)
+            self.saved = {**saved, "facts": dict(self.facts)}
+        if not self.initialized.exists():
+            publish_private_model(self.initialized, _Facts(dict(schema=_SCHEMA, round=self.round)))
 
     def _latest_partial(self, submission, evaluator):
         directory = self.root / "partials" / self.round / submission / evaluator
@@ -247,26 +300,63 @@ class ExecutionExportProgress:
                     or not isinstance(saved["facts"], dict)
                 ):
                     raise ValueError("execution progress checkpoint binding is invalid")
-                self.facts, self.loaded = saved["facts"], True
+                self.facts = saved["facts"]
+                self.saved = {**saved, "facts": dict(saved["facts"])}
+                self.last_snapshot = saved.get("last_snapshot", {})
+                if (
+                    not isinstance(self.last_snapshot, dict)
+                    or set(self.last_snapshot) - set(_COUNTS)
+                    or any(
+                        v is not None and (type(v) is not int or v < 0)
+                        for k, v in self.last_snapshot.items()
+                        if k != "projection_basis"
+                    )
+                ):
+                    raise ValueError("execution progress retained counts are invalid")
+                origin = saved.get("rate_origin")
+                if origin is not None:
+                    _hex(origin["epoch"])
+                    if (
+                        type(origin["monotonic_ms"]) is not int
+                        or origin["monotonic_ms"] < 0
+                        or type(origin["completed"]) is not int
+                        or origin["completed"] < 0
+                    ):
+                        raise ValueError("execution progress rate origin is invalid")
+                    if (
+                        origin["clock"] == self.clock_identity
+                        and origin["monotonic_ms"] <= now * 1000
+                    ):
+                        self.rate_epoch = origin["epoch"]
+                        self.rate_origin = (origin["monotonic_ms"] / 1000, origin["completed"])
+                self.loaded = True
             elif self.initialized.exists() and not self.checkpoint.exists():
                 raise ValueError("initialized execution progress checkpoint is missing")
-            previous = dict(self.facts)
             report.update(self._sample())
-            if self.facts != previous or not self.checkpoint.exists():
-                ensure_private_directory(self.checkpoint.parent)
-                private_path(str(self.checkpoint))
-                raw = canonical_json_bytes(
-                    _Facts(dict(schema=_SCHEMA, round=self.round, facts=self.facts))
+            self.last_snapshot = {key: report[key] for key in _COUNTS if key in report}
+        except _PendingExport:
+            # Keep the confirmed floor and its unchanged producer rate origin.
+            # Neither a newly arrived reference nor an absent new object erases
+            # previous completions. Persist individually accepted metadata too.
+            report.update(self.last_snapshot)
+            if report["completed"] is not None and report["total"]:
+                report["percent"] = round(100 * report["completed"] / report["total"], 3)
+            report.update(
+                status="pending",
+                stalled_or_retrying=True,
+                eta_basis="awaiting_new_execution_export_object_delivery",
+            )
+            try:
+                self._persist()
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                report.update(
+                    status="repair_required",
+                    repair_required=True,
+                    eta_basis="execution_export_metadata_requires_repair",
+                    error_type=type(error).__name__,
                 )
-                if len(raw) > _MAX_BYTES:
-                    raise ValueError("execution progress checkpoint exceeds its byte budget")
-                atomic_write(self.checkpoint, raw, immutable=False)
-            if not self.initialized.exists():
-                publish_private_model(
-                    self.initialized, _Facts(dict(schema=_SCHEMA, round=self.round))
-                )
+            return report
         except (OSError, ValueError, KeyError, TypeError) as error:
-            self.rate_origin = None
             report.update(
                 status="repair_required",
                 repair_required=True,
@@ -277,22 +367,28 @@ class ExecutionExportProgress:
             return report
         epochs = producer_epochs or {}
         known = bool(self.required_producers) and all(
-            e in epochs and isinstance(epochs[e], str)
+            e in epochs
+            and isinstance(epochs[e], str)
             and re.fullmatch(r"[0-9a-f]{64}", epochs[e]) is not None
             for e in self.required_producers
         )
         epoch = digest(sorted((e, epochs[e]) for e in self.required_producers)) if known else None
-        if epoch != self.rate_epoch or not known:
+        if known and epoch != self.rate_epoch:
             self.rate_origin = None
-        self.rate_epoch = epoch
+        if known:
+            self.rate_epoch = epoch
         report["rate_epoch_sha256"] = epoch
         report["rate_producers"] = len(self.required_producers)
         if not known:
             report["eta_basis"] = "awaiting_current_execution_producer_epochs"
         if self.rate_origin is None and known:
             self.rate_origin = (now, report["completed"])
-        elapsed = 0 if self.rate_origin is None else now - self.rate_origin[0]
-        new = 0 if self.rate_origin is None else report["completed"] - self.rate_origin[1]
+        elapsed = 0 if self.rate_origin is None or not known else now - self.rate_origin[0]
+        new = (
+            0
+            if self.rate_origin is None or not known
+            else report["completed"] - self.rate_origin[1]
+        )
         if new < 0:
             self.rate_origin = (now, report["completed"])
             elapsed = new = 0
@@ -306,7 +402,7 @@ class ExecutionExportProgress:
             report.update(
                 status="completed", eta_seconds=0, eta_basis="all_selected_model_terminals_exported"
             )
-        elif new >= 3 and elapsed >= 300:
+        elif known and new >= 3 and elapsed >= 300:
             report.update(
                 eta_seconds=round((report["total"] - report["completed"]) * elapsed / new, 3),
                 eta_basis="observed_completed_assignment_rate_current_producer_epoch",
@@ -322,5 +418,16 @@ class ExecutionExportProgress:
                 eta_seconds=None,
                 eta_basis="no_new_export_progress_for_15_minutes",
                 stalled_or_retrying=True,
+            )
+        try:
+            self._persist()
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            report.update(
+                status="repair_required",
+                repair_required=True,
+                stalled_or_retrying=True,
+                eta_seconds=None,
+                eta_basis="execution_export_metadata_requires_repair",
+                error_type=type(error).__name__,
             )
         return report

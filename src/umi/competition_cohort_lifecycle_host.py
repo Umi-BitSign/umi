@@ -563,13 +563,23 @@ class LifecycleHost:
                     ):
                         try:
                             epoch = result.get("rate_epoch_sha256")
-                            if meter.forecast is not None and epoch != meter.forecast_epoch:
-                                meter.forecast.observe(dict(
-                                    result, state="interrupted", eta_seconds=None,
-                                    eta_basis="execution_producer_epoch_changed_or_unavailable",
-                                    observed_unix_ms=time.time_ns() // 1_000_000,
-                                    eta_samples=0, eta_ignored_fast_samples=0, eta_assumption="",
-                                ))
+                            if (
+                                meter.forecast is not None
+                                and epoch is not None
+                                and epoch != meter.forecast_epoch
+                            ):
+                                meter.forecast.observe(
+                                    dict(
+                                        result,
+                                        state="interrupted",
+                                        eta_seconds=None,
+                                        eta_basis="execution_producer_epoch_changed_or_unavailable",
+                                        observed_unix_ms=time.time_ns() // 1_000_000,
+                                        eta_samples=0,
+                                        eta_ignored_fast_samples=0,
+                                        eta_assumption="",
+                                    )
+                                )
                                 meter.forecast = None
                             if meter.forecast is None:
                                 meter.forecast = ForecastAttempt(
@@ -595,7 +605,9 @@ class LifecycleHost:
                                     eta_ignored_fast_samples=0,
                                     eta_assumption="; ".join(result.get("eta_assumptions", [])),
                                     forecast_rate_semantics="completed_exports_current_producer_epoch/1",
-                                    forecast_rate_epoch_sha256=epoch,
+                                    forecast_rate_epoch_sha256=epoch
+                                    if epoch is not None
+                                    else meter.forecast_epoch,
                                 )
                             )
                             if result["repair_required"]:

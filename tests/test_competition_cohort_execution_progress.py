@@ -1,6 +1,7 @@
 """Actual private export layouts, restart reuse and advisory counting boundaries."""
 
 import asyncio
+import json
 from contextlib import closing
 from types import SimpleNamespace as NS
 
@@ -144,6 +145,26 @@ def test_restart_reuses_unchanged_export_facts_without_payload_reads(exported, m
     assert restarted.read_bytes == 0
 
 
+def test_legacy_checkpoint_without_rate_fields_keeps_its_completed_checks(exported, monkeypatch):
+    h = exported
+    h.order()
+    h.partial([0, 1])
+    meter = ExecutionExportProgress(h.root, h.roster)
+    meter.sample()
+    saved = json.loads(meter.checkpoint.read_bytes())
+    saved.pop("last_snapshot")
+    saved.pop("rate_origin")
+    meter.checkpoint.write_bytes(module.canonical_json_bytes(module._Facts(saved)))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("legacy completed metadata was rechecked")
+
+    monkeypatch.setattr(module, "_read_private_bytes", forbidden)
+    restarted = ExecutionExportProgress(h.root, h.roster)
+    assert restarted.sample()["exported_executions"] == 2
+    assert restarted.read_bytes == 0
+
+
 def test_changed_latest_partial_only_reads_changed_metadata(exported):
     h = exported
     h.order()
@@ -191,6 +212,7 @@ def test_corrupt_or_missing_metadata_is_visible_and_never_completed(exported, da
     else:
         archive = h.obj(dict(steps=["99" * 32] * 6))
         h.terminal(key)
+        assert meter.sample()["completed"] == 1
         (h.root / "objects" / (archive + ".json")).unlink()
     result = meter.sample()
     assert result["repair_required"] and result["stalled_or_retrying"]
@@ -212,6 +234,89 @@ def test_missing_initialized_checkpoint_is_repair_on_restart(exported):
     meter.sample()
     meter.checkpoint.unlink()
     assert ExecutionExportProgress(exported.root, exported.roster).sample()["repair_required"]
+
+
+def test_invalid_retained_origin_remains_repair_without_resampling(exported, monkeypatch):
+    meter = ExecutionExportProgress(exported.root, exported.roster)
+    meter.sample()
+    saved = json.loads(meter.checkpoint.read_bytes())
+    saved["rate_origin"] = dict(epoch="11" * 32, monotonic_ms="invalid", completed=0, clock="boot")
+    meter.checkpoint.write_bytes(module.canonical_json_bytes(module._Facts(saved)))
+    restarted = ExecutionExportProgress(exported.root, exported.roster)
+
+    def forbidden():
+        raise AssertionError("damaged retained origin must not silently reset and resample")
+
+    monkeypatch.setattr(restarted, "_sample", forbidden)
+    assert restarted.sample()["repair_required"]
+    assert restarted.sample()["repair_required"]
+
+
+def test_late_new_object_preserves_confirmed_floor_and_rate_origin(exported, monkeypatch):
+    h = exported
+    clock = [1000]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    h.order()
+    h.partial([0, 1])
+    meter = ExecutionExportProgress(h.root, h.roster)
+    meter.sample()
+    epochs = {identity(E1): "11" * 32}
+    meter.sample(producer_epochs=epochs)
+    origin = meter.rate_origin
+    key = h.partial([0, 1, 2, 3], number=2)
+    path = h.root / "objects" / (key + ".json")
+    held = h.root.parent / "not-yet-delivered"
+    path.rename(held)
+    clock[0] += 30
+    pending = meter.sample(producer_epochs=epochs)
+    assert pending["status"] == "pending" and not pending["repair_required"]
+    assert pending["exported_executions"] == 2
+    assert pending["eta_seconds"] is None and meter.rate_origin == origin
+    # A sampler restart reuses all accepted reference metadata, even while the
+    # new object's delivery is pending; no completed originals are reread.
+    restarted = ExecutionExportProgress(h.root, h.roster)
+    original_read = module._read_private_bytes
+
+    def new_object_only(path, **kwargs):
+        assert path.name == key + ".json"
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(module, "_read_private_bytes", new_object_only)
+    assert restarted.sample(producer_epochs=epochs)["exported_executions"] == 2
+    held.rename(path)
+    clock[0] += 30
+    after = restarted.sample(producer_epochs=epochs)
+    assert after["exported_executions"] == 4 and restarted.rate_origin == origin
+    assert after["rate_sample_seconds"] == 60
+
+
+def test_same_producer_rate_survives_sampler_restart_and_temporary_probe_gap(exported, monkeypatch):
+    clock = [1000]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    count = [0]
+    epochs = {identity(E1): "11" * 32}
+
+    def counts():
+        return dict(completed=count[0], total=5, exported_executions=count[0] * 12)
+
+    meter = ExecutionExportProgress(exported.root, exported.roster)
+    meter.required_producers = {identity(E1)}
+    monkeypatch.setattr(meter, "_sample", counts)
+    meter.sample(producer_epochs=epochs)
+    clock[0], count[0] = 1300, 3
+    assert meter.sample(producer_epochs=epochs)["eta_seconds"] == 200
+    restarted = ExecutionExportProgress(exported.root, exported.roster)
+    restarted.required_producers = {identity(E1)}
+    monkeypatch.setattr(restarted, "_sample", counts)
+    clock[0] = 1330
+    assert restarted.sample()["eta_seconds"] is None
+    clock[0] = 1360
+    continued = restarted.sample(producer_epochs=epochs)
+    assert continued["rate_completed_models"] == 3 and continued["rate_sample_seconds"] == 360
+    assert continued["eta_seconds"] == 240
+    clock[0] = 1390
+    changed = restarted.sample(producer_epochs={identity(E1): "22" * 32})
+    assert changed["eta_seconds"] is None and changed["rate_completed_models"] == 0
 
 
 def test_rate_scope_stall_and_restart_do_not_reuse_a_previous_process_forecast(
@@ -240,16 +345,20 @@ def test_rate_scope_stall_and_restart_do_not_reuse_a_previous_process_forecast(
     assert restarted.sample()["eta_seconds"] is None
 
 
-def test_producer_rollout_or_missing_epoch_resets_rate_without_resetting_work(
-    exported, monkeypatch
-):
+def test_producer_rollout_resets_rate_and_probe_gap_preserves_its_origin(exported, monkeypatch):
     clock, count = [0], [0]
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
     meter = ExecutionExportProgress(exported.root, exported.roster)
     meter.required_producers = {identity(E1)}
-    monkeypatch.setattr(meter, "_sample", lambda: dict(
-        completed=count[0], total=10, exported_executions=12 * count[0],
-    ))
+    monkeypatch.setattr(
+        meter,
+        "_sample",
+        lambda: dict(
+            completed=count[0],
+            total=10,
+            exported_executions=12 * count[0],
+        ),
+    )
     a, b = {identity(E1): "11" * 32}, {identity(E1): "22" * 32}
     meter.sample(producer_epochs=a)
     clock[0], count[0] = 300, 3
@@ -266,7 +375,7 @@ def test_producer_rollout_or_missing_epoch_resets_rate_without_resetting_work(
     missing = meter.sample(producer_epochs={})
     assert missing["completed"] == 8 and missing["rate_epoch_sha256"] is None
     assert missing["eta_basis"] == "awaiting_current_execution_producer_epochs"
-    assert meter.sample(producer_epochs=b)["rate_completed_models"] == 0
+    assert meter.sample(producer_epochs=b)["rate_completed_models"] == 4
     assert not meter.sample(producer_epochs=b)["repair_required"]
 
 
@@ -296,7 +405,7 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
     producer = ["11" * 32]
 
     async def epochs(_):
-        return {identity(E1): producer[0]}
+        return {identity(E1): producer[0]} if producer[0] else {}
 
     with closing(ForecastLedger(h.root / "forecast-accounting")) as ledger:
         cohort = h.roster.round.cohort_sha256
@@ -324,6 +433,20 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
         try:
             first = await wait_for_count(1)
             assert first["total"] == 2
+            meter = host.execution_progress[cohort]
+            first_forecast = meter.forecast
+            producer[0] = None
+            for _ in range(100):
+                uncertain = snapshots.snapshot(cohort)["components"]["execution"]
+                if uncertain.get("rate_epoch_sha256") is None:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("producer probe gap was not observed")
+            assert meter.forecast is first_forecast
+            assert not [
+                r for r in ledger.records(first_forecast.scope) if r["kind"] == "attempt_terminal"
+            ]
             producer[0] = "22" * 32
             for _ in range(100):
                 changed = snapshots.snapshot(cohort)["components"]["execution"]
