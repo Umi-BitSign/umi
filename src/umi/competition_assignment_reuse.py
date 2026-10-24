@@ -44,6 +44,22 @@ def assignment_reuse_key(journal, slot, records, config, policy, cohorts):
 class AssignmentVerificationReuse:
     """Keep private copies; changed inputs, process or materialization miss."""
 
+    @classmethod
+    def for_execution(cls, purpose):
+        """Explicit host operating budgets; defaults preserve older installations."""
+        if purpose not in {"execution_retained", "execution_supplied"}:
+            raise ValueError("execution cache budget requires an execution purpose")
+        selected = []
+        for name, default, ceiling in (
+            ("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", 64 * 1024**2, 512 * 1024**2),
+            ("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", 256, 16384),
+        ):
+            raw = os.environ.get(name, str(default))
+            if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= ceiling:
+                raise ValueError("invalid execution assignment reuse operating budget: " + name)
+            selected.append(int(raw))
+        return cls(*selected, purpose=purpose)
+
     def __init__(
         self, maximum_bytes: int = 64 * 1024**2, maximum_entries: int = 256, *, purpose="assignment"
     ):
@@ -71,7 +87,11 @@ class AssignmentVerificationReuse:
                         pid=os.getpid(),
                         purpose=self.purpose,
                         stage="assignment_reuse_capacity",
-                        status="capacity_required" if self._counts["oversized"] else "current",
+                        status="capacity_required"
+                        if self._counts["oversized"]
+                        else "capacity_pressure"
+                        if self._counts["evictions"]
+                        else "current",
                         **self._counts,
                         retained_bytes=self._bytes,
                         maximum_bytes=self.maximum_bytes,

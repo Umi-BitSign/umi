@@ -335,6 +335,14 @@ and execution permission are never borrowed from this reuse. The
 verification and local-owner waiting separately. Bounded assignment reuse also
 reports hit, miss, eviction and oversize counts, retained bytes and configured
 capacity; a capacity bypass is visible instead of silently hiding repeated work.
+For a host whose complete queue exceeds the execution caches, explicitly select
+`UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES` and `UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES`
+in the reviewer service environment. These bound each of its two execution
+caches; defaults remain 64 MiB and 256 entries. The byte override permits at most 512 MiB,
+and the entry override at most 16384. Choose them from measured queue size and
+available memory, allowing for Python object/copy overhead, all reviewers,
+concurrent model ceilings and the host reserve. They change no journal binding,
+admission limit or proof semantics. Other caches retain their selected budgets.
 
 An exact single-record retention retry also uses that read-only snapshot: the
 same canonical bytes must already be committed and satisfy their reservation.

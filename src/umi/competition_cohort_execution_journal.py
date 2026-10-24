@@ -155,8 +155,10 @@ class CohortExecutionJournal:
         if identity(self.config.signer) not in {identity(e.hotkey) for e in self.policy.evaluators}:
             raise ValueError("execution journal evaluator is not in its policy")
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
-        self._assignment_reuse = AssignmentVerificationReuse(purpose="execution_retained")
-        self._supplied_assignment_reuse = AssignmentVerificationReuse(purpose="execution_supplied")
+        self._assignment_reuse = AssignmentVerificationReuse.for_execution("execution_retained")
+        self._supplied_assignment_reuse = AssignmentVerificationReuse.for_execution(
+            "execution_supplied"
+        )
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
