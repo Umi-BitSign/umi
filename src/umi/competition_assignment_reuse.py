@@ -76,7 +76,9 @@ class AssignmentVerificationReuse:
         self._entries = OrderedDict()
         self._bytes = 0
         self._owners = WeakValueDictionary()
-        self._counts = dict(lookups=0, hits=0, misses=0, evictions=0, oversized=0, waits=0)
+        self._counts = dict(
+            lookups=0, hits=0, misses=0, evictions=0, oversized=0, waits=0, projections=0
+        )
 
     def _diagnostic(self):
         with suppress(Exception):
@@ -104,6 +106,22 @@ class AssignmentVerificationReuse:
             )
 
     def resolve(self, slot, key, calculate):
+        """One first verification per exact retained input, with a private result."""
+        return deepcopy(self._resolve_private(slot, key, calculate))
+
+    def _project(self, slot, key, calculate, project):
+        """Run a trusted read-only projection, copying only its returned value.
+
+        This is for owned internal consumers, never a caller-supplied callback.
+        The retained graph stays private; even a projection returning a nested
+        mutable model receives a defensive copy. Fresh journal/conflict reads
+        remain the caller's responsibility before entering this cache.
+        """
+        with self._lock:
+            self._counts["projections"] += 1
+        return deepcopy(project(self._resolve_private(slot, key, calculate)))
+
+    def _resolve_private(self, slot, key, calculate):
         """One first verification per exact retained input, outside journal locks."""
         from .competition_transport_verification import TransferProgress
 
@@ -123,7 +141,7 @@ class AssignmentVerificationReuse:
                 gate.acquire()
                 progress.advance(1)
         try:
-            cached = self.lookup(slot, key)
+            cached = self._lookup_private(slot, key)
             if cached is not None:
                 return cached
             with TransferProgress(
@@ -140,6 +158,9 @@ class AssignmentVerificationReuse:
             gate.release()
 
     def lookup(self, slot, key):
+        return deepcopy(self._lookup_private(slot, key))
+
+    def _lookup_private(self, slot, key):
         if os.getpid() != self._pid:
             return None
         with self._lock:
@@ -160,9 +181,9 @@ class AssignmentVerificationReuse:
             if self._counts["lookups"] % 64 == 0:
                 self._diagnostic()
             private = entry[1]
-        # Private entries never mutate. Hold a reference across eviction, but
-        # don't serialize unrelated cache hits behind a potentially large copy.
-        return deepcopy(private)
+        # Only owned read-only projections see this graph. Public lookup and
+        # resolve still copy it, outside the cache mutex.
+        return private
 
     def remember(self, slot, key, value):
         if os.getpid() != self._pid:

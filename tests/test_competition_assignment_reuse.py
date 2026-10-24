@@ -448,3 +448,33 @@ def test_selected_execution_budget_reuses_a_complete_large_queue_rotation(monkey
     assert calls == list(range(330))
     assert reuse._counts["evictions"] == reuse._counts["oversized"] == 0
     assert reuse._counts["hits"] == 330
+
+
+def test_projection_copies_only_returned_values_and_keeps_public_isolation(monkeypatch, caplog):
+    from umi import competition_assignment_reuse as module
+
+    cache = AssignmentVerificationReuse()
+    original = {"large": [1, 2, 3]}
+    cache.remember("slot", "key", original)
+    copied = []
+    copy = module.deepcopy
+
+    def counted(value):
+        copied.append(value)
+        return copy(value)
+
+    monkeypatch.setattr(module, "deepcopy", counted)
+    assert cache._project("slot", "key", unexpected_replay, lambda value: len(value["large"])) == 3
+    assert copied == [3]
+    projected = cache._project("slot", "key", unexpected_replay, lambda value: value["large"])
+    projected.clear()
+    assert cache.lookup("slot", "key") == original
+    resolved = cache.resolve("slot", "key", unexpected_replay)
+    resolved["large"].clear()
+    assert cache.lookup("slot", "key") == original
+    assert cache._counts["projections"] == 2
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        cache._diagnostic()
+    progress = json.loads(caplog.records[-1].message)
+    assert progress["stage"] == "assignment_reuse_capacity"
+    assert progress["projections"] == 2 and progress["hits"] == 5
