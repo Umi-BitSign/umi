@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_execution_journal import CohortExecutionConfig, CohortExecutionJournal
 from .competition_cohort_executor import CohortExecutionWorker, CohortExecutor
@@ -33,6 +33,8 @@ from .competition_cohort_sandbox import CohortCpuSandbox, DirectCohortCpuSandbox
 from .competition_reward_boot import _disjoint
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task
+from .host_memory_runtime import HostMemoryAdmissionSelection
+from .host_model_execution import ModelExecutionAdmission
 from .open_competition import digest, identity
 from .private_files import Directory
 from .protocol import StrictProtocolModel, canonical_json_bytes
@@ -64,6 +66,14 @@ class BenchmarkHostConfig(StrictProtocolModel):
     concurrency: Annotated[int, Field(ge=1, le=32)] = 4
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     maximum_state_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)] = 1024**3
+    model_execution_admission: HostMemoryAdmissionSelection | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_config(self, handler):
+        value = handler(self)
+        if self.model_execution_admission is None:
+            value.pop("model_execution_admission", None)
+        return value
 
     def stores(self):
         return tuple(
@@ -134,6 +144,10 @@ class BenchmarkHost:
             videos=Path(c.videos_directory),
             workspace=Path(c.workspace_directory),
         )
+        if c.model_execution_admission is not None:
+            sandbox["execution_admission"] = ModelExecutionAdmission(
+                c.model_execution_admission, config.policy
+            )
         if direct_artifacts is not None and model_reviewer is None:
             raise ValueError("direct benchmark artifact review requires the review journal")
         if legacy_readers is not None and direct_artifacts is None:
@@ -184,6 +198,11 @@ class BenchmarkHost:
 
             self.sandbox = DirectCohortCpuSandbox(
                 **sandbox,
+                **(
+                    {"concurrency": c.concurrency}
+                    if c.model_execution_admission is not None
+                    else {}
+                ),
                 artifacts=direct_artifacts,
                 request=request,
                 legacy_artifacts=(

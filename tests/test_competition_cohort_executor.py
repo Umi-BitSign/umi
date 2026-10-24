@@ -537,6 +537,29 @@ async def test_cached_order_review_still_rejects_changed_participant(execution):
     assert not e.calls
 
 
+async def test_prepared_scope_never_materializes_an_invalid_assignment(execution):
+    e = execution
+    entered = []
+
+    @asynccontextmanager
+    async def scope(job):
+        entered.append(job)
+        yield True
+
+    e.port.execution_scope = scope
+    e.port.prepared_execution_scope = True
+    changed = e.assignment.model_copy(
+        update={
+            "certificate": e.assignment.certificate.model_copy(
+                update={"signatures": e.assignment.certificate.signatures[:1]}
+            )
+        }
+    )
+    with pytest.raises(ValueError):
+        await e.executor().advance_batch(changed)
+    assert not entered and not e.calls
+
+
 async def test_regressed_finality_holds_pending_result(execution):
     e = execution
 

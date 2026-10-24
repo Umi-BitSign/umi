@@ -15,7 +15,7 @@ from .competition_cohort_execution_journal import CohortExecutionAttempt, case_r
 from .competition_cohort_model_acceptance import ModelReviewRequest
 from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
 from .competition_execution import read_case_video
-from .competition_model_cache_space import BootDiskModelCache
+from .competition_model_cache_space import BootDiskModelCache, managed_model_slot
 from .competition_runner import (
     EvaluationInfrastructureError,
     OfflineCaseExecution,
@@ -30,8 +30,17 @@ from .private_files import ensure_private_directory, private_path
 
 
 class CohortCpuSandbox:
-    def __init__(self, policy: CompetitionPolicy, *, archive: Path, videos: Path, workspace: Path):
+    def __init__(
+        self,
+        policy: CompetitionPolicy,
+        *,
+        archive: Path,
+        videos: Path,
+        workspace: Path,
+        execution_admission=None,
+    ):
         self.policy, self.archive, self.videos, self.workspace = policy, archive, videos, workspace
+        self.execution_admission = execution_admission
         ensure_private_directory(workspace)
         for path in (archive, videos):
             private_path(str(path))
@@ -79,18 +88,24 @@ class CohortCpuSandbox:
             read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
         )
         path = self._path(attempt)
-        result = await execute_offline_case(
-            bundle=model,
-            archive=archive,
-            runtime=job.runtime,
-            policy=self.policy,
-            case_id=case.case_id,
-            video_sha256=case.video_sha256,
-            video=video,
-            invocation_sha256=digest(attempt),
-            workspace=path,
-        )
-        return result
+
+        async def execute():
+            return await execute_offline_case(
+                bundle=model,
+                archive=archive,
+                runtime=job.runtime,
+                policy=self.policy,
+                case_id=case.case_id,
+                video_sha256=case.video_sha256,
+                video=video,
+                invocation_sha256=digest(attempt),
+                workspace=path,
+            )
+
+        if self.execution_admission is None:
+            return await execute()
+        async with self.execution_admission.invocation(job.runtime):
+            return await execute()
 
 
 def _direct_model_cache_path(workspace: Path, boot) -> Path:
@@ -129,6 +144,8 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         artifacts: DirectModelArtifactReviewer,
         request: Callable[[RecoverableExecutionJob], ModelReviewRequest],
         legacy_artifacts=None,
+        execution_admission=None,
+        concurrency=1,
     ) -> None:
         boot = getattr(getattr(artifacts, "config", None), "materialization_boot_disk_cache", None)
         cache = _direct_model_cache_path(workspace, boot)
@@ -136,7 +153,13 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             # Create the selected private root before mkdir(parents=True) can
             # give an intermediate cache directory the process's ordinary umask.
             artifacts.verify_materialization_filesystem(Path(boot.directory))
-        super().__init__(policy, archive=archive, videos=videos, workspace=workspace)
+        super().__init__(
+            policy,
+            archive=archive,
+            videos=videos,
+            workspace=workspace,
+            execution_admission=execution_admission,
+        )
         if not callable(request):
             raise ValueError("direct model execution request source is not callable")
         self.artifacts, self.request = artifacts, request
@@ -152,6 +175,15 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         self.slot_clock = 0
         ensure_private_directory(self.cache)
         self.artifacts.verify_materialization_filesystem(self.cache)
+        self.parallel = None
+        if execution_admission is not None and boot is not None:
+            from .competition_cohort_parallel_cache import ParallelModelCache
+
+            self.parallel = ParallelModelCache(self, execution_admission, concurrency)
+
+    @property
+    def prepared_execution_scope(self):
+        return getattr(self, "parallel", None) is not None
 
     @asynccontextmanager
     async def execution_scope(self, order):
@@ -164,6 +196,14 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         enabled = self.boot is not None and order.submission.submission.track == "model"
         if not enabled:
             yield False
+            return
+        if getattr(self, "parallel", None) is not None:
+            token = PUBLIC_COHORT_SCOPE.set(order.round.cohort_sha256)
+            try:
+                async with self.parallel.scope(order) as active:
+                    yield active
+            finally:
+                PUBLIC_COHORT_SCOPE.reset(token)
             return
         token = PUBLIC_COHORT_SCOPE.set(order.round.cohort_sha256)
         try:
@@ -178,9 +218,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             PUBLIC_COHORT_SCOPE.reset(token)
 
     async def _evict_archive(self, archive, *, leased=False):
-        # These two fixed roots are the only disposable model slots. Capacity
+        # Only the fixed bounded managed roots are disposable model slots. Capacity
         # pressure must never remove another consumer's cache or owner state.
-        if archive not in (self.cache / "archive", self.cache / "standby"):
+        if not managed_model_slot(archive, self.cache):
             raise ValueError("unmanaged model cache slot")
         budget = (
             None
@@ -308,6 +348,46 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         self, job: RecoverableExecutionJob, attempt: CohortExecutionAttempt
     ) -> OfflineCaseExecution:
         _, role, bundle = case_role_model(job, attempt.step_index)
+        plan = (
+            self.parallel.plan(job, role)
+            if self.parallel is not None and self.parallel.owns(job)
+            else await self._source_plan(job, role)
+        )
+        if plan is None:
+            return await super().invoke(job, attempt)
+        path = self._path(attempt)
+        completed = False
+        archive = (
+            await self.parallel.acquire(plan, job.runtime)
+            if self.parallel is not None
+            else await self._candidate_archive(
+                plan.request,
+                bundle,
+                materializer=plan.materializer,
+                protected_model=job.round.incumbent_model_sha256,
+            )
+        )
+        try:
+            result = await self._invoke(job, attempt, archive)
+            completed = True
+            return result
+        finally:
+            try:
+                await await_owned_task(
+                    asyncio.create_task(
+                        self.parallel.release(archive)
+                        if self.parallel is not None
+                        else self._release_candidate_archive()
+                    )
+                )
+            finally:
+                if completed:
+                    await run_owned_thread(path.rmdir)
+
+    async def _source_plan(self, job, role):
+        from .competition_cohort_parallel_cache import ModelPlan
+
+        bundle = job.submission.submission.model_bundle if role == "candidate" else job.incumbent
         request = self.request(job) if role == "candidate" else None
         if inspect.isawaitable(request):
             request = await request
@@ -319,24 +399,9 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
             )
         )
         if source is None and (role != "candidate" or request.direct_artifact is None):
-            return await super().invoke(job, attempt)
+            return None
         if bundle is None:
             raise ValueError("direct model execution has no bundle")
-        path = self._path(attempt)
-        completed = False
-        archive = await self._candidate_archive(
-            request if source is None else source,
-            bundle,
-            materializer=None if source is None else self.legacy_artifacts,
-            protected_model=job.round.incumbent_model_sha256,
-        )
-        try:
-            result = await self._invoke(job, attempt, archive)
-            completed = True
-            return result
-        finally:
-            try:
-                await await_owned_task(asyncio.create_task(self._release_candidate_archive()))
-            finally:
-                if completed:
-                    await run_owned_thread(path.rmdir)
+        selected = request if source is None else source
+        materializer = self.artifacts if source is None else self.legacy_artifacts
+        return ModelPlan(selected, bundle, materializer, materializer.cache_identity(selected))

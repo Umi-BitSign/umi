@@ -195,6 +195,25 @@ class CohortExecutor(CohortExecutionAuthority):
         super().__init__(journal, provider, history)
         self.sandbox = sandbox
 
+    async def _journal_progress(self, assignment, operation, *args):
+        cohort = (
+            assignment.round.cohort_sha256
+            if isinstance(assignment, RecoverableExecutionJob)
+            else assignment.certificate.order.round.cohort_sha256
+        )
+        with review_scope("execution_journal", cohort, reads=0):
+            return await await_progress(
+                run_owned_thread(operation, *args),
+                stage="execution_journal_" + operation.__name__,
+                cohort=cohort,
+            )
+
+    async def _first_unfinished(self, job):
+        for index in range(step_count(job)):
+            if await run_owned_thread(self.journal.step, job, index) is None:
+                return index
+        return None
+
     async def advance_batch(
         self, assignment: CohortExecutionAssignment
     ) -> RecoverableExecutionEvidence | None:
@@ -206,12 +225,17 @@ class CohortExecutor(CohortExecutionAuthority):
         evidence = await self._completed(assignment, slot)
         if evidence is not None:
             return evidence
-        async with scope(assignment.certificate.order) as enabled:
+        job = await self._journal_progress(assignment, self.journal.validate_assignment, assignment)
+        scope_input = (
+            job
+            if getattr(self.sandbox, "prepared_execution_scope", False)
+            else (assignment.certificate.order)
+        )
+        async with scope(scope_input) as enabled:
             if not enabled:
                 return await self.advance(assignment)
-            job = await run_owned_thread(self.journal.validate_assignment, assignment)
             total = step_count(job)
-            restored = await run_owned_thread(self.journal.checkpoint_count, job)
+            restored = await self._journal_progress(job, self.journal.checkpoint_count, job)
             with TransferProgress(
                 "model_pair_execution",
                 total,
@@ -256,22 +280,27 @@ class CohortExecutor(CohortExecutionAuthority):
             if evidence is not None:
                 return evidence
             source, started = await self.current(assignment)
-            job = await run_owned_thread(self.journal.retain, assignment, source, started.block)
-            shared = await run_owned_thread(
-                self.journal.reuse_endpoint_incumbent, slot, job, started
+            job = await self._journal_progress(
+                assignment, self.journal.retain, assignment, source, started.block
+            )
+            shared = await self._journal_progress(
+                job, self.journal.reuse_endpoint_incumbent, slot, job, started
             )
             if shared is not None:
                 return shared
-            for index in range(step_count(job)):
-                if await run_owned_thread(self.journal.step, job, index) is None:
-                    break
-            else:
-                return await run_owned_thread(self.journal.evidence, slot)
-            attempt = await run_owned_thread(self.journal.head, job, index)
+            with review_scope("execution_journal", job.round.cohort_sha256, reads=0):
+                index = await await_progress(
+                    self._first_unfinished(job),
+                    stage="execution_checkpoint_lookup",
+                    cohort=job.round.cohort_sha256,
+                )
+            if index is None:
+                return await self._journal_progress(job, self.journal.evidence, slot)
+            attempt = await self._journal_progress(job, self.journal.head, job, index)
             pending = (
                 None
                 if attempt is None
-                else await run_owned_thread(self.journal.result, job, attempt)
+                else await self._journal_progress(job, self.journal.result, job, attempt)
             )
             if pending is None:
                 if attempt is not None:
@@ -280,9 +309,11 @@ class CohortExecutor(CohortExecutionAuthority):
                         self.sandbox.reconcile(job, attempt),
                         timeout=SANDBOX_RECONCILIATION_TIMEOUT_SECONDS,
                     )
-                    await run_owned_thread(self.journal.stopped, attempt)
+                    await self._journal_progress(job, self.journal.stopped, attempt)
                     source, started = await self.current(assignment)
-                attempt = await run_owned_thread(self.journal.begin, job, index, source, started)
+                attempt = await self._journal_progress(
+                    job, self.journal.begin, job, index, source, started
+                )
 
                 async def invoke_and_retain():
                     result = await await_progress(
@@ -290,15 +321,15 @@ class CohortExecutor(CohortExecutionAuthority):
                         stage="execution_sandbox",
                         cohort=job.round.cohort_sha256,
                     )
-                    await run_owned_thread(self.journal.observe, job, attempt, result)
+                    await self._journal_progress(job, self.journal.observe, job, attempt, result)
 
                 # Restoration and shared cache queues precede inference. Give
                 # them the configured read budget without consuming the signed
                 # inference limit, which the sandbox enforces independently.
                 await wait_for_owned(invoke_and_retain(), timeout=job_policy_timeout(self.journal))
             _, finished = await self.current(assignment)
-            await run_owned_thread(self.journal.finish, job, attempt, finished)
-            return await run_owned_thread(self.journal.evidence, slot)
+            await self._journal_progress(job, self.journal.finish, job, attempt, finished)
+            return await self._journal_progress(job, self.journal.evidence, slot)
 
 
 def job_policy_timeout(journal: CohortExecutionJournal) -> float:

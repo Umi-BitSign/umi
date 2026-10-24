@@ -8,6 +8,7 @@ restart; an empty view is unknown rather than zero or completed.
 import re
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from threading import RLock
@@ -223,3 +224,19 @@ class CohortProgressSnapshots:
 
 PUBLIC_COHORT_PROGRESS = CohortProgressSnapshots()
 PUBLIC_COHORT_SCOPE = ContextVar("umi_public_cohort_progress", default=None)
+EXECUTION_JOB_SCOPE = ContextVar("umi_execution_progress_job", default=None)
+
+
+@contextmanager
+def execution_job_scope(job_sha256):
+    """Attribute diagnostics without retaining private job or model objects."""
+    selected = (
+        job_sha256
+        if type(job_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", job_sha256)
+        else None
+    )
+    token = EXECUTION_JOB_SCOPE.set(selected)
+    try:
+        yield
+    finally:
+        EXECUTION_JOB_SCOPE.reset(token)

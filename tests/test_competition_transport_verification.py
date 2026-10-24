@@ -5,7 +5,25 @@ import os
 import pytest
 
 from umi import competition_transport_verification as transport
+from umi.competition_cohort_public_progress import EXECUTION_JOB_SCOPE, execution_job_scope
 from umi.private_files import PrivateStateBusyError
+
+
+def test_transfer_monitor_keeps_job_and_work_identity_after_scope_exit():
+    events = []
+    with execution_job_scope("a" * 64):
+        meter = transport.TransferProgress("model", 1, events.append)
+    assert EXECUTION_JOB_SCOPE.get() is None
+    meter.emit("waiting")
+    meter.advance(1)
+    assert {event["job_sha256"] for event in events} == {"a" * 64}
+    assert {event["pid"] for event in events} == {os.getpid()}
+    assert {event["work_id"] for event in events} == {meter.public_work_id}
+    with execution_job_scope("invalid private text"):
+        invalid = transport.TransferProgress("model", 1, events.append)
+    invalid.emit("waiting")
+    assert events[-1]["job_sha256"] is None
+    assert events[-1]["work_id"] != meter.public_work_id
 
 
 def test_checkpoint_repair_is_visible_and_does_not_touch_unchanged_slot(tmp_path):

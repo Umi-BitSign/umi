@@ -713,3 +713,96 @@ async def test_resident_pair_scope_cancellation_releases_real_scheduler(cpu):
     async with port.execution_scope(order):
         assert port.paired_execution.locked()
     assert PUBLIC_COHORT_SCOPE.get() == initial
+
+
+async def test_selected_parallel_port_executes_distinct_models_with_one_reference(
+    cpu, tmp_path, monkeypatch
+):
+    from umi.competition_model_cache_space import BootDiskModelCacheConfig
+    from umi.private_files import ensure_private_directory
+
+    from .test_competition_cohort_parallel_cache import Capacity
+
+    job, attempt, original = cpu
+    if job.mode != "paired_model":
+        pytest.skip("endpoint comparator has no model pair")
+    changed = bundle_at(tmp_path / "second-model", "second")
+    second = job.model_copy(update={"submission": submission(original.policy, bundle=changed)})
+    boot = BootDiskModelCacheConfig(
+        schema="umi-boot-disk-model-cache/1",
+        directory=str(tmp_path / "bounded"),
+        maximum_allocated_bytes=16 * 1024**2,
+    )
+    loaded, source_calls = [], []
+
+    class Materializer:
+        def execution_source(self, selected, role, bundle, request):
+            source_calls.append((digest(selected), role))
+            return bundle
+
+        def cache_identity(self, bundle):
+            return digest(bundle)
+
+        async def resumable(self, bundle, archive):
+            return (archive / digest(bundle) / "model").is_dir()
+
+        async def materialized(self, bundle, archive):
+            return await self.resumable(bundle, archive)
+
+        async def materialize(self, bundle, archive):
+            loaded.append(digest(bundle))
+            for path in (archive, archive / digest(bundle), archive / digest(bundle) / "model"):
+                ensure_private_directory(path)
+
+    class Artifacts:
+        config = SimpleNamespace(
+            materialization_boot_disk_cache=boot, materialization_free_space_reserve_bytes=0
+        )
+
+        def verify_materialization_filesystem(self, path):
+            ensure_private_directory(path)
+
+    capacity = Capacity()
+    port = sandbox.DirectCohortCpuSandbox(
+        original.policy,
+        archive=original.archive,
+        videos=original.videos,
+        workspace=tmp_path / "parallel-work",
+        artifacts=Artifacts(),
+        request=lambda _: SimpleNamespace(direct_artifact=object()),
+        legacy_artifacts=Materializer(),
+        execution_admission=capacity,
+        concurrency=2,
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    active = 0
+
+    async def invoke(selected, selected_attempt, archive):
+        nonlocal active
+        assert selected_attempt.job_sha256 == digest(selected)
+        assert (archive / digest(selected.submission.submission.model_bundle) / "model").is_dir()
+        active += 1
+        if active == 2:
+            entered.set()
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+        return selected_attempt
+
+    monkeypatch.setattr(port, "_invoke", invoke)
+
+    async def run(selected):
+        async with port.execution_scope(selected):
+            return await port.invoke(
+                selected, attempt.model_copy(update={"job_sha256": digest(selected)})
+            )
+
+    tasks = [asyncio.create_task(run(selected)) for selected in (job, second)]
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert len(loaded) == 3 and len(source_calls) == 4
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert capacity.active == 0 and not port.parallel.pairs

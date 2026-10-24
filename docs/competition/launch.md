@@ -303,6 +303,30 @@ configuration. Complete these checks in order:
    when checking aggregate consumption; they may be outside the reviewer unit's
    cgroup. Test watchdogs may detect harness stalls;
    they must not define cohort expiry.
+
+   Shared model admission is selected through the optional private benchmark
+   `model_execution_admission` field. It binds a root-owned host policy and file
+   leases to the protocol policy and signed CPU image, leaving existing configs
+   and the legacy two-slot cache readable. All reviewers on a host must select
+   the same capacity namespace. Reserve the full per-invocation memory ceiling,
+   at least 4 GiB for owner services, and a separate preparation lane. Populated
+   rootless container cgroups remain charged at their full ceilings even if a
+   reviewer exits and releases its lease. Admission waits rather than exceeding
+   capacity; its diagnostics identify the wait without changing signed clocks.
+   Configure only the number of model slots qualified for the host's memory.
+
+   Admitted pairs share one reference materialization, pin active model bytes,
+   and project the complete resident working set before transfer. Resident reads
+   can continue while another pair downloads. A pair larger than the bounded
+   cache takes all model slots and uses the supported single-model path; it
+   does not raise the cache cap or evict another active consumer. Interruption
+   preserves completed challenge checkpoints and resumable transfers. Extra
+   managed slots are bounded and released when unused. Rollback selects the
+   preserved source and config together, since older readers do not accept the
+   added private config field. No miner/client signed schema changes are needed.
+   Timing logs carry PID, work identity and job digest so concurrent samples
+   remain distinct; journal timings surround the original operations and do not
+   trigger extra verification. Public polling still reads diagnostic snapshots.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
    records without exposing private clips or credentials.
