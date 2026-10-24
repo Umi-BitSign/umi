@@ -103,6 +103,18 @@ attempts are retained as interrupted under the same work scope; only the complet
 cohort outcome contributes completion evidence. Public progress exposes the sample
 epoch and sample size, not service paths or credentials.
 
+A new partial-result reference can arrive before its immutable object. The
+execution sampler reports `pending` with the last confirmed export counts and
+`awaiting_new_execution_export_object_delivery`; it withdraws the current ETA
+without discarding that producer's rate origin. Disappearance of an object that
+was already checked remains explicit repair. Accepted metadata, confirmed counts
+and the rate origin share the existing bounded private checkpoint. Older
+checkpoints without those optional fields remain readable. A lifecycle sampler
+restart on the same host boot resumes the origin only when the live producer
+epoch matches. A temporary identity-probe gap withdraws the estimate without
+ending its forecast attempt; a confirmed producer change starts a new scope.
+No model bytes or completed native proofs are reread for these advisory updates.
+
 The intake owner, phase reviewer, settlement service and reward runtime emit
 `umi-competition-work-progress/1` JSON through `umi.competition.progress`. Each
 record identifies a process, a fresh `work_id`, the cohort and a named `stage`.
