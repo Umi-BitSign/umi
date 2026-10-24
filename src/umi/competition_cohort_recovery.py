@@ -206,11 +206,24 @@ class CohortModelDeliveryAdoption(StrictProtocolModel):
     envelope alone is never an upload, migration or eviction capability.
     """
 
-    schema_: Literal["umi-cohort-model-delivery-adoption/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-cohort-model-delivery-adoption/1", "umi-cohort-model-delivery-adoption/2"
+    ] = Field(alias="schema")
     original_plan: RecoverableCohortPlan
     delivery: ModelDeliveryProfile
     legacy_inventory_sha256: Hex32
     preservation_inventory_sha256: Hex32
+    eligible_tracks: tuple[Literal["model"]] | None = None
+    service_pool_bps: Literal[0] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_transport_only_bytes(self, handler):
+        value = handler(self)
+        if self.eligible_tracks is None:
+            value.pop("eligible_tracks", None)
+        if self.service_pool_bps is None:
+            value.pop("service_pool_bps", None)
+        return value
 
     @model_validator(mode="after")
     def original_legacy_cohort(self) -> Self:
@@ -222,7 +235,32 @@ class CohortModelDeliveryAdoption(StrictProtocolModel):
             raise ValueError("model delivery adoption requires a legacy model cohort after C5")
         if "0" * 64 in {self.legacy_inventory_sha256, self.preservation_inventory_sha256}:
             raise ValueError("model delivery adoption requires complete retained inventories")
+        exclusive = self.schema_ == "umi-cohort-model-delivery-adoption/2"
+        if exclusive != (self.eligible_tracks is not None) or exclusive != (
+            self.service_pool_bps is not None
+        ):
+            raise ValueError("model-only adoption requires its explicit tracks, pool and version")
+        if exclusive and (
+            self.original_plan.eligible_tracks != ("endpoint", "model")
+            or self.original_plan.service_pool_bps is None
+            or not 0 < self.original_plan.service_pool_bps < 10_000
+        ):
+            raise ValueError("model-only adoption requires an original mixed-track intake plan")
         return self
+
+
+def cohort_profile_adoption(plan, adoption):
+    """Validate a derived profile against its unchanged original plan.
+
+    The caller must have authenticated the selected history containing this
+    amendment. This pure shape/binding check supplies no signature authority.
+    """
+    if adoption is None:
+        return None
+    adoption = CohortModelDeliveryAdoption.model_validate_json(canonical_json_bytes(adoption))
+    if canonical_json_bytes(adoption.original_plan) != canonical_json_bytes(plan):
+        raise ValueError("cohort profile adoption differs from the original signed plan")
+    return adoption
 
 
 def cohort_model_delivery(plan: RecoverableCohortPlan) -> ModelDeliveryProfile:
@@ -237,16 +275,22 @@ def cohort_model_delivery(plan: RecoverableCohortPlan) -> ModelDeliveryProfile:
     )
 
 
-def verify_cohort_tracks(plan: RecoverableCohortPlan, tracks: tuple[Track, ...]) -> None:
+def verify_cohort_tracks(
+    plan: RecoverableCohortPlan, tracks: tuple[Track, ...], *, adoption=None
+) -> None:
     """Bind cohort-specific eligibility while preserving version-1 plans."""
 
     plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
-    if plan.eligible_tracks is not None and tracks != plan.eligible_tracks:
+    adopted = cohort_profile_adoption(plan, adoption)
+    expected = (
+        adopted.eligible_tracks if adopted and adopted.eligible_tracks else plan.eligible_tracks
+    )
+    if expected is not None and tracks != expected:
         raise ValueError("round tracks differ from the cohort-specific plan")
 
 
 def cohort_tracks(
-    plan: RecoverableCohortPlan, available_tracks: tuple[Track, ...]
+    plan: RecoverableCohortPlan, available_tracks: tuple[Track, ...], *, adoption=None
 ) -> tuple[Track, ...]:
     """Select the signed cohort tracks from the host's configured capabilities."""
 
@@ -258,7 +302,10 @@ def cohort_tracks(
         or any(track not in ("endpoint", "model") for track in available_tracks)
     ):
         raise ValueError("available cohort tracks must be unique and ordered")
-    selected = plan.eligible_tracks or available_tracks
+    adopted = cohort_profile_adoption(plan, adoption)
+    selected = (
+        adopted.eligible_tracks if adopted and adopted.eligible_tracks else plan.eligible_tracks
+    ) or available_tracks
     if not set(selected).issubset(available_tracks):
         raise ValueError("cohort-specific tracks are unavailable on this host")
     return selected
@@ -270,6 +317,19 @@ def verify_cohort_service_pool(plan: RecoverableCohortPlan, service_pool_bps: in
     plan = RecoverableCohortPlan.model_validate_json(canonical_json_bytes(plan))
     if plan.service_pool_bps is not None and service_pool_bps != plan.service_pool_bps:
         raise ValueError("service reward split differs from the cohort-specific plan")
+
+
+def cohort_service_pool(
+    plan: RecoverableCohortPlan, service_pool_bps: int, *, adoption=None
+) -> int:
+    """Keep original signed terms intact; derive the separately adopted budget."""
+    verify_cohort_service_pool(plan, service_pool_bps)
+    adopted = cohort_profile_adoption(plan, adoption)
+    return (
+        adopted.service_pool_bps
+        if adopted is not None and adopted.service_pool_bps is not None
+        else service_pool_bps
+    )
 
 
 class CohortRecoveryAuthority(StrictProtocolModel):

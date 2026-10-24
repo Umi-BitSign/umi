@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 from typing_extensions import Self
 
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
-from .competition_cohort_recovery import Block, verify_recovery_quorum
+from .competition_cohort_recovery import Block, cohort_tracks, verify_recovery_quorum
 from .open_competition import (
     CompetitionPolicy,
     Hotkey,
@@ -140,8 +140,10 @@ def admit_recovery_participant(
     if (
         sub.policy_sha256 != digest(policy)
         or (
-            history.plan.eligible_tracks is not None
-            and sub.track not in history.plan.eligible_tracks
+            sub.track
+            not in cohort_tracks(
+                history.plan, ("endpoint", "model"), adoption=view.state.model_delivery_adoption
+            )
         )
         or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or body.cohort_sha256 != view.state.cohort_sha256

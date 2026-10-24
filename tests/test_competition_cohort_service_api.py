@@ -561,6 +561,33 @@ async def test_readiness_capacity_and_seal_preserve_duplicate_recovery(api_case,
     assert (await post(s)).json() == first.json()
 
 
+@pytest.mark.parametrize("closure_path", ["early", "serialized_capacity"])
+async def test_model_only_closure_is_permanent_and_recovers_accepted_claim(
+    api_case, monkeypatch, closure_path
+):
+    s = api_case
+    accepted = await post(s)
+    assert accepted.status_code == 200
+    s.calls.clear()
+    # Round validation is covered by the adopted mixed-plan native pipeline;
+    # exercise each API closure path without introducing fresh owner inputs.
+    if closure_path == "early":
+        monkeypatch.setattr(s.c.queue, "_admission_closed", lambda *_a, **_k: "model_only")
+    else:
+        monkeypatch.setattr(s.api, "_closed", lambda _: None)
+        monkeypatch.setattr(s.api, "_capacity", lambda *_a, **_k: ("model_only", 0))
+    s.offline = {"history", "capture", "roster", "archive"}
+    result = await ready(s)
+    assert result.json()["reason_code"] == "model_only"
+    assert result.json()["new_claims_closed"] and not result.json()["ready"]
+    refused = await post(s, inputs(s.c, nonce=2)[0])
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["closure_reason"] == "model_only"
+    assert refused.json()["detail"]["retryable"] is False
+    assert (await post(s)).content == accepted.content
+    assert not s.calls
+
+
 def test_capacity_snapshot_does_not_take_the_queue_writer(api_case):
     queue = api_case.c.queue
     # A real compound mutex and SQLite writer stay owned while the advisory

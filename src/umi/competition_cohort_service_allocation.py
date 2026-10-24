@@ -75,11 +75,16 @@ def allocate_service_quality(
     terms = ServiceTerms.model_validate_json(canonical_json_bytes(terms))
     if quality.terms_sha256 != digest(terms):
         raise ValueError("allocation terms differ from replayed service quality")
+    service_pool = (
+        terms.service_pool_bps
+        if quality.adopted_service_pool_bps is None
+        else quality.adopted_service_pool_bps
+    )
     pools = apportion_work_budget(
         terms.total_raw_weight,
         {
-            "service": Fraction(terms.service_pool_bps),
-            "model": Fraction(10000 - terms.service_pool_bps),
+            "service": Fraction(service_pool),
+            "model": Fraction(10000 - service_pool),
         },
     )
     service, model = pools.get("service", 0), pools.get("model", 0)

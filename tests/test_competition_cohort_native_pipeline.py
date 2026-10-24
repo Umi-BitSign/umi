@@ -452,7 +452,9 @@ def configure_model_reviews(o, root, client, signatures):
     o.service.models.reviewers = tuple(peers)
 
 
-async def certify_requests(o, app, root, monkeypatch, signatures, admission_probe=None):
+async def certify_requests(
+    o, app, root, monkeypatch, signatures, admission_probe=None, *, model_only=False
+):
     """Use native request observation, review and handoff with synthetic readiness.
 
     Fence the original catalog, preserve completed benchmark and service work,
@@ -461,6 +463,12 @@ async def certify_requests(o, app, root, monkeypatch, signatures, admission_prob
     h = o.h
     cohort_index = tuple(digest(p) for p in o.config.series.cohorts).index(h.cohort)
     assert (await o.service.poll_once())["catalogs_installed"] == cohort_index + 1
+    if model_only:
+        for catalog in h.catalogs:
+            if catalog.catalog.cohort_sha256 == h.cohort:
+                readiness = await o.service.api.readiness(digest(catalog.catalog), "ab" * 16)
+                assert readiness["reason_code"] == "model_only"
+                assert readiness["new_claims_closed"] and not readiness["ready"]
     node = await app.state.lifecycle.node(h.cohort)
     await node._driver("requests")
     source = app.state.lifecycle.requests[h.cohort]
@@ -978,7 +986,13 @@ async def run_pipeline(
                 assert service.lost_replies == int(interrupt)
                 service.reveal()
             await certify_requests(
-                o, app, tmp_path / "request-review", monkeypatch, signatures, admission_probe
+                o,
+                app,
+                tmp_path / "request-review",
+                monkeypatch,
+                signatures,
+                admission_probe,
+                model_only=not mixed,
             )
             assert max(signatures.values()) == 1
             settled = await run_settlement(

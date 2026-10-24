@@ -31,6 +31,14 @@ its bundle manifest:
   --wallet-name miner --hotkey-name hotkey --wallet-path /absolute/path/to/wallets
 ```
 
+C6 and later use public-model participation. For a retained mixed plan, a
+quorum-signed intake amendment can select only `model` and a zero service pool
+while preserving the original plan and clocks. Update the published model client
+before submitting to that amended history; an older client that rejects the
+history cannot safely continue. Resume the same signed model request after the
+update. New endpoint participation is refused for the amended cohort; retained
+endpoint receipts and journals remain recoverable evidence.
+
 Save the command's stdout as your initial receipt; keep the original
 `model-participation.json` request separately. C6 model bytes go directly to R2.
 A successful command can print `pending_attestation`: that is the immutable

@@ -2,11 +2,12 @@
 
 # What SN78 miners should run now
 
-C5 certification is complete and C5 competition rewards are live. C6 is still in
-public-model intake; C6 cohort evaluation and certification have not started.
-The C6 intake cutoff will be announced separately.
+C5 certification is complete and C5 competition rewards are live. C6 intake is
+closed and public-model evaluation is running. Follow the cohort progress API
+for counted completion and its scoped ETA; evaluation is separate from final
+certification and reward activation.
 
-## Submit a model for C6
+## Submit a model for an open cohort
 
 1. Keep the submitting hotkey registered on subnet **78**. Registration alone is
    not cohort participation and does not guarantee a score or reward.
@@ -15,7 +16,7 @@ The C6 intake cutoff will be announced separately.
    [model contribution requirements](contributors/models.md). Keep the exact
    signed participation request and original source directory.
 4. Follow the [public-model upload steps](miners/model.md#model-files-for-recoverable-cohorts).
-   C6 sends model bytes directly to R2; the coordinator handles signed metadata,
+   Direct-R2 cohorts send model bytes to R2; the coordinator handles signed metadata,
    admission and review. A running endpoint is not required to submit this track.
 5. After upload, [query current admission](miners/model.md#check-admission-after-upload)
    with the original request. The initial receipt stays `pending_attestation`;
@@ -23,9 +24,11 @@ The C6 intake cutoff will be announced separately.
 
 Use the [cohort catalog](https://api.umi.vision/v1/competition/cohorts) to identify
 the exact cohort and its history, accepted tracks, readiness and admission URL.
-For C6 and later, prepare public models; later openings require their authenticated
-successor plans. An older endpoint plan is not an instruction to enroll an endpoint
-for a successor that has not opened.
+For C6 and later, prepare public models. C7–C10 remain held; their original mixed
+plans require the authenticated model-only amendment before opening. An older
+endpoint plan is not an instruction to enroll an endpoint for a held successor.
+Install the published client update before submitting to an amended cohort;
+keep existing signed requests and resume them unchanged after updating.
 
 ## Understand the result
 

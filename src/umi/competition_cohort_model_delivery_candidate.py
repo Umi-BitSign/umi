@@ -8,7 +8,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_legacy_model_readers import LegacyModelStorageReaders
 from .competition_cohort_legacy_model_selection import LegacyModelStorageSourceConfig
@@ -46,6 +46,14 @@ class ModelDeliveryAdoptionCandidateConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     verification_directory: Directory
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    model_only: bool = False
+
+    @model_serializer(mode="wrap")
+    def preserve_transport_only_config(self, handler):
+        value = handler(self)
+        if not self.model_only:
+            value.pop("model_only", None)
+        return value
 
     @model_validator(mode="after")
     def direct_only(self):
@@ -168,6 +176,7 @@ class ModelDeliveryAdoptionCandidate:
             delivery=self.config.delivery,
             legacy_inventory_sha256=digest(legacy),
             preservation_inventory_sha256=digest(preservation),
+            model_only=self.config.model_only,
         )
 
     def authenticate(self, history, transition):
@@ -176,6 +185,10 @@ class ModelDeliveryAdoptionCandidate:
             raise ValueError("model delivery candidate selects another cohort")
         if transition.model_delivery_adoption.delivery != self.config.delivery:
             raise ValueError("model delivery candidate selects another transport")
+        if (
+            transition.model_delivery_adoption.eligible_tracks == ("model",)
+        ) != self.config.model_only:
+            raise ValueError("model delivery candidate selects another cohort reward profile")
         legacy, preservation = self.inventories()
         authenticated = authenticate_legacy_storage_proposal(
             canonical_json_bytes(legacy),

@@ -47,7 +47,7 @@ from umi.competition_cohort_model_delivery_reservation import (
 )
 from umi.competition_cohort_model_upload import CohortModelUploads, ModelUploadConfig
 from umi.competition_cohort_progress_signer import CohortProgressSigner, CohortProgressSignerConfig
-from umi.competition_cohort_recovery import ModelDeliveryProfile
+from umi.competition_cohort_recovery import ModelDeliveryProfile, admit_recoverable_cohort
 from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.competition_cohort_request_rule import prepare_request_tail_adoption_at_block
 from umi.competition_reward_decisions import StandingRewardSeries
@@ -64,9 +64,10 @@ from .test_competition_cohort_legacy_model_storage import legacy_scenario as leg
 from .test_competition_cohort_legacy_model_storage import policy as policy
 from .test_competition_cohort_legacy_model_storage import prepared as prepared
 from .test_competition_cohort_legacy_model_storage import receipt_scenario as receipt_scenario
-from .test_competition_cohort_legacy_model_storage import recovery as recovery
+from .test_competition_cohort_legacy_model_storage import recovery as legacy_recovery
 from .test_competition_cohort_legacy_model_storage import runtime as runtime
 from .test_competition_cohort_model_acceptance import certify
+from .test_competition_cohort_recovery import signatures
 from .test_competition_cohort_request_rule_api import post
 from .test_open_competition import wallet
 
@@ -77,7 +78,31 @@ pytestmark = [
 
 
 @pytest.fixture
-def issuance(case, tmp_path, request):
+def model_only(request):
+    return getattr(request, "param", False)
+
+
+@pytest.fixture
+def recovery(policy, request, model_only):
+    plan, authority, state = legacy_recovery.__wrapped__(policy, request)
+    if not model_only:
+        return plan, authority, state
+    plan = plan.model_copy(
+        update={
+            "schema_": "umi-recoverable-cohort-plan/2",
+            "sequence": 7,
+            "eligible_tracks": ("endpoint", "model"),
+            "service_pool_bps": 5000,
+        }
+    )
+    body = authority.authority.model_copy(update={"cohort_sha256s": (digest(plan),)})
+    authority = authority.__class__(authority=body, signatures=signatures(body))
+    _, state = admit_recoverable_cohort(plan, authority, policy, admitted_at_block=160)
+    return plan, authority, state
+
+
+@pytest.fixture
+def issuance(case, tmp_path, request, model_only):
     c = case
     prefix = getattr(request, "param", "")
     if prefix:
@@ -128,6 +153,7 @@ def issuance(case, tmp_path, request):
         r2_credentials_file=str(tmp_path / "unused-credentials"),
         r2_bucket=remote.signer.bucket,
         verification_directory=str(tmp_path / "byte-receipts"),
+        model_only=model_only,
     )
     candidate = ModelDeliveryAdoptionCandidate(config, c.policy, multipart=remote)
     uploads = CohortModelUploads(
@@ -393,6 +419,34 @@ async def test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tm
         assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) is None
         assert i.case.owner.intake.history(i.case.cohort).plan == i.case.history.plan
         assert i.case.cohort in a.host.config.automatic_progression_hold_cohorts
+
+
+@pytest.mark.parametrize("model_only", [True], indirect=True)
+async def test_model_only_owner_routes_quorum_commit_preserve_hold_and_original_plan(
+    owner_api, tmp_path
+):
+    original = canonical_json_bytes(owner_api.i.case.history.plan)
+    await test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tmp_path)
+    history = owner_api.i.case.owner.intake.history(owner_api.i.case.cohort)
+    assert canonical_json_bytes(history.plan) == original
+    adoption = history.transitions[-1].transition.model_delivery_adoption
+    assert adoption.schema_ == "umi-cohort-model-delivery-adoption/2"
+    assert adoption.eligible_tracks == ("model",) and adoption.service_pool_bps == 0
+
+
+@pytest.mark.parametrize("model_only", [True, False], indirect=True)
+def test_independent_candidate_rejects_unselected_reward_profile(issuance):
+    i = issuance
+    assert i.candidate.authenticate(i.case.history, i.transition).legacy == i.case.legacy
+    other = ModelDeliveryAdoptionCandidate(
+        i.config.model_copy(update={"model_only": not i.config.model_only}),
+        i.case.policy,
+        multipart=i.remote,
+    )
+    with pytest.raises(ValueError, match="cohort reward profile"):
+        other.authenticate(i.case.history, i.transition)
+    if not i.config.model_only:
+        assert "model_only" not in i.config.model_dump(by_alias=True)
 
 
 async def test_explicit_held_owner_initialization_does_not_tick(owner_api):

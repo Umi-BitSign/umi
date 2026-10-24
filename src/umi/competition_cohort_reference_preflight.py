@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_endpoint_archive import read_endpoint_object
 from .competition_cohort_history import CohortRecoveryHistory
+from .competition_cohort_model_transport_selection import retained_model_delivery_adoption
 from .competition_cohort_recovery import (
     cohort_tracks,
     verify_cohort_service_pool,
@@ -36,7 +37,9 @@ def preflight_service_references(
     if phase not in {"intake", "preparation"}:
         return 0
     plan = history.plan
-    if "endpoint" not in cohort_tracks(plan, sources.eligible_tracks):
+    if "endpoint" not in cohort_tracks(
+        plan, sources.eligible_tracks, adoption=retained_model_delivery_adoption(history)
+    ):
         return 0
     cohort = digest(plan)
     if plan.policy_sha256 != digest(policy) or requirement.cohort_sha256 != cohort:

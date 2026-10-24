@@ -20,7 +20,11 @@ from .competition_cohort_intake_records import (
     read_participation,
     replay_participation,
 )
-from .competition_cohort_recovery import CohortRecoveryTransition, verify_recovery_quorum
+from .competition_cohort_recovery import (
+    CohortRecoveryTransition,
+    cohort_tracks,
+    verify_recovery_quorum,
+)
 from .competition_execution import ExecutionBoundary
 from .open_competition import (
     CompetitionPolicy,
@@ -118,6 +122,9 @@ def _build_intake_seal_from_participations(
     )
     if view.state.phase != "intake" or observation.block < view.state.targets[0].target_block:
         raise ValueError("intake cannot be sealed before its target or outside intake")
+    tracks = cohort_tracks(
+        history.plan, ("endpoint", "model"), adoption=view.state.model_delivery_adoption
+    )
     registrations = {identity(r.hotkey): r.uid for r in snapshot.registrations}
     if len(registrations) != len(snapshot.registrations):
         raise ValueError("sealed snapshot repeats a registered hotkey")
@@ -140,7 +147,7 @@ def _build_intake_seal_from_participations(
         sub = retained.request.signed_submission.submission
         account = identity(sub.hotkey)
         uid = registrations.get(account)
-        if uid is None or uid >= policy.maximum_uids:
+        if uid is None or uid >= policy.maximum_uids or sub.track not in tracks:
             continue
         selection = CohortIntakeSelection(
             consent_sha256=key,

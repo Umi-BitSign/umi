@@ -71,7 +71,7 @@ def prepare_cohort_round(
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
     )
-    verify_cohort_tracks(history.plan, eligible_tracks)
+    verify_cohort_tracks(history.plan, eligible_tracks, adoption=view.state.model_delivery_adoption)
     if view.state.phase in {"intake", "revoked"}:
         raise ValueError("round preparation requires certified intake and active authority")
     decisions: dict[str, CohortDecisionInput] = {}
