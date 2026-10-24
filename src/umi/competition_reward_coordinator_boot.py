@@ -287,7 +287,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.exchange_inbox,
                 self.exchange_outbox,
                 *(
-                    (self.direct_model_review.r2_credentials_file,)
+                    self.direct_model_review.stores()
                     if self.direct_model_review
                     else ()
                 ),

@@ -375,7 +375,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.owner_token_file,
                 self.vote_token_file,
                 *(
-                    (self.direct_model_review.r2_credentials_file,)
+                    self.direct_model_review.stores()
                     if self.direct_model_review
                     else ()
                 ),
