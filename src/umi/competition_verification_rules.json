@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.",
+  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.; model partial-export reuse diagnostics use the actual CLI progress logger; native receipt, source-read and verification semantics are unchanged",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -161,7 +161,7 @@
     "competition_cohort_request_completion.py": "5278f5cc818a9632a675e9c193ffe38efdb3bc7f0224c6b43b2e43e022e4fa65",
     "competition_cohort_request_export.py": "022bd9a50eaac8a75fe83aa2a503e1a2dfb98e1467e8d6675eb4e482f43c1e84",
     "competition_cohort_request_export_worker.py": "ca43790780ca02b0483492affcebeca950981d6ecfd2f94ef17c69dd468f09f0",
-    "competition_cohort_request_files.py": "4904b7f435ac4d5dbaab12755c378c35720b36d218be188968de8914794f5520",
+    "competition_cohort_request_files.py": "e768e70512b98c9f51f9bdc2c50f259172be056d0a6383e6527272407913edc0",
     "competition_cohort_request_inventory.py": "ab7a98b5adeed4030c3d02940ba74e8c7eb2b362c58d5c213daa86a57349f97c",
     "competition_cohort_request_partial.py": "1fd4e2fc6efecc87d9fa11638dd61efb34b96d4210eae7527334d1e51cf7c029",
     "competition_cohort_request_phase.py": "d034dc86b8a50e71af373bf237bf457f28f652ea77eb58bd3de3d3db50b145aa",
