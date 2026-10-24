@@ -321,12 +321,28 @@ configuration. Complete these checks in order:
    cache takes all model slots and uses the supported single-model path; it
    does not raise the cache cap or evict another active consumer. Interruption
    preserves completed challenge checkpoints and resumable transfers. Extra
-   managed slots are bounded and released when unused. Rollback selects the
+   candidate slots are bounded and reclaimed after their job completes; retain
+   unfinished model slots across cooperative updates so restart can reuse their
+   byte receipts. Rollback selects the
    preserved source and config together, since older readers do not accept the
    added private config field. No miner/client signed schema changes are needed.
    Timing logs carry PID, work identity and job digest so concurrent samples
    remain distinct; journal timings surround the original operations and do not
    trigger extra verification. Public polling still reads diagnostic snapshots.
+
+   For an installed predecessor that evicts unfinished extra slots on stop,
+   hold its existing cache-allocation lease across the cooperative stop and source
+   selection, then release it before model workers resume. This prevents the old
+   cleanup path from discarding warm models without moving or copying files.
+   This migration is needed only while such predecessor hosts remain installed.
+   New releases preserve the bounded unfinished working set directly.
+
+   Transfer ETAs separate measured byte time from fixed per-file/request
+   completion overhead. Remaining large weight bytes and small metadata operations
+   must not be extrapolated as equally costly files. Restored work supplies no
+   native rate sample; a new transfer generation resets both rate histories.
+   Partial range-response bytes are a child diagnostic scope, not completed or
+   verified parent bytes. A stalled initial response withdraws its forecast.
 5. **Storage and publication:** Restore evidence and model artifacts from the
    private R2 copies, verify every digest, and publish bounded public discovery
    records without exposing private clips or credentials.

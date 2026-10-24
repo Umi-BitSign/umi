@@ -171,10 +171,22 @@ class R2MultipartClient:
                 if streamed.headers.get("content-encoding") not in {None, "identity"}:
                     raise ValueError("R2 multipart response used content encoding")
                 content = bytearray()
-                async for chunk in streamed.aiter_bytes():
-                    if len(content) + len(chunk) > maximum_response_bytes:
-                        raise ValueError("R2 multipart response is too large")
-                    content.extend(chunk)
+                # Lazy import keeps the transport's existing dependency graph.
+                # Only exact range responses have a known complete byte count;
+                # small metadata responses retain their original handling.
+                from .competition_transport_verification import response_read_progress
+
+                with (
+                    response_read_progress(maximum_response_bytes)
+                    if method == "GET" and streamed.status_code == 206
+                    else nullcontext(None)
+                ) as progress:
+                    async for chunk in streamed.aiter_bytes():
+                        if len(content) + len(chunk) > maximum_response_bytes:
+                            raise ValueError("R2 multipart response is too large")
+                        content.extend(chunk)
+                        if progress is not None:
+                            progress.advance(len(chunk))
                 response = httpx.Response(
                     streamed.status_code,
                     headers=streamed.headers,
