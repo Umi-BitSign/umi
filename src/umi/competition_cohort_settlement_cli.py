@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_settlement_boot import run_settlement_service
 from .competition_cohort_settlement_config import load_settlement_service_config
+from .competition_progress import _failure_details
 from .open_competition import digest
 
 
@@ -58,7 +59,15 @@ def main(argv=None):
             logger.propagate = False
         asyncio.run(_run(config))
     except Exception as error:
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__}))
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error_type": type(error).__name__,
+                    "details": _failure_details(error),
+                }
+            )
+        )
         raise SystemExit(1) from None
     finally:
         for logger, level, propagate in loggers:

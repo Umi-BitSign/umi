@@ -686,6 +686,24 @@ class RewardProofArchive:
         self, kind: Kind, key: str, *, bounds: dict[str, int]
     ) -> tuple[dict, dict[str, bytes]]:
         frame = self._frame(kind, key)
+        return self._read_frame(frame, kind, key, bounds)
+
+    def read_if_present(
+        self, kind: Kind, key: str, *, bounds: dict[str, int]
+    ) -> tuple[dict, dict[str, bytes]] | None:
+        """Absent lookup hints may defer; missing referenced evidence is a repair.
+
+        Frame selection is separate from payload resolution so a caller cannot
+        mistake a damaged present archive for an unavailable lookup source.
+        Completed remote transport fences retain their existing repair errors.
+        """
+        try:
+            frame = self._frame(kind, key)
+        except FileNotFoundError:
+            return None
+        return self._read_frame(frame, kind, key, bounds)
+
+    def _read_frame(self, frame, kind, key, bounds):
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
         with self._directory_scope(enabled=bool(frame.fields)) as directory:
