@@ -168,12 +168,24 @@ class CohortProgressSnapshots:
                     break
         if stage not in {"model_certification", "waiting_request_rest"} and "work" in parts:
             observed, work = entry["work"]
+            earlier_phase = (
+                phase == "requests"
+                and "execution" in parts
+                and work.get("stage", "").startswith(
+                    ("model_acceptance_", "preparation_", "intake_", "legacy_model_")
+                )
+            )
             # Do not call the previous phase's last 100% substage current work.
-            if observed >= entry.get("phase_started", 0) and work.get("state") in {
-                "started",
-                "running",
-                "waiting",
-            }:
+            if (
+                not earlier_phase
+                and observed >= entry.get("phase_started", 0)
+                and work.get("state")
+                in {
+                    "started",
+                    "running",
+                    "waiting",
+                }
+            ):
                 selected = parts["work"]
                 stage = selected["stage"]
         result = dict(

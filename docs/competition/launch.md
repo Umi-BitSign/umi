@@ -139,6 +139,8 @@ During model evaluation, `components.execution` reports completed selected model
 with every evaluator terminal exported, the selected-model denominator, saved
 execution and paired-comparison counts, and delivered orders. Its percentage
 counts completed models, not equal-cost inference work or reward readiness.
+Background intake continuations and repair of earlier preparation publications
+stay visible in their components without replacing the current evaluation counts.
 Counts are confirmed export floors: unfinished or delayed exports can lag actual
 execution. `projected_executions` assumes undelivered orders use the same case and
 evaluator counts as delivered orders; `projection_basis` states that assumption.
