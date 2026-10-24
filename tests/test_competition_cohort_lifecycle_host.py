@@ -738,6 +738,8 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
             config=SimpleNamespace(series=SimpleNamespace(cohorts=(held, active)))
         ),
         last_reports={},
+        requests={},
+        execution_progress={},
         node=node,
     )
     task = asyncio.create_task(module.LifecycleHost.run(host, stop))
