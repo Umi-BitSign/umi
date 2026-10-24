@@ -51,7 +51,10 @@ class ExecutionExportProgress:
         self.facts, self.loaded = {}, False
         self.started = time.monotonic()
         self.rate_origin = None
+        self.rate_epoch = None
+        self.required_producers = set()
         self.forecast = None
+        self.forecast_epoch = None
         self.forecast_closed = False
         self.last_progress = (self.started, None)
 
@@ -140,6 +143,7 @@ class ExecutionExportProgress:
     def _sample(self):
         completed = executions = comparisons = orders = delivered_total = 0
         profiles = set()
+        producers = set()
         for submission in self.selected:
             path = f"orders/{self.round}/{submission}.json"
             try:
@@ -156,6 +160,7 @@ class ExecutionExportProgress:
             ):
                 raise ValueError("execution progress order differs from its selected model")
             cases, evaluators = order["cases"], order["evaluators"]
+            producers.update(evaluators)
             if not 3 <= cases <= 2048:
                 raise ValueError("execution progress case count is invalid")
             orders += 1
@@ -184,6 +189,7 @@ class ExecutionExportProgress:
                 comparisons += sum(i % 2 == 0 and i + 1 in saved for i in saved)
             completed += sealed == len(evaluators)
         self.facts = {key: value for key, value in self.facts.items() if key in self.used}
+        self.required_producers = producers
         projection = delivered_total if orders == len(self.selected) else None
         if orders != len(self.selected) and len(profiles) == 1:
             cases, evaluators = next(iter(profiles))
@@ -202,7 +208,7 @@ class ExecutionExportProgress:
             else "all_selected_orders_delivered",
         )
 
-    def sample(self):
+    def sample(self, *, producer_epochs=None):
         """Run only on the background owner thread; failures never stop evaluation."""
         now = time.monotonic()
         report = dict(
@@ -269,10 +275,28 @@ class ExecutionExportProgress:
                 error_type=type(error).__name__,
             )
             return report
-        if self.rate_origin is None:
+        epochs = producer_epochs or {}
+        known = bool(self.required_producers) and all(
+            e in epochs and isinstance(epochs[e], str)
+            and re.fullmatch(r"[0-9a-f]{64}", epochs[e]) is not None
+            for e in self.required_producers
+        )
+        epoch = digest(sorted((e, epochs[e]) for e in self.required_producers)) if known else None
+        if epoch != self.rate_epoch or not known:
+            self.rate_origin = None
+        self.rate_epoch = epoch
+        report["rate_epoch_sha256"] = epoch
+        report["rate_producers"] = len(self.required_producers)
+        if not known:
+            report["eta_basis"] = "awaiting_current_execution_producer_epochs"
+        if self.rate_origin is None and known:
             self.rate_origin = (now, report["completed"])
-        elapsed = now - self.rate_origin[0]
-        new = report["completed"] - self.rate_origin[1]
+        elapsed = 0 if self.rate_origin is None else now - self.rate_origin[0]
+        new = 0 if self.rate_origin is None else report["completed"] - self.rate_origin[1]
+        if new < 0:
+            self.rate_origin = (now, report["completed"])
+            elapsed = new = 0
+            report["eta_basis"] = "execution_export_count_regression_rate_reset"
         report["rate_completed_models"] = new
         report["rate_sample_seconds"] = round(elapsed, 3)
         progress = (report["completed"], report["exported_executions"])
@@ -285,11 +309,12 @@ class ExecutionExportProgress:
         elif new >= 3 and elapsed >= 300:
             report.update(
                 eta_seconds=round((report["total"] - report["completed"]) * elapsed / new, 3),
-                eta_basis="observed_completed_assignment_rate_since_sampler_start",
+                eta_basis="observed_completed_assignment_rate_current_producer_epoch",
                 eta_assumptions=[
                     "remaining assignments have comparable cost",
                     "export delivery keeps up",
                     "current resources and error rate continue",
+                    "observed evaluator processes remain unchanged",
                 ],
             )
         if report["status"] != "completed" and now - self.last_progress[0] >= 900:

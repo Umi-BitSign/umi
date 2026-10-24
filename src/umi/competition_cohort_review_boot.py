@@ -32,6 +32,7 @@ from .competition_cohort_model_review import ModelArtifactReviewer
 from .competition_cohort_model_review_http import model_review_routes
 from .competition_cohort_origin import CohortEndpointFinalityProvider
 from .competition_cohort_phase_vote_http import phase_vote_routes
+from .competition_cohort_producer_epoch import producer_epoch_routes
 from .competition_cohort_progress_signer import CohortProgressSigner
 from .competition_cohort_request_probe import evaluator_request_readiness_routes
 from .competition_cohort_request_rule_api import request_tail_adoption_vote_routes
@@ -376,6 +377,9 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
                 app.state.endpoint = endpoint
                 await origins.start()
+        app.include_router(producer_epoch_routes(
+            config.signing.signer, token=vote_token, enabled=app.state.benchmark is not None,
+        ))
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app

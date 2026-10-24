@@ -77,6 +77,18 @@ selection changes no signed format, native proof semantics or historical clocks.
 
 ## Work progress and ETA logs
 
+The lifecycle's execution-rate sampler observes authenticated cached identities
+from its configured reviewer peers. Each reviewer application has a fresh epoch;
+restart or replacement starts a new rate sample without resetting execution
+exports or native journals. Select reviewers with the cached identity route before
+selecting the lifecycle reader to keep measured estimates available during rollout.
+An older or unavailable reviewer leaves the evaluation ETA unknown, without holding
+evaluation or changing signed work. The private GET reads no journals or RPC state
+and remains authenticated during request-stage memory admission. Previous forecast
+attempts are retained as interrupted under the same work scope; only the completed
+cohort outcome contributes completion evidence. Public progress exposes the sample
+epoch and sample size, not service paths or credentials.
+
 The intake owner, phase reviewer, settlement service and reward runtime emit
 `umi-competition-work-progress/1` JSON through `umi.competition.progress`. Each
 record identifies a process, a fresh `work_id`, the cohort and a named `stage`.

@@ -56,6 +56,8 @@ _FIELDS = (
     "projection_basis",
     "rate_completed_models",
     "rate_sample_seconds",
+    "rate_epoch_sha256",
+    "rate_producers",
 )
 
 
