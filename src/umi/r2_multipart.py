@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 
 import httpx
 
@@ -58,6 +59,17 @@ class R2ObjectHead:
 def r2_connection_scope(client: object) -> AbstractAsyncContextManager[None]:
     """Pool native clients; other providers retain their own transport ownership."""
     return client.connection_scope() if isinstance(client, R2MultipartClient) else nullcontext()
+
+
+def pooled_r2_reads(operation):
+    """Retain the existing native pool through one complete owned reader call."""
+
+    @wraps(operation)
+    async def run(reader, *args, **kwargs):
+        async with r2_connection_scope(reader.multipart):
+            return await operation(reader, *args, **kwargs)
+
+    return run
 
 
 class R2MultipartClient:

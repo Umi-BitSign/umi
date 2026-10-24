@@ -31,7 +31,12 @@ class _RemoteModelRanges:
     """
 
     def __init__(
-        self, multipart, key, total_bytes, *, start_offset=0,
+        self,
+        multipart,
+        key,
+        total_bytes,
+        *,
+        start_offset=0,
         maximum_range_bytes=None,
     ):
         if maximum_range_bytes is None:

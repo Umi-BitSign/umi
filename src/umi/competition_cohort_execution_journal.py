@@ -410,6 +410,19 @@ class CohortExecutionJournal:
                 ).fetchone()[0]
         return completed
 
+    def recent_assignment_slots(self, *, limit=32):
+        """Small startup scheduling hints; no evidence is read or authorized."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("invalid execution startup hint bound")
+        with self.journal.read_transaction() as db:
+            return tuple(
+                row[0]
+                for row in db.execute(
+                    "SELECT id FROM records WHERE kind='assignment' ORDER BY rowid DESC LIMIT ?",
+                    (limit,),
+                )
+            )
+
     def step(self, job: RecoverableExecutionJob, index: int, *, db=None) -> ExecutionStep | None:
         if db is None:
             with self.journal.read_transaction() as db:

@@ -375,6 +375,33 @@ class CohortExecutionWorker:
         self.inbox_reads = asyncio.Lock()
         self.serial = asyncio.Lock()
         self.source_priority_due = True
+        self.resume_priority_due = True
+
+    def _startup_resume(self):
+        if not self.resume_priority_due:
+            return ()
+        try:
+            inventory = getattr(self.executor.sandbox, "resume_model_revisions", None)
+            revisions = () if inventory is None else inventory()
+            slots = (
+                self.inbox.assignments_for_models(
+                    revisions,
+                    limit=min(self.concurrency, self.batch_size),
+                    preferred=self.executor.journal.recent_assignment_slots(),
+                )
+                if revisions
+                else ()
+            )
+        except (OSError, ValueError, sqlite3.Error) as error:
+            # Hints cannot suppress ordinary acknowledged work. Surface the
+            # inventory issue; normal execution still enforces all cache and
+            # journal checks rather than treating it as successful verification.
+            report_execution_retry(slot=None, error=error)
+            slots = ()
+        # Give preserved work one turn. A failing hint cannot monopolize later
+        # batches, and an out-of-order resume never advances the ordinary cursor.
+        self.resume_priority_due = False
+        return slots
 
     async def poll_once(self):
         async with self.serial:
@@ -387,15 +414,16 @@ class CohortExecutionWorker:
                         raise ValueError("execution cursor is invalid")
                     return rows[0][0] if rows else ""
 
+            resumed = await run_owned_thread(self._startup_resume)
             after = await run_owned_thread(cursor)
-            slots = await run_owned_thread(
+            slots = resumed or await run_owned_thread(
                 lambda: self.inbox.assignments(after=after, limit=self.batch_size)
             )
             if not slots and after:
                 slots = await run_owned_thread(
                     lambda: self.inbox.assignments(limit=self.batch_size)
                 )
-            if slots:
+            if slots and not resumed:
 
                 def advance():
                     with journal.transaction() as db:
@@ -478,20 +506,22 @@ class CohortExecutionWorker:
                         raise ValueError("execution cursor is invalid")
                     after = rows[0][0] if rows else ""
                 available = self.concurrency - len(active)
-                chosen = []
+                chosen = [slot for slot in self._startup_resume() if slot not in active][:available]
                 # One fixed source unlocks many consumers. Revisit it promptly
                 # rather than putting each of its steps behind the whole roster.
                 # Keep peer capacity; a single-slot host alternates with normal
                 # work even if this source is repeatedly unavailable.
-                if self.concurrency > 1 or self.source_priority_due:
+                if len(chosen) < available and (self.concurrency > 1 or self.source_priority_due):
                     sources = self.executor.journal.unfinished_incumbent_sources()
-                    chosen = [slot for slot in sources if slot not in active][:1]
+                    chosen.extend(
+                        [slot for slot in sources if slot not in active and slot not in chosen][:1]
+                    )
                 self.source_priority_due = not bool(chosen)
-                slots = self.inbox.assignments(after=after, limit=self.batch_size)
-                if not slots and after:
-                    slots = self.inbox.assignments(limit=self.batch_size)
                 last = None
                 if len(chosen) < available:
+                    slots = self.inbox.assignments(after=after, limit=self.batch_size)
+                    if not slots and after:
+                        slots = self.inbox.assignments(limit=self.batch_size)
                     for slot in slots:
                         last = slot
                         if slot not in active and slot not in chosen:

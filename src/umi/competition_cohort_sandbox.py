@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import shutil
 from collections.abc import Callable
 from contextlib import asynccontextmanager, nullcontext
@@ -184,6 +185,32 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     @property
     def prepared_execution_scope(self):
         return getattr(self, "parallel", None) is not None
+
+    def resume_model_revisions(self):
+        """Names in bounded managed slots are startup preferences, not byte verdicts."""
+        slots = (
+            self.parallel.slots
+            if self.parallel is not None
+            else (self.cache / "archive", self.cache / "standby")
+        )
+        revisions = set()
+        with TransferProgress("model_resume_inventory", len(slots), unit="slots") as progress:
+            for slot in slots:
+                if slot.is_dir() and not slot.is_symlink():
+                    with os.scandir(slot) as entries:
+                        for index, entry in enumerate(entries):
+                            if index >= 32:
+                                raise OSError("managed model slot exceeds startup inventory bound")
+                            if (
+                                len(entry.name) == 64
+                                and all(c in "0123456789abcdef" for c in entry.name)
+                                and entry.is_dir(follow_symlinks=False)
+                            ):
+                                revisions.add(entry.name)
+                progress.advance(1)
+        if len(revisions) > 32:
+            raise OSError("resident model startup hints exceed their bound")
+        return tuple(sorted(revisions))
 
     @asynccontextmanager
     async def execution_scope(self, order):

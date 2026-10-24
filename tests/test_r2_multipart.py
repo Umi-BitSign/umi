@@ -42,9 +42,7 @@ async def test_range_reports_partial_response_without_completing_parent(cancel):
 
     async def send(request):
         requests.append(request)
-        return httpx.Response(
-            206, headers={"Content-Range": "bytes 0-3/4"}, stream=Stream()
-        )
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, stream=Stream())
 
     client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
     with TransferProgress("materialize", 4, events.append) as parent:
@@ -77,6 +75,7 @@ async def test_response_diagnostics_cannot_fail_a_valid_read(monkeypatch):
         ),
     )
     with TransferProgress("materialize", 4) as parent:
+
         def unavailable(_):
             raise RuntimeError("diagnostic thread unavailable")
 

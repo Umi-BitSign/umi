@@ -92,6 +92,12 @@ Legacy chunk restoration overlaps up to four missing 8 MiB chunks (32 MiB of
 payload buffers), then writes and checkpoints files in manifest order. Pending
 reads are cancelled and drained before releasing the cache lease on failure;
 already completed local files are excluded from prefetch after restart.
+Native legacy chunk readers retain one HTTP connection pool through inventory,
+range reads and generation confirmation. Requests remain separately signed and
+bounded; cancellation drains outstanding reads before closing the pool. A
+required unfinished child operation withdraws the parent ETA until it has a
+positive forecast or completes, preventing the last payload byte from implying
+that confirmation is finished.
 
 ### Rootless CPU namespace readiness
 

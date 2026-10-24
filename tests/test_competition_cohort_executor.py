@@ -649,6 +649,85 @@ async def test_execution_scan_survives_blocked_first_job_and_restart(execution):
     assert (await e.worker(batch_size=1).poll_once())["retry_count"] == 1
 
 
+@pytest.mark.parametrize("rolling", [False, True])
+async def test_restart_prefers_resident_unfinished_model_without_moving_cursor(
+    execution, rolling, tmp_path
+):
+    e = execution
+    if e.job.mode != "paired_model":
+        pytest.skip("resident model scheduling applies to public model jobs")
+    r, batch = e.r, e.r.h.batch
+    participant = batch["roster"].participants[1]
+    second = signed_order(batch["scenarios"][1]).order
+    r.queue().select(
+        second,
+        CohortOrderParticipant(
+            consent=participant.record.request.consent,
+            admission=participant.admission,
+            admission_snapshot=participant.record.snapshot,
+        ),
+        r.h.source,
+        await r.capture(),
+    )
+    await r.worker().poll_once()
+    assert len(e.box.assignments()) == 2
+    await e.executor().advance(e.assignment)
+    assert len(e.calls) == 1
+    journal = e.journal().journal
+    with journal.transaction() as db:
+        db.execute("DELETE FROM execution_cursor")
+        db.execute("INSERT INTO execution_cursor VALUES (?)", (r.slot,))
+    from umi.competition_cohort_sandbox import DirectCohortCpuSandbox
+
+    inventory_calls = []
+    e.port.cache = tmp_path / "resident-cache"
+    e.port.parallel = None
+    warm = e.port.cache / "archive" / e.job.submission.submission.model_revision
+    warm.mkdir(parents=True)
+    # Other cache files and symlinks must not become scheduling inputs.
+    (warm.parent / ("ff" * 32)).symlink_to(warm, target_is_directory=True)
+    (warm.parent / "unrelated-metadata").write_bytes(b"not model evidence")
+
+    def inventory():
+        inventory_calls.append(True)
+        return DirectCohortCpuSandbox.resume_model_revisions(e.port)
+
+    e.port.resume_model_revisions = inventory
+    worker = e.worker(batch_size=1, concurrency=1)
+    if rolling:
+        active = {}
+        await worker._rolling_poll(active)
+        assert tuple(active) == (r.slot,)
+        await asyncio.gather(*active.values())
+    else:
+        assert (await worker.poll_once())["retry_count"] == 0
+    assert len(e.calls) == 2
+    assert [attempt.step_index for attempt in e.calls] == [0, 1]
+    with journal.read_transaction() as db:
+        assert db.execute("SELECT slot FROM execution_cursor").fetchall() == [(r.slot,)]
+    # A preference is consumed once; the ordinary cursor then admits its peer.
+    if rolling:
+        await worker._rolling_poll(active)
+        assert len(active) == 1 and r.slot not in active
+        await asyncio.gather(*active.values())
+    else:
+        assert (await worker.poll_once())["retry_count"] == 0
+    assert len(e.calls) == 3 and e.calls[-1].job_sha256 != digest(e.job)
+    assert inventory_calls == [True]
+
+
+async def test_startup_inventory_failure_cannot_block_ordinary_work(execution, caplog):
+    e = execution
+
+    def broken_inventory():
+        raise OSError("fixture inventory unavailable")
+
+    e.port.resume_model_revisions = broken_inventory
+    assert (await e.worker().poll_once())["retry_count"] == 0
+    assert len(e.calls) == 1
+    assert "execution_retry" in caplog.text
+
+
 async def test_service_stop_preserves_inflight_result_for_next_process(execution):
     e = execution
     stop, entered = asyncio.Event(), asyncio.Event()

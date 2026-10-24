@@ -509,14 +509,15 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
-With an explicit boot-disk model cache, CPU model evaluation retains at most two
-model archives under the existing shared allocation and filesystem reserves. It
+With an explicit boot-disk model cache, CPU model evaluation retains a bounded
+set of model archives under the existing shared allocation and filesystem reserves. It
 finishes a paired assignment's case/role steps before rotating to another model,
 keeping candidate and reference bytes resident when they fit. Each step still
 uses its original authority checks, inference deadline and durable result; paired
 model observations are never borrowed from another assignment. The original
 `archive` slot and interrupted transfers stay in place across upgrades. The idle
-`standby` slot may be evicted when a pair cannot fit; unrelated cache entries are
+`standby` slot and managed parallel slots may be evicted when a pair cannot fit;
+concurrent jobs share the reference where possible. Unrelated cache entries are
 never removed. Legacy installations without an explicit boot cache retain their
 single-slot, one-step scheduling.
 
@@ -525,6 +526,13 @@ space admission and case/role progress separately. Completed steps restored from
 the journal count separately from newly executed steps. The ETA covers that job,
 not all cohort scoring or reward activation. Cancellation drains the current
 invocation and releases scheduling ownership; restart reuses existing checkpoints.
+On startup, the worker reads only directory names in its bounded managed cache
+and a small set of recent assignment IDs. It gives matching acknowledged jobs
+one scheduling turn before continuing the unchanged fair cursor. This preference
+does not read model payloads or replay the inbox roster; each admitted job still
+uses the ordinary assignment, current-authority and retained-step checks. A
+failed resumed job returns to normal rotation instead of monopolizing capacity.
+`model_resume_inventory` reports counted slot-inventory progress separately.
 
 Managed boot-cache transfers take one allocation snapshot under the exclusive
 cache lock, then account for each signed file append and its directory metadata.

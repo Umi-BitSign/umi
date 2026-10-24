@@ -331,9 +331,11 @@ class TransferProgress:
                     operation_eta = (
                         operations_left * self.operation_seconds / self.native_operations
                     )
-                    eta = (remaining / rate if remaining else 0) + operation_eta if (
-                        not remaining or rate is not None
-                    ) else None
+                    eta = (
+                        (remaining / rate if remaining else 0) + operation_eta
+                        if (not remaining or rate is not None)
+                        else None
+                    )
                     basis = (
                         "separate_native_byte_time_and_operation_overhead"
                         if eta is not None
@@ -342,13 +344,29 @@ class TransferProgress:
                 elif operations_left:
                     eta, basis = None, "waiting_for_native_operation_samples"
             if (
-                remaining == 0
-                and self.child is not None
+                self.child is not None
                 and self.child.get("status") != "completed"
                 and state != "completed"
-                and operation_eta is None
             ):
-                eta, basis = None, "required_child_scope_incomplete"
+                child_eta = self.child.get("eta_seconds")
+                if (
+                    not stalled
+                    and state not in {"retrying", "refused", "repair_required", "waiting"}
+                    and isinstance(child_eta, (int, float))
+                    and child_eta > 0
+                ):
+                    if eta is not None:
+                        eta = max(eta, child_eta)
+                        basis = "required_child_and_remaining_native_work"
+                    elif not remaining and (
+                        self.total_operations is None
+                        or self.completed_operations == self.total_operations
+                    ):
+                        eta, basis = child_eta, "required_child_remaining_work"
+                    else:
+                        planning, basis = None, "waiting_for_parent_and_required_child_samples"
+                else:
+                    eta, planning, basis = None, None, "required_child_scope_incomplete"
             event = {
                 "schema": "umi-transport-work-progress/1",
                 "pid": os.getpid(),

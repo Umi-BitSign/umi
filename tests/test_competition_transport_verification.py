@@ -299,6 +299,7 @@ def test_child_failed_progress_withdraws_parent_eta(monkeypatch, state, failed_c
             "completed_units": 1,
             "total_units": 10,
             "unit": "blocks",
+            "eta_seconds": 90,
         }
     )
     assert events[-1]["eta_seconds"] is not None
@@ -314,6 +315,50 @@ def test_child_failed_progress_withdraws_parent_eta(monkeypatch, state, failed_c
     assert events[-1]["status"] == state
     assert events[-1]["eta_seconds"] is None
     assert events[-1]["completed_units"] == 10
+
+
+@pytest.mark.parametrize("child_eta", [None, 0])
+def test_unfinished_child_without_forecast_withdraws_parent_eta(monkeypatch, child_eta):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
+    parent.advance(10)
+    now[0] += 10
+    parent.emit("running")
+    assert events[-1]["eta_seconds"] is not None
+    child = parent.child_report()
+    child(
+        {
+            "stage": "confirmation",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 10,
+            "unit": "objects",
+            "eta_seconds": child_eta,
+        }
+    )
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["eta_basis"] == "required_child_scope_incomplete"
+    assert events[-1]["completed_units"] == 10
+
+
+def test_child_forecast_cannot_replace_unmeasured_parent_work():
+    events = []
+    parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
+    child = parent.child_report()
+    child(
+        {
+            "stage": "child",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 10,
+            "unit": "objects",
+            "eta_seconds": 90,
+        }
+    )
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["eta_basis"] == "waiting_for_parent_and_required_child_samples"
 
 
 def test_operation_tail_prevents_zero_eta_after_last_large_payload(monkeypatch):
