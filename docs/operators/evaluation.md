@@ -533,6 +533,9 @@ does not read model payloads or replay the inbox roster; each admitted job still
 uses the ordinary assignment, current-authority and retained-step checks. A
 failed resumed job returns to normal rotation instead of monopolizing capacity.
 `model_resume_inventory` reports counted slot-inventory progress separately.
+Slot discovery recognizes the exact interrupted-transfer marker or completed
+materialization receipt. Completion removes the interrupted marker; the ordinary
+materialized reader still checks retained file identities before invocation.
 
 Managed boot-cache transfers take one allocation snapshot under the exclusive
 cache lock, then account for each signed file append and its directory metadata.
