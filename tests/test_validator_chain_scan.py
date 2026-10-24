@@ -488,6 +488,105 @@ async def test_proxy_and_multisig_effective_origins_are_derived_exactly() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("others", "threshold", "reason"),
+    [
+        ([], 2, "multisig_signatories_invalid"),
+        ([OTHER], 2, "multisig_signatories_invalid"),
+        ([SIGNATORY, SIGNATORY], 2, "multisig_signatories_invalid"),
+        ([SIGNATORY], 0, "multisig_threshold_invalid"),
+        ([SIGNATORY], 3, "multisig_threshold_invalid"),
+    ],
+)
+@pytest.mark.parametrize("successful", [False, True])
+async def test_failed_multisig_dispatch_preconditions_preserve_complete_block(
+    others, threshold, reason, successful
+) -> None:
+    # Finney 9,346,812 contains a threshold-2 as_multi with no other
+    # signatories and System.ExtrinsicFailed. Failed dispatch is not a malformed
+    # block. A successful claim with the same impossible origin must refuse.
+    port = FakePort()
+    item = identity(83)
+    nested = call("Balances", "transfer_keep_alive", [arg("dest", OTHER), arg("value", 3)])
+    outer = call(
+        "Multisig",
+        "as_multi",
+        [arg("threshold", threshold), arg("other_signatories", others), arg("call", nested)],
+        marker=83,
+    )
+    status = success() if successful else event("System", "ExtrinsicFailed", {})
+    add_block(port, item, [outer], [status], signers=[OTHER])
+    if successful:
+        with pytest.raises(ValidatorChainScanError, match=reason):
+            await scanner(port).decode_block(item)
+        return
+    block = await scanner(port).decode_block(item)
+    assert block.extrinsic_count == 1 and block.event_count == 1
+    (parent,) = block.calls
+    (child,) = parent.children
+    assert parent.effective_origin_account_id32 == OTHER
+    assert not parent.successful and not child.successful
+    assert child.effective_origin_account_id32 is None
+    assert child.module == "Balances" and child.function == "transfer_keep_alive"
+    assert parent.recursive_decode_complete and child.recursive_decode_complete
+    assert child.call_path == (0,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("others", ["malformed", [b"short"], [SIGNATORY] * 4097])
+async def test_failed_multisig_still_requires_bounded_valid_decoded_arguments(others):
+    port = FakePort()
+    item = identity(84)
+    outer = call(
+        "Multisig",
+        "as_multi",
+        [
+            arg("threshold", 2),
+            arg("other_signatories", others),
+            arg("call", call("System", "remark")),
+        ],
+    )
+    add_block(port, item, [outer], [event("System", "ExtrinsicFailed", {})], signers=[OTHER])
+    with pytest.raises(ValidatorChainScanError, match="multisig_signator"):
+        await scanner(port).decode_block(item)
+
+
+@pytest.mark.asyncio
+async def test_failed_multisig_does_not_grant_shadow_no_weight_authority():
+    port = FakePort()
+    item = identity(85)
+    outer = call(
+        "Multisig",
+        "as_multi",
+        [arg("threshold", 2), arg("other_signatories", []), arg("call", weight_call())],
+    )
+    add_block(port, item, [outer], [event("System", "ExtrinsicFailed", {})], signers=[OTHER])
+    with pytest.raises(ValidatorChainScanError, match="shadow_no_weight_assertion_failed"):
+        await scanner(port).decode_no_weight_interval(
+            (item,), start_block=85, end_block=85, validator_account=VALIDATOR
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", [None, "2", True, 65536])
+async def test_failed_multisig_with_empty_signatories_still_checks_threshold_shape(threshold):
+    port = FakePort()
+    item = identity(86)
+    outer = call(
+        "Multisig",
+        "as_multi",
+        [
+            arg("threshold", threshold),
+            arg("other_signatories", []),
+            arg("call", call("System", "remark")),
+        ],
+    )
+    add_block(port, item, [outer], [event("System", "ExtrinsicFailed", {})], signers=[OTHER])
+    with pytest.raises(ValidatorChainScanError, match="multisig_threshold_invalid"):
+        await scanner(port).decode_block(item)
+
+
+@pytest.mark.asyncio
 async def test_batch_weight_target_cannot_hide_sn78_in_a_multi_target_list() -> None:
     port = FakePort()
     item = identity(54)

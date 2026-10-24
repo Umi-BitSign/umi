@@ -1094,6 +1094,7 @@ class FinalizedBlockScanner:
             function,
             args,
             effective_origin,
+            successful=successful,
             maximum_signatories=self._limits.maximum_children_per_call,
         )
         children = tuple(
@@ -1355,6 +1356,7 @@ def _wrapper_child_origin(
     args: Mapping[str, Any],
     origin: bytes | None,
     *,
+    successful: bool,
     maximum_signatories: int,
 ) -> bytes | tuple[bytes | None, ...] | None:
     wrapper = (module, function)
@@ -1390,17 +1392,25 @@ def _wrapper_child_origin(
         raw_others = args.get("other_signatories")
         if isinstance(raw_others, (str, bytes, bytearray)) or not isinstance(raw_others, Sequence):
             raise ValidatorChainScanError("multisig_signatories_invalid")
-        if not raw_others or len(raw_others) > maximum_signatories:
+        if len(raw_others) > maximum_signatories:
             raise ValidatorChainScanError("multisig_signatories_invalid")
         others = tuple(_account(value, "multisig_signatory_invalid") for value in raw_others)
-        if origin in others or len(set(others)) != len(others):
-            raise ValidatorChainScanError("multisig_signatories_invalid")
         threshold = (
             1
             if function == "as_multi_threshold_1"
             else _uint(args.get("threshold"), "multisig_threshold_invalid", maximum=_MAX_U16)
         )
+        if not others or origin in others or len(set(others)) != len(others):
+            # A SCALE-valid extrinsic can fail these dispatch preconditions.
+            # Its proof-bound ExtrinsicFailed event is still a valid block
+            # record. Preserve the entire failed call tree without inventing
+            # an effective multisig origin; never waive codec or size checks.
+            if not successful:
+                return None
+            raise ValidatorChainScanError("multisig_signatories_invalid")
         if threshold == 0 or threshold > len(others) + 1:
+            if not successful:
+                return None
             raise ValidatorChainScanError("multisig_threshold_invalid")
         try:
             derived, _ordered = bittensor_core.multisig_account_id([origin, *others], threshold)
