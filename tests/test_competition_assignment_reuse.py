@@ -385,3 +385,66 @@ async def test_execution_first_validation_is_shared_across_readers(execution, mo
         results = await asyncio.gather(*tasks)
     assert calls == [True]
     assert all(value == results[0] for value in results)
+
+
+def test_execution_budget_overrides_are_explicit_and_leave_generic_caches_unchanged(monkeypatch):
+    monkeypatch.delenv("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", raising=False)
+    monkeypatch.delenv("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", raising=False)
+    original = AssignmentVerificationReuse.for_execution("execution_retained")
+    assert (original.maximum_bytes, original.maximum_entries) == (64 * 1024**2, 256)
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", str(256 * 1024**2))
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "1024")
+    selected = AssignmentVerificationReuse.for_execution("execution_supplied")
+    assert (selected.maximum_bytes, selected.maximum_entries) == (256 * 1024**2, 1024)
+    generic = AssignmentVerificationReuse(maximum_bytes=32, maximum_entries=1)
+    assert (generic.maximum_bytes, generic.maximum_entries) == (32, 1)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", "0"),
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", str(512 * 1024**2 + 1)),
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "16385"),
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "-1"),
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", " 1024"),
+        ("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "\uff11\uff10\uff12\uff14"),
+    ],
+)
+def test_invalid_execution_cache_budget_is_refused(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="operating budget"):
+        AssignmentVerificationReuse.for_execution("execution_retained")
+
+
+async def test_execution_cache_budget_change_preserves_retained_assignment(execution, monkeypatch):
+    e = execution
+    journal = e.journal()
+    journal.retain(e.assignment, e.r.h.source, e.r.h.block)
+    expected = canonical_json_bytes(journal.assignment(e.r.slot))
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", str(256 * 1024**2))
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "1024")
+    restarted = e.journal()
+    assert restarted._assignment_reuse.maximum_bytes == 256 * 1024**2
+    assert restarted._supplied_assignment_reuse.maximum_entries == 1024
+    assert canonical_json_bytes(restarted.assignment(e.r.slot)) == expected
+
+
+def test_selected_execution_budget_reuses_a_complete_large_queue_rotation(monkeypatch):
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_BYTES", str(256 * 1024**2))
+    monkeypatch.setenv("UMI_EXECUTION_ASSIGNMENT_CACHE_ENTRIES", "1024")
+    reuse = AssignmentVerificationReuse.for_execution("execution_retained")
+    calls = []
+    proof_metadata = "a" * (400 * 1024)
+
+    def calculate(slot):
+        calls.append(slot)
+        return {"slot": slot, "proof_metadata": proof_metadata}
+
+    for _ in range(2):
+        for slot in range(330):
+            result = reuse.resolve(slot, (slot,), lambda slot=slot: calculate(slot))
+            assert result["slot"] == slot
+    assert calls == list(range(330))
+    assert reuse._counts["evictions"] == reuse._counts["oversized"] == 0
+    assert reuse._counts["hits"] == 330
