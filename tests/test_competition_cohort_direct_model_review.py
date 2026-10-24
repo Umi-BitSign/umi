@@ -401,6 +401,49 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         await boot_reviewer().materialize(direct_request, boot_archive)
         assert await boot_reviewer().materialized(direct_request, boot_archive)
     reads_before_eviction = source.ranges_read
+    # Production's parallel selector must recognize completed native slots after
+    # the pending marker is removed, before considering them eviction candidates.
+    from umi.competition_cohort_parallel_cache import ModelPlan, ParallelModelCache
+
+    from .test_competition_cohort_parallel_cache import Capacity
+
+    assert not (boot_archive / "materialization-pending.json").exists()
+    native_restarted = boot_reviewer()
+    assert await native_restarted.resumable(direct_request, boot_archive)
+    inode = boot_archive.stat().st_ino
+
+    async def unexpected_eviction(*args, **kwargs):
+        pytest.fail("completed native model slot was selected for eviction")
+
+    port = SimpleNamespace(
+        cache=boot_root,
+        boot=boot_config.materialization_boot_disk_cache,
+        artifacts=native_restarted,
+        slot_identities={},
+        slot_clock=0,
+        _evict_archive=unexpected_eviction,
+    )
+    parallel = ParallelModelCache(port, Capacity(), 2)
+    plan = ModelPlan(
+        direct_request, bundle, native_restarted, native_restarted.cache_identity(direct_request)
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "read_range", no_transfer)
+        patch.setattr(artifacts, "verify_bundle_directory", no_second_weight_read)
+        selected = await parallel._select(plan)
+        assert selected == boot_archive
+        await parallel._load(selected, plan)
+    assert boot_archive.stat().st_ino == inode and source.ranges_read == reads_before_eviction
+    # A foreign completed receipt is never a match for this exact model request.
+    original_completed = read_private_model(
+        boot_archive / "materialization.json", direct_review.DirectModelMaterialization
+    )
+    (boot_archive / "materialization.json").unlink()  # Fixture-only foreign receipt.
+    publish_private_model(
+        boot_archive / "materialization.json",
+        original_completed.model_copy(update={"payload_sha256": "ff" * 32}),
+    )
+    assert not await native_restarted.resumable(direct_request, boot_archive)
     shutil.rmtree(boot_archive)
     assert (await boot_reviewer().verify(direct_request, preserved=True))[0] == result
     assert source.ranges_read == reads_before_eviction

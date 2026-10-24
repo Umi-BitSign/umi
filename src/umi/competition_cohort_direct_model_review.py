@@ -453,9 +453,28 @@ class DirectModelArtifactReviewer:
             raise
 
     async def resumable(self, request, archive):
+        """Locate interrupted or completed slots without rereading model bytes.
+
+        Completion removes the pending marker. The completed receipt must still
+        identify a reusable slot; the ordinary materialized reader subsequently
+        authenticates its retained file identities before invocation.
+        """
         try:
-            return await run_owned_thread(
+            if await run_owned_thread(
                 pending_materialization, archive, self.cache_identity(request)
+            ):
+                return True
+        except FileNotFoundError:
+            pass
+        expected = self._materialization_record(request)
+        try:
+            return (
+                await run_owned_thread(
+                    read_private_model,
+                    Path(archive) / "materialization.json",
+                    DirectModelMaterialization,
+                )
+                == expected
             )
         except FileNotFoundError:
             return False
@@ -483,10 +502,9 @@ class DirectModelArtifactReviewer:
                 progress.emit("repair_required", reason="model_cache_missing_or_damaged")
             return retained
 
-    async def _materialized(self, request, archive):
-        request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
+    def _materialization_record(self, request):
         bundle, payload, object_key = self._source(request, preserved=True)
-        expected = DirectModelMaterialization(
+        return DirectModelMaterialization(
             schema="umi-direct-model-materialization/2",
             review_request_sha256=digest(request),
             source_object_key_sha256=sha256_hex(object_key.encode()),
@@ -494,6 +512,11 @@ class DirectModelArtifactReviewer:
             payload_sha256=payload.payload_sha256,
             total_bytes=payload.total_bytes,
         )
+
+    async def _materialized(self, request, archive):
+        request = ModelReviewRequest.model_validate_json(canonical_json_bytes(request))
+        bundle = request.record.request.signed_submission.submission.model_bundle
+        expected = self._materialization_record(request)
         try:
             retained = await run_owned_thread(
                 read_private_model,
