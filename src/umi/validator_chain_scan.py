@@ -1395,6 +1395,11 @@ def _wrapper_child_origin(
         if len(raw_others) > maximum_signatories:
             raise ValidatorChainScanError("multisig_signatories_invalid")
         others = tuple(_account(value, "multisig_signatory_invalid") for value in raw_others)
+        threshold = (
+            1
+            if function == "as_multi_threshold_1"
+            else _uint(args.get("threshold"), "multisig_threshold_invalid", maximum=_MAX_U16)
+        )
         if not others or origin in others or len(set(others)) != len(others):
             # A SCALE-valid extrinsic can fail these dispatch preconditions.
             # Its proof-bound ExtrinsicFailed event is still a valid block
@@ -1403,11 +1408,6 @@ def _wrapper_child_origin(
             if not successful:
                 return None
             raise ValidatorChainScanError("multisig_signatories_invalid")
-        threshold = (
-            1
-            if function == "as_multi_threshold_1"
-            else _uint(args.get("threshold"), "multisig_threshold_invalid", maximum=_MAX_U16)
-        )
         if threshold == 0 or threshold > len(others) + 1:
             if not successful:
                 return None

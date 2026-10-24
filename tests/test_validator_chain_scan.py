@@ -568,6 +568,25 @@ async def test_failed_multisig_does_not_grant_shadow_no_weight_authority():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("threshold", [None, "2", True, 65536])
+async def test_failed_multisig_with_empty_signatories_still_checks_threshold_shape(threshold):
+    port = FakePort()
+    item = identity(86)
+    outer = call(
+        "Multisig",
+        "as_multi",
+        [
+            arg("threshold", threshold),
+            arg("other_signatories", []),
+            arg("call", call("System", "remark")),
+        ],
+    )
+    add_block(port, item, [outer], [event("System", "ExtrinsicFailed", {})], signers=[OTHER])
+    with pytest.raises(ValidatorChainScanError, match="multisig_threshold_invalid"):
+        await scanner(port).decode_block(item)
+
+
+@pytest.mark.asyncio
 async def test_batch_weight_target_cannot_hide_sn78_in_a_multi_target_list() -> None:
     port = FakePort()
     item = identity(54)

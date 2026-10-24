@@ -608,7 +608,7 @@
     "validator_anchor_ports.py": "32984eed0c8a2caeddd585e18634ce78175f2f3d8c2a52a7de254823c5800a6a",
     "validator_assignments.py": "3c3a2a75e80adf75bcdbc49dbd02753c41321941abe479f3a2383136b31c613c",
     "validator_chain.py": "abfb194fc12d026d6af7ccbd0fb68ec319a3fc5a04cff3cb5d054c9eb8f8ee6a",
-    "validator_chain_scan.py": "59413b209387463d3a432783537865a14d6c40fee686667e758b7607a70af014",
+    "validator_chain_scan.py": "84979bf32314c2a24fd15fb12f0b2f8f99e4304df21c063b67017936e5969f4e",
     "validator_chain_scan_port.py": "9165f18012c7cc1180ad8b2af7b1daef435af4b42b40228c660a4609560f40c3",
     "validator_delivery.py": "917f964e0d1181acfea91f4e669affac12b47614fde48f1102570e779f99bef9",
     "validator_extrinsics.py": "8acdf81304c806d93a6dd963729126b7badb221a154f9b59885e48cf63d24768",
