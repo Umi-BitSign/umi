@@ -48,6 +48,14 @@ _FIELDS = (
     "target_block",
     "rest_clock",
     "cutover_unix_ms",
+    "exported_executions",
+    "exported_comparisons",
+    "delivered_orders",
+    "delivered_order_executions",
+    "projected_executions",
+    "projection_basis",
+    "rate_completed_models",
+    "rate_sample_seconds",
 )
 
 
@@ -68,6 +76,7 @@ class CohortProgressSnapshots:
             "acceptance",
             "work",
             "request_start",
+            "execution",
         }:
             return
         now = time.monotonic()
@@ -114,6 +123,7 @@ class CohortProgressSnapshots:
             "acceptance",
             "work",
             "request_start",
+            "execution",
         ):
             if kind in entry:
                 observed, value = entry[kind]
@@ -144,6 +154,9 @@ class CohortProgressSnapshots:
             "progress_review": f"{phase}_progress_quorum",
             "decision_certification": f"{phase}_decision_quorum",
         }.get(stage)
+        if phase == "requests" and "execution" in parts and quorum_stage is None:
+            selected = parts["execution"]
+            stage = selected["stage"]
         if quorum_stage is not None:
             # Concurrent model exports must not hide the phase transition that
             # follows completed certification. Keep its own meter and ETA.

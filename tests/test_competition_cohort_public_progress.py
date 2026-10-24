@@ -143,6 +143,50 @@ async def test_progress_api_is_available_without_capture_or_database(monkeypatch
         assert (await client.get(f"/v1/competition/cohorts/{'d' * 64}/progress")).status_code == 404
 
 
+def test_execution_counts_are_separate_from_certification_and_current_native_work(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="requests", stage="progress_sampling"))
+    state.record(
+        "execution",
+        dict(
+            cohort_sha256=C,
+            stage="model_evaluation",
+            completed=3,
+            total=103,
+            percent=100 * 3 / 103,
+            exported_executions=94,
+            exported_comparisons=40,
+            projected_executions=1236,
+            eta_seconds=None,
+            eta_basis="insufficient_completed_assignment_rate_samples",
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_evaluation" and result["completed"] == 3
+    assert result["exported_executions"] == 94
+    assert result["overall_percent"] is None and result["overall_eta_seconds"] is None
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            stage="native_phase_review",
+            state="running",
+            completed=1,
+            total=4,
+            percent=25,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "native_phase_review"
+    assert result["components"]["execution"]["completed"] == 3
+    now[0] = 200
+    assert state.snapshot(C)["components"]["execution"]["stale"]
+    state.record("lifecycle", dict(cohort_sha256=C, phase="review", stage="decision_certification"))
+    assert state.snapshot(C)["stage"] != "model_evaluation"
+
+
 def test_active_transfer_stays_visible_between_short_completed_work(monkeypatch):
     from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
     from umi.competition_transport_verification import TransferProgress

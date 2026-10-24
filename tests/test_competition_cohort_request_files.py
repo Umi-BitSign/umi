@@ -113,6 +113,26 @@ async def publish_all(h):
         assert report["assignments_exported"] == len(worker.executions), report
 
 
+async def test_native_endpoint_exports_do_not_inflate_model_execution_progress(
+    exporting, monkeypatch
+):
+    from umi import competition_cohort_execution_progress as progress
+
+    h = exporting
+    await publish_all(h)
+    meter = progress.ExecutionExportProgress(h.files.root, h.b["roster"])
+    report = meter.sample()
+    assert report["total"] == report["completed"] == 0, report
+    assert report["exported_executions"] == 0 and report["percent"] is None
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("restart must reuse saved metadata facts")
+
+    monkeypatch.setattr(progress, "_read_private_bytes", forbidden)
+    restarted = progress.ExecutionExportProgress(h.files.root, h.b["roster"]).sample()
+    assert restarted["exported_executions"] == report["exported_executions"]
+
+
 async def test_exports_use_owned_finality_without_fresh_membership(exporting, monkeypatch):
     h = exporting
     current = AsyncMock(return_value=h.block)

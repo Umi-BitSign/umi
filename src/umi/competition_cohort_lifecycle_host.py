@@ -20,6 +20,7 @@ from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .competition_client import validate_intake_origin
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
+from .competition_cohort_execution_progress import ExecutionExportProgress
 from .competition_cohort_intake import CohortIntakePublisher
 from .competition_cohort_intake_phase import CohortIntakePhaseObserver
 from .competition_cohort_lifecycle import CohortLifecycleService, CohortPhaseDriver
@@ -48,7 +49,7 @@ from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
 from .competition_execution import execution_boundary
-from .competition_forecast import ForecastCapacityRequired, ForecastLedger
+from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_round_journal import RoundJournal
@@ -225,6 +226,7 @@ class LifecycleHost:
         self.stores, self.nodes, self.requests = {}, {}, {}
         self.last_reports = {}
         self.request_opening_clocks = {}
+        self.execution_progress = {}
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
@@ -531,6 +533,72 @@ class LifecycleHost:
         return node
 
     async def run(self, stop):
+        async def execution_progress_loop():
+            # Export metadata is sampled independently of long native lifecycle
+            # observations and outside intake/admission database leases. Public
+            # polling never calls this sampler or touches its files.
+            while not stop.is_set():
+                for cohort, source in tuple(self.requests.items()):
+                    meter = self.execution_progress.get(cohort)
+                    if meter is None:
+                        meter = ExecutionExportProgress(self.files.root, source.roster)
+                        self.execution_progress[cohort] = meter
+                    if not meter.selected:
+                        continue
+                    result = await run_owned_thread(meter.sample)
+                    if (
+                        self.forecast_ledger is not None
+                        and not meter.forecast_closed
+                        and (not result["repair_required"] or meter.forecast is not None)
+                    ):
+                        try:
+                            if meter.forecast is None:
+                                meter.forecast = ForecastAttempt(
+                                    self.forecast_ledger,
+                                    dict(
+                                        cohort_sha256=cohort,
+                                        work_sha256=meter.round,
+                                        operation="model_execution_exports",
+                                    ),
+                                    "model_evaluation",
+                                    "selected_models",
+                                    {},
+                                )
+                            meter.forecast.observe(
+                                dict(
+                                    result,
+                                    state="interrupted"
+                                    if result["repair_required"]
+                                    else result["status"],
+                                    observed_unix_ms=time.time_ns() // 1_000_000,
+                                    eta_samples=result.get("rate_completed_models", 0),
+                                    eta_ignored_fast_samples=0,
+                                    eta_assumption="; ".join(result.get("eta_assumptions", [])),
+                                    forecast_rate_semantics="completed_exports_current_sampler_session/1",
+                                )
+                            )
+                            if result["repair_required"]:
+                                meter.forecast = None
+                            elif result["status"] == "completed":
+                                meter.forecast_closed = True
+                        except Exception as error:
+                            # Forecast accounting is advisory and must not stop
+                            # evaluation or turn unknown counts into completion.
+                            result.update(
+                                eta_seconds=None, eta_basis="forecast_accounting_requires_repair"
+                            )
+                            logger.warning(
+                                "cohort_execution_forecast cohort=%s error_type=%s",
+                                cohort,
+                                type(error).__name__,
+                            )
+                    PUBLIC_COHORT_PROGRESS.record("execution", result)
+                    logger.info(
+                        "cohort_execution_progress %s", canonical_json_bytes(result).decode()
+                    )
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=min(30, self.config.poll_seconds))
+
         async def cohort_loop(cohort):
             if cohort in self.config.automatic_progression_hold_cohorts:
                 # Do not construct a controller, publish history, sample, seal,
@@ -590,6 +658,7 @@ class LifecycleHost:
             for p in self.service.config.series.cohorts
             if stage is None or digest(p) == stage.cohort_sha256
         ]
+        tasks.append(asyncio.create_task(execution_progress_loop()))
         try:
             await asyncio.gather(*tasks)
         finally:

@@ -135,6 +135,22 @@ include observation age, disable caching, and never trigger verification or RPC.
 After restart an unknown observation is null, not zero or complete. This separate
 endpoint leaves signed history, readiness and existing client schemas unchanged.
 
+During model evaluation, `components.execution` reports completed selected models
+with every evaluator terminal exported, the selected-model denominator, saved
+execution and paired-comparison counts, and delivered orders. Its percentage
+counts completed models, not equal-cost inference work or reward readiness.
+Counts are confirmed export floors: unfinished or delayed exports can lag actual
+execution. `projected_executions` assumes undelivered orders use the same case and
+evaluator counts as delivered orders; `projection_basis` states that assumption.
+Once all orders arrive, that total is exact even for differing order sizes.
+Partial and terminal exports are never counted twice. A background worker samples
+bounded metadata and persists small facts; restart reuses unchanged facts without
+model downloads, proof replay or journal inspection. Damaged referenced metadata
+is reported as requiring repair and never treated as completion. The scoped ETA
+requires at least three new complete models over five minutes in the sampler's
+current session, assumes comparable remaining cost and steady export delivery,
+and excludes subsequent certification and rewards. Overall ETA remains separate.
+
 Intake logs `cohort_model_certification_progress` from the same current roster
 used to seal intake. `completed`, `total`, `remaining` and `percent` count model
 artifact certificates for the selected latest submissions, excluding superseded
