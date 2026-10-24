@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Reuse the selected round identity within one request inventory walk. Restore damaged settlement snapshot metadata or a returned original only against the package identity retained by the native journal, under its existing memory reservation, with explicit counted repair; missing/conflicting originals still refuse. Existing native validation, signed bytes, history clocks, and proof ABI are unchanged.",
+  "compatibility_basis": "Preserve every previously accepted decoded block and successful dispatch origin unchanged. A proof-bound System.ExtrinsicFailed call with invalid multisig dispatch preconditions retains its full call tree and failed status without an invented child origin. Codec, proof, bounds and successful-dispatch validation remain unchanged. Previously rejected blocks have no successful checkpoints to reuse; completed unaffected native verification remains valid.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -608,7 +608,7 @@
     "validator_anchor_ports.py": "32984eed0c8a2caeddd585e18634ce78175f2f3d8c2a52a7de254823c5800a6a",
     "validator_assignments.py": "3c3a2a75e80adf75bcdbc49dbd02753c41321941abe479f3a2383136b31c613c",
     "validator_chain.py": "abfb194fc12d026d6af7ccbd0fb68ec319a3fc5a04cff3cb5d054c9eb8f8ee6a",
-    "validator_chain_scan.py": "b92be6a09b216857792bbe5d9a73489a7185e3efacab9129ab44edaf421be81b",
+    "validator_chain_scan.py": "59413b209387463d3a432783537865a14d6c40fee686667e758b7607a70af014",
     "validator_chain_scan_port.py": "9165f18012c7cc1180ad8b2af7b1daef435af4b42b40228c660a4609560f40c3",
     "validator_delivery.py": "917f964e0d1181acfea91f4e669affac12b47614fde48f1102570e779f99bef9",
     "validator_extrinsics.py": "8acdf81304c806d93a6dd963729126b7badb221a154f9b59885e48cf63d24768",

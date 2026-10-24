@@ -487,6 +487,17 @@ change. Validate the installed wheel and dependency inventory before cutover.
 
 ## Reward-history checkpoints and repair
 
+Failed on-chain dispatches remain part of the complete block history. In
+particular, `System.ExtrinsicFailed` can accompany a multisig call with too few
+or duplicate signatories or an impossible threshold. The scanner preserves
+that failed call and its full nested tree without inventing a child origin.
+The same impossible origin on a successful dispatch still refuses. SCALE
+decoding, proof verification and resource limits remain required; this does
+not grant shadow no-weight authority to an unattributed nested weight call.
+Existing successfully verified blocks keep their unchanged checkpoint
+semantics. Resume the owner at its retained next block after upgrading the
+scanner; do not discard completed history or rebuild its prefix.
+
 The reward-history owner keeps successful per-block native facts in its original
 private journal. These facts bind the chain-configuration digest, control hotkey, initial block,
 original directory and database identity, source-record mutation identities and
