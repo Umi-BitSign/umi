@@ -27,6 +27,14 @@ from .protocol import StrictProtocolModel, canonical_json_bytes
 _LOG = logging.getLogger("umi.competition.progress")
 
 
+def managed_model_slot(path: Path, cache: Path) -> bool:
+    """Fixed bounded roots, including the original two-slot layouts."""
+    return path.parent == cache and (
+        path.name in {"archive", "standby"}
+        or path.name in {f"slot-{index:04d}" for index in range(2, 33)}
+    )
+
+
 class BootDiskModelCacheConfig(StrictProtocolModel):
     schema_: Literal["umi-boot-disk-model-cache/1"] = Field(alias="schema")
     directory: Directory
@@ -96,15 +104,16 @@ class BootDiskModelCache:
         return total, unit
 
     def _managed_layout(self):
-        # Only the two sandbox slots have exclusive, allocation-lease-owned
+        # Only bounded managed slots have exclusive, allocation-lease-owned
         # writers and read-only CPU consumers. Older boot roots can also hold
         # invocation scratch or other consumers; retain full accounting there.
         cache = self.root / "direct-model-cache"
         return (
-            self.archive in (cache / "archive", cache / "standby")
+            self.archive is not None
+            and managed_model_slot(self.archive, cache)
             and {p.name for p in self.root.iterdir()} <= {".allocation.lock", cache.name}
             and cache.is_dir()
-            and {p.name for p in cache.iterdir()} <= {"archive", "standby"}
+            and all(managed_model_slot(p, cache) for p in cache.iterdir())
         )
 
     def _current_allocation(self):
@@ -135,14 +144,32 @@ class BootDiskModelCache:
         their allocation; only the sandbox's lease owner may release a slot.
         Per-write checks still protect against subsequent external consumption.
         """
-        archive = Path(archive)
-        if not archive.is_relative_to(self.root) or archive == self.root:
-            raise ValueError("model slot is outside its shared cache root")
-        allocated, unit, selected = self._measure(archive)
-        expected = self._metadata_bytes(bundle, unit) + sum(
+        return self.fits_materializations({Path(archive): bundle})
+
+    def model_bytes(self, bundle):
+        unit = max(4096, os.statvfs(self.root).f_frsize)
+        return self._metadata_bytes(bundle, unit) + sum(
             ((f.size_bytes + unit - 1) // unit) * unit for f in bundle.files
         )
-        growth = max(0, expected - selected)
+
+    def fits_materializations(self, models):
+        """Project the complete working set before admitting partial transfers."""
+        if not models or any(
+            not path.is_relative_to(self.root) or path == self.root for path in models
+        ):
+            raise ValueError("model slot is outside its shared cache root")
+        entries = {}
+        allocated, _, _ = self._measure(entries=entries)
+        growth = sum(
+            max(
+                0,
+                self.model_bytes(bundle)
+                - sum(
+                    size for path, size in entries.items() if path == slot or slot in path.parents
+                ),
+            )
+            for slot, bundle in models.items()
+        )
         return (
             allocated + growth <= self.maximum_bytes
             and shutil.disk_usage(self.root).free - self.reserve_bytes >= growth

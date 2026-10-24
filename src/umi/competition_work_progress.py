@@ -18,7 +18,11 @@ from itertools import count
 from threading import RLock
 from typing import TypeVar
 
-from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
+from .competition_cohort_public_progress import (
+    EXECUTION_JOB_SCOPE,
+    PUBLIC_COHORT_PROGRESS,
+    PUBLIC_COHORT_SCOPE,
+)
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired
 
 _LOG = logging.getLogger("umi.competition.progress")
@@ -104,6 +108,7 @@ class WorkProgress:
         self.stage, self.total, self.unit, self.cohort = stage, total, unit, _cohort(cohort)
         self.estimate = estimate is True
         self.identity = next(_IDS)
+        self.job_sha256 = EXECUTION_JOB_SCOPE.get()
         self.completed = 0
         self.started = time.monotonic()
         self.last_completed = self.started
@@ -172,6 +177,7 @@ class WorkProgress:
                 "observed_unix_ms": time.time_ns() // 1_000_000,
                 **self.context,
                 "work_id": self.identity,
+                "job_sha256": self.job_sha256,
                 "stage": self.stage,
                 "state": state,
                 "cohort_sha256": self.cohort or self.context.get("cohort_sha256"),

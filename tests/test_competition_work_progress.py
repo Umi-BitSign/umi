@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_work_progress as progress
+from umi.competition_cohort_public_progress import EXECUTION_JOB_SCOPE, execution_job_scope
 from umi.concurrency import await_owned_task, run_owned_thread
 
 
@@ -297,6 +298,32 @@ async def test_wait_failure_keeps_original_error_and_stops_heartbeat(events, mon
     count = len(events)
     await asyncio.sleep(0.01)
     assert len(events) == count
+
+
+async def test_job_attribution_isolated_between_tasks_and_owned_threads(events):
+    ready, release = asyncio.Queue(), asyncio.Event()
+
+    async def job(key):
+        with execution_job_scope(key):
+            ready.put_nowait(key)
+            await release.wait()
+
+            def operation():
+                meter = progress.WorkProgress("journal", 1, unit="operations")
+                meter.advance()
+                meter.finish()
+
+            await progress.await_progress(run_owned_thread(operation), stage="journal_wait")
+        assert EXECUTION_JOB_SCOPE.get() is None
+
+    tasks = [asyncio.create_task(job(key * 64)) for key in ("a", "b")]
+    await ready.get()
+    await ready.get()
+    release.set()
+    await asyncio.gather(*tasks)
+    assert {event["job_sha256"] for event in events} == {"a" * 64, "b" * 64}
+    assert len({event["work_id"] for event in events}) == 4
+    assert EXECUTION_JOB_SCOPE.get() is None
 
 
 async def test_wait_preserves_repeated_cancellation_and_owned_drain(events, monkeypatch):

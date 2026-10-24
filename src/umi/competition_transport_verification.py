@@ -19,7 +19,11 @@ from itertools import count
 from pathlib import Path
 from threading import Event, RLock, Thread
 
-from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS, PUBLIC_COHORT_SCOPE
+from .competition_cohort_public_progress import (
+    EXECUTION_JOB_SCOPE,
+    PUBLIC_COHORT_PROGRESS,
+    PUBLIC_COHORT_SCOPE,
+)
 from .competition_reward_proof_archive import _publication_clock_ns
 from .competition_verification_rules import runtime_identity
 from .file_identity import file_fingerprint
@@ -116,6 +120,7 @@ class TransferProgress:
         self.child = None
         self.public_cohort = PUBLIC_COHORT_SCOPE.get()
         self.public_work_id = -next(_PUBLIC_WORK_IDS)
+        self.job_sha256 = EXECUTION_JOB_SCOPE.get()
 
     def __enter__(self):
         self.token = _CURRENT.set(self)
@@ -311,6 +316,9 @@ class TransferProgress:
                 eta, basis = None, "required_child_scope_incomplete"
             event = {
                 "schema": "umi-transport-work-progress/1",
+                "pid": os.getpid(),
+                "work_id": self.public_work_id,
+                "job_sha256": self.job_sha256,
                 "stage": self.stage,
                 "status": "stalled" if stalled else state,
                 "completed_units": self.completed,
