@@ -196,6 +196,11 @@ def _publish_locked(path: Path, value: BaseModel, raw: bytes, *, maximum_bytes: 
         if not canonical_json_matches(retained, raw):
             raise ValueError("evaluator input must have stable canonical bytes")
         return
+    _write_private_bytes(path, raw)
+
+
+def _write_private_bytes(path: Path, raw: bytes) -> None:
+    """Write under the caller's private directory lease; caller syncs its directory."""
     fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:

@@ -171,7 +171,9 @@ class LifecycleHostConfig(StrictProtocolModel):
 
 
 class LifecycleHost:
-    def __init__(self, service: ServiceAdmissionHost, resources, client, credentials, sign):
+    def __init__(
+        self, service: ServiceAdmissionHost, resources, client, credentials, sign, epoch_client=None
+    ):
         self.service, self.resources, self.client = service, resources, client
         self.model_delivery_candidates = {}
         self.model_delivery_serial = asyncio.Lock()
@@ -228,7 +230,9 @@ class LifecycleHost:
         self.last_reports = {}
         self.request_opening_clocks = {}
         self.execution_progress = {}
-        self.producer_epochs = ExecutionProducerEpochs(client, owner.reviewers, credentials)
+        self.producer_epochs = ExecutionProducerEpochs(
+            client if epoch_client is None else epoch_client, owner.reviewers, credentials
+        )
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
@@ -609,6 +613,8 @@ class LifecycleHost:
                                 cohort,
                                 type(error).__name__,
                             )
+                    if observer is not None:
+                        result.update(observer.diagnostics(meter.required_producers))
                     PUBLIC_COHORT_PROGRESS.record("execution", result)
                     logger.info(
                         "cohort_execution_progress %s", canonical_json_bytes(result).decode()

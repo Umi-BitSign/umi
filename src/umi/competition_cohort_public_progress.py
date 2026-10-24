@@ -58,6 +58,11 @@ _FIELDS = (
     "rate_sample_seconds",
     "rate_epoch_sha256",
     "rate_producers",
+    "rate_probe_status",
+    "rate_probe_http_status",
+    "rate_probe_attempts",
+    "rate_probe_failures",
+    "rate_probe_timeouts",
 )
 
 
@@ -173,8 +178,11 @@ class CohortProgressSnapshots:
             earlier_phase = (
                 phase == "requests"
                 and "execution" in parts
-                and work.get("stage", "").startswith(
-                    ("model_acceptance_", "preparation_", "intake_", "legacy_model_")
+                and (
+                    work.get("stage") == "lifecycle_history_publication"
+                    or work.get("stage", "").startswith(
+                        ("model_acceptance_", "preparation_", "intake_", "legacy_model_")
+                    )
                 )
             )
             # Do not call the previous phase's last 100% substage current work.

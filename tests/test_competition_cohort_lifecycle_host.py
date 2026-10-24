@@ -753,3 +753,12 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
     await asyncio.wait_for(task, timeout=1)
     assert node_stopped.is_set()
     assert host.last_reports[active] == {"status": "stopped"}
+
+
+async def test_older_lifecycle_boot_owns_separate_epoch_client_until_shutdown(host):
+    o = host
+    async with o.open() as app:
+        lifecycle = app.state.lifecycle
+        advisory = lifecycle.producer_epochs.client
+        assert advisory is not lifecycle.client and not advisory.is_closed
+    assert advisory.is_closed

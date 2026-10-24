@@ -139,7 +139,7 @@ During model evaluation, `components.execution` reports completed selected model
 with every evaluator terminal exported, the selected-model denominator, saved
 execution and paired-comparison counts, and delivered orders. Its percentage
 counts completed models, not equal-cost inference work or reward readiness.
-Background intake continuations and repair of earlier preparation publications
+Background history delivery, intake continuations and repair of earlier preparation publications
 stay visible in their components without replacing the current evaluation counts.
 Counts are confirmed export floors: unfinished or delayed exports can lag actual
 execution. `projected_executions` assumes undelivered orders use the same case and
@@ -152,6 +152,23 @@ is reported as requiring repair and never treated as completion. The scoped ETA
 requires at least three new complete models over five minutes in the sampler's
 current session, assumes comparable remaining cost and steady export delivery,
 and excludes subsequent certification and rewards. Overall ETA remains separate.
+Authenticated reviewer-epoch probes use a separate bounded HTTP pool so long
+admission/review requests cannot consume their connections. Cached `rate_probe_*`
+fields report availability, numeric HTTP status, attempts, failures and timeouts;
+probe failures still withdraw the rate rather than borrowing an older epoch.
+
+Prepared-round delivery reuses the native owner's immutable canonical snapshot.
+Fresh history, authority, retained-row and requests-stage bindings remain required
+on every handoff. Mutable public readers receive isolated objects. A private
+`.prepared-publication` receipt preserves successful delivery across restart;
+unchanged output identities require no payload reread, serialization or schema
+replay. Older outputs acquire this additive receipt without changing their bytes.
+Missing or damaged receipts and changed output identities report counted
+`publication_repair` progress with a scoped planning ETA. Repairs compare the
+original verified bytes, restore missing delivery and retain conflicts for repair;
+they do not create a new round or repeat proof work. The receipt becomes visible
+only after the output is durable. Older consumers can ignore this private namespace;
+no signed history, cohort clock, miner startup schema or release selection changes.
 
 Intake logs `cohort_model_certification_progress` from the same current roster
 used to seal intake. `completed`, `total`, `remaining` and `percent` count model
