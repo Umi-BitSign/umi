@@ -372,7 +372,7 @@ class CohortExecutionJournal:
         self.journal.put_many((("assignment", slot, value),), index=index)
         return job
 
-    def _validated_assignment(self, slot: str):
+    def _validated_assignment(self, slot: str, *, project=None):
         # Read exact bytes and current conflict holds in one short snapshot.
         # Static proof verification must not reserve the journal writer or keep
         # unrelated reads waiting on its process lock. This read grants no
@@ -392,7 +392,13 @@ class CohortExecutionJournal:
                 raise ValueError("retained execution assignment changed its slot")
             return saved, job
 
+        if project is not None:
+            return self._assignment_reuse._project(slot, key, calculate, project)
         return self._assignment_reuse.resolve(slot, key, calculate)
+
+    def _project_assignment(self, slot: str, project):
+        """Owned read-only projection after fresh assignment/conflict reads."""
+        return self._validated_assignment(slot, project=project)
 
     @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:

@@ -35,32 +35,47 @@ class CohortEndpointAttemptWorker:
         self.recovery = requests.recovery
 
     def current(self, slot, case_id):
+        return self._project_current(slot, case_id, lambda result: result)
+
+    def _project_current(self, slot, case_id, project):
+        """Follow fresh successor records; return only an owned projection."""
         seen = set()
         while True:
             if slot in seen:
                 raise ValueError("endpoint successor selection is cyclic")
             seen.add(slot)
-            selected, assignment, job = self.recovery.selection(slot)
-            selected_request(selected, case_id)
-            key = case_record_key(selected, case_id)
-            raw = self.recovery.journal.journal.get("endpoint_attempt_successor", key)
-            if raw is None:
-                return slot, selected, assignment, job
-            successor = EndpointAttemptSuccessor.model_validate_json(canonical_json_bytes(raw))
-            if (
-                successor.previous_selection_sha256 != digest(selected)
-                or successor.case_id != case_id
-            ):
-                raise ValueError("endpoint successor changed its parent selection")
-            child, child_assignment, _ = self.recovery.selection(successor.selection_slot)
-            grant = selection_grant(child, child_assignment)
-            if (
-                not isinstance(grant, CohortCaseMinerGrant)
-                or grant.attempt.order.case_id != case_id
-            ):
-                raise ValueError("endpoint successor changed its case")
-            verify_replacement_parent(grant, selection_grant(selected, assignment))
-            slot = successor.selection_slot
+
+            def selected_result(result, slot=slot):
+                selected, assignment, job = result
+                selected_request(selected, case_id)
+                key = case_record_key(selected, case_id)
+                raw = self.recovery.journal.journal.get("endpoint_attempt_successor", key)
+                if raw is None:
+                    return False, project((slot, selected, assignment, job))
+                successor = EndpointAttemptSuccessor.model_validate_json(canonical_json_bytes(raw))
+                if (
+                    successor.previous_selection_sha256 != digest(selected)
+                    or successor.case_id != case_id
+                ):
+                    raise ValueError("endpoint successor changed its parent selection")
+
+                def child_checked(child_result):
+                    child, child_assignment, _ = child_result
+                    grant = selection_grant(child, child_assignment)
+                    if (
+                        not isinstance(grant, CohortCaseMinerGrant)
+                        or grant.attempt.order.case_id != case_id
+                    ):
+                        raise ValueError("endpoint successor changed its case")
+                    verify_replacement_parent(grant, selection_grant(selected, assignment))
+
+                self.recovery._project_selection(successor.selection_slot, child_checked)
+                return True, successor.selection_slot
+
+            continuing, value = self.recovery._project_selection(slot, selected_result)
+            if not continuing:
+                return value
+            slot = value
 
     def _answered_peers(self, original_slot, case_id, job):
         """Find authenticated answers still occupying this miner's old windows."""
@@ -68,7 +83,7 @@ class CohortEndpointAttemptWorker:
         for case in job.cases:
             if case.case_id == case_id:
                 continue
-            peer_slot, _, _, _ = self.current(original_slot, case.case_id)
+            peer_slot = self._project_current(original_slot, case.case_id, lambda result: result[0])
             if self.recovery.retained(peer_slot, case.case_id) is None:
                 continue
             if self.decisions.retirement.retained(peer_slot, case.case_id) is None:
@@ -76,22 +91,28 @@ class CohortEndpointAttemptWorker:
         return pending
 
     def phase(self, original_slot, case_id):
-        slot, selected, _, _ = self.current(original_slot, case_id)
-        if self.decisions.retirement.retained(slot, case_id) is not None:
-            return "certification"
-        if (
-            self.recovery.journal.journal.get(
-                "endpoint_dispatch_intent", case_record_key(selected, case_id)
-            )
-            is not None
-            or self.recovery.retained(slot, case_id) is not None
-            or bt.timelock.current_round()
-            >= selected_request(selected, case_id).response_close_round
-        ):
-            # An expired unsent request still needs native retirement and a
-            # certified replacement. A scheduling hint never proves absence.
-            return "recovery"
-        return "dispatch"
+        def selected_phase(result):
+            _slot, selected, assignment, job = result
+            if (
+                self.decisions.retirement._retained_selection(selected, assignment, job, case_id)
+                is not None
+            ):
+                return "certification"
+            if (
+                self.recovery.journal.journal.get(
+                    "endpoint_dispatch_intent", case_record_key(selected, case_id)
+                )
+                is not None
+                or self.recovery._retained(selected, job, case_id) is not None
+                or bt.timelock.current_round()
+                >= selected_request(selected, case_id).response_close_round
+            ):
+                # Expiry remains a scheduling hint, never proof of absence or
+                # authority to send, retire, score or construct a replacement.
+                return "recovery"
+            return "dispatch"
+
+        return self._project_current(original_slot, case_id, selected_phase)
 
     async def advance(self, original_slot, case_id, *, video=None, one_stage=False):
         slot, selected, assignment, job = await run_owned_thread(

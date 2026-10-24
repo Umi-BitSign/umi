@@ -3040,10 +3040,19 @@ policy, cohort configuration, private journal identity and current process. The
 endpoint host keeps at most 2,048 successful selections within 512 MiB so that
 repeated sweeps can retain a cohort's working replacement ancestry. Eviction is
 still bounded and requires native verification on the next read. The cache
-returns private copies; changes, failed proofs, restart or fork
-require native verification again. Each replacement still reads and verifies its
-retained parent chain. Current execution and reward authority remain independently
-verified.
+returns private copies through its public readers. Internal phase, current-slot,
+response and retirement polls use owned read-only projections and defensively
+copy only their returned result, rather than the full assignment/job graph. Fresh
+selection and assignment bytes, conflict/index fences and replacement ancestry
+remain mandatory on every read; an absent receipt does not prove absence of work.
+The CLI's `assignment_reuse_capacity` diagnostics include `projections` alongside
+hits, misses and retained capacity. Changes, failed proofs, restart or fork require
+native verification again. Current execution and reward authority remain
+independently verified. Closed request history still denies new origin capture;
+this optimization does not admit late scoring or discard pending retirement.
+The change uses existing retained formats and the supported intake runtime
+maintenance selection above; miner grants, startup state and updater schemas are
+unchanged. Publishing source alone does not select it on a running reviewer.
 
 
 Canonical participation decoding additionally retains private decoded results for

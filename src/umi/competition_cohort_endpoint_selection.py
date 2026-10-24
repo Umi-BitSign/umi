@@ -76,6 +76,16 @@ def parse_endpoint_selection(raw):
     return selected
 
 
+def _project_endpoint_selection(raw: bytes, project):
+    """Owned read-only decode projection; no cached model escapes to callers."""
+    if type(raw) is not bytes or len(raw) > 16 * 1024**2:
+        raise ValueError("endpoint selection exceeds its byte bound")
+    key = hashlib.sha256(raw).digest()
+    return _selection_decode_reuse._project(
+        key, key, lambda: _SELECTION.validate_json(raw), project
+    )
+
+
 def selection_slot(selected: EndpointSelection) -> str:
     if isinstance(selected, CohortEndpointReplacementSelection):
         return grant_slot(selected.grant)

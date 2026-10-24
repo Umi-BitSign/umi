@@ -911,3 +911,57 @@ async def test_exact_selection_inherited_receipt_is_not_reused(recovery_case, mo
     assert recovery.selection(p.slot) == expected
     assert recovery.selection(p.slot) == expected
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("operation", ["phase", "response", "retirement"])
+async def test_endpoint_poll_projection_avoids_large_copies_and_keeps_fresh_fences(
+    recovery_case, monkeypatch, operation
+):
+    from types import SimpleNamespace
+
+    from umi import competition_assignment_reuse as module
+    from umi.competition_cohort_attempt_worker import CohortEndpointAttemptWorker
+    from umi.competition_cohort_endpoint_retirement import CohortEndpointRetirement
+
+    p = recovery_case
+    recovery = p.consumer()
+    retirement = CohortEndpointRetirement(recovery)
+    attempts = CohortEndpointAttemptWorker(
+        SimpleNamespace(recovery=recovery),
+        SimpleNamespace(recovery=recovery, retirement=retirement),
+    )
+    case_id = p.e.job.cases[0].case_id
+    call = {
+        "phase": lambda: attempts.phase(p.slot, case_id),
+        "response": lambda: recovery.retained(p.slot, case_id),
+        "retirement": lambda: retirement.retained(p.slot, case_id),
+    }[operation]
+    expected = call()
+    copy = module.deepcopy
+
+    def bounded_copy(value):
+        def large(item):
+            if isinstance(item, (tuple, list)):
+                return any(large(child) for child in item)
+            return type(item).__name__ in {
+                "CohortExecutionAssignment",
+                "RecoverableExecutionJob",
+                "CohortEndpointRecoverySelection",
+                "CohortEndpointReplacementSelection",
+            }
+
+        assert not large(value), "poll copied a full private assignment/selection/job graph"
+        return copy(value)
+
+    monkeypatch.setattr(module, "deepcopy", bounded_copy)
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("unchanged retained proof was reverified")
+
+    monkeypatch.setattr(recovery.journal, "validate_assignment", no_replay)
+    assert call() == expected
+    assert call() == expected
+    with recovery.journal.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (p.slot,))
+    with pytest.raises(ValueError, match="conflict held"):
+        call()
