@@ -278,6 +278,31 @@ or evidence replay. Dependency coverage and resource budgets are still counted
 when a verdict is reused. Payloads are read when a new consumer actually needs them.
 A completed participant's verdict survives interruption before full closure.
 
+Recurring evaluator partial exports retain small source facts in
+`<request-export-directory>/.model-partial-export`. For an unfinished public-model
+job, these bind the actual journal file, assignment, policy/verifier semantics,
+precomputed step identities and the already reviewed partial manifest. Each poll
+still checks fresh assignment/step conflict fences and exact committed metadata,
+plus the existing output-publication file stamps. An unchanged job skips evidence
+collection, repeated job hashing, assignment copies and native partial review.
+The first changed step invalidates only that job's source fact; completing all
+steps always resumes normal terminal sealing. Endpoint retirement and request
+inventory continuation keep their original paths.
+
+An upgrade seeds these facts from an existing valid native publication receipt
+and its latest small manifest, without collecting the whole job or repeating
+proof review. Publication receipt `/1` has the implicit historical native
+verification ABI `/1`; it cannot seed or supply reuse under changed native
+verification semantics without a supported receipt migration. This concerns
+receipt validity, not Bittensor runtime/spec versions. Missing delivery files
+can be restored from the unchanged verified
+source without repeating native review; conflicting immutable output bytes still
+refuse replacement. Source/checkpoint repair and capacity shortage are reported.
+Retain these source facts with the original exports so restart preserves reuse.
+The namespace is additive: older supported runtimes ignore it and use their
+ordinary export path; signed files, startup configuration and journal schemas
+do not change.
+
 The lifecycle request publisher selects its own durable verification owner under
 `<request-journal>/request-publication/verification`. It captures original
 closure decisions and current queue/service fences while owning the intake

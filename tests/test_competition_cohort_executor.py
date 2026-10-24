@@ -38,6 +38,257 @@ from .test_competition_cohort_roster import close
 
 
 @pytest.fixture
+async def model_partial_export(execution, tmp_path):
+    from umi.competition_cohort_request_export_worker import RequestExportWorker
+    from umi.competition_cohort_request_files import RequestCompletionFiles
+    from umi.competition_round_journal import RoundJournal
+    from umi.open_competition import identity, sign_object
+
+    from .test_open_competition import wallet
+
+    e = execution
+    if e.job.mode != "paired_model":
+        pytest.skip("this source optimization only covers public model jobs")
+    executor = e.executor()
+    e.r.h.block += 1
+    assert await executor.advance(e.assignment) is None
+    files = RequestCompletionFiles(tmp_path / "partial-exports")
+
+    async def sign(body):
+        return sign_object(body, wallet(e.r.names[identity(executor.journal.config.signer)]))
+
+    worker = RequestExportWorker(
+        (executor.journal,),
+        e.box.provider,
+        sign,
+        files,
+        RoundJournal(tmp_path / "partial-export-cursor", {"schema": "partial-export-test/1"}),
+    )
+    block = e.r.h.block
+    assert await worker._export(executor.journal, e.r.slot, block) is False
+    return SimpleNamespace(
+        e=e,
+        executor=executor,
+        owner=executor.journal,
+        files=files,
+        worker=worker,
+        slot=e.r.slot,
+        block=block,
+    )
+
+
+async def test_model_partial_export_skips_unchanged_evidence_and_collection_after_restart(
+    model_partial_export, monkeypatch
+):
+    import umi.competition_cohort_request_files as module
+
+    h = model_partial_export
+    key = h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block)
+    assert key is not None
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "unchanged source must not repeat evidence, collection or job projection"
+        )
+
+    monkeypatch.setattr(h.owner, "evidence", forbidden)
+    monkeypatch.setattr(h.owner, "assignment_and_job", forbidden)
+    monkeypatch.setattr(module, "collect_partial_request_with_inputs", forbidden)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    h.worker.files = module.RequestCompletionFiles(h.files.root)
+    assert await h.worker._export(h.owner, h.slot, h.block + 2) is False
+    assert (
+        h.worker.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block + 2) == key
+    )
+
+
+async def test_model_partial_export_upgrades_existing_publication_without_recollecting(
+    model_partial_export, monkeypatch
+):
+    import umi.competition_cohort_request_files as module
+
+    h = model_partial_export
+    key = h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block)
+    for path in h.files._model_partials.root.glob("*.json"):
+        path.unlink()
+    h.worker.files = module.RequestCompletionFiles(h.files.root)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("existing native publication must seed upgrade facts without replay")
+
+    monkeypatch.setattr(h.owner, "evidence", forbidden)
+    monkeypatch.setattr(module, "collect_partial_request_with_inputs", forbidden)
+    monkeypatch.setattr(module, "review_partial_request", forbidden)
+    h.worker.publish_inventory_proof = forbidden
+    h.worker.inventory_cutoff = lambda cohort: None
+    h.worker.inventory_needed = lambda cohort: True
+    monkeypatch.setattr(h.owner, "assignment", forbidden)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert (
+        h.worker.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block + 1) == key
+    )
+
+
+async def test_model_partial_export_new_step_invalidates_only_that_source(model_partial_export):
+    h = model_partial_export
+    before = h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block)
+    h.e.r.h.block += 1
+    assert await h.executor.advance(h.e.assignment) is None
+    block = h.e.r.h.block
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=block) is None
+    assert await h.worker._export(h.owner, h.slot, block) is False
+    after = h.files.current_model_partial(h.owner, h.slot, completed_by_block=block)
+    assert after is not None and after != before
+
+
+@pytest.mark.parametrize("held", ["assignment", "step"])
+async def test_model_partial_export_still_observes_fresh_source_conflicts(
+    model_partial_export, held
+):
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    key = h.slot if held == "assignment" else checkpoint.step_keys[0]
+    with h.owner.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (key,))
+    with pytest.raises(ValueError, match="conflict held"):
+        await h.worker._export(h.owner, h.slot, h.block + 1)
+
+
+async def test_model_partial_export_repairs_missing_output_without_repeating_native_review(
+    model_partial_export, monkeypatch
+):
+    import umi.competition_cohort_request_files as module
+
+    h = model_partial_export
+    key = h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block)
+    output = h.files.objects._path(key)
+    original = output.read_bytes()
+    output.unlink()
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block) is None
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "unchanged verified source needs delivery repair, not repeated proof review"
+        )
+
+    monkeypatch.setattr(module, "review_partial_request", forbidden)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert output.read_bytes() == original
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block + 1) == key
+
+
+async def test_model_partial_export_keeps_inventory_continuation_and_completion(
+    model_partial_export,
+):
+    h = model_partial_export
+    calls = []
+    original = h.worker._partial
+
+    async def inventory(owner, slot, block, **kwargs):
+        calls.append(kwargs.get("manifest_key"))
+        return await original(owner, slot, block, **kwargs)
+
+    h.worker._partial = inventory
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert calls and calls[-1] is not None
+    for _ in range(step_count(h.e.job) - 1):
+        h.e.r.h.block += 1
+        await h.executor.advance(h.e.assignment)
+    block = h.e.r.h.block
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=block) is None
+    assert await h.worker._export(h.owner, h.slot, block) is True
+    assert len(h.e.calls) == step_count(h.e.job)
+
+
+async def test_model_partial_export_changed_context_and_damaged_checkpoint_reconstruct(
+    model_partial_export, monkeypatch
+):
+    from umi.competition_cohort_request_files import RequestCompletionFiles
+
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    assert not h.owner.partial_export_unchanged(
+        checkpoint.model_copy(update={"context_sha256": "ff" * 32})
+    )
+    assert not h.owner.partial_export_unchanged(checkpoint.model_copy(update={"owner_inode": "0"}))
+    assert h.files.current_model_partial(h.owner, h.slot, completed_by_block=0) is None
+    smaller = RequestCompletionFiles(h.files.root, maximum_bytes=h.files.maximum_bytes // 2)
+    assert smaller.current_model_partial(h.owner, h.slot, completed_by_block=h.block) is None
+    path = h.files._model_partials.root / (h.files._model_partials.key(h.owner, h.slot) + ".json")
+    path.write_bytes(b"{damaged")
+    h.worker.files = RequestCompletionFiles(h.files.root)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert (
+        h.worker.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block + 1)
+        is not None
+    )
+
+
+async def test_model_partial_export_legacy_native_abi_refuses_upgrade_hint(
+    model_partial_export, monkeypatch
+):
+    import umi.competition_cohort_request_files as module
+
+    h = model_partial_export
+    for path in h.files._model_partials.root.glob("*.json"):
+        path.unlink()
+    h.worker.files = module.RequestCompletionFiles(h.files.root)
+    monkeypatch.setattr(module, "legacy_publication_compatible", lambda: False)
+    assert h.worker.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block) is None
+    reviewed = []
+    original = module.review_partial_request
+
+    def review(*args, **kwargs):
+        reviewed.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "review_partial_request", review)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert len(reviewed) == 1
+
+
+async def test_model_partial_export_missing_completed_source_requires_repair(
+    model_partial_export, monkeypatch, caplog
+):
+    from umi.competition_cohort_execution_journal import PartialExportSourceRepairRequired
+
+    h = model_partial_export
+    checkpoint = h.files._model_partials.load(h.owner, h.slot)
+    with h.owner.journal.transaction() as db:
+        db.execute("DELETE FROM records WHERE kind='step' AND id=?", (checkpoint.step_keys[0],))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("lost completed work must not silently fall through to recollection")
+
+    monkeypatch.setattr(h.owner, "evidence", forbidden)
+    with pytest.raises(PartialExportSourceRepairRequired, match="completed_step_missing"):
+        await h.worker._export(h.owner, h.slot, h.block + 1)
+    assert '"status":"repair_required"' in caplog.text
+
+
+async def test_model_partial_export_upgrade_repairs_lost_output_from_retained_verdict(
+    model_partial_export, monkeypatch
+):
+    import umi.competition_cohort_request_files as module
+
+    h = model_partial_export
+    key = h.files.current_model_partial(h.owner, h.slot, completed_by_block=h.block)
+    output = h.files.objects._path(key)
+    original = output.read_bytes()
+    output.unlink()
+    for path in h.files._model_partials.root.glob("*.json"):
+        path.unlink()
+    h.worker.files = module.RequestCompletionFiles(h.files.root)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retained exact native verdict should survive lost delivery metadata")
+
+    monkeypatch.setattr(module, "review_partial_request", forbidden)
+    assert await h.worker._export(h.owner, h.slot, h.block + 1) is False
+    assert output.read_bytes() == original
+
+
+@pytest.fixture
 async def execution(relay, tmp_path):
     r = relay
     await r.worker().poll_once()
