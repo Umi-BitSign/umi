@@ -73,6 +73,7 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
     r2_bucket: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")]
     standing_review_policy: StandingModelReviewPolicy
     r2_timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
+    verification_directory: Directory | None = None
     maximum_materialized_bytes: Annotated[int, Field(ge=1024**2, le=R2_MAXIMUM_MULTIPART_BYTES)] = (
         64 * 1024**3
     )
@@ -93,6 +94,8 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
         value = handler(self)
         if self.materialization_boot_disk_cache is None:
             value.pop("materialization_boot_disk_cache", None)
+        if self.verification_directory is None:
+            value.pop("verification_directory", None)
         return value
 
     @model_validator(mode="after")
@@ -112,10 +115,19 @@ class DirectModelReviewSourceConfig(StrictProtocolModel):
             for path in self.materialization_protected_roots
         ):
             raise ValueError("boot-disk model cache overlaps a protected root")
+        if self.verification_directory is not None:
+            root = Path(self.verification_directory)
+            if not disjoint(root, Path(self.r2_credentials_file)) or (
+                boot is not None and not disjoint(root, Path(boot.directory))
+            ):
+                raise ValueError("direct model verification state overlaps credentials or cache")
         return self
 
     def stores(self) -> tuple[Path, ...]:
-        return (Path(self.r2_credentials_file),)
+        return (
+            Path(self.r2_credentials_file),
+            *((Path(self.verification_directory),) if self.verification_directory else ()),
+        )
 
 
 class DirectModelMaterialization(StrictProtocolModel):
@@ -179,6 +191,8 @@ class DirectModelArtifactReviewer:
                 timeout_seconds=self.config.r2_timeout_seconds,
             )
         self.multipart = multipart
+        if self.config.verification_directory is not None:
+            verification_root = Path(self.config.verification_directory)
         if verification_root is not None:
             private_path(str(verification_root))
         self.verification_root = verification_root

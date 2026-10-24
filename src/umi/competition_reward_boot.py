@@ -282,7 +282,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
                 *(
-                    (self.direct_model_review.r2_credentials_file,)
+                    self.direct_model_review.stores()
                     if self.direct_model_review
                     else ()
                 ),

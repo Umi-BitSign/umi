@@ -266,6 +266,41 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     after_materialization = source.ranges_read
     await durable.verify(direct_request, preserved=True)
     assert source.ranges_read == after_materialization
+    # A separately booted downstream consumer reuses the account's completed
+    # byte work. Its local fallback state and signing checks remain independent.
+    selected_config = verifier.config.model_copy(
+        update={"verification_directory": str(durable_root)}
+    )
+    shared = DirectModelArtifactReviewer(
+        selected_config,
+        verifier.policy,
+        verifier.owner_hotkey,
+        multipart=source,
+        verification_root=reviews.root / "unused-settlement-default",
+    )
+    assert shared.verification_root == durable_root
+    assert durable_root in shared.config.stores()
+    assert "verification_directory" not in verifier.config.model_dump(mode="json")
+    assert (await shared.verify(direct_request, preserved=True))[0] == result
+    assert source.ranges_read == after_materialization
+    assert not (reviews.root / "unused-settlement-default").exists()
+    # Changing the policy owner is still rejected before it can reuse bytes.
+    changed_owner = DirectModelArtifactReviewer(
+        selected_config,
+        verifier.policy,
+        wallet("Dave").hotkey.ss58_address,
+        multipart=source,
+    )
+    with pytest.raises(ValueError, match="differs from its request"):
+        await changed_owner.verify(direct_request, preserved=True)
+    assert source.ranges_read == after_materialization
+    with pytest.raises(ValueError, match="overlaps credentials or cache"):
+        DirectModelReviewSourceConfig.model_validate(
+            {
+                **selected_config.model_dump(by_alias=True),
+                "verification_directory": selected_config.r2_credentials_file,
+            }
+        )
     shutil.rmtree(durable_cache)
     restarted = DirectModelArtifactReviewer(
         verifier.config,

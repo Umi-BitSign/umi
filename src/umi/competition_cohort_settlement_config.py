@@ -135,7 +135,7 @@ class SettlementServiceConfig(StrictProtocolModel):
                 *(self.original_sources.stores() if self.original_sources else ()),
                 *((self.request_export_directory,) if self.request_export_directory else ()),
                 *(
-                    (self.direct_model_review.r2_credentials_file,)
+                    self.direct_model_review.stores()
                     if self.direct_model_review
                     else ()
                 ),

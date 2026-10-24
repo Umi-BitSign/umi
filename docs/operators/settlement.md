@@ -20,6 +20,25 @@ an OS update. Package updates must not thaw a deliberately frozen replica or
 restart process-bound consumers before their qualified rebind. Policy installation
 alone does not prove replica custody, restore coverage or a successful restart.
 
+Direct R2 readers may select `direct_model_review.verification_directory` to
+reuse an existing account-private byte-verification directory across evaluation,
+settlement and reward consumers. Select the directory that already contains the
+completed checks; keep it in place during upgrades and cache eviction. Omit the
+field to preserve an installation's existing default and canonical configuration.
+The service account must own the selected private state. Different service
+accounts retain their independent directories; do not copy untrusted receipts or
+broaden permissions. The selected directory must be separate from credentials,
+the model cache and the consumer's other protected state stores. Config inventories
+include it so managed namespaces and updaters retain the dependency.
+
+Sharing reuses exact remote-object, bundle, policy and authority byte facts. It
+still checks current remote object identity and independently derives document
+review results and signing authorization. It does not grant model admission or
+scoring authority. Existing completed results must remain available; missing or
+damaged results require the native counted repair rather than a state reset.
+Publish and select the compatible reader before introducing the optional field
+into a private service configuration; older strict configuration readers reject it.
+
 ## Work progress and ETA logs
 
 The intake owner, phase reviewer, settlement service and reward runtime emit
