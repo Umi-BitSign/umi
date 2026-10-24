@@ -1,8 +1,10 @@
 """Static assignment reuse never replaces fresh journal/conflict checks."""
 
 import asyncio
+import json
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -263,3 +265,123 @@ def test_assignment_pair_capacity_uses_complete_protocol_objects():
     undersized = AssignmentVerificationReuse(maximum_bytes=size - 1)
     undersized.remember("pair", (1,), pair)
     assert undersized.lookup("pair", (1,)) is None
+
+
+def test_assignment_first_fill_is_shared_without_sharing_mutable_results():
+    reuse = AssignmentVerificationReuse()
+    entered, release = threading.Event(), threading.Event()
+    ready = threading.Barrier(4)
+    calls = []
+
+    def calculate():
+        calls.append(True)
+        entered.set()
+        assert release.wait(5)
+        return {"values": [1]}
+
+    def reader():
+        ready.wait(5)
+        return reuse.resolve("slot", (1,), calculate)
+
+    with ThreadPoolExecutor(4) as pool:
+        tasks = [pool.submit(reader) for _ in range(4)]
+        try:
+            assert entered.wait(5)
+            assert not any(task.done() for task in tasks)
+        finally:
+            release.set()
+        results = [task.result(5) for task in tasks]
+    assert calls == [True]
+    results[0]["values"].append(2)
+    assert all(value == {"values": [1]} for value in results[1:])
+    assert reuse.lookup("slot", (1,)) == {"values": [1]}
+
+
+def test_assignment_failed_fill_and_changed_key_require_new_validation():
+    reuse = AssignmentVerificationReuse()
+    calls = []
+
+    def calculate():
+        calls.append(True)
+        if len(calls) == 1:
+            raise ValueError("fixture failure")
+        return {"answer": len(calls)}
+
+    with pytest.raises(ValueError, match="fixture failure"):
+        reuse.resolve("slot", (1,), calculate)
+    assert reuse.resolve("slot", (1,), calculate) == {"answer": 2}
+    assert reuse.resolve("slot", (1,), calculate) == {"answer": 2}
+    assert reuse.resolve("slot", (2,), calculate) == {"answer": 3}
+    assert len(calls) == 3
+
+
+def test_assignment_capacity_pressure_is_reported_without_retaining_oversized_value(caplog):
+    reuse = AssignmentVerificationReuse(maximum_bytes=8, purpose="execution_retained")
+    with caplog.at_level("INFO", logger="umi.competition.progress"):
+        reuse.remember("slot", (1,), {"answer": "too large for fixture"})
+    event = next(
+        json.loads(row.message)
+        for row in caplog.records
+        if row.message.startswith('{"schema":"umi-assignment-reuse-progress/1"')
+    )
+    assert event["status"] == "capacity_required" and event["oversized"] == 1
+    assert event["purpose"] == "execution_retained"
+    assert event["retained_bytes"] == 0 and event["maximum_bytes"] == 8
+    assert reuse.lookup("slot", (1,)) is None
+
+
+async def test_inbox_first_validation_releases_writer_and_is_shared(relay, monkeypatch):
+    r = relay
+    await r.worker().poll_once()
+    box = r.inbox(r.h.order.evaluators[0])
+    entered, release = threading.Event(), threading.Event()
+    original = box._load
+    calls = []
+
+    def held(*args, **kwargs):
+        calls.append(True)
+        entered.set()
+        assert release.wait(20)
+        return original(*args, **kwargs)
+
+    def writer():
+        with box.journal.transaction() as db:
+            return db.execute("SELECT 1").fetchone()
+
+    monkeypatch.setattr(box, "_load", held)
+    tasks = [asyncio.create_task(asyncio.to_thread(box.assignment, r.slot)) for _ in range(3)]
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        # A real writer transaction can begin while static verification waits.
+        assert await asyncio.wait_for(asyncio.to_thread(writer), 2) == (1,)
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks)
+    assert calls == [True]
+    assert all(value == results[0] for value in results)
+
+
+async def test_execution_first_validation_is_shared_across_readers(execution, monkeypatch):
+    e = execution
+    journal = e.journal()
+    journal.retain(e.assignment, e.r.h.source, e.r.h.block)
+    original = journal.validate_assignment
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def held(value):
+        calls.append(True)
+        entered.set()
+        assert release.wait(20)
+        return original(value)
+
+    monkeypatch.setattr(journal, "validate_assignment", held)
+    tasks = [asyncio.create_task(asyncio.to_thread(journal.assignment, e.r.slot)) for _ in range(3)]
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks)
+    assert calls == [True]
+    assert all(value == results[0] for value in results)

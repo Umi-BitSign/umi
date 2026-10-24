@@ -155,8 +155,8 @@ class CohortExecutionJournal:
         if identity(self.config.signer) not in {identity(e.hotkey) for e in self.policy.evaluators}:
             raise ValueError("execution journal evaluator is not in its policy")
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
-        self._assignment_reuse = AssignmentVerificationReuse()
-        self._supplied_assignment_reuse = AssignmentVerificationReuse()
+        self._assignment_reuse = AssignmentVerificationReuse(purpose="execution_retained")
+        self._supplied_assignment_reuse = AssignmentVerificationReuse(purpose="execution_supplied")
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -204,23 +204,22 @@ class CohortExecutionJournal:
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
-        cached = self._supplied_assignment_reuse.lookup(slot, key)
-        if cached is not None:
-            return cached
-        value = CohortExecutionAssignment.model_validate_json(raw)
-        order = value.certificate.order
-        verify_recovery_quorum(order, value.certificate.signatures, self.policy)
-        if any(
-            identity(s.hotkey) == identity(order.submission.submission.hotkey)
-            for s in value.certificate.signatures
-        ):
-            raise ValueError("miner cannot authorize its own execution")
-        receipt = check_delivery_receipt(value.certificate, value.delivery)
-        if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
-            raise ValueError("execution delivery belongs to another evaluator")
-        job = recoverable_order_job(order, self.config.signer)
-        self._supplied_assignment_reuse.remember(slot, key, job)
-        return job
+
+        def calculate():
+            value = CohortExecutionAssignment.model_validate_json(raw)
+            order = value.certificate.order
+            verify_recovery_quorum(order, value.certificate.signatures, self.policy)
+            if any(
+                identity(s.hotkey) == identity(order.submission.submission.hotkey)
+                for s in value.certificate.signatures
+            ):
+                raise ValueError("miner cannot authorize its own execution")
+            receipt = check_delivery_receipt(value.certificate, value.delivery)
+            if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
+                raise ValueError("execution delivery belongs to another evaluator")
+            return recoverable_order_job(order, self.config.signer)
+
+        return self._supplied_assignment_reuse.resolve(slot, key, calculate)
 
     def retain(self, value: CohortExecutionAssignment, source: CohortOrderHistory, block: int):
         job = self.validate_assignment(value)
@@ -256,15 +255,15 @@ class CohortExecutionJournal:
         key = assignment_reuse_key(
             self.journal, slot, (raw,), self.config, self.policy, self.cohorts
         )
-        cached = self._assignment_reuse.lookup(slot, key)
-        if cached is not None:
-            return cached
-        saved = CohortExecutionAssignment.model_validate_json(raw)
-        job = self.validate_assignment(saved)
-        if order_slot(saved.certificate.order) != slot:
-            raise ValueError("retained execution assignment changed its slot")
-        self._assignment_reuse.remember(slot, key, (saved, job))
-        return saved, job
+
+        def calculate():
+            saved = CohortExecutionAssignment.model_validate_json(raw)
+            job = self.validate_assignment(saved)
+            if order_slot(saved.certificate.order) != slot:
+                raise ValueError("retained execution assignment changed its slot")
+            return saved, job
+
+        return self._assignment_reuse.resolve(slot, key, calculate)
 
     @canonical_json_reuse()
     def assignment(self, slot: str) -> CohortExecutionAssignment:
