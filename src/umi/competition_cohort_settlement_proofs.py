@@ -7,6 +7,8 @@ keys or live databases and can be replicated while either service is offline.
 
 from __future__ import annotations
 
+import os
+import stat
 from functools import partial
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_proof_archive import RewardProofArchive
 from .concurrency import run_owned_thread
 from .open_competition import digest
+from .private_files import private_path
 from .protocol import canonical_json_bytes
 
 
@@ -29,11 +32,29 @@ class SettlementRegistrationFiles:
         inbox: Path,
         outbox: Path,
         proof_stores: ProofArchiveStores | None = None,
+        shared_archives: tuple[Path, ...] = (),
     ):
         self.provider = provider
         if inbox.is_relative_to(outbox) or outbox.is_relative_to(inbox):
             raise ValueError("settlement proof inbox and outbox must be disjoint")
         self.inbox, self.outbox = selected_proof_archives(inbox, outbox, proof_stores)
+        self.shared = tuple(RewardProofArchive(path) for path in shared_archives)
+        paths = (inbox, outbox, *(archive.root for archive in self.shared))
+        if len(paths) != len(set(paths)) or any(
+            a.is_relative_to(b) or b.is_relative_to(a)
+            for index, a in enumerate(paths)
+            for b in paths[index + 1 :]
+        ):
+            raise ValueError("settlement shared proof sources must be distinct and disjoint")
+        for archive in self.shared:
+            self._check_shared(archive)
+
+    @staticmethod
+    def _check_shared(archive):
+        private_path(str(archive.root))
+        info = archive.root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("shared proof archive must be owned and private")
 
     @staticmethod
     def _read(archive: RewardProofArchive, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
@@ -67,4 +88,21 @@ class SettlementRegistrationFiles:
 
     async def read(self, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
-        return await run_owned_thread(self._read, self.inbox, observation)
+        return await run_owned_thread(self._read_selected, observation)
+
+    def _read_selected(self, observation):
+        for archive in (self.inbox, self.outbox, *self.shared):
+            if archive in self.shared:
+                self._check_shared(archive)
+            result = archive.read_if_present(
+                "registration",
+                digest(observation),
+                bounds={"proof": MAX_ARCHIVE_BYTES, "metadata": MAX_METADATA_BYTES},
+            )
+            if result is None:
+                continue
+            context, fields = result
+            if context != observation.model_dump(mode="json", by_alias=True):
+                raise ValueError("settlement proof changes its original observation")
+            return fields["proof"], fields["metadata"]
+        raise FileNotFoundError("selected settlement registration proof is unavailable")

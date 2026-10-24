@@ -34,6 +34,8 @@ def proof_case(tmp_path):
         inbox=tmp_path / "input",
         outbox=tmp_path / "output",
     )
+    # Managed service state is private even when the test runner's umask is022.
+    files.outbox.root.mkdir(mode=0o700)
     return files, observation, calls
 
 
@@ -94,3 +96,60 @@ async def test_settlement_partial_proof_export_never_publishes_a_frame(proof_cas
     await files.publish(observation)
     shutil.copytree(files.outbox.root, files.inbox.root, dirs_exist_ok=True)
     assert await files.read(observation) == (b"original-registration", b"original-metadata")
+
+
+async def test_own_and_explicit_shared_proofs_need_no_archive_copy(proof_case, tmp_path):
+    files, observation, calls = proof_case
+    await files.publish(observation)
+    assert await files.read(observation) == (b"original-registration", b"original-metadata")
+    reader = SettlementRegistrationFiles(
+        files.provider,
+        inbox=tmp_path / "new-input",
+        outbox=tmp_path / "new-output",
+        shared_archives=(files.outbox.root,),
+    )
+    before = {str(p): p.stat().st_ino for p in files.outbox.root.rglob("*.json")}
+    assert await reader.read(observation) == (b"original-registration", b"original-metadata")
+    # Ordinary private-file readers may create empty lookup/lock directories;
+    # no proof frame, encoded object or other payload may be copied there.
+    assert not any(p.is_file() and p.stat().st_size for p in reader.inbox.root.rglob("*"))
+    assert not any(p.is_file() and p.stat().st_size for p in reader.outbox.root.rglob("*"))
+    assert before == {str(p): p.stat().st_ino for p in files.outbox.root.rglob("*.json")}
+    assert calls == [observation]
+
+
+async def test_present_damaged_import_is_not_hidden_by_valid_shared_source(proof_case, tmp_path):
+    files, observation, _ = proof_case
+    await files.publish(observation)
+    shutil.copytree(files.outbox.root, files.inbox.root)
+    frame = json.loads(
+        (files.inbox.root / "registration" / (digest(observation) + ".json")).read_bytes()
+    )
+    recipe = frame["fields"]["proof"][0]["recipe_sha256"]
+    (files.inbox.root / "objects" / (recipe + ".json")).unlink()
+    reader = SettlementRegistrationFiles(
+        files.provider,
+        inbox=files.inbox.root,
+        outbox=tmp_path / "reader-output",
+        shared_archives=(files.outbox.root,),
+    )
+    with pytest.raises(FileNotFoundError):
+        await reader.read(observation)
+
+
+async def test_shared_proof_source_loss_and_permissions_are_explicit(proof_case, tmp_path):
+    files, observation, _ = proof_case
+    await files.publish(observation)
+    reader = SettlementRegistrationFiles(
+        files.provider,
+        inbox=tmp_path / "new-input",
+        outbox=tmp_path / "new-output",
+        shared_archives=(files.outbox.root,),
+    )
+    files.outbox.root.chmod(0o755)
+    with pytest.raises(ValueError, match="owned and private"):
+        await reader.read(observation)
+    files.outbox.root.chmod(0o700)
+    shutil.rmtree(files.outbox.root)
+    with pytest.raises(FileNotFoundError):
+        await reader.read(observation)

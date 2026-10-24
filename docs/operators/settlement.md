@@ -39,6 +39,42 @@ damaged results require the native counted repair rather than a state reset.
 Publish and select the compatible reader before introducing the optional field
 into a private service configuration; older strict configuration readers reject it.
 
+Settlement startup opens execution journals on an owned worker thread. If another
+writer holds the journal, only that unfinished open retries, with counted startup
+progress and a withdrawn ETA while contention continues. Completed journal opens,
+legacy-source preparation and key initialization stay retained in the current
+startup. Stop requests drain the current native call and end the wait; noncontention
+database errors still require explicit repair.
+
+`automatic_progression_hold_cohorts` explicitly holds selected local settlement
+lanes without changing the approved series, signed cohort clocks or state paths.
+Unheld cohorts retain their original relative order. This permits a separately
+maintained historical reward row to coexist with a successor's native settlement
+lane, while future cohorts stay held. Holds do not certify skipped work, erase
+inputs, abandon retirement duties or alter already earned rewards. Keep the
+historical row's actual writer and other required recovery consumers running.
+Held lanes report their stage, elapsed time and `awaiting_explicit_configuration_release`
+ETA basis. Releasing a hold resumes its original retained state and dependencies.
+Omitting the field preserves older canonical configurations. Select the compatible
+reader before adding the optional field; intake holds and release permissions
+remain independent and must also be preserved.
+
+For private registration-proof transport, settlement can select up to eight
+`shared_registration_archives` belonging to its existing service account. Include
+the explicit source directories in the service's read-only namespace bindings.
+Original import/export directories stay in place. Reads check the ordinary inbox,
+then the service's own outbox, then the configured shared sources; only the requested
+frame and its bounded referenced objects are read. No archive census or bulk copy
+is required. Native finality, context and proof verification still apply before
+signing. A missing frame may select the next source; a present invalid frame or
+missing referenced object is an explicit failure, never a fallback. Selected shared
+roots must remain present, private and owned; retain their source/restore dependencies.
+Qualify the container directory of an older archive before selecting sharing; a
+broader historical umask is not a reason to broaden access or reset its contents.
+Use the existing authenticated remote proof transport for cross-account or remote
+delivery; do not broaden permissions or share private signer state. The optional
+selection changes no signed format, native proof semantics or historical clocks.
+
 ## Work progress and ETA logs
 
 The intake owner, phase reviewer, settlement service and reward runtime emit
