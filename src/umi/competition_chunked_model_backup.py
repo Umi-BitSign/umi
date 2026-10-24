@@ -54,7 +54,7 @@ from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, ModelBundle, digest, validate_bundle_policy
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
-from .r2_multipart import R2MultipartClient
+from .r2_multipart import R2MultipartClient, pooled_r2_reads
 
 CHUNK_BYTES = 8 * 1024**2
 MATERIALIZATION_PREFETCH_CHUNKS = 4
@@ -523,6 +523,7 @@ class ChunkedModelBackupReader:
             progress.advance(len(raw))
             return raw
 
+    @pooled_r2_reads
     async def verify(
         self,
         *,
@@ -666,6 +667,7 @@ class ChunkedModelBackupReader:
         shared.remember_verified(document)
         return document
 
+    @pooled_r2_reads
     async def export_completed(self, *, report=None):
         """Export complete native results without fetching or repairing model bytes.
 
@@ -716,6 +718,7 @@ class ChunkedModelBackupReader:
                     raise OSError("owned model byte verification requires repair")
                 progress.advance(1, restored=True)
 
+    @pooled_r2_reads
     async def read_verified_range(
         self,
         snapshot: ChunkedModelVerification,
@@ -769,6 +772,7 @@ class ChunkedModelBackupReader:
                 raise ValueError("model retry range coverage differs")
             return bytes(content)
 
+    @pooled_r2_reads
     async def materialize(
         self,
         archive: Path,
@@ -947,7 +951,7 @@ class ChunkedModelBackupReader:
                             progress.advance_operations(1)
                         written.append([record.path, stamp["file"]])
                 if heads:
-                    await self._unchanged(heads, report)
+                    await self._unchanged(heads, progress.child_report())
                 await run_owned_thread(publish_private_model, target / "manifest.json", bundle)
                 expected = await run_owned_thread(_preserved_verification_record, bundle, archive)
                 if json.loads(expected)["files"] != written:

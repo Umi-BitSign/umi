@@ -342,6 +342,7 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
         patch.setattr(direct_review, "publish_private_model", lose_final_marker)
         with pytest.raises(OSError, match="lost final materialization publication"):
             await durable.materialize(direct_request, interrupted_cache)
+
     async def no_transfer(*args, **kwargs):
         raise AssertionError("completed payload was downloaded during finalization recovery")
 

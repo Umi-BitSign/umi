@@ -907,7 +907,7 @@ class RoundJournal:
             columns = [
                 self._identifier(row[1]) for row in db.execute(f"PRAGMA table_info({table})")
             ]
-            sizes = "+".join(f"COALESCE(LENGTH(CAST({col} AS BLOB)),0)" for col in columns)
+            sizes = "+".join(self._stored_byte_length(col) for col in columns)
             rows, size = db.execute(
                 f"SELECT COUNT(*),COALESCE(SUM({sizes}),0) FROM {table}"
             ).fetchone()
@@ -917,6 +917,16 @@ class RoundJournal:
             count += rows
             used += size
         return count, used, kinds
+
+    @staticmethod
+    def _stored_byte_length(column):
+        # SQLite can read a BLOB's length from its record header without loading
+        # overflow pages. CAST disables that optimization. Retain the original
+        # UTF-8 byte accounting for TEXT and SQLite's numeric conversions.
+        return (
+            f"COALESCE(CASE WHEN TYPEOF({column})='blob' THEN LENGTH({column}) "
+            f"ELSE LENGTH(CAST({column} AS BLOB)) END,0)"
+        )
 
     def _check_capacity(self, db):
         count, used, kinds = self._capacity(db)

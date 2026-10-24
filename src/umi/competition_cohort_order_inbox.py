@@ -150,6 +150,47 @@ class CohortOrderInbox:
                 )
             )
 
+    def assignments_for_models(
+        self, revisions: tuple[str, ...], *, limit: int, preferred=()
+    ) -> tuple[str, ...]:
+        """Bounded startup hints, never an assignment or execution authorization.
+
+        Read only the compact retained certificate, not the intent's historical
+        proof payload. The ordinary assignment reader still authenticates each
+        selected item. No persisted input or fair cursor is changed.
+        """
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 32
+            or len(revisions) > 32
+            or len(preferred) > 32
+            or any(
+                len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+                for value in (*revisions, *preferred)
+            )
+        ):
+            raise ValueError("invalid resident model scheduling hints")
+        if not revisions:
+            return ()
+        placeholders = ",".join("?" for _ in revisions)
+        priority = (
+            ("CASE WHEN c.id IN (" + ",".join("?" for _ in preferred) + ") THEN 0 ELSE 1 END,")
+            if preferred
+            else ""
+        )
+        with self.journal.read_transaction() as db:
+            return tuple(
+                row[0]
+                for row in db.execute(
+                    "SELECT c.id FROM records c JOIN records r ON c.id=r.id "
+                    "WHERE c.kind='certificate' AND r.kind='receipt' AND "
+                    "json_extract(CAST(c.body AS TEXT),"
+                    "'$.order.submission.submission.model_revision') IN (" + placeholders + ") "
+                    "ORDER BY " + priority + "c.id LIMIT ?",
+                    (*revisions, *preferred, limit),
+                )
+            )
+
     def _check_certificate(self, certificate):
         delivery_receipt(certificate, self.config.signer)
         miner = identity(certificate.order.submission.submission.hotkey)
