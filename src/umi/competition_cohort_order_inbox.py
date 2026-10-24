@@ -61,7 +61,7 @@ class CohortOrderInbox:
         self.provider, self.history, self.sign = provider, history, sign
         self.cohorts = {c.cohort_sha256: c.authority_sha256 for c in self.config.cohorts}
         self.serial = asyncio.Lock()
-        self._assignment_reuse = AssignmentVerificationReuse()
+        self._assignment_reuse = AssignmentVerificationReuse(purpose="order_inbox")
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -79,13 +79,16 @@ class CohortOrderInbox:
                 "(cohort TEXT PRIMARY KEY, history TEXT NOT NULL)"
             )
 
-    def _load(self, slot: str, *, db: sqlite3.Connection | None = None):
-        raw = self.journal.get("intent", slot, db=db)
+    def _load(self, slot: str, *, db: sqlite3.Connection | None = None, records=None):
+        raw = self.journal.get_raw("intent", slot, db=db) if records is None else records[0]
         if raw is None:
             return None
-        intent = CohortOrderIntent.model_validate_json(canonical_json_bytes(raw))
+        intent = CohortOrderIntent.model_validate_json(raw)
+        raw_certificate = (
+            self.journal.get_raw("certificate", slot, db=db) if records is None else records[1]
+        )
         certificate = SignedRecoverableEvaluationOrder.model_validate_json(
-            canonical_json_bytes(self.journal.get("certificate", slot, db=db))
+            b"null" if raw_certificate is None else raw_certificate
         )
         if (
             order_slot(intent.order) != slot
@@ -106,36 +109,37 @@ class CohortOrderInbox:
         # network calls. Acknowledged work needs only a consistent SQLite
         # snapshot of its immutable inputs, with fresh conflict checks. Static
         # proofs may be reused only for those exact bytes and owner bindings.
-        with canonical_json_reuse(), self.journal.transaction() as db:
-            records = tuple(
-                self.journal.get_raw(kind, slot, db=db)
-                for kind in ("intent", "certificate", "receipt")
-            )
+        with canonical_json_reuse():
+            with self.journal.read_transaction() as db:
+                records = tuple(
+                    self.journal.get_raw(kind, slot, db=db)
+                    for kind in ("intent", "certificate", "receipt")
+                )
             key = None
             if all(raw is not None for raw in records):
                 key = assignment_reuse_key(
                     self.journal, slot, records, self.config, self.policy, self.cohorts
                 )
-                cached = self._assignment_reuse.lookup(slot, key)
-                if cached is not None:
-                    return cached
-            saved = self._load(slot, db=db)
-            if saved is None:
-                raise FileNotFoundError("inbox assignment is unavailable")
-            raw = self.journal.get("receipt", slot, db=db)
-            if raw is None:
-                raise FileNotFoundError("inbox assignment acknowledgement is pending")
-            receipt = check_delivery_receipt(
-                saved[1], SignedOrderDeliveryReceipt.model_validate_json(canonical_json_bytes(raw))
+
+            def calculate():
+                saved = self._load(slot, records=records)
+                if saved is None:
+                    raise FileNotFoundError("inbox assignment is unavailable")
+                raw = records[2]
+                if raw is None:
+                    raise FileNotFoundError("inbox assignment acknowledgement is pending")
+                receipt = check_delivery_receipt(
+                    saved[1], SignedOrderDeliveryReceipt.model_validate_json(raw)
+                )
+                if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
+                    raise ValueError("inbox acknowledgement belongs to another evaluator")
+                return CohortExecutionAssignment(
+                    certificate=saved[1], participant=saved[0].participant, delivery=receipt
+                )
+
+            return (
+                calculate() if key is None else self._assignment_reuse.resolve(slot, key, calculate)
             )
-            if identity(receipt.receipt.evaluator_hotkey) != identity(self.config.signer):
-                raise ValueError("inbox acknowledgement belongs to another evaluator")
-            assignment = CohortExecutionAssignment(
-                certificate=saved[1], participant=saved[0].participant, delivery=receipt
-            )
-            if key is not None:
-                self._assignment_reuse.remember(slot, key, assignment)
-            return assignment
 
     def assignments(self, *, after: str = "", limit: int = 16) -> tuple[str, ...]:
         if type(limit) is not int or not 1 <= limit <= 256:

@@ -326,6 +326,16 @@ read-then-write decisions retain the writer transaction. Every snapshot checks
 current conflict holds, journal generation and reservation fences; this is not a
 cache of mutable authorization state.
 
+Inbox assignment readers release that snapshot before static proof validation.
+Concurrent local readers of the same exact assignment share its first successful
+validation, then receive separate private copies. Changed retained bytes, owner
+bindings or conflict holds still require their normal checks; current finality
+and execution permission are never borrowed from this reuse. The
+`assignment_static_verification` and `assignment_verification_owner` stages show
+verification and local-owner waiting separately. Bounded assignment reuse also
+reports hit, miss, eviction and oversize counts, retained bytes and configured
+capacity; a capacity bypass is visible instead of silently hiding repeated work.
+
 An exact single-record retention retry also uses that read-only snapshot: the
 same canonical bytes must already be committed and satisfy their reservation.
 New records and conflicting bytes still use the native writer transaction;
