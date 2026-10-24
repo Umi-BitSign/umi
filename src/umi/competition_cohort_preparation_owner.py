@@ -12,13 +12,14 @@ from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_d
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation import PreparedCohortRound, prepare_cohort_round
+from .competition_cohort_preparation_publication import PreparedRoundPublication
 from .competition_cohort_recovery import cohort_tracks
 from .competition_cohort_roster import RecoverableRosterParticipant
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_store import AdmissionCapacityError, CompetitionStore
 from .host_memory_request_bounds import check_stage_json
 from .host_memory_runtime import authorize_memory
-from .open_competition import digest
+from .open_competition import digest, digest_canonical_bytes
 from .protocol import canonical_json_bytes
 
 
@@ -28,6 +29,7 @@ class _VerifiedRound:
     sha256: str
     value: PreparedCohortRound
     tip_sha256: str
+    round_sha256: str
 
 
 class CohortPreparation:
@@ -74,12 +76,42 @@ class CohortPreparation:
             observation,
             expected_tip_sha256=expected_tip_sha256,
             current_block=observation.block,
+        ).value
+
+    def prepare_publication(self, cohort, capture, *, expected_tip_sha256):
+        """Prepare and retain one private snapshot without a second preparation pass."""
+        authorize_memory(None, cohort, "preparation")
+        observation = execution_boundary(capture)
+        saved = self._retained(
+            cohort, expected_tip_sha256=expected_tip_sha256,
+            current_block=observation.block, observation=observation,
         )
+        return self._publication(saved)
 
     def retained(
         self, cohort: str, *, expected_tip_sha256: str, current_block: int
     ) -> PreparedCohortRound:
-        """Replay a retained round without selecting or creating a new one."""
+        """Replay a retained round without exposing the owner's private object."""
+        return self._retained(
+            cohort, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+        ).value.model_copy(deep=True)
+
+    def retained_publication(self, cohort, *, expected_tip_sha256, current_block):
+        """Internal immutable bytes after the same fresh authority/source fences."""
+        saved = self._retained(
+            cohort, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+        )
+        return self._publication(saved)
+
+    @staticmethod
+    def _publication(saved):
+        round_ = saved.value.roster.round
+        return PreparedRoundPublication(
+            saved.raw, saved.sha256, saved.round_sha256,
+            round_.cohort_sha256, round_.sequence, round_.incumbent_model_sha256,
+        )
+
+    def _retained(self, cohort, *, expected_tip_sha256, current_block, observation=None):
         key = cohort
         with self._retained_lock:
             cached = self._retained_cache.get(key)
@@ -153,7 +185,7 @@ class CohortPreparation:
                                 or decision(
                                     prepared.evidence_sha256
                                 ).progress.progress.phase_result_sha256
-                                != digest(cached.value.roster.round)
+                                != cached.round_sha256
                             ):
                                 raise ValueError(
                                     "prepared round differs from certified preparation"
@@ -161,25 +193,23 @@ class CohortPreparation:
                         cached = replace(cached, tip_sha256=expected_tip_sha256)
                         self._retained_cache[key] = cached
                 self._retained_cache.move_to_end(key)
-                return cached.value.model_copy(deep=True)
-            result = self._prepare(
-                cohort,
-                None,
-                expected_tip_sha256=expected_tip_sha256,
+                return cached
+            saved = self._prepare(
+                cohort, observation, expected_tip_sha256=expected_tip_sha256,
                 current_block=current_block,
             )
-            # Bound total retained canonical bytes across cohorts. Neither the
-            # initial caller nor a cache-hit caller can mutate these copies.
-            raw = canonical_json_bytes(result)
-            if len(raw) <= self.maximum_bytes:
-                while self._retained_cache and self._retained_bytes + len(raw) > self.maximum_bytes:
-                    _, old = self._retained_cache.popitem(last=False)
-                    self._retained_bytes -= len(old.raw)
-                self._retained_cache[key] = _VerifiedRound(
-                    raw, digest(result), result.model_copy(deep=True), expected_tip_sha256
-                )
-                self._retained_bytes += len(raw)
-            return result
+            self._remember(key, saved)
+            return saved
+
+    def _remember(self, key, saved):
+        previous = self._retained_cache.pop(key, None)
+        if previous is not None:
+            self._retained_bytes -= len(previous.raw)
+        while self._retained_cache and self._retained_bytes + len(saved.raw) > self.maximum_bytes:
+            _, old = self._retained_cache.popitem(last=False)
+            self._retained_bytes -= len(old.raw)
+        self._retained_cache[key] = saved
+        self._retained_bytes += len(saved.raw)
 
     def _prepare(
         self,
@@ -188,7 +218,7 @@ class CohortPreparation:
         *,
         expected_tip_sha256: str,
         current_block: int,
-    ) -> PreparedCohortRound:
+    ) -> _VerifiedRound:
         queue, intake = self.queue, self.queue.intake
         intake._allowed(cohort)
         with queue._connection() as (db, store):
@@ -268,12 +298,18 @@ class CohortPreparation:
             if previous is not None:
                 if raw != row[1]:
                     raise ValueError("round preparation changed its original retained inputs")
-                return result
+                return _VerifiedRound(
+                    raw, row[0], result, expected_tip_sha256, digest(result.roster.round)
+                )
             if len(raw) > self.maximum_bytes:
                 raise AdmissionCapacityError("round preparation needs additional durable capacity")
+            prepared_sha = digest_canonical_bytes(raw)
             with queue._transaction(db):
                 db.execute(
                     "INSERT INTO cohort_prepared_rounds VALUES (?,?,?,?)",
-                    (cohort, digest(result), result.observation.block, raw),
+                    (cohort, prepared_sha, result.observation.block, raw),
                 )
-            return result
+            return _VerifiedRound(
+                raw, prepared_sha, result, expected_tip_sha256,
+                digest(result.roster.round),
+            )

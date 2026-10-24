@@ -1,6 +1,7 @@
 """Host-only review allowances preserve supported layouts and durable bindings."""
 
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -275,10 +276,12 @@ def test_owner_export_is_independent_of_short_ordinary_peer_timeout(selected, tm
         ),
         history=None,
     )
-    host = LifecycleHost(service, None, None, (), None)
-    assert host.readiness_timeout_seconds == 17
-    assert host.timeout_seconds == (4000 if use_budget else 17)
-    assert host.maximum_bytes == host.request_replay_bytes == GIB4
+    credentials = ("private-reviewer-token" * 3,) * len(owner.reviewers)
+    with ExitStack() as resources:
+        host = LifecycleHost(service, resources, None, credentials, None)
+        assert host.readiness_timeout_seconds == 17
+        assert host.timeout_seconds == (4000 if use_budget else 17)
+        assert host.maximum_bytes == host.request_replay_bytes == GIB4
 
 
 @pytest.mark.parametrize("selected_profile", [False, True])

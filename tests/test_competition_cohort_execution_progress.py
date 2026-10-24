@@ -306,7 +306,7 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
             files=NS(root=h.root),
             requests={cohort: NS(roster=h.roster)},
             execution_progress={},
-            producer_epochs=NS(sample=epochs),
+            producer_epochs=NS(sample=epochs, diagnostics=lambda _: {}),
             forecast_ledger=ledger,
             last_reports={},
             node=node,

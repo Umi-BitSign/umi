@@ -44,6 +44,7 @@ from .competition_cohort_order_host import CohortOrderHost
 from .competition_cohort_preparation_export import PreparationReviewExporter
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_review_http import preparation_review_routes
+from .competition_cohort_producer_epoch import producer_epoch_client
 from .competition_cohort_request_probe import tasks_running
 from .competition_cohort_request_readiness_host import CombinedRequestReadiness
 from .competition_cohort_request_review_http import request_review_routes
@@ -233,13 +234,13 @@ async def admission_owner_app(
             )
             for peer, credential in zip(c.reviewers, credentials, strict=True)
         )
-        lifecycle = (
-            await run_owned_thread(
-                LifecycleHost, service_host, resources, client, credentials, sign
+        lifecycle = None
+        if service_host is not None and service_host.config.lifecycle is not None:
+            epoch_client = await resources.enter_async_context(producer_epoch_client())
+            lifecycle = await run_owned_thread(
+                LifecycleHost, service_host, resources, client, credentials, sign,
+                epoch_client,
             )
-            if service_host is not None and service_host.config.lifecycle is not None
-            else None
-        )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
         phase_export_timeout_seconds = (
             c.phase_review_budget.export_seconds

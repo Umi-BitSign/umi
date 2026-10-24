@@ -45,6 +45,14 @@ def producer_epoch_routes(signer, *, token, enabled):
     return router
 
 
+def producer_epoch_client():
+    """Advisory requests must not wait for long business requests' pool slots."""
+    return httpx.AsyncClient(
+        trust_env=False, follow_redirects=False,
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+    )
+
+
 class ExecutionProducerEpochs:
     """One bounded cached observation per configured peer, shared across cohorts."""
 
@@ -56,6 +64,8 @@ class ExecutionProducerEpochs:
         }
         self.cache = {}
         self.capacity = asyncio.Semaphore(4)
+        self.probes = {}
+        self.attempts = self.failures = self.timeouts = 0
 
     async def _fetch(self, evaluator, origin, token):
         async with self.capacity, self.client.stream(
@@ -63,6 +73,7 @@ class ExecutionProducerEpochs:
             headers={"authorization": "Bearer " + token, "accept-encoding": "identity"},
             timeout=2,
         ) as response:
+            self.probes[evaluator] = ("http_status", response.status_code)
             if response.status_code != 200:
                 return None
             raw = bytearray()
@@ -91,16 +102,24 @@ class ExecutionProducerEpochs:
             return previous[1]
         selected = self.peers.get(evaluator)
         value = None
+        self.attempts += 1
+        self.probes[evaluator] = ("unconfigured", None)
         if selected is not None:
             origin, token = selected
             try:
                 value = await asyncio.wait_for(
                     self._fetch(evaluator, origin, token), timeout=_REFRESH_SECONDS
                 )
-            except (httpx.HTTPError, OSError, ValueError, TypeError, AttributeError,
-                    asyncio.TimeoutError):
+            except (httpx.TimeoutException, asyncio.TimeoutError):
+                self.timeouts += 1
+                self.probes[evaluator] = ("timeout", None)
+            except (httpx.HTTPError, OSError, ValueError, TypeError, AttributeError):
                 # Never borrow a previous successful epoch after a failed refresh.
-                value = None
+                self.probes[evaluator] = ("invalid_or_unavailable", None)
+        if value is None:
+            self.failures += 1
+        else:
+            self.probes[evaluator] = ("current", 200)
         self.cache[evaluator] = (time.monotonic(), value)
         return value
 
@@ -110,3 +129,18 @@ class ExecutionProducerEpochs:
             raise ValueError("execution rate producer inventory exceeds its bound")
         values = await asyncio.gather(*(self._read(e) for e in selected))
         return {e: value for e, value in zip(selected, values, strict=True) if value is not None}
+
+    def diagnostics(self, evaluators):
+        """Cached bounded reason/counters only: no origins, credentials or errors."""
+        selected = sorted(set(evaluators))
+        if len(selected) > 64:
+            raise ValueError("execution rate producer inventory exceeds its bound")
+        states = [self.probes.get(e, ("awaiting_probe", None)) for e in selected]
+        failed = next((value for value in states if value[0] != "current"), None)
+        return dict(
+            rate_probe_status="current" if failed is None else failed[0],
+            rate_probe_http_status=200 if failed is None else failed[1],
+            rate_probe_attempts=self.attempts,
+            rate_probe_failures=self.failures,
+            rate_probe_timeouts=self.timeouts,
+        )

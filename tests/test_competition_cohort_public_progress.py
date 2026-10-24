@@ -167,7 +167,9 @@ def test_execution_counts_are_separate_from_certification_and_current_native_wor
     assert result["stage"] == "model_evaluation" and result["completed"] == 3
     assert result["exported_executions"] == 94
     assert result["overall_percent"] is None and result["overall_eta_seconds"] is None
-    for old_stage in ("model_acceptance_export", "preparation_result_publication"):
+    for old_stage in (
+        "model_acceptance_export", "preparation_result_publication", "lifecycle_history_publication"
+    ):
         state.record(
             "work",
             dict(
