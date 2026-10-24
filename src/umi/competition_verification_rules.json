@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.",
+  "compatibility_basis": "Qualify advisory execution-export delivery gaps and persisted same-producer, same-boot progress origins. Only intake telemetry and optional private diagnostic fields change; native verdict semantics, signed inputs, cohort clocks and completed verification ABI are unchanged. Retained original native verification and telemetry qualification apply.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -79,7 +79,7 @@
     "competition_cohort_evaluation.py": "37202d901ae15dfb7a1ddeee24346fde484b7f0aaebe75b904351b781e8b1e61",
     "competition_cohort_execution.py": "e8db8de5219814c4f45b9f6fac5db0cd4a484116e26991b570bd3a2055a636c3",
     "competition_cohort_execution_journal.py": "8f863eeb2bddb66951a6f91d1737d461d42bef606cd7d4f9cf143526fc641a79",
-    "competition_cohort_execution_progress.py": "d75d4c7d0d06c8b409e319e75a3e2d2f064b89ed85bf16343d1af954d5eb2ea9",
+    "competition_cohort_execution_progress.py": "311d286ce4915003734109fbe88c9a4bf54a3906838bc0ba4e4641e20a92d6c2",
     "competition_cohort_executor.py": "a1fcd19fe9e8293617daf9f8be28b3cf34dbec6dc9ec98ab9173f04f3df49d4b",
     "competition_cohort_export_checkpoint.py": "164bd2b24bd78d1964d1689b3f5d5cd7992ece86a0a8f92c5cd5f34e74ff0fc8",
     "competition_cohort_grant_delivery.py": "cb6b147618d9fc4e9a31804f8c32195835bd015f2f1025cf8aaef5882936d4ba",
@@ -99,7 +99,7 @@
     "competition_cohort_legacy_model_settlement.py": "dbce44cb72c62e44a5d054ee0f8855000d7005b871d2c64f8d0c62b6e9d8fccc",
     "competition_cohort_legacy_model_storage.py": "a24ecc3c54b8be707ef906ad50c53de5d623ebe94fecde46e674b71f962b18cb",
     "competition_cohort_lifecycle.py": "657ecc05a066877fc7c84840374b5e2ea0af4ab9eb57f478d0aa4c93fc0b2da8",
-    "competition_cohort_lifecycle_host.py": "8ed5e9437c30d811bc4d20fac4ce59dcc808b377c82a234f7affd7271166614f",
+    "competition_cohort_lifecycle_host.py": "9410e253245f83e885b922a100888aae89551ae5191b3fcb7761e7d6987ea02f",
     "competition_cohort_miner.py": "a5d824bb18ff0a2540f00d38546e72d7a3a5950242c5779e9995dc2929770bb3",
     "competition_cohort_miner_case.py": "19ad82b74a50d68c533a377965ec553cef8f71f5c273a213aace759a6325dbe0",
     "competition_cohort_miner_contracts.py": "eb08376f378ba1105dedc1b00eb2f4cceff11db315e65d2cc7d52835830002d5",
