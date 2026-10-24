@@ -199,6 +199,34 @@ def test_logger_setup_is_idempotent_and_does_not_enable_http_logging(monkeypatch
     assert len([json.loads(line) for line in captured.err.splitlines()]) == 2
 
 
+def test_model_export_reuse_counters_emit_with_actual_cli_logging_setup(
+    monkeypatch, capsys, tmp_path
+):
+    from umi.competition_cohort_request_files import RequestCompletionFiles
+
+    logger = logging.getLogger("umi.competition.progress")
+    monkeypatch.setattr(progress, "_LOG", logger)
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logging.WARNING)
+    monkeypatch.setattr(logger, "propagate", True)
+    monkeypatch.setattr(logging.getLogger(), "level", logging.WARNING)
+    progress.configure_progress_logging()
+    try:
+        files = RequestCompletionFiles(tmp_path / "exports")
+        for _ in range(64):
+            files._partial_reuse_event("hits")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        event = json.loads(captured.err)
+        assert event["schema"] == "umi-model-partial-export-reuse/1"
+        assert event["stage"] == "model_partial_export_source_reuse"
+        assert event["lookups"] == event["hits"] == 64
+        assert event["certification_authority"] is False
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+
+
 def test_unrecognized_phase_cannot_be_used_to_log_arbitrary_text(progress_events):
     with pytest.raises(ValueError, match="unknown competition diagnostic phase"):
         progress.log_phase("secret capability")

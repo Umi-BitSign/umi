@@ -53,7 +53,7 @@ from .private_files import ensure_private_directory, private_path, publish_priva
 from .private_files import read_private_model as read
 from .protocol import Hex32, StrictProtocolModel
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("umi.competition.progress")
 
 
 class _Reference(StrictProtocolModel):
