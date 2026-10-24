@@ -30,6 +30,34 @@ ModelDeliveryAdoptionSelections = Annotated[
 ]
 
 
+def retained_model_delivery_adoption(history):
+    """Project an immutable amendment from an already authenticated history.
+
+    This performs no verification or current-tip selection. Native callers use
+    their checked history; boot callers first validate the committed selection.
+    """
+    return next(
+        (
+            signed.transition.model_delivery_adoption
+            for signed in history.transitions
+            if signed.transition.model_delivery_adoption is not None
+        ),
+        None,
+    )
+
+
+def selected_cohort_profile(config, cohort):
+    """Project a boot-validated committed amendment; never infer one from a plan."""
+    return next(
+        (
+            retained_model_delivery_adoption(selected.history)
+            for selected in config.model_delivery_adoptions
+            if digest(selected.history.plan) == cohort
+        ),
+        None,
+    )
+
+
 def committed_model_delivery_selection(store, cohort, policy):
     """Read the actual owner snapshot without reserving, signing or publishing.
 

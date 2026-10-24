@@ -3168,6 +3168,32 @@ than inheriting a short readiness timeout. Keep the operator client and private
 proxy allowances at least as large as those complete derived exchanges. Candidate
 metadata does not select transport for consumers.
 
+For an originally mixed C7+ intake that is becoming public-model-only, select
+`model_only: true` in the candidate on the owner and every independent reviewer.
+This issues `umi-cohort-model-delivery-adoption/2`, explicitly binding
+`eligible_tracks: ["model"]` and `service_pool_bps: 0`. Omitting that flag keeps
+the original transport-only `/1` bytes and reward split. A reviewer with a
+different private selection refuses the proposal before reviewing remote bytes.
+The amendment is intake-only and cannot discard completed paid work. It preserves
+the original signed plan, terms, catalogs, participation records and all clocks.
+Sealing authenticates every retained record but selects only enabled tracks.
+New endpoint entries are refused; exact retained retries still recover.
+
+Native closure replay derives `umi-cohort-service-quality/3` with the adoption
+digest and zero service pool. The original signed service terms remain unchanged;
+the derived allocation assigns all 65,535 raw-weight units to the model budget.
+Participation status `/2` reports the effective profile and fences disabled
+endpoint enrollment. A prepared model-only service queue reports nonretryable
+`409 admission_closed` with `closure_reason: model_only`; accepted original
+claims always recover before any new-claim fence.
+
+Keep successor progression held until the updated model client and all selected
+owner, independent reviewer, settlement, reward and validator readers have their
+supported release selected. A source merge does not update installed readers.
+Publish the compatible client/manifest before exposing the amended history,
+then configure committed `model_delivery_adoptions` for independent consumers.
+No amendment or release changes the operator's progression hold.
+
 Prepare candidate inventory files and exact original copies in the selected source
 directory using the formats below. Preserve the complete original ledger census,
 including superseded participation, uploads without admission, reserved acceptance

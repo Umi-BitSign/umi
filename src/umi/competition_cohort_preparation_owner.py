@@ -83,8 +83,10 @@ class CohortPreparation:
         authorize_memory(None, cohort, "preparation")
         observation = execution_boundary(capture)
         saved = self._retained(
-            cohort, expected_tip_sha256=expected_tip_sha256,
-            current_block=observation.block, observation=observation,
+            cohort,
+            expected_tip_sha256=expected_tip_sha256,
+            current_block=observation.block,
+            observation=observation,
         )
         return self._publication(saved)
 
@@ -107,8 +109,12 @@ class CohortPreparation:
     def _publication(saved):
         round_ = saved.value.roster.round
         return PreparedRoundPublication(
-            saved.raw, saved.sha256, saved.round_sha256,
-            round_.cohort_sha256, round_.sequence, round_.incumbent_model_sha256,
+            saved.raw,
+            saved.sha256,
+            saved.round_sha256,
+            round_.cohort_sha256,
+            round_.sequence,
+            round_.incumbent_model_sha256,
         )
 
     def _retained(self, cohort, *, expected_tip_sha256, current_block, observation=None):
@@ -195,7 +201,9 @@ class CohortPreparation:
                 self._retained_cache.move_to_end(key)
                 return cached
             saved = self._prepare(
-                cohort, observation, expected_tip_sha256=expected_tip_sha256,
+                cohort,
+                observation,
+                expected_tip_sha256=expected_tip_sha256,
                 current_block=current_block,
             )
             self._remember(key, saved)
@@ -288,7 +296,11 @@ class CohortPreparation:
                 tuple(members),
                 promotion,
                 observation if previous is None else previous.observation,
-                eligible_tracks=cohort_tracks(history.plan, tuple(sorted(set(intake.tracks)))),
+                eligible_tracks=cohort_tracks(
+                    history.plan,
+                    tuple(sorted(set(intake.tracks))),
+                    adoption=view.state.model_delivery_adoption,
+                ),
                 decision_source=lambda key: store.source(cohort, key, CohortDecisionInput),
                 intake_records=intake._records(db, history),
                 expected_tip_sha256=expected_tip_sha256,
@@ -310,6 +322,9 @@ class CohortPreparation:
                     (cohort, prepared_sha, result.observation.block, raw),
                 )
             return _VerifiedRound(
-                raw, prepared_sha, result, expected_tip_sha256,
+                raw,
+                prepared_sha,
+                result,
+                expected_tip_sha256,
                 digest(result.roster.round),
             )

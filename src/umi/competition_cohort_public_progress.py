@@ -181,7 +181,13 @@ class CohortProgressSnapshots:
                 and (
                     work.get("stage") == "lifecycle_history_publication"
                     or work.get("stage", "").startswith(
-                        ("model_acceptance_", "preparation_", "intake_", "legacy_model_")
+                        (
+                            "model_acceptance_",
+                            "preparation_",
+                            "intake_",
+                            "legacy_model_",
+                            "chunked_model_",
+                        )
                     )
                 )
             )

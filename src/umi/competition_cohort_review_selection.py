@@ -10,6 +10,7 @@ from .competition_cohort_intake_review_http import IntakeReviewHTTPClient
 from .competition_cohort_model_delivery_api import ModelDeliveryAdoptionReviewer
 from .competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidate
 from .competition_cohort_model_delivery_reservation import ModelDeliveryReservationReader
+from .competition_cohort_model_transport_selection import selected_cohort_profile
 from .competition_cohort_preparation_export import RemotePreparationProgressReviewer
 from .competition_cohort_preparation_review_http import PreparationReviewHTTPClient
 from .competition_cohort_recovery import cohort_tracks, verify_cohort_service_pool
@@ -153,7 +154,9 @@ class SelectedPhaseReviewer:
         plan = next((plan for plan in c.series.cohorts if digest(plan) == cohort), None)
         if plan is None:
             raise ValueError("phase review cohort is absent from its standing series")
-        selected_tracks = cohort_tracks(plan, c.eligible_tracks)
+        selected_tracks = cohort_tracks(
+            plan, c.eligible_tracks, adoption=selected_cohort_profile(c, cohort)
+        )
         requirement = c.manifest.requirement(cohort)
         root = Path(c.inputs_directory)
         total = 0

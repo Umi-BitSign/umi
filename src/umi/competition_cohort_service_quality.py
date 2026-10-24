@@ -15,7 +15,7 @@ from .competition_cohort_coordinator import CohortDecisionInput
 from .competition_cohort_endpoint_archive import read_endpoint_object
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_quality import ExactQuality, exact_quality
-from .competition_cohort_recovery import verify_cohort_service_pool
+from .competition_cohort_recovery import cohort_service_pool, verify_cohort_service_pool
 from .competition_cohort_service_closure import verify_certified_service_request_closure
 from .competition_cohort_service_grant import ServiceMinerGrant
 from .competition_cohort_service_reference import ServiceReference, ServiceStratum
@@ -169,25 +169,40 @@ class ServiceWorkQuality(StrictProtocolModel):
 
 
 class ClosedServiceQuality(StrictProtocolModel):
-    schema_: Literal["umi-cohort-service-quality/1", "umi-cohort-service-quality/2"] = Field(
-        alias="schema"
-    )
+    schema_: Literal[
+        "umi-cohort-service-quality/1",
+        "umi-cohort-service-quality/2",
+        "umi-cohort-service-quality/3",
+    ] = Field(alias="schema")
     terms_sha256: Hex32
     request_closure_sha256: Hex32
     reference_reveal_sha256: Hex32
     work: Annotated[tuple[ServiceWorkQuality, ...], Field(max_length=524288)]
     skipped_work: Annotated[tuple[Hex32, ...], Field(max_length=524288)] = ()
     chain_submission_authorized: Literal[False] = False
+    adopted_service_pool_bps: Literal[0] | None = None
+    model_profile_sha256: Hex32 | None = None
 
     @model_serializer(mode="wrap")
     def preserve_legacy_bytes(self, handler):
         value = handler(self)
         if self.schema_ == "umi-cohort-service-quality/1" and not self.skipped_work:
             value.pop("skipped_work", None)
+        if self.adopted_service_pool_bps is None:
+            value.pop("adopted_service_pool_bps", None)
+        if self.model_profile_sha256 is None:
+            value.pop("model_profile_sha256", None)
         return value
 
     @model_validator(mode="after")
     def unperformed_has_no_credit(self):
+        adopted = self.schema_ == "umi-cohort-service-quality/3"
+        if adopted != (self.adopted_service_pool_bps is not None) or adopted != (
+            self.model_profile_sha256 is not None
+        ):
+            raise ValueError("adopted model-only service quality requires its explicit profile")
+        if adopted and self.work:
+            raise ValueError("model-only service quality cannot discard completed paid work")
         if self.schema_ == "umi-cohort-service-quality/1" and self.skipped_work:
             raise ValueError("legacy service quality cannot skip work")
         if self.skipped_work != tuple(sorted(set(self.skipped_work))) or set(self.skipped_work) & {
@@ -267,7 +282,7 @@ def replay_closed_service_quality(
     for declared, catalog in zip(reveal.catalogs, expected_catalogs, strict=True):
         if declared.references != tuple(w.reference_sha256 for w in catalog.catalog.work):
             raise ValueError("service reveal substituted its committed reference inventory")
-    return _review_service_quality(
+    quality = _review_service_quality(
         closure,
         objects,
         policy,
@@ -277,6 +292,28 @@ def replay_closed_service_quality(
         expected_catalogs=expected_catalogs,
         pulses=pulses,
         cohort=roster.round.cohort_sha256,
+    )
+    return _selected_service_quality(
+        quality, history.plan, terms, adoption=view.state.model_delivery_adoption
+    )
+
+
+def _selected_service_quality(quality, plan, terms, *, adoption=None):
+    """Derive the selected budget; caller authenticates the history amendment."""
+    if adoption is None or adoption.service_pool_bps is None:
+        return quality
+    # Keep signed terms/catalogs intact. Only native replay of the authenticated
+    # intake amendment selects a new pool; bind it into the derived quality used
+    # by certification and public projection without repeating immutable replay.
+    if cohort_service_pool(plan, terms.service_pool_bps, adoption=adoption) != 0:
+        raise ValueError("model-only service quality has an inconsistent reward pool")
+    return ClosedServiceQuality.model_validate(
+        quality.model_dump(by_alias=True)
+        | dict(
+            schema="umi-cohort-service-quality/3",
+            adopted_service_pool_bps=0,
+            model_profile_sha256=digest(adoption),
+        )
     )
 
 

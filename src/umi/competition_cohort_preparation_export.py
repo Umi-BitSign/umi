@@ -184,7 +184,9 @@ def replay_preparation_export(
         raise ValueError("preparation export inventory must be unique and ordered")
     # Promotion comes from the reviewer's own preserved evidence, never from an
     # unverified binding in the owner's export. Rebuild every participant too.
-    selected_tracks = cohort_tracks(exported.history.plan, eligible_tracks)
+    selected_tracks = cohort_tracks(
+        exported.history.plan, eligible_tracks, adoption=state.model_delivery_adoption
+    )
     rebuilt = prepare_cohort_round(
         exported.history,
         policy,
