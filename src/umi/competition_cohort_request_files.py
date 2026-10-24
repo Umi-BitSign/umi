@@ -771,11 +771,14 @@ class RequestCompletionFiles:
         self, roster: RecoverableRosterEvidence
     ) -> Iterator[SignedRecoverableEvaluationOrder]:
         stage_count("maximum_participants", len(roster.round.participants))
+        # One selected immutable round binds the whole inventory pass. Hashing
+        # it again for every participant adds no new source or authority check.
+        round_sha = digest(roster.round)
         order_count = 0
         for participant in roster.round.participants:
             try:
                 ref = read(
-                    self._order_path(digest(roster.round), participant.submission_sha256),
+                    self._order_path(round_sha, participant.submission_sha256),
                     _Reference,
                     maximum_bytes=1024,
                 )

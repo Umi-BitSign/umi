@@ -56,7 +56,12 @@ from .competition_progress import report_settlement_retry
 from .competition_round_journal import RoundJournal
 from .competition_store import CompetitionStore
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
-from .competition_verification_snapshot import VerificationPackageStore, VerifiedPackageSnapshot
+from .competition_verification_snapshot import (
+    VerificationPackageStore,
+    VerificationSnapshotRepairRequired,
+    VerifiedPackageSnapshot,
+)
+from .competition_work_progress import await_progress
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import (
     compact_memory_error,
@@ -356,6 +361,40 @@ class CohortSettlementService:
             self._release_memory()
             raise failure from None
 
+    async def _input_snapshot(self, path, prior):
+        """Resume a restored original against its already retained native identity.
+
+        Missing originals remain an explicit repair hold. Once the original is
+        restored, or only derived metadata is damaged, repair exactly that source
+        under the caller's existing memory lease. Never select replacement bytes
+        or reconstruct another package from current live inputs.
+        """
+        expected = None if prior is None else prior["sha256"]
+        try:
+            return await run_owned_thread(partial(
+                self.verified_packages.load, path, SettlementInputPackage,
+                maximum_bytes=self.config.maximum_package_bytes,
+                expected_sha256=expected,
+            ))
+        except VerificationSnapshotRepairRequired:
+            if prior is None:
+                raise
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                raise VerificationSnapshotRepairRequired(
+                    "previously reviewed settlement original must be restored"
+                ) from None
+            return await await_progress(
+                run_owned_thread(partial(
+                    self.verified_packages.repair, path, SettlementInputPackage,
+                    maximum_bytes=self.config.maximum_package_bytes,
+                    expected_sha256=expected,
+                    reason="restore original settlement input selected by native journal",
+                )),
+                stage="settlement_original_input_repair", cohort=self.cohort,
+            )
+
     async def _load_active_inputs(self, history):
         decisions = {
             t.transition.evidence_sha256: self._decisions(t.transition.evidence_sha256)
@@ -377,14 +416,7 @@ class CohortSettlementService:
                 else execution_boundary(await self.provider.collect()).block
             )
         try:
-            package = await run_owned_thread(
-                partial(
-                    self.verified_packages.load,
-                    path,
-                    SettlementInputPackage,
-                    maximum_bytes=self.config.maximum_package_bytes,
-                )
-            )
+            package = await self._input_snapshot(path, prior)
         except FileNotFoundError:
             # Once reviewed, a missing original must be restored, never rebuilt
             # from a possibly different source set or newer selection.
@@ -421,14 +453,7 @@ class CohortSettlementService:
                 "settlement_inputs cohort=%s phase=%s status=retained", self.cohort, state.phase
             )
         if type(package) is not VerifiedPackageSnapshot:
-            package = await run_owned_thread(
-                partial(
-                    self.verified_packages.load,
-                    path,
-                    SettlementInputPackage,
-                    maximum_bytes=self.config.maximum_package_bytes,
-                )
-            )
+            package = await self._input_snapshot(path, prior)
         package_sha256 = package.sha256
         if prior is not None and prior != {"sha256": package_sha256}:
             raise ValueError("settlement inputs changed after their first native review")

@@ -77,6 +77,20 @@ selection changes no signed format, native proof semantics or historical clocks.
 
 ## Work progress and ETA logs
 
+A previously reviewed settlement input keeps its original package identity in the
+native journal. If its original file disappears, settlement reports an explicit
+repair hold. Returning that exact original lets the existing owner automatically
+repair its private snapshot under the same memory reservation; damaged derived
+metadata uses retained preparation without rereading unchanged package bytes.
+`settlement_original_input_repair` exposes counted progress and its scoped ETA.
+Conflicting replacement bytes remain refused and are never overwritten or selected
+as a new input. First delivery still follows the original preparation path; repair
+does not change signed histories, clocks, votes or completed native proof verdicts.
+Protocol delivery excludes producer-local hidden verification directories, locks
+and pending files. Each receiver retains its own inode-bound verification facts.
+Model artifact payload paths retain their original names.
+
+
 The lifecycle's execution-rate sampler observes authenticated cached identities
 from its configured reviewer peers. Each reviewer application has a fresh epoch;
 restart or replacement starts a new rate sample without resetting execution
