@@ -41,6 +41,7 @@ from .competition_history_source_externalization import (
 )
 from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_reward_admission_checkpoint import CompletedAdmissionCheckpoint
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip
 from .competition_reward_control_archive import (
     MAX_CONTROL_ARCHIVE_BYTES,
     MAX_CONTROL_METADATA_BYTES,
@@ -205,6 +206,7 @@ class _CheckpointRestoreBatch:
     checkpoints: HistoryCheckpoints
     repair_id: str | None
     values: list[dict]
+    checkpoint_tip: OwnedCheckpointTip | None
 
 
 class RewardControlHistoryReader:
@@ -773,7 +775,9 @@ class RewardControlHistoryReader:
 
     async def _restore_completed_admission(self, provider, through_block):
         try:
-            value = await run_owned_thread(self.completed_admission.load)
+            value, checkpoint_tip = await run_owned_thread(
+                self.completed_admission.load_for_restore
+            )
         except HistoryCheckpointRepairRequired:
             self.progress.completed_admission_through = self.first_block - 1
             raise
@@ -798,7 +802,7 @@ class RewardControlHistoryReader:
             )
         self.progress.restore_start(self._next, boundary - self._next + 1, admission=True)
         self.progress.report(self, "running", force=True)
-        await self._validate_checkpoint_tip(provider, value)
+        await self._validate_checkpoint_tip(provider, value, completed_checkpoint=checkpoint_tip)
         self.progress.restore_start(self._next, boundary - self._next + 1, admission=True)
         if await run_owned_thread(self.completed_admission.load) != value:
             raise HistoryCheckpointRepairRequired("completed admission changed during finality")
@@ -854,10 +858,15 @@ class RewardControlHistoryReader:
         self._next += 1
         self.progress.report(self, "running")
 
-    async def _validate_checkpoint_tip(self, provider, value):
+    async def _validate_checkpoint_tip(self, provider, value, *, completed_checkpoint=None):
         async with provider._lock:
             if provider._closed or not provider._owned:
                 raise ValueError("checkpoint restore requires the running owned provider")
+            if completed_checkpoint is not None and (
+                type(completed_checkpoint) is not OwnedCheckpointTip
+                or completed_checkpoint.owner is not self.checkpoints
+            ):
+                raise ValueError("checkpoint tip belongs to another history owner")
             snapshot = FinalizedSnapshotRef(**value["snapshot"])
             with self.progress.watch_ancestry(
                 provider._historical_headers.telemetry, snapshot.block_number
@@ -868,9 +877,13 @@ class RewardControlHistoryReader:
                 options = (
                     {}
                     if self._repair_reason
+                    else {"completed_checkpoint": completed_checkpoint}
+                    if completed_checkpoint is not None
                     else {"retained_headers": self.checkpoints.header_hints}
                 )
                 await provider._resolve_control_header(snapshot, value["header"], **options)
+                if completed_checkpoint is not None and not self._repair_reason:
+                    self.progress.completed_tip_refreshes += 1
 
     async def _restore_prefix(self, provider, last):
         self.progress.native_stop()
@@ -892,8 +905,10 @@ class RewardControlHistoryReader:
         if reuse_batch:
             assert batch is not None
             values = batch.values
+            checkpoint_tip = batch.checkpoint_tip
         elif self._repair_reason:
             values = []
+            checkpoint_tip = None
             for height in range(self._next, last + 1):
                 try:
                     value = await run_owned_thread(self.checkpoints.load, height)
@@ -905,7 +920,9 @@ class RewardControlHistoryReader:
                 values.append(value)
         else:
             try:
-                values = await run_owned_thread(self.checkpoints.load_many, self._next, last)
+                values, checkpoint_tip = await run_owned_thread(
+                    self.checkpoints.load_restore_batch, self._next, last
+                )
             except HistoryCheckpointRepairRequired as error:
                 self.progress.invalidate(error.height if error.height is not None else self._next)
                 raise
@@ -914,14 +931,22 @@ class RewardControlHistoryReader:
         self.progress.restore_start(self._next, len(values), started=metadata_started)
         self.progress.report(self, "running")
         try:
-            await self._validate_checkpoint_tip(provider, values[-1])
+            await self._validate_checkpoint_tip(
+                provider, values[-1], completed_checkpoint=checkpoint_tip
+            )
         except HistoricalHeaderRecoveryProgress:
             # Keep one already bounded metadata batch while its exact tip's
             # ancestry advances. This is not an acceptance cache: every retry
             # still obtains owned finality, and all dependencies are reread below
             # before any history effects apply. Failure/cancellation drops it.
             self._pending_checkpoint_restore = _CheckpointRestoreBatch(
-                self._next, last, provider, self.checkpoints, self._repair_id, values
+                self._next,
+                last,
+                provider,
+                self.checkpoints,
+                self._repair_id,
+                values,
+                checkpoint_tip,
             )
             raise
         self.progress.restore_start(self._next, len(values))

@@ -36,6 +36,7 @@ class HistoryProgress:
         self.inventory_completed = 0
         self.restored_completed = 0
         self.completed_admission_through = first_block - 1
+        self.completed_tip_refreshes = 0
         self.target = None
         self.state = "pending"
         self.stage = "native_history"
@@ -74,6 +75,7 @@ class HistoryProgress:
             )
             self.native_elapsed = 0.0
             self.native_completed = self.restored_completed = self.native_applied = 0
+            self.completed_tip_refreshes = 0
             self._new_native.clear()
             self.elapsed = 0.0
             self.wall_started, self.wall_finished = now, None
@@ -448,6 +450,7 @@ class HistoryProgress:
                 "local_release": self.local_release,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
+                "completed_tip_finality_refreshes": self.completed_tip_refreshes,
                 "elapsed_seconds": elapsed,
                 "active_elapsed_seconds": self.elapsed
                 + (now - self.started if self.active else 0.0),
