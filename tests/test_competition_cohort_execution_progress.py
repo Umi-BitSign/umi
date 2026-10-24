@@ -220,21 +220,54 @@ def test_rate_scope_stall_and_restart_do_not_reuse_a_previous_process_forecast(
     clock = [0]
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
     meter = ExecutionExportProgress(exported.root, exported.roster)
+    meter.required_producers = {identity(E1)}
+    epochs = {identity(E1): "11" * 32}
     count = [0]
 
     def counts():
         return dict(completed=count[0], total=5, exported_executions=12 * count[0])
 
     monkeypatch.setattr(meter, "_sample", counts)
-    assert meter.sample()["eta_seconds"] is None
+    assert meter.sample(producer_epochs=epochs)["eta_seconds"] is None
     clock[0], count[0] = 300, 3
-    measured = meter.sample()
+    measured = meter.sample(producer_epochs=epochs)
     assert measured["eta_seconds"] == 200 and measured["rate_completed_models"] == 3
     clock[0] = 1200
-    assert meter.sample()["eta_seconds"] is None and meter.sample()["stalled_or_retrying"]
+    assert meter.sample(producer_epochs=epochs)["eta_seconds"] is None
+    assert meter.sample(producer_epochs=epochs)["stalled_or_retrying"]
     restarted = ExecutionExportProgress(exported.root, exported.roster)
     monkeypatch.setattr(restarted, "_sample", counts)
     assert restarted.sample()["eta_seconds"] is None
+
+
+def test_producer_rollout_or_missing_epoch_resets_rate_without_resetting_work(
+    exported, monkeypatch
+):
+    clock, count = [0], [0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    meter = ExecutionExportProgress(exported.root, exported.roster)
+    meter.required_producers = {identity(E1)}
+    monkeypatch.setattr(meter, "_sample", lambda: dict(
+        completed=count[0], total=10, exported_executions=12 * count[0],
+    ))
+    a, b = {identity(E1): "11" * 32}, {identity(E1): "22" * 32}
+    meter.sample(producer_epochs=a)
+    clock[0], count[0] = 300, 3
+    before = meter.sample(producer_epochs=a)
+    assert before["eta_seconds"] == 700 and before["rate_completed_models"] == 3
+    clock[0], count[0] = 360, 4
+    changed = meter.sample(producer_epochs=b)
+    assert changed["completed"] == 4 and changed["rate_completed_models"] == 0
+    assert changed["rate_epoch_sha256"] != before["rate_epoch_sha256"]
+    assert changed["eta_seconds"] is None
+    clock[0], count[0] = 660, 7
+    assert meter.sample(producer_epochs=b)["eta_seconds"] == 300
+    clock[0], count[0] = 700, 8
+    missing = meter.sample(producer_epochs={})
+    assert missing["completed"] == 8 and missing["rate_epoch_sha256"] is None
+    assert missing["eta_basis"] == "awaiting_current_execution_producer_epochs"
+    assert meter.sample(producer_epochs=b)["rate_completed_models"] == 0
+    assert not meter.sample(producer_epochs=b)["repair_required"]
 
 
 async def test_background_progress_and_forecast_accounting_continue_during_blocked_native_tick(
@@ -260,6 +293,11 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
     async def node(_):
         return Node()
 
+    producer = ["11" * 32]
+
+    async def epochs(_):
+        return {identity(E1): producer[0]}
+
     with closing(ForecastLedger(h.root / "forecast-accounting")) as ledger:
         cohort = h.roster.round.cohort_sha256
         host = NS(
@@ -268,6 +306,7 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
             files=NS(root=h.root),
             requests={cohort: NS(roster=h.roster)},
             execution_progress={},
+            producer_epochs=NS(sample=epochs),
             forecast_ledger=ledger,
             last_reports={},
             node=node,
@@ -283,14 +322,28 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
             raise AssertionError("background execution sampler did not update")
 
         try:
-            assert (await wait_for_count(1))["total"] == 2
+            first = await wait_for_count(1)
+            assert first["total"] == 2
+            producer[0] = "22" * 32
+            for _ in range(100):
+                changed = snapshots.snapshot(cohort)["components"]["execution"]
+                if changed["rate_epoch_sha256"] != first["rate_epoch_sha256"]:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("producer rollout did not reset the advisory rate")
+            assert changed["completed"] == 1 and changed["rate_completed_models"] == 0
             h.terminal(h.order(index=1))
             await wait_for_count(2)
             await asyncio.sleep(0.05)
             meter = host.execution_progress[cohort]
             assert meter.forecast_closed
             records = ledger.records(meter.forecast.scope)
-            assert sum(r["kind"] == "attempt_terminal" for r in records) == 1
+            terminals = [r for r in records if r["kind"] == "attempt_terminal"]
+            assert len(terminals) == 2
+            assert sorted(r["state"] for r in terminals) == ["completed", "interrupted"]
         finally:
             stop.set()
             await running
+    with closing(ForecastLedger(h.root / "forecast-accounting")) as restored:
+        assert restored.records(meter.forecast.scope) == records

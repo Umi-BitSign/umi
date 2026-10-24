@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -468,6 +469,30 @@ async def test_stage_private_scope_enters_native_route(stage, role, path):
     wrapped = runtime.RequestsStageASGIBinding(application, controller=stage[0], private_role=role)
     await wrapped({"type": "http", "method": "POST", "path": path}, None, None)
     assert seen == [stage[0]]
+
+
+async def test_stage_allows_only_cached_reviewer_epoch_get_without_admission_work(stage):
+    from fastapi import FastAPI
+
+    from umi.competition_cohort_producer_epoch import producer_epoch_routes
+
+    from .test_open_competition import wallet
+
+    app = FastAPI()
+    app.include_router(producer_epoch_routes(
+        wallet("Charlie").hotkey.ss58_address, token="s" * 32, enabled=True,
+    ))
+    wrapped = runtime.RequestsStageASGIBinding(
+        app, controller=stage[0], private_role="phase_reviewer"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=wrapped), base_url="https://review.example"
+    ) as client:
+        path = "/internal/cohorts/execution-producer"
+        assert (await client.get(path)).status_code == 401
+        response = await client.get(path, headers={"authorization": "Bearer " + "s" * 32})
+        assert response.status_code == 200
+        assert (await client.post(path, json={})).status_code == 503
 
 
 async def test_no_lane_unknown_route_refuses_before_body_parse(stage):

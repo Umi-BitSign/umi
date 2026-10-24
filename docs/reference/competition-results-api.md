@@ -19,10 +19,26 @@ and return `total`, `next_offset` and `items`.
 
 | GET path | Meaning |
 | --- | --- |
+| `/v1/competition/cohorts/{cohort}/progress` | Cached stage, counted work, scoped ETA and retry/repair status; advisory, never reward or phase authority |
 | `/v1/competition/cohorts/{cohort}/service-results` | All sealed roster hotkeys, including zero-work rows, retained UIDs, successful/failed paid terminals, exact quality credit and certified service weight |
 | `/v1/competition/cohorts/{cohort}/models` | Every exported admitted public submission, original terms and license, revision identity, artifact-release state and download availability |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download` | Native bundle manifest, renewable GET capabilities, optional complete tar archive, and the file-download endpoint |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download-files` | One manifest file's bounded pieces or preserved-payload byte range |
+
+Execution counts are confirmed delivered export floors, so live execution can be
+ahead. A completed model requires all of its selected evaluators' terminal exports.
+Projected execution totals assume the undelivered orders match delivered profiles.
+An execution ETA covers evaluations only; certification and reward activation are
+separate. `overall_eta_seconds: null` means no end-to-end forecast is established.
+
+Execution rates use completed models within the currently observed evaluator
+processes, identified by `rate_epoch_sha256`. `rate_completed_models` and
+`rate_sample_seconds` describe that sample only. An evaluator restart, rollout,
+unavailable identity or change to the evaluator set withdraws the old rate while
+preserving all completed work. A new sample needs three completed models and five
+minutes before an estimate is issued. Older reviewers without the optional cached
+identity endpoint keep counts available and report an unknown ETA. Public polling
+reads only the retained in-process snapshot; it triggers no RPC or verification.
 
 File pages accept `file_index`, `offset` and `limit` (1–128 pieces). A preserved
 chunk page has SHA-256 and byte size per piece. A concatenated R2 payload page

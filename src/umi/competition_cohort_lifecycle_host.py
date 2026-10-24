@@ -32,6 +32,7 @@ from .competition_cohort_phase_vote_http import PhaseVotePeer
 from .competition_cohort_preparation import PreparedCohortRound
 from .competition_cohort_preparation_phase import NativePreparationProgressSource
 from .competition_cohort_preparation_publisher import CohortPreparationPublisher
+from .competition_cohort_producer_epoch import ExecutionProducerEpochs
 from .competition_cohort_progress_signer import CertifiedPhaseObserver
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import LiveIntakePhaseObserver
@@ -227,6 +228,7 @@ class LifecycleHost:
         self.last_reports = {}
         self.request_opening_clocks = {}
         self.execution_progress = {}
+        self.producer_epochs = ExecutionProducerEpochs(client, owner.reviewers, credentials)
         # A request export can replay every retained service observation and
         # object in a cohort. Use the same operational budget as the configured
         # reviewers instead of cancelling that replay after a fixed 30 seconds.
@@ -545,13 +547,26 @@ class LifecycleHost:
                         self.execution_progress[cohort] = meter
                     if not meter.selected:
                         continue
-                    result = await run_owned_thread(meter.sample)
+                    observer = getattr(self, "producer_epochs", None)
+                    epochs = (
+                        {} if observer is None else await observer.sample(meter.required_producers)
+                    )
+                    result = await run_owned_thread(partial(meter.sample, producer_epochs=epochs))
                     if (
                         self.forecast_ledger is not None
                         and not meter.forecast_closed
                         and (not result["repair_required"] or meter.forecast is not None)
                     ):
                         try:
+                            epoch = result.get("rate_epoch_sha256")
+                            if meter.forecast is not None and epoch != meter.forecast_epoch:
+                                meter.forecast.observe(dict(
+                                    result, state="interrupted", eta_seconds=None,
+                                    eta_basis="execution_producer_epoch_changed_or_unavailable",
+                                    observed_unix_ms=time.time_ns() // 1_000_000,
+                                    eta_samples=0, eta_ignored_fast_samples=0, eta_assumption="",
+                                ))
+                                meter.forecast = None
                             if meter.forecast is None:
                                 meter.forecast = ForecastAttempt(
                                     self.forecast_ledger,
@@ -564,6 +579,7 @@ class LifecycleHost:
                                     "selected_models",
                                     {},
                                 )
+                                meter.forecast_epoch = epoch
                             meter.forecast.observe(
                                 dict(
                                     result,
@@ -574,7 +590,8 @@ class LifecycleHost:
                                     eta_samples=result.get("rate_completed_models", 0),
                                     eta_ignored_fast_samples=0,
                                     eta_assumption="; ".join(result.get("eta_assumptions", [])),
-                                    forecast_rate_semantics="completed_exports_current_sampler_session/1",
+                                    forecast_rate_semantics="completed_exports_current_producer_epoch/1",
+                                    forecast_rate_epoch_sha256=epoch,
                                 )
                             )
                             if result["repair_required"]:

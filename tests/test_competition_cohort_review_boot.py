@@ -229,6 +229,7 @@ def test_benchmark_host_binds_orders_execution_and_private_stores(selected, faul
 
 async def test_benchmark_boot_routes_exclusive_execution_and_restart(selected, providers):
     c = with_benchmark(selected.config)
+    epochs = []
     for _ in range(2):
         async with boot.phase_review_app(c) as app:
             assert app.state.benchmark is not None
@@ -237,11 +238,19 @@ async def test_benchmark_boot_routes_exclusive_execution_and_restart(selected, p
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="https://review.example"
             ) as client:
+                path = "/internal/cohorts/execution-producer"
+                assert (await client.get(path)).status_code == 401
+                headers = {"authorization": "Bearer " + "vote-token" * 4}
+                first = await client.get(path, headers=headers)
+                assert first.status_code == 200 and first.json()["execution_enabled"]
+                epochs.append(first.json()["epoch_sha256"])
+                assert (await client.get(path, headers=headers)).content == first.content
                 for path in ("votes/lookup", "votes/attest", "inbox/lookup", "inbox/accept"):
                     assert (
                         await client.post("/internal/cohorts/orders/" + path, json={})
                     ).status_code == 401
     assert providers.events.count("started") == providers.events.count("closed") == 2
+    assert len(set(epochs)) == 2
     os.close(lock_private_file(Path(c.benchmark.directory) / "service.lock"))
 
 
