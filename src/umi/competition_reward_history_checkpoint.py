@@ -17,6 +17,7 @@ from dataclasses import asdict
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
 from .competition_reward_checkpoint_progress import CheckpointMetadataProgress
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip, _issue_checkpoint_tip
 from .competition_reward_history_origin import check_checkpoint_origin
 from .competition_verification_rules import runtime_identity
 from .open_competition import digest, digest_canonical_bytes
@@ -135,6 +136,7 @@ class HistoryCheckpoints:
 
     def _initialize(self, journal, binding):
         self.journal = journal
+        self.binding = dict(binding)
         self._original_export_origins = {}
         self.remote_sources = None
         directory = journal.root.stat()
@@ -405,6 +407,19 @@ class HistoryCheckpoints:
             )
             failure.height = height
             raise failure from error
+
+    def load_restore_batch(
+        self, first: int, last: int
+    ) -> tuple[list[dict], OwnedCheckpointTip | None]:
+        """Carry the checked native tip across the owner's async finality read.
+
+        These original-owner receipts already establish historical finality.
+        The ordinary fresh source recheck still fences every item before apply;
+        neither serialization nor an imported archive can issue this capability.
+        """
+        values = self.load_many(first, last)
+        tip = _issue_checkpoint_tip(self, values[-1]) if values else None
+        return values, tip
 
     def header_hints(self, first: int, last: int) -> tuple[str, ...]:
         """Reuse completed local headers without opening their proof payloads.

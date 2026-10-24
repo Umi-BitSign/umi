@@ -156,8 +156,8 @@ async def test_batched_restore_rechecks_changes_after_owned_finality(history_cas
     validate = h.reader._validate_checkpoint_tip
     affected = h.old.height + 1
 
-    async def changed_during_finality(provider, value):
-        await validate(provider, value)
+    async def changed_during_finality(provider, value, **kwargs):
+        await validate(provider, value, **kwargs)
         with h.reader.journal.transaction() as db:
             db.execute(
                 "UPDATE records SET body=body WHERE kind='control_history_block' AND id=?",

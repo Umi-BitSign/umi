@@ -21,6 +21,7 @@ from typing import Any
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_chain import CompetitionChainConfig, _hotkey, _uint
 from .competition_chain_state import _cache_usage
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip, validate_checkpoint_tip
 from .competition_reward_control import (
     FinalizedRewardControlProvider,
     _control_evidence,
@@ -345,10 +346,14 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         )
         return result
 
-    async def _resolve_control_header(self, ref, encoded, *, retained_headers=None):
+    async def _resolve_control_header(
+        self, ref, encoded, *, retained_headers=None, completed_checkpoint=None
+    ):
         # Single historical reads and checkpoint restoration always acquire a
         # current owned head. Only an explicit bounded worker batch shares it.
         options = {} if retained_headers is None else {"retained_headers": retained_headers}
+        if completed_checkpoint is not None:
+            options["completed_checkpoint"] = completed_checkpoint
         async with self._control_header_window(**options) as resolve:
             return await resolve(ref, encoded)
 
@@ -397,6 +402,7 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         self,
         *,
         retained_headers=None,
+        completed_checkpoint=None,
     ) -> AsyncIterator[Callable[[FinalizedSnapshotRef, str], Awaitable[tuple[int | None, int]]]]:
         """Resolve historical headers against one genuinely owned finalized head.
 
@@ -411,6 +417,15 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
         owner = asyncio.current_task()
         if self._closed or not self._lock.locked():
             raise ValueError("historical header window requires the running locked provider")
+        if completed_checkpoint is not None:
+            if not self._owned or type(completed_checkpoint) is not OwnedCheckpointTip:
+                raise ValueError("checkpoint tip requires the original native owner result")
+            validate_checkpoint_tip(
+                completed_checkpoint,
+                snapshot=completed_checkpoint.snapshot,
+                encoded_header=completed_checkpoint.encoded_header,
+                chain_config_sha256=digest(self.config),
+            )
         try:
             head = await self._finality.verified_finalized_snapshot()
         except Exception as error:
@@ -440,6 +455,11 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 raise ValueError("historical header resolver escaped its owned window")
             if ref.block_number > head.block_number:
                 raise ValueError("historical reward control is ahead of owned finality")
+            if completed_checkpoint is not None and (
+                completed_checkpoint.snapshot,
+                completed_checkpoint.encoded_header,
+            ) != (ref, encoded):
+                raise ValueError("checkpoint tip differs from the selected history boundary")
             original = await self._finality.verified_block_at(ref.block_number)
             timestamp = None
             if original is not None:
@@ -447,6 +467,18 @@ class HistoricalRewardControlProvider(FinalizedRewardControlProvider):
                 if json.loads(original.finality_evidence)["block"]["scale_header"] != encoded:
                     raise ValueError("reward control header differs from owned history")
                 timestamp = original.timestamp_ms
+                ceiling = head_block.timestamp_ms
+            elif completed_checkpoint is not None:
+                # The original private success record already proved this
+                # immutable historical identity. A new owned head refreshes the
+                # finality ceiling, not the old ancestry/proof work. The history
+                # owner rechecks source generations after this await, before
+                # applying the checked batch in order. Raw archives and hints
+                # never reach this branch.
+                if ref.block_number == head.block_number and (
+                    ref != head or encoded != encoded_head
+                ):
+                    raise ValueError("completed checkpoint differs from the owned head")
                 ceiling = head_block.timestamp_ms
             else:
                 if not self._owned or self._registration_rpc is None:

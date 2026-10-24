@@ -8,6 +8,16 @@ import pytest
 from umi import competition_reward_history_progress as module
 
 
+def test_native_tip_refreshes_keep_the_current_target_scope():
+    progress = module.HistoryProgress(10)
+    progress.start(20, 10)
+    progress.completed_tip_refreshes = 3
+    progress.start(20, 12)
+    assert progress.completed_tip_refreshes == 3
+    progress.start(21, 12)
+    assert progress.completed_tip_refreshes == 0
+
+
 @pytest.fixture
 def clock(monkeypatch):
     now = [0.0]

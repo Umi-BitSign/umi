@@ -1155,6 +1155,21 @@ a fresh snapshot rechecks every dependency before history effects apply in order
 This changes neither journal formats nor the verifier ABI; supported retained
 checkpoints keep their original signed bytes, owner and clock bindings.
 
+For an unchanged original-owner checkpoint, the native reader carries its
+validated historical tip directly into the owned provider. This private,
+in-process handoff is issued only after checking the original journal identity,
+compatible verifier semantics, source generations, conflict holds and any
+selected migration provenance. After restart it reads those compact results
+again, rather than importing or rehashing the historical header range. The
+provider still obtains a fresh owned finalized head, refuses a boundary ahead of
+that head and checks any original observer record available at the boundary.
+The history owner then rechecks all source dependencies before applying effects
+in order. `completed_tip_finality_refreshes` reports these successful handoffs;
+they never count as newly verified native blocks. Serialized checkpoint JSON,
+raw archives and untrusted header hints cannot select this path. They retain
+their ordinary ancestry and proof verification. No checkpoint migration, journal
+reset, signed-clock change or miner startup-schema change is required.
+
 For bounded retained ASCII JSON, canonicality checking uses the decoder's owned
 builtin values directly. Safe integers retain the exact RFC 8785 encoding;
 floats, Unicode and larger inputs use the ordinary RFC reader. This avoids

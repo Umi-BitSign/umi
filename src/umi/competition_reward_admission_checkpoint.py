@@ -12,6 +12,7 @@ import sqlite3
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
 from .competition_reward_admission_source import check_retained_admission_source
+from .competition_reward_checkpoint_tip import OwnedCheckpointTip, _issue_checkpoint_tip
 from .competition_reward_history_checkpoint import (
     SOURCE_KINDS,
     HistoryCheckpointRepairRequired,
@@ -100,6 +101,11 @@ class CompletedAdmissionCheckpoint:
             raise HistoryCheckpointRepairRequired(
                 "completed admission requires explicit provenance repair"
             ) from error
+
+    def load_for_restore(self) -> tuple[dict | None, OwnedCheckpointTip | None]:
+        value = self.load()
+        tip = None if value is None else _issue_checkpoint_tip(self.blocks, value)
+        return value, tip
 
     def validate(self, value):
         fields = {
