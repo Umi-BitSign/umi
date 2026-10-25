@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,6 +169,69 @@ def remote_receipt_root(case, tmp_path):
 @pytest.fixture
 def backup(policy):
     return selected(policy)
+
+
+async def test_completed_file_restore_keeps_event_loop_running_without_payload_reads(
+    backup, tmp_path, monkeypatch
+):
+    first = await reader(backup, tmp_path).verify()
+    backup.remote.reads.clear()
+    ticks, observed, stop = [0], [], asyncio.Event()
+    load = chunked.SharedRemoteFileBytes.load
+
+    def restore(value):
+        observed.append(ticks[0])
+        return load(value)
+
+    monkeypatch.setattr(chunked.SharedRemoteFileBytes, "load", restore)
+
+    async def heartbeat():
+        while not stop.is_set():
+            ticks[0] += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(heartbeat())
+    try:
+        second = await reader(backup, tmp_path).verify(completed_only=True)
+    finally:
+        stop.set()
+        await task
+    assert second == first
+    assert backup.remote.reads == []
+    assert len(observed) == len(backup.bundle.files)
+    assert observed[-1] > observed[0], "completed file restores monopolized the service loop"
+
+
+async def test_bulk_receipt_worker_drains_before_cancellation_releases_byte_lease(
+    backup, tmp_path, monkeypatch
+):
+    from umi.private_files import PrivateStateBusyError
+
+    instance = reader(backup, tmp_path)
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    owner_thread = threading.get_ident()
+
+    def migration(*args, **kwargs):
+        assert threading.get_ident() != owner_thread
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "metadata worker could not yield to the service loop"
+
+    monkeypatch.setattr(instance, "_migrate_remote_receipts", migration)
+    task = asyncio.create_task(instance.verify(completed_only=True))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done(), "cancellation abandoned the metadata worker"
+        with pytest.raises(PrivateStateBusyError), instance._store(None):
+            pass
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    with instance._store(None):
+        pass
 
 
 def test_exact_legacy_metadata_retains_original_manifest_and_non_authority(backup):
