@@ -23,7 +23,7 @@ import os
 import stat
 from collections import deque
 from collections.abc import Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -48,6 +48,7 @@ from .competition_transport_verification import (
     ByteCheckpoints,
     ProgressReader,
     TransferProgress,
+    owned_byte_checkpoint,
     verifier_semantics,
 )
 from .concurrency import run_owned_thread
@@ -548,16 +549,20 @@ class ChunkedModelBackupReader:
             self._context()  # Refuse an unqualified verifier before remote I/O.
             heads = await self._heads(report)
             documents = {}
-            with (
-                TransferProgress(
-                    "chunked_model_verification",
-                    sum(r.size_bytes for r in bundle.files),
-                    report,
-                    total_operations=2 * sum(len(f.chunks) for f in self.selection.package.files)
-                    + len(heads),
-                ) as progress,
-                self._store(progress) as saved,
-            ):
+            async with AsyncExitStack() as stack:
+                progress = stack.enter_context(
+                    TransferProgress(
+                        "chunked_model_verification",
+                        sum(r.size_bytes for r in bundle.files),
+                        report,
+                        total_operations=2
+                        * sum(len(f.chunks) for f in self.selection.package.files)
+                        + len(heads),
+                    )
+                )
+                saved = await stack.enter_async_context(
+                    owned_byte_checkpoint(self._store(progress), progress)
+                )
                 self._migrate_remote_receipts(saved, heads, report=report)
                 import_completed_byte_facts(
                     self,
@@ -568,7 +573,9 @@ class ChunkedModelBackupReader:
                     report=report,
                 )
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
-                    with SharedRemoteFileBytes(self, record, item, heads, progress) as shared:
+                    async with owned_byte_checkpoint(
+                        SharedRemoteFileBytes(self, record, item, heads, progress), progress
+                    ) as shared:
                         document = await self._verify_file(
                             saved,
                             shared,
@@ -677,12 +684,22 @@ class ChunkedModelBackupReader:
         """
         async with self.serial:
             self._context()
-            heads = await self._heads(report)
-            value = await run_owned_thread(
-                partial(export_completed_byte_facts, self, heads, report=report)
-            )
-            await self._unchanged(heads, report)
-            return await run_owned_thread(publish_byte_export, self, value)
+            with TransferProgress("chunked_model_export", 1, report, unit="models") as progress:
+                async with owned_byte_checkpoint(self._store(progress), progress) as saved:
+                    heads = await self._heads(report)
+                    value = await run_owned_thread(
+                        partial(
+                            export_completed_byte_facts,
+                            self,
+                            heads,
+                            report=report,
+                            checkpoint=saved,
+                        )
+                    )
+                    await self._unchanged(heads, report)
+                    result = await run_owned_thread(publish_byte_export, self, value)
+                    progress.advance(1)
+                    return result
 
     def require_verified(self, snapshot: ChunkedModelVerification):
         """Consume owned byte checkpoints, never a supplied digest as byte proof.
@@ -823,18 +840,23 @@ class ChunkedModelBackupReader:
                 / sha256_hex(os.fsencode(archive))
             )
             written = []
-            with (
-                TransferProgress(
-                    "chunked_model_materialization",
-                    total,
-                    report,
-                    total_operations=(
-                        sum(len(item.chunks) + 1 for item in self.selection.package.files) + 1
-                    ),
-                ) as progress,
-                ByteCheckpoints(state_root, context, progress) as local,
-                self._store(progress) as remote,
-            ):
+            async with AsyncExitStack() as stack:
+                progress = stack.enter_context(
+                    TransferProgress(
+                        "chunked_model_materialization",
+                        total,
+                        report,
+                        total_operations=(
+                            sum(len(item.chunks) + 1 for item in self.selection.package.files) + 1
+                        ),
+                    )
+                )
+                local = await stack.enter_async_context(
+                    owned_byte_checkpoint(ByteCheckpoints(state_root, context, progress), progress)
+                )
+                remote = await stack.enter_async_context(
+                    owned_byte_checkpoint(self._store(progress), progress)
+                )
                 retained, reusable, needed = {}, set(), {}
                 with TransferProgress(
                     "chunked_model_local_cache_inventory", len(bundle.files), report, unit="files"

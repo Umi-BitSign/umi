@@ -3124,6 +3124,18 @@ Select a qualified intake maintenance release through the supported cooperative
 update path before claiming it is active. It does not require restarting a
 progressing reviewer, history writer, coordinator, or miner.
 
+Asynchronous chunked/direct model checks wait cooperatively when another native
+reader holds the exact byte-checkpoint mutex. Chunked materialization, byte export
+and shared files use the same wait path. A busy checkpoint reports `retrying`
+with reason `shared_byte_checkpoint_busy` and withdraws its ETA; acquisition
+reports `shared_byte_checkpoint_acquired`. The holder remains free to progress,
+and the waiter resumes the same operation using completed file checks. Cancellation
+releases only that operation's acquired leases. Unsafe metadata and other I/O
+errors still refuse; mutex waiting never grants admission, rights or release
+authority. Synchronous commit checks remain nonblocking. Select the qualified
+native owner/reviewer source through the existing cooperative maintenance update;
+no miner protocol change or new public client manifest is needed.
+
 Direct-upload polling records successful private review-file shape checks in its
 existing metadata journal. Unchanged owned file identities reuse those checks
 across polls and restart, without rereading documents on the event loop. Missing

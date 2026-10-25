@@ -13,6 +13,7 @@ from pathlib import Path
 from .competition_transport_verification import (
     ByteCheckpoints,
     TransferProgress,
+    owned_byte_checkpoint,
     verifier_semantics,
 )
 from .concurrency import run_owned_thread
@@ -176,8 +177,9 @@ async def verify_remote_model(
         # Injected stateless test/legacy ports need no provider namespace. Durable
         # production callers must supply the actual R2 client and explicit root.
         source = remote_identity(multipart, key, head) if root is not None else None
-        with model_byte_store(
-            root, key, bundle, payload, context, document_paths, progress
+        async with owned_byte_checkpoint(
+            model_byte_store(root, key, bundle, payload, context, document_paths, progress),
+            progress,
         ) as saved:
             result_path = None if saved is None else saved.root / "result.json"
             prior = None if saved is None else saved.load("object", source)
