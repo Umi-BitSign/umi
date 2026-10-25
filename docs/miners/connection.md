@@ -435,7 +435,10 @@ the new command. Follow [model delivery](model.md#model-files-for-recoverable-co
 with the same request, source, wallet and policy to resume an interrupted upload.
 The current client authenticates model-delivery changes from cohort history,
 resumes a retained original through its authenticated continuation when required,
-and uploads new direct-delivery payloads to R2. It signs additional transport
+and uploads new direct-delivery payloads to R2. It also reads authenticated
+amendments that make a previously mixed cohort model-only. Updating the client
+does not reopen intake or enable an upload route; the cohort's authenticated
+history selects those rules. It signs additional transport
 declarations using the same wallet; do not edit or re-sign the original request.
 Admission review follows byte delivery, so an uploaded payload alone does not
 mean the model has been admitted.
