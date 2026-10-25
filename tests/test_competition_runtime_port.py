@@ -60,12 +60,12 @@ def port(policy, tmp_path):
     preserve_bundle(original, tmp_path / "old", archive, policy)
     shutil.copytree(tmp_path / "old", tmp_path / "new")
     payload = b"INERT TEST CPU ENTRYPOINT"
-    (tmp_path / "new/inference.txt").write_bytes(payload)
+    (tmp_path / "new/inference.py").write_bytes(payload)
     files = tuple(
         f.model_copy(
             update={"sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload)}
         )
-        if f.path == "inference.txt"
+        if f.path == "inference.py"
         else f
         for f in original.files
     )
@@ -96,7 +96,7 @@ def port(policy, tmp_path):
         sequence=1,
         original=original,
         replacement=replacement,
-        entrypoint="inference.txt",
+        entrypoint="inference.py",
         qualification_sha256="ab" * 32,
         source_review_sha256="ac" * 32,
         offline_reconstruction_passed=True,

@@ -108,6 +108,35 @@ def signed_chunk(key, index, data, offset=0, signer="Alice"):
     return chunk, signature
 
 
+def request_with_bundle(request, model):
+    sub = request.signed_submission.submission.model_copy(
+        update={"model_bundle": model, "model_revision": digest(model)}
+    )
+    signed = type(request.signed_submission)(
+        submission=sub, signature=sign_object(sub, wallet("Alice"))
+    )
+    body = request.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    consent = type(request.consent)(consent=body, signature=sign_object(body, wallet("Alice")))
+    return type(request)(signed_submission=signed, consent=consent)
+
+
+def test_new_reservation_rejects_unsupported_interface_before_finality_or_bytes(delivery):
+    sub = delivery.request.signed_submission.submission
+    model = sub.model_bundle.model_copy(
+        update={
+            "files": tuple(
+                f.model_copy(update={"path": "inference.sh"}) if f.role == "inference" else f
+                for f in sub.model_bundle.files
+            )
+        }
+    )
+    request = request_with_bundle(delivery.request, model)
+    with pytest.raises(ValueError, match="declared Python inference entrypoint"):
+        # No usable finality is supplied: new reservation must reject the
+        # interface before opening intake state or retaining an allocation.
+        delivery.owner.reserve(request, None)
+
+
 def chunk_headers(key, index, data, offset=0):
     chunk, signature = signed_chunk(key, index, data, offset)
     return {

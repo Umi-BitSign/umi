@@ -25,6 +25,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from .competition_model_interface import model_python_entrypoint
 from .competition_native_inventory import checked_roots, inventory
 from .competition_native_sandbox import native_profile
 from .open_competition import CompetitionPolicy, digest
@@ -141,11 +142,10 @@ async def execute_native_case(*, bundle, archive, runtime, policy, case_id, vide
         raise EvaluationInfrastructureError("video bytes do not match the native assignment")
     roots = await verify_native_runtime(runtime, policy)
     verify_preserved_bundle(bundle, archive, policy)
-    entries = [entry.path for entry in bundle.files if entry.role == "inference"]
-    if len(entries) != 1 or not entries[0].endswith(".py"):
-        raise EvaluationInfrastructureError(
-            "native runtime requires one declared Python entrypoint"
-        )
+    try:
+        entrypoint = model_python_entrypoint(bundle)
+    except ValueError as error:
+        raise EvaluationInfrastructureError(str(error)) from error
     model = (archive / digest(bundle) / "model").resolve(strict=True)
     prelude = Path(__file__).with_name("competition_native_entrypoint.py").resolve(strict=True)
     guard = Path(__file__).with_name("competition_native_watchdog.py").resolve(strict=True)
@@ -194,7 +194,7 @@ async def execute_native_case(*, bundle, archive, runtime, policy, case_id, vide
             "-I",
             "-B",
             str(prelude),
-            str(model / entries[0]),
+            str(model / entrypoint),
             str(video_path),
             str(roots["overlay"]),
             suffix,

@@ -47,6 +47,7 @@ from .competition_cohort_participation import (
 )
 from .competition_cohort_upload_references import UploadModelReferences
 from .competition_execution import execution_boundary
+from .competition_model_interface import model_python_entrypoint
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import (
@@ -169,6 +170,7 @@ def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
     cohort = request.consent.consent.cohort_sha256
     intake._allowed(cohort)
     validate_bundle_policy(sub.model_bundle, intake.policy)
+    model_python_entrypoint(sub.model_bundle)
     # Validation alone: do not add an incomplete model to the roster.
     with intake._connection() as (db, store):
         history = store.published_history(cohort)

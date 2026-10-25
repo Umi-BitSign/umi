@@ -138,10 +138,11 @@ def bundle_at(root: Path, marker: str = "baseline", parent=None):
         "provenance",
     ):
         data = f"INERT TEST DATA {marker} {role}".encode()
-        (root / f"{role}.txt").write_bytes(data)
+        name = f"{role}.py" if role == "inference" else f"{role}.txt"
+        (root / name).write_bytes(data)
         records.append(
             BundleFile(
-                path=f"{role}.txt",
+                path=name,
                 role=role,
                 sha256=hashlib.sha256(data).hexdigest(),
                 size_bytes=len(data),
