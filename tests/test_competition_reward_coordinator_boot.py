@@ -446,17 +446,29 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
 
 
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
-@pytest.mark.parametrize("legacy_read_through", [False, True])
+@pytest.mark.parametrize(
+    "legacy_read_through,source_release_batch_records", [(False, 0), (True, 0), (True, 1)]
+)
 async def test_r2_reward_owner_boot_retains_selection_on_restart(
-    config_case, tmp_path, monkeypatch, role, legacy_read_through
+    config_case, tmp_path, monkeypatch, role, legacy_read_through, source_release_batch_records
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
     config_case.config, opened, _ = select_remote_proofs(
-        config_case.config, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+        config_case.config,
+        tmp_path,
+        monkeypatch,
+        legacy_read_through=legacy_read_through,
+        source_release_batch_records=source_release_batch_records,
     )
     for _ in range(2):
         await test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
             config_case, monkeypatch, role, None, True, successor=False
         )
     assert len(opened) == 4
+    assert [s.config.source_release_batch_records for s in opened] == [
+        0,
+        source_release_batch_records,
+        0,
+        source_release_batch_records,
+    ]

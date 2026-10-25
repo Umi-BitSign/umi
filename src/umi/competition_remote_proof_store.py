@@ -41,11 +41,14 @@ class ProofArchiveR2Config(StrictProtocolModel):
     maximum_index_bytes: Annotated[int, Field(ge=1024**2, le=16 * 1024**3)]
     timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     legacy_read_through: bool = False
+    source_release_batch_records: Annotated[int, Field(ge=0, le=4096)] = 0
 
     @model_validator(mode="after")
     def legacy_selection(self):
         if self.legacy_read_through and self.schema_ != "umi-r2-proof-archive/2":
             raise ValueError("retained local proof reads require explicit archive/2 selection")
+        if self.source_release_batch_records and (not self.legacy_read_through or self.read_only):
+            raise ValueError("source release requires writable retained-local archive/2 selection")
         return self
 
     @model_serializer(mode="wrap")
@@ -53,6 +56,8 @@ class ProofArchiveR2Config(StrictProtocolModel):
         value = handler(self)
         if not self.legacy_read_through:
             value.pop("legacy_read_through", None)
+        if not self.source_release_batch_records:
+            value.pop("source_release_batch_records", None)
         return value
 
 

@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Preserve original completed admission verdicts and native proof semantics across owned exact R2 source alias replacement. Install a backward-compatible explicit reinsertion fence and marker before the first deletion; discharge only that single atomic replacement, retain all original verdict/source identities, and require repair for prior/additional mutations or missing release metadata. Partial migration, restart, remote cache eviction, native reward-tail interpretation and original signed bytes remain compatible.",
+  "compatibility_basis": "Preserve completed admission and native proof semantics while the original owner runs explicitly selected bounded R2 source release after admission restoration and before new capture. Original config bytes, immutable R2 namespace, source tokens, verdicts, journals and archive readers remain unchanged. Restart, partial interruption, shutdown, full capacity, writer/coordinator/reviewer boot and reward reuse are qualified; no new accepted proof semantics.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -354,7 +354,7 @@
     "competition_registration_archive.py": "eb3965e4d76d04beb4793fbe5739c3c06f0de4dda49a2a4c126f2df99ce3eea0",
     "competition_release.py": "0b8ad4e028d9ee99a9721342b80027f21ab09f4e470d6c7a22e119b730d3bf22",
     "competition_remote_model_verification.py": "760e8d7d7dfab655e9f86a2d46b95a1e438aa372dfe36db5aa4eb99dccfe8f4e",
-    "competition_remote_proof_store.py": "e94ca4a25b16065f29661c0d8098ca62025ab854c5af3e6b94d7bb415697fd9b",
+    "competition_remote_proof_store.py": "c79e1e0dca8748a5a2c0039833331f292a440bcc6d0a582bb18abf3592c61d75",
     "competition_review_history.py": "c44afaac10d31c5e89f49b3ab4da764a37f5958d7e31ca862af36648cae6ce18",
     "competition_reward_admission_checkpoint.py": "a89d071349f8c0c17739ac2eb3d3412cc827effafdb6b8bce84d35b98bbf7dda",
     "competition_reward_admission_migration.py": "ebbc7c52a1f52b96b5b0a6eb5b87714fce0952507b2a05ef54497baa8de43262",
@@ -403,7 +403,7 @@
     "competition_reward_files.py": "7f6c8ea4737847f9fd9ff1c48bf10dbd85d1a6c7dff1d64ad7512518aff526c7",
     "competition_reward_handoff.py": "3397f5eb33e9b7c6ec4b4b87ab5fe48df3b52bdc563028a66df85a24f4a2c9be",
     "competition_reward_handoff_models.py": "cbae14533f5b5d71a8ef479320e76d12979c0145a5a21f5966cdd8ce902f81fe",
-    "competition_reward_history.py": "f6f2a32bbb985fbf8e2aacdcb607cef0eaf3ab58f43a232d468fefe3e57875c7",
+    "competition_reward_history.py": "91a2ff1ee185cbbb6dafe810a9be861bad4aeb25f466400a64727ca520471564",
     "competition_reward_history_checkpoint.py": "d22d054d41bb157ae44110c264952e85d10b5829f0361b600efdeece7eb9c39d",
     "competition_reward_history_effects.py": "8bcb197e8385cec547c7a330cbebc8cf6734b581e1355e3a8c6fe49664ecfa35",
     "competition_reward_history_export.py": "47eaab89ca17b2b49cb4a558d9687318a8135009e63d4ea68cbda5d6f92054a2",

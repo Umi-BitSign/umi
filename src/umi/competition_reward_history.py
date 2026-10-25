@@ -760,6 +760,18 @@ class RewardControlHistoryReader:
                 return ControlHistoryProgress(self._next, through_block, history)
             with self.journal.locked():
                 await self._restore_completed_admission(provider, through_block)
+                release_batch = (
+                    self.remote_store.config.source_release_batch_records
+                    if self.remote_store is not None and not self.journal.read_only
+                    else 0
+                )
+                if release_batch and not self._shutdown_requested():
+                    # Preserve legacy archive reads while the sole native owner
+                    # drains a separately selected bounded source batch. Restore
+                    # the admission first, then free capacity before new capture.
+                    self.progress.stage = "history_source_replication"
+                    self.progress.report(self, "running", force=True)
+                    await run_owned_thread(self._externalize_sources_locked, release_batch)
                 last = min(through_block, self._next + maximum_blocks - 1)
                 if not self._shutdown_requested():
                     await self.progress.inventory(self)
@@ -1041,6 +1053,7 @@ class RewardControlHistoryReader:
             return self._externalize_sources_locked(maximum_records)
 
     def _externalize_sources_locked(self, maximum_records):
+        started = time.monotonic()
         if self.completed_admission.load() is not None and (
             self.remote_store is None or self.remote_store.config.read_only
         ):
@@ -1074,6 +1087,27 @@ class RewardControlHistoryReader:
                 "WHERE kind IN (?,?,?)",
                 SOURCE_KINDS,
             ).fetchone()[0]
+            remote_records = db.execute(
+                "SELECT COALESCE(SUM(number),0) FROM round_record_capacity_kinds WHERE kind=?",
+                (self.remote_sources.alias_kind,),
+            ).fetchone()[0]
+        elapsed = time.monotonic() - started
+        remaining = result["remaining_local_records"]
+        total = remote_records + remaining
+        result.update(
+            completed_records=remote_records,
+            total_records=total,
+            percent=100.0 * remote_records / total if total else 100.0,
+            state="completed" if remaining == 0 else "running",
+            elapsed_seconds=elapsed,
+            eta_seconds=0 if remaining == 0 else remaining * elapsed / len(keys) if keys else None,
+            eta_basis="completed_scope"
+            if remaining == 0
+            else "current_batch_source_records_per_second_excludes_advancement_and_new_sources",
+            eta_scope="remaining_control_history_source_upload_time_only",
+            scope="current_control_history_sources_including_new_remote_capture",
+            stalled_or_retrying=False,
+        )
         self.progress.local_release = result
         return result
 

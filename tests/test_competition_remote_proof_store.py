@@ -357,7 +357,13 @@ def test_migration_changed_source_requires_explicit_exact_byte_repair(tmp_path, 
 
 
 def select_remote_proofs(
-    value, tmp_path, monkeypatch, *, import_only=False, legacy_read_through=False
+    value,
+    tmp_path,
+    monkeypatch,
+    *,
+    import_only=False,
+    legacy_read_through=False,
+    source_release_batch_records=0,
 ):
     """Use real selection/owner stores and a bounded authenticated HTTP fixture."""
     from umi import competition_proof_archive_selection as selection
@@ -378,6 +384,11 @@ def select_remote_proofs(
             selected = ProofArchiveR2Config.model_validate(
                 selected.model_dump(mode="json", by_alias=True)
                 | {"schema": "umi-r2-proof-archive/2", "legacy_read_through": True}
+            )
+        if source_release_batch_records and not read_only:
+            selected = ProofArchiveR2Config.model_validate(
+                selected.model_dump(mode="json", by_alias=True)
+                | {"source_release_batch_records": source_release_batch_records}
             )
         return selected
 
@@ -436,11 +447,22 @@ def test_retained_local_selection_preserves_old_config_bytes_and_refuses_implici
     original = config(tmp_path)
     raw = canonical_json_bytes(original)
     assert b"legacy_read_through" not in raw
+    assert b"source_release_batch_records" not in raw
     assert canonical_json_bytes(ProofArchiveR2Config.model_validate_json(raw)) == raw
     with pytest.raises(ValueError, match="explicit archive/2"):
         ProofArchiveR2Config.model_validate(
             original.model_dump(mode="json", by_alias=True) | {"legacy_read_through": True}
         )
+
+
+@pytest.mark.parametrize("change", [{"read_only": True}, {"legacy_read_through": False}])
+def test_owned_source_release_requires_explicit_writable_retained_local_selection(tmp_path, change):
+    selected = retained_local_config(tmp_path)
+    raw = selected.model_dump(mode="json", by_alias=True) | {"source_release_batch_records": 16}
+    configured = ProofArchiveR2Config.model_validate(raw)
+    assert configured.source_release_batch_records == 16
+    with pytest.raises(ValueError, match="source release requires writable"):
+        ProofArchiveR2Config.model_validate(raw | change)
 
 
 def retained_local_config(root):
