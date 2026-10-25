@@ -39,10 +39,13 @@ class LegacyModelStorageReaders:
         multipart,
         verification_root,
         byte_stores=None,
+        original_reuse=None,
+        original_identity=None,
     ):
         self.authenticated = dict(authenticated)
         self.policy, self.load_original = policy, load_original
         self.multipart, self.verification_root = multipart, verification_root
+        self.original_reuse, self.original_identity = original_reuse, original_identity
         self.byte_stores = {k: v for k, v in (byte_stores or {}).items() if v is not None}
         if not set(self.byte_stores) <= set(self.authenticated):
             raise ValueError("byte stores require authenticated cohort selections")
@@ -99,6 +102,17 @@ class LegacyModelStorageReaders:
             authenticated = self.authenticated[cohort]
         except KeyError as error:
             raise ValueError("legacy model reader has no authenticated cohort selection") from error
+        if self.original_reuse is not None:
+            return self.original_reuse.resolve(
+                authenticated,
+                load_original=self.load_original,
+                identity=self.original_identity,
+                endpoint=self.multipart.signer.endpoint,
+                bucket=self.multipart.signer.bucket,
+                request_sha256=request_sha256,
+                baseline=baseline,
+                incumbent_sha256=incumbent_sha256,
+            )
         return resolve_legacy_model_storage(
             authenticated,
             load_original=self.load_original,

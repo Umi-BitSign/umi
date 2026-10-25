@@ -113,6 +113,8 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.signing.directory)
+            / "legacy-original-verification",
         )
     )
     root = Path(config.signing.directory)

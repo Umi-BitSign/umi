@@ -3124,6 +3124,39 @@ Select a qualified intake maintenance release through the supported cooperative
 update path before claiming it is active. It does not require restarting a
 progressing reviewer, history writer, coordinator, or miner.
 
+Legacy original metadata now retains a native verification result per selected
+baseline, incumbent or original participation. Intake, reviewer, settlement,
+coordinator and writer startup use persistent receipt directories under their
+existing role state. The same reader reuses these results during execution.
+Each result binds the signed inventory, original policy/history, adoption,
+provider namespace and native verifier ABI, plus every original's current owned
+file identity. Unchanged original files are neither reopened nor rehashed for
+reuse, including after restart; current authority, R2 byte verification and
+admission remain independent. A changed dependency verifies only the affected
+item. Receipt paths shard each cohort's items across 256 directories.
+
+Existing installations migrate individual completed items on their first
+verification pass, checkpointing as they go. Interrupted marker publication can
+reuse the intact receipt. Missing or damaged completed receipts refuse reuse:
+an explicit native metadata repair calls `authenticate_legacy_model_sources`
+with the existing `original_verification_directory` and a nonempty
+`original_verification_repair_reason`; run it as the role's own account with its
+same selected sources, series, policy and authenticated delivery adoptions.
+Repair changes derived metadata only and must not run concurrently with that
+role's receipt migration. Normal startup never opts into this repair.
+
+The local `UMI_LEGACY_ORIGINAL_RECEIPT_MIN_FREE_BYTES` override reserves free
+filesystem bytes before receipt publication. Managed installations must set it
+to their selected operating/startup reserve; the compatibility default is zero
+additional reserved bytes. Individual receipts remain bounded independently.
+Retain these directories outside disposable model caches and include them in
+state restoration. Intake enables its progress logger before constructing the
+application, so initial metadata verification reports counts, elapsed time and
+ETA even before the HTTP listener opens. Logger state is restored on failure.
+Select the qualified source through each role's supported maintenance/update
+path before claiming adoption; a merged commit alone does not change a running
+service. Public miner and validator reward formats are unchanged.
+
 Automatic legacy payload retirement is selected through
 `recoverable_service.model_uploads.retirement`. Configure `consumers` with every
 policy evaluator's reviewer and settlement service: each entry has `kind`,
