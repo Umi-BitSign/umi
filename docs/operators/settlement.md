@@ -77,6 +77,14 @@ selection changes no signed format, native proof semantics or historical clocks.
 
 ## Work progress and ETA logs
 
+For model-only paired-baseline awards, a signed failed candidate case contributes
+zero quality. It does not become an incumbent failure or stop the roster's
+settlement. Candidate and frozen baseline use the same content metric; the
+candidate-only dependence gate remains bypassed for that existing award rule.
+An actual failed incumbent, infrastructure failure, missing evidence or evaluator
+disagreement retains its existing hold. The baseline quality floor and signed
+observations are unchanged.
+
 A previously reviewed settlement input keeps its original package identity in the
 native journal. If its original file disappears, settlement reports an explicit
 repair hold. Returning that exact original lets the existing owner automatically
