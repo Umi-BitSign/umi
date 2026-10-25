@@ -183,6 +183,21 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
         async def sign(body):
             return await run_owned_thread(sign_object, body, key)
 
+        if config.model_storage_consumer is not None:
+            from .competition_model_storage_leases import model_storage_consumer
+
+            await resources.enter_async_context(
+                model_storage_consumer(
+                    config.model_storage_consumer,
+                    kind="settlement",
+                    hotkey=config.signer_hotkey,
+                    policy=config.policy,
+                    series=config.series,
+                    sources=legacy_sources,
+                    sign=sign,
+                )
+            )
+
         executions = await _open_executions(config.executions, config.policy, stop)
         if executions is None:
             return

@@ -176,6 +176,61 @@ async def test_upgraded_client_retries_released_original_without_uploading_again
     assert receipts[0] == receipts[1]
 
 
+@pytest.mark.parametrize("frozen", ["unadmitted"], indirect=True)
+async def test_preserved_unadmitted_upload_keeps_delivery_retries_without_admission(released):
+    f = released
+    original = f.uploads.journal.get_raw("upload", f.key)
+    allocation = f.uploads.allocations.snapshot()
+    resolution = f.sources.resolve(f.case.cohort, request_sha256=digest(f.request))
+    await f.sources.reader(resolution).verify()
+    assert not f.owner.legacy_payloads.contains(f.request)
+    for attempt in range(2):
+        if attempt:
+            f.uploads = CohortModelUploads(f.uploads.config, f.uploads.intake, f.uploads.archive)
+            f.owner, f.router = f.create()
+        f.remote.reads.clear()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app_for(f)), base_url="https://intake.example"
+        ) as client:
+            response = await client.post(
+                f"/v1/competition/cohorts/{f.case.cohort}/model-uploads",
+                content=original,
+                headers={"content-type": "application/json"},
+            )
+            assert response.status_code == 200, response.text
+            status = response.json()
+            assert status["payload_preserved"] is True
+            assert status["participation_admitted"] is False
+            assert status["artifact_review_certified"] is False
+            if attempt:
+                assert not f.remote.reads, "completed byte checks survive restart"
+            data, headers = chunk(f)
+            response = await client.put(
+                f"/v1/competition/model-uploads/{f.key}/files/0", content=data, headers=headers
+            )
+            assert response.status_code == 200 and response.json() == status
+        delivery = ModelUploadDelivery(f.uploads, remote_payloads=f.owner.legacy_payloads)
+        assert delivery._payload_owner(f.request) is delivery.preserved
+        with pytest.raises(ValueError, match="cannot qualify model admission"):
+            delivery.preserved.qualify(None, record=None, admission=None)
+        assert not f.owner.legacy_payloads.contains(f.request)
+        assert f.uploads.journal.get_raw("upload", f.key) == original
+        assert f.uploads.allocations.snapshot() == allocation
+        assert_no_payloads(f)
+
+
+@pytest.mark.parametrize("frozen", ["incomplete"], indirect=True)
+async def test_unpreserved_original_cannot_claim_delivery_from_backup(released):
+    f = released
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app_for(f)), base_url="https://intake.example"
+    ) as client:
+        response = await client.get(f"/v1/competition/model-uploads/{f.key}")
+    assert response.status_code == 503
+    assert not f.remote.reads
+    assert_no_payloads(f)
+
+
 @pytest.mark.parametrize("released", ["release_prepared", "released"], indirect=True)
 async def test_recurring_host_poll_reuses_remote_original_without_recreating_payloads(released):
     f = released
@@ -241,7 +296,7 @@ async def test_released_poll_uses_only_retained_review_and_recovers_after_metada
     assert_no_payloads(f)
 
 
-@pytest.mark.parametrize("frozen", ["unadmitted", "incomplete"], indirect=True)
+@pytest.mark.parametrize("frozen", ["incomplete"], indirect=True)
 async def test_recurring_remote_poll_refuses_original_outside_authenticated_selection(released):
     f = released
     result = await ModelUploadDelivery(
@@ -341,8 +396,8 @@ async def test_original_remote_retry_storage_failure_is_retryable(released, fail
     assert_no_payloads(f)
 
 
-@pytest.mark.parametrize("frozen", ["unadmitted", "incomplete"], indirect=True)
-async def test_unadmitted_original_cannot_inherit_remote_retry(released):
+@pytest.mark.parametrize("frozen", ["incomplete"], indirect=True)
+async def test_unpreserved_original_cannot_inherit_remote_retry(released):
     f = released
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app_for(f)), base_url="http://test"

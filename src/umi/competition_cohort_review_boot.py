@@ -144,6 +144,21 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         async def sign(body):
             return await run_owned_thread(sign_object, body, key)
 
+        if config.model_storage_consumer is not None:
+            from .competition_model_storage_leases import model_storage_consumer
+
+            await resources.enter_async_context(
+                model_storage_consumer(
+                    config.model_storage_consumer,
+                    kind="reviewer",
+                    hotkey=config.signing.signer,
+                    policy=config.policy,
+                    series=config.series,
+                    sources=legacy_metadata,
+                    sign=sign,
+                )
+            )
+
         client = await resources.enter_async_context(
             httpx.AsyncClient(
                 trust_env=False,
@@ -377,10 +392,14 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 )
                 app.state.endpoint = endpoint
                 await origins.start()
-        app.include_router(producer_epoch_routes(
-            config.signing.signer, token=vote_token, enabled=app.state.benchmark is not None,
-            cohorts=tuple(binding.cohort_sha256 for binding in config.signing.cohorts),
-        ))
+        app.include_router(
+            producer_epoch_routes(
+                config.signing.signer,
+                token=vote_token,
+                enabled=app.state.benchmark is not None,
+                cohorts=tuple(binding.cohort_sha256 for binding in config.signing.cohorts),
+            )
+        )
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))
         yield app

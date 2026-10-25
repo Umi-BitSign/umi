@@ -5,8 +5,8 @@ The small derived state index is checked against immutable transition records;
 missing or damaged accounting is an explicit repair, never free capacity.
 
 This module does not authorize remote adoption, consumer release, or deletion.
-Its release transitions are private integration ports for a future qualified
-consumer-release owner. No configured runtime currently invokes those ports.
+Its private release transitions are used by the configured native upload-retirement
+owner only while holding remote ownership and every consumer/transfer lease.
 The full two-copy charge survives qualification, preparation and partial unlink.
 """
 
@@ -290,7 +290,7 @@ class ModelReservationLedger:
                 "active_reserved_bytes": reserved,
                 "released_reserved_bytes": released,
                 "states": counts,
-                "archive_release_authority": "not_configured",
+                "archive_release_authority": "separate_native_consumer_leases_required",
             }
 
     def reservation_record(self, bundle):
@@ -313,8 +313,8 @@ class ModelReservationLedger:
     def _transition(self, model, phase, *, evidence):
         """Private accounting port; evidence pins do not issue deletion authority.
 
-        Its future owner must hold the upload journal, model transfer and complete
-        consumer-release leases. There is deliberately no configured caller yet.
+        The configured retirement owner holds the upload journal, model transfer
+        and complete consumer-release leases. This port alone grants no release.
         """
         with self.journal.read_transaction() as db:
             before, prior, _ = self._state(model, db)

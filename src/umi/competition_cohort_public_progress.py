@@ -63,6 +63,8 @@ _FIELDS = (
     "rate_probe_attempts",
     "rate_probe_failures",
     "rate_probe_timeouts",
+    "released_local_bytes",
+    "reason_code",
 )
 
 
@@ -85,6 +87,7 @@ class CohortProgressSnapshots:
             "request_start",
             "execution",
             "execution_workers",
+            "storage_retirement",
         }:
             return
         now = time.monotonic()
@@ -177,6 +180,7 @@ class CohortProgressSnapshots:
             "request_start",
             "execution",
             "execution_workers",
+            "storage_retirement",
         ):
             if kind in entry:
                 observed, value = entry[kind]

@@ -528,6 +528,24 @@ class CohortModelAcceptances:
             self._qualify_transport(db, store, value.acceptance)
             return value
 
+    def has_retained_selection(self, cohort, submission):
+        """Discovery only; a selected continuation still needs full native reads.
+
+        A damaged intent must not fall back to an earlier preserved-upload
+        delivery path while its independent publication remains retained.
+        """
+        self.intake._allowed(cohort)
+        with self.intake._connection() as (db, _):
+            return (
+                db.execute(
+                    "SELECT 1 FROM cohort_model_acceptance_intents WHERE cohort=? AND submission=? "
+                    "UNION ALL SELECT 1 FROM cohort_model_acceptances "
+                    "WHERE cohort=? AND submission=? LIMIT 1",
+                    (cohort, submission, cohort, submission),
+                ).fetchone()
+                is not None
+            )
+
     def retained(self, cohort, submission):
         self.intake._allowed(cohort)
         with self.intake._connection() as (db, store):

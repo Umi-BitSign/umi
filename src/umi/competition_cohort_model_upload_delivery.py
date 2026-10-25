@@ -16,6 +16,7 @@ from .competition_cohort_model_upload_continuation import (
     LegacyModelUploadContinuation,
     owned_upload_continuation,
 )
+from .competition_cohort_preserved_upload_payloads import PreservedModelUploadPayloads
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -41,9 +42,18 @@ class ModelUploadDelivery:
         for owner in (remote_payloads, continued_payloads):
             if owner is not None and owner.intake is not self.intake:
                 raise ValueError("remote model retries require the same native intake owner")
+        source = remote_payloads or continued_payloads
+        self.preserved = (
+            None if source is None else PreservedModelUploadPayloads(uploads, source.sources)
+        )
+        self.retirement = None
 
     def _payload_owner(self, request):
-        for owner in (self.remote, self.continued):
+        if self.remote is not None and self.remote.contains(request):
+            return self.remote
+        if self.continued is not None and self.continued.has_owned_selection(request):
+            return self.continued
+        for owner in (self.preserved, self.continued):
             if owner is not None and owner.contains(request):
                 return owner
         raise OSError("released model awaits its authenticated remote retry owner")
@@ -122,26 +132,49 @@ class ModelUploadDelivery:
         capacity nor creates local payloads, and the synchronous poll rechecks
         current owned authority before counting a model as preserved.
         """
+        generation = (
+            None
+            if self.retirement is None
+            else await run_owned_thread(self.uploads._model_references.versions.inventory_identity)
+        )
         keys = await run_owned_thread(self.uploads.journal.keys, "upload")
+        groups = {}
+        grouped_all = True
         with TransferProgress(
             "legacy_model_remote_reconciliation", len(keys), report, unit="requests"
         ) as progress:
             for key in keys:
+                grouped = self.retirement is None
                 try:
+                    if self.retirement is not None:
+                        retained = await run_owned_thread(self.uploads.retained, key)
+                        model = retained.signed_submission.submission.model_revision
+                        groups.setdefault(model, []).append(retained)
+                        grouped = True
                     request = await run_owned_thread(self._remote_request, key)
                     if request is not None:
-                        await self.status(key)
+                        owner = self._payload_owner(request)
+                        if digest(request) in owner.verified:
+                            await run_owned_thread(owner.require_owned_payload, request)
+                        else:
+                            await owner.ensure_owned(request)
                     progress.advance(1)
                 except (OSError, ValueError, sqlite3.Error):
+                    grouped_all = grouped_all and grouped
                     # Missing/damaged storage retains a pending model in the
                     # native poll below. Do not turn a failed check into a
                     # success, and continue independent models in this cycle.
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
-            return await run_owned_thread(
+            result = await run_owned_thread(
                 partial(
                     self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review
                 )
             )
+        if self.retirement is not None and grouped_all:
+            result["local_retirement"] = await self.retirement.poll_once(groups, generation)
+        elif self.retirement is not None:
+            result["local_retirement"] = self.retirement.blocked_inventory(groups)
+        return result
 
     async def put_chunk(
         self, chunk: ModelUploadChunk, signature: Signature, data: bytes

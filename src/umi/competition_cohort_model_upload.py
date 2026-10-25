@@ -48,6 +48,7 @@ from .competition_cohort_participation import (
 from .competition_cohort_upload_references import UploadModelReferences
 from .competition_execution import execution_boundary
 from .competition_model_interface import model_python_entrypoint
+from .competition_model_storage_leases import ModelUploadRetirementConfig
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import (
@@ -71,6 +72,7 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 class ModelUploadConfig(StrictProtocolModel):
     directory: Directory
+    retirement: ModelUploadRetirementConfig | None = None
     admission_reviews_directory: Directory | None = None
     standing_review_policy: StandingModelReviewPolicy | None = None
     maximum_models: Annotated[int, Field(ge=1, le=4096)] = 1024
@@ -83,6 +85,8 @@ class ModelUploadConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.retirement is None:
+            value.pop("retirement", None)
         if self.admission_reviews_directory is None:
             value.pop("admission_reviews_directory", None)
         if self.standing_review_policy is None:
