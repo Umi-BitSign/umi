@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from .competition_cohort_model_delivery_api import selected_owner_candidate
+from .competition_cohort_model_delivery_api import adoption_owner_node, selected_owner_candidate
 from .competition_cohort_model_delivery_census import census_model_delivery
 from .competition_cohort_recovery import CohortRecoveryTransition
 from .competition_cohort_review_http import PhaseReviewHTTPClient, phase_review_routes
@@ -45,9 +45,10 @@ class ModelDeliveryReservationExporter:
         if transition.operation != "adopt_model_delivery":
             raise ValueError("model-delivery reservation proof requires adoption")
         cohort = transition.cohort_sha256
-        node = self.host.nodes.get(cohort)
-        if node is None:
-            raise OSError("model-delivery reservation awaits its lifecycle owner")
+        # Held cohorts are not automatically opened after owner restart. The
+        # authenticated proof request uses the same serialized initialization
+        # as prepare/reserve, restoring the exact durable pending reservation.
+        node = await adoption_owner_node(self.host, cohort)
         async with node.serial, node.controller.serial:
             history, state, _, _ = node.controller._history()
             _, pending = node.controller.store.status(cohort)

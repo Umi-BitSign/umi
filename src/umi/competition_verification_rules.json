@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Preserve original delivered order decoding, round/submission bindings, resource accounting and all closure/reward authority. Restore exact first-read results from private source-bound receipts and bounded isolated typed reuse; changed sources or bounds receive counted native repair. Qualify historical exports, stage budgets, mutation isolation, restart, damaged records and actual retained orders before rollout.",
+  "compatibility_basis": "Preserve original model-delivery proposals, dual native reservation census, challenge proofs, signer journals and held-cohort authority. Restore the held lifecycle owner after restart; exact pending reservation reuses prior remote verification while retaining current local census. Qualify issuance, interrupted reservation, restart, retained transport selections, client continuation and reward replay without changing verification ABI.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -109,11 +109,11 @@
     "competition_cohort_model_acceptance_worker.py": "27137d89ad70bb7df2b0ac43244b7fc9ec6710ac3169ca132f0b0c1c1dd804ad",
     "competition_cohort_model_award.py": "36bfd53900852e44b33ef91b1d1dd5077d4b361c7c0df1c7dd8b721777632eec",
     "competition_cohort_model_client.py": "342e23fdab029b6b83e4f71ef11026e58b300c00de0de9b5730654f524463cca",
-    "competition_cohort_model_delivery_api.py": "be99f5e493de0014d62cd2eaf8c6bea1591308e449b4b3524a7bf960ac90dff9",
+    "competition_cohort_model_delivery_api.py": "6833bd45e4822c2805e3f4583f329db6e28194826378053b5b56f51d57857a66",
     "competition_cohort_model_delivery_candidate.py": "6b0b52d4b819e9da09ac7d583d2ca4a03db897650dd9e3829e9084961b7e14ce",
     "competition_cohort_model_delivery_census.py": "49af97e478995c8773d034317d3fb9fccb3b62bcf0ae15c4365a04295c6813fa",
     "competition_cohort_model_delivery_preflight.py": "db374659af65fea81ec9c6aaedee15a90f781a333bf6c38520ed53d29d975e71",
-    "competition_cohort_model_delivery_reservation.py": "814cdfa255c250ab1b123e1d0015c33e1023aa4418dd261769b40d12d97dfbcd",
+    "competition_cohort_model_delivery_reservation.py": "6f7f0305ceb4a1c12e7b183730966be9a6adb8faf3a740a152ad984abc84e583",
     "competition_cohort_model_execution_source.py": "e308ff88fc9031420968be4bc1976aa9eb792a8d79f243cc993f0a1e86d8e9da",
     "competition_cohort_model_reservations.py": "6063c9bb709d3cb55c138eb6288c65fff3dcfd988260a087188ae2f3a5eb9fb5",
     "competition_cohort_model_review.py": "8854cd91059685bf84ac92fc44e651ce2fed95752f3840248c593d05ca2b1284",

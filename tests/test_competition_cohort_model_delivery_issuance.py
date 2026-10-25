@@ -493,6 +493,81 @@ async def test_challenge_proof_requires_dual_reservation_and_refuses_replay(owne
         reader._verify(raw, request.model_copy(update={"challenge": "13" * 32}), i.case.history)
 
 
+async def test_held_reservation_proof_reopens_owner_once_after_restart(owner_api):
+    a, i = owner_api, owner_api.i
+    census(i, reserve=True)
+    a.store.reserve_exact(i.transition)
+    a.host.nodes.clear()
+    calls = []
+
+    async def reopen(cohort):
+        calls.append(cohort)
+        await asyncio.sleep(0)
+        assert a.store.status(cohort)[1] == i.transition
+        assert i.case.owner.intake.pending_policy_adoption(cohort) == i.transition
+        a.host.nodes[cohort] = a.node
+        return a.node
+
+    a.host.node = reopen
+    requests = tuple(
+        ModelDeliveryReservationRequest(
+            schema="umi-model-delivery-reservation-request/1",
+            transition=i.transition,
+            challenge=value * 32,
+        )
+        for value in ("12", "13")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=a.app), base_url="https://owner.example"
+    ) as client:
+        responses = await asyncio.gather(
+            *(post(client, ROOT + "/reservation", request, "h" * 32) for request in requests)
+        )
+    reader = ModelDeliveryReservationReader(
+        None, "https://owner.example", token="h" * 32, owner=wallet("Charlie").hotkey.ss58_address
+    )
+    for request, response in zip(requests, responses, strict=True):
+        assert response.status_code == 200
+        reader._verify(response.content, request, i.case.history)
+    assert calls == [i.case.cohort]
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+    assert a.store.status(i.case.cohort)[1] == i.transition
+
+
+async def test_reservation_proof_cannot_open_unheld_missing_owner(owner_api):
+    a, i = owner_api, owner_api.i
+    a.host.nodes.clear()
+    a.host.config.automatic_progression_hold_cohorts = ()
+    request = ModelDeliveryReservationRequest(
+        schema="umi-model-delivery-reservation-request/1",
+        transition=i.transition,
+        challenge="12" * 32,
+    )
+    with pytest.raises(OSError, match="awaits existing lifecycle owner"):
+        await ModelDeliveryReservationExporter(a.host).respond(request)
+
+
+async def test_exact_pending_reserve_reuses_completed_remote_work(owner_api, monkeypatch):
+    a, i = owner_api, owner_api.i
+    census(i, reserve=True)
+    a.store.reserve_exact(i.transition)
+
+    async def forbidden(*_):
+        pytest.fail("saved exact reservation repeated completed remote model checks")
+
+    monkeypatch.setattr(i.candidate, "verify", forbidden)
+    proposal = ModelDeliveryAdoptionProposal(
+        schema="umi-model-delivery-adoption-proposal/1",
+        series_sha256=digest(a.series),
+        transition=i.transition,
+    )
+    raw = await ModelDeliveryAdoptionOwner(a.host, "reserve").respond(proposal)
+    assert raw == canonical_json_bytes(proposal)
+    assert a.store.status(i.case.cohort)[1] == i.transition
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == i.transition
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+
+
 def replace_candidate_inventory(i, legacy):
     preservation = i.case.preservation.model_copy(
         update={"legacy_inventory_sha256": digest(legacy)}
