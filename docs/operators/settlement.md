@@ -3507,6 +3507,17 @@ model caches are refused. Candidate and committed selections that coexist must
 name the same store and imports. This does not share rights approvals, private
 review decisions, admission authority or signing state.
 
+Legacy settlement completion snapshots retain full remote object keys, including
+the authenticated `object_key_prefix`. Certification, reward preparation and
+coverage recovery compare those exact prefixed keys with the original chunk
+digests and sizes. They reuse the existing completion and snapshot unchanged
+across restart, with fresh remote generation checks. Updating a reader that
+previously omitted the prefix requires no model download, rehash, rewritten
+acceptance or receipt migration. A changed prefix, namespace, chunk coverage or
+generation still requires explicit repair. Carry this reader through both the
+private settlement services and signed reward coordinator/writer hosts; a local
+settlement-source update alone does not update every consuming host.
+
 Provision a separate mode0700 root owned by each actual service UID. Candidate,
 reviewer and owner may reuse one root only when they run as that same UID; another
 reviewer account independently verifies its bytes or imports its own prior

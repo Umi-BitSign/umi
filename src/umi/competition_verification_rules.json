@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.; exact retained reservation reads and bounded successful obligation decoding preserve full current capacity, typed allowances, holds, schema fences and native receipt ABI; SQLite diagnostics add redacted standard error codes only",
+  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.; exact retained reservation reads and bounded successful obligation decoding preserve full current capacity, typed allowances, holds, schema fences and native receipt ABI; SQLite diagnostics add redacted standard error codes only; legacy settlement snapshot coverage uses the existing authenticated full object key including its prefix, preserving original byte-completion snapshots and signed acceptances across certification, reward and coverage replay",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -98,7 +98,7 @@
     "competition_cohort_legacy_model_readers.py": "44606cde0e2490221a075e72d71bc9afff07229c9452b6cf8e3f7bdeaa419898",
     "competition_cohort_legacy_model_reuse.py": "c0c37dd07043e91dbef21a717c921d116525f640a1d156aa0a72320f17b45e48",
     "competition_cohort_legacy_model_selection.py": "b2c118e9940f5983bc15f9dda760af5ac7a2a53e6764df90c7e72da1c3ae9832",
-    "competition_cohort_legacy_model_settlement.py": "dbce44cb72c62e44a5d054ee0f8855000d7005b871d2c64f8d0c62b6e9d8fccc",
+    "competition_cohort_legacy_model_settlement.py": "3b7875f0edda50eb80bbcc7ac33c9491788fba5c72003b847456ba213b17c7e3",
     "competition_cohort_legacy_model_storage.py": "ff8ca96663e0d945cf26a473eb1bedbcf98300cef4ed26e722a3275db0558627",
     "competition_cohort_lifecycle.py": "657ecc05a066877fc7c84840374b5e2ea0af4ab9eb57f478d0aa4c93fc0b2da8",
     "competition_cohort_lifecycle_host.py": "511e8c916a2cec318b3a52dc7f5e1756b912ad6ae650aa287d71bdfa28f6e1f7",
@@ -490,7 +490,6 @@
     "competition_scheduling_retirement_cache.py": "bbb1a37bcf26f8c026d8c3ecac788dbcf21eb51711dde2b8f4153b3e98b73875",
     "competition_scheduling_timing.py": "e77eb79a954b421438f0926ebd444853113a98233f2747a9a7417009d7ec04ca",
     "competition_scoring.py": "51654d28bcc956a740d6535ddd40625d25419372c2d55e5b6c39ac79c9696810",
-    "competition_service.py": "84133d9431a0a6d42b046d31e1cfdfe534aaed47a61e1dc6c8fc75e470ed6ed8",
     "competition_service_supervision.py": "ad595debd93324b37f47eadb892f7c47471bbb8f35371f91f5e72aac9e01050a",
     "competition_settlement.py": "14586abcc24e4158453bf401d10ff0178e8ec27afdf70ba4fe142b8c068c5df2",
     "competition_settlement_capacity.py": "58378d524c943f4814d94a05bd683d3d686f5d3da41ee7120171a43f25ad0e08",
