@@ -76,6 +76,7 @@ class RequestCompletionFiles:
         self._partial_reuse_counts = dict(
             lookups=0, hits=0, seeded=0, changed=0, repairs=0, absent=0
         )
+        self._order_reads = None
 
     def _partial_reuse_event(self, event):
         with self._cache_lock:
@@ -774,6 +775,11 @@ class RequestCompletionFiles:
         # One selected immutable round binds the whole inventory pass. Hashing
         # it again for every participant adds no new source or authority check.
         round_sha = digest(roster.round)
+        if self._order_reads is None:
+            # Lazy selection preserves older read-only injected file ports.
+            from .competition_cohort_request_order_reuse import RequestOrderReads
+
+            self._order_reads = RequestOrderReads(self.root)
         order_count = 0
         for participant in roster.round.participants:
             try:
@@ -786,14 +792,14 @@ class RequestCompletionFiles:
                 continue
             order_count += 1
             stage_count("maximum_orders", order_count)
-            order = SignedRecoverableEvaluationOrder.model_validate_json(
-                read_endpoint_object(self.objects, ref.sha256)
+            order = self._order_reads.read(
+                self,
+                self._order_path(round_sha, participant.submission_sha256),
+                ref,
+                roster.round,
+                round_sha,
+                participant.submission_sha256,
             )
-            if (
-                order.order.round != roster.round
-                or digest(order.order.submission.submission) != participant.submission_sha256
-            ):
-                raise ValueError("delivered request order differs from its selected participant")
             yield order
 
     def terminal(

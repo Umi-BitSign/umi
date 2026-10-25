@@ -68,7 +68,13 @@ class AssignmentVerificationReuse:
         if type(maximum_entries) is not int or maximum_entries < 1:
             raise ValueError("assignment reuse requires a positive entry capacity")
         self.maximum_bytes, self.maximum_entries = maximum_bytes, maximum_entries
-        if purpose not in {"assignment", "execution_retained", "execution_supplied", "order_inbox"}:
+        if purpose not in {
+            "assignment",
+            "execution_retained",
+            "execution_supplied",
+            "order_inbox",
+            "request_order",
+        }:
             raise ValueError("unknown assignment reuse purpose")
         self.purpose = purpose
         self._pid = os.getpid()
