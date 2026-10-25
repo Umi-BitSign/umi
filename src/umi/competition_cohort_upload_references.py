@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_transport_verification import TransferProgress
+from .competition_upload_record_versions import UploadRecordRepairRequired, UploadRecordVersions
 from .competition_verification_reuse import VerificationReuse, metadata_completion
 from .open_competition import digest, digest_canonical_bytes
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -29,9 +30,48 @@ class _Reference(StrictProtocolModel):
 
 
 class UploadModelReferences:
-    def __init__(self, journal, binding):
+    def __init__(self, journal, binding, *, versions=None):
         self.journal, self.binding = journal, binding
+        self.versions = versions or UploadRecordVersions(journal, binding)
         self._shards = {}
+
+    def retained(self, key, decode, *, repair=False, report=None):
+        def validate(raw):
+            value = _Reference.model_validate_json(raw)
+            if value.upload_sha256 != key:
+                raise ValueError("completed upload reference binding changed")
+
+        def verify(db):
+            raw = self.journal.get_raw("upload", key, db=db)
+            if raw is None:
+                raise FileNotFoundError("model delivery is not reserved")
+            model, _ = self.model(key, raw, decode, repair=repair, report=report)
+            return canonical_json_bytes(
+                _Reference(
+                    schema="umi-upload-model-reference/1",
+                    upload_sha256=key,
+                    model_sha256=model,
+                )
+            ).decode()
+
+        try:
+            with self.journal.read_transaction() as db:
+                raw, repaired = self.versions.result(
+                    "upload",
+                    key,
+                    "umi-upload-model-reference/1",
+                    verify,
+                    db=db,
+                    validate=validate,
+                    repair=repair,
+                    report=report,
+                )
+            value = _Reference.model_validate_json(raw)
+            if value.upload_sha256 != key:
+                raise UploadRecordRepairRequired("completed upload reference binding changed")
+            return value.model_sha256, repaired
+        except UploadRecordRepairRequired as error:
+            raise UploadReferenceRepairRequired(str(error)) from error
 
     def model(self, key, raw, decode, *, repair=False, report=None):
         # A digest is only an exact-byte fence. A first result still requires

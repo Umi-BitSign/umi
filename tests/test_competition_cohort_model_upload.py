@@ -30,6 +30,7 @@ from umi.competition_cohort_model_upload import (
     PendingModelReview,
 )
 from umi.competition_cohort_model_upload_http import model_upload_routes
+from umi.competition_upload_record_versions import UploadRecordRepairRequired
 from umi.open_competition import digest, sign_object
 from umi.private_files import lock_private_file, publish_private_model
 from umi.protocol import canonical_json_bytes
@@ -423,7 +424,8 @@ def test_completed_allocation_verification_damage_requires_repair(
 
     h = delivery
     h.owner.reserve(h.request, capture_at(210))
-    (receipt,) = h.owner.allocations._bundle_verification.directory.glob("*.json")
+    reuse = h.owner.allocations.versions._reuse["umi-model-allocation-bundle-facts/1"]
+    (receipt,) = reuse.directory.glob("*.json")
     if damage == "missing":
         receipt.unlink()
     else:
@@ -435,14 +437,14 @@ def test_completed_allocation_verification_damage_requires_repair(
     caplog.set_level(logging.INFO, logger="umi.competition.progress")
     with monkeypatch.context() as guarded:
         guarded.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
-        with pytest.raises(ModelAllocationRepairRequired, match="verification requires repair"):
+        with pytest.raises(ModelAllocationRepairRequired, match="requires repair"):
             h.owner.allocations.snapshot()
     assert "repair_required" in caplog.text
     reports = []
     repaired = repair_model_allocation_verification(h.owner.journal, report=reports.append)
     assert repaired == {"status": "completed", "verification_receipts_repaired": 1}
     assert any(
-        r["stage"] == "model_allocation_bundle_verification_repair" and r["status"] == "completed"
+        r["stage"] == "upload_record_verification_repair" and r["status"] == "completed"
         for r in reports
     )
     monkeypatch.setattr(allocations.ModelBundle, "model_validate_json", forbidden)
@@ -740,7 +742,7 @@ def test_retained_upload_decode_reads_current_journal_fence(retained_decode, cha
             ).fetchone()[0]
             db.execute("UPDATE records SET body=? WHERE kind='upload' AND id=?", (raw + b" ", key))
     for _ in range(2):
-        with pytest.raises((ValueError, FileNotFoundError)):
+        with pytest.raises((ValueError, FileNotFoundError, UploadRecordRepairRequired)):
             h.owner.retained(key)
     # Replacement schema failures/identity failures never enter reuse.
     assert len(calls) == (3 if change == "replace" else 1)

@@ -258,7 +258,9 @@ class CohortModelUploads:
         ensure_private_directory(self.root / "files")
         self._retained_reuse = AssignmentVerificationReuse()
         self._model_references = UploadModelReferences(self.journal, binding)
-        self.allocations = ModelReservationLedger(self.journal)
+        self.allocations = ModelReservationLedger(
+            self.journal, versions=self._model_references.versions
+        )
 
     def reserve(self, request: CohortParticipationRequest, capture) -> str:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -305,13 +307,17 @@ class CohortModelUploads:
     def retained(self, key: str) -> CohortParticipationRequest:
         if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
             raise ValueError("invalid model delivery identity")
-        # Read current bytes and the journal conflict fence on every call. Only
-        # successful static decoding and its exact request identity are reusable;
-        # admission, capacity, payload and current authority remain separate.
-        raw = self.journal.get_raw("upload", key)
-        if raw is None:
-            raise FileNotFoundError("model delivery is not reserved")
-        return self._decode_retained(key, raw)
+        with self.journal.read_transaction() as db:
+            token = bytes.fromhex(self._model_references.versions.identity("upload", key, db=db))
+            cached = self._retained_reuse.lookup(key, token)
+            if cached is not None:
+                return cached
+            raw = self.journal.get_raw("upload", key, db=db)
+            if raw is None:
+                raise FileNotFoundError("model delivery is not reserved")
+            request = self._decode_retained(key, raw)
+            self._retained_reuse.remember(key, token, request)
+            return request
 
     @canonical_json_reuse()
     def _decode_retained(self, key: str, raw: bytes) -> CohortParticipationRequest:
@@ -329,10 +335,7 @@ class CohortModelUploads:
         """Resolve exact current model identity without loading a full request."""
         if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
             raise ValueError("invalid model delivery identity")
-        raw = self.journal.get_raw("upload", key)
-        if raw is None:
-            raise FileNotFoundError("model delivery is not reserved")
-        model, _ = self._model_references.model(key, raw, self._decode_retained)
+        model, _ = self._model_references.retained(key, self._decode_retained)
         return model
 
     def repair_retained_references(self, *, report=None):
@@ -347,12 +350,8 @@ class CohortModelUploads:
             planning_unit_seconds=(0.001, 2.0),
         ) as progress:
             for key in keys:
-                raw = self.journal.get_raw("upload", key)
-                if raw is None:
-                    raise FileNotFoundError("model delivery is not reserved")
-                _, changed = self._model_references.model(
+                _, changed = self._model_references.retained(
                     key,
-                    raw,
                     self._decode_retained,
                     repair=True,
                     report=report,
@@ -561,16 +560,13 @@ class CohortModelUploads:
         seen = set()
         for key in self.journal.keys("upload"):
             try:
-                # Preserve fresh current bytes/conflict checks for every row,
-                # but materialize only one representative request per model.
-                raw = self.journal.get_raw("upload", key)
-                if raw is None:
-                    raise FileNotFoundError("model delivery is not reserved")
-                model, _ = self._model_references.model(key, raw, self._decode_retained)
+                # Current mutation/conflict fences precede reuse; unchanged
+                # duplicate rows need neither a payload read nor another hash.
+                model = self.retained_model(key)
                 if model in seen:
                     continue
                 seen.add(model)
-                request = self._decode_retained(key, raw)
+                request = self.retained(key)
                 bundle = request.signed_submission.submission.model_bundle
                 if self.allocations.state(model) in {"release_prepared", "released"}:
                     if remote_payloads is None:
