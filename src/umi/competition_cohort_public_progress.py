@@ -84,10 +84,46 @@ class CohortProgressSnapshots:
             "work",
             "request_start",
             "execution",
+            "execution_workers",
         }:
             return
         now = time.monotonic()
         public = {key: body[key] for key in _FIELDS if key in body}
+        if kind == "execution_workers":
+            from .competition_cohort_execution_work import MAX_STAGES, public_stage
+
+            rows = body.get("workers", [])
+            if type(rows) is not list or len(rows) > 64:
+                raise ValueError("evaluator work inventory exceeds its bound")
+            workers, remaining = [], MAX_STAGES
+            for row in rows:
+                if type(row) is not dict:
+                    raise ValueError("invalid evaluator work observation")
+                evaluator = row.get("evaluator")
+                if type(evaluator) is not str or re.fullmatch(r"[0-9a-f]{64}", evaluator) is None:
+                    raise ValueError("invalid evaluator work identity")
+                stages = row.get("stages", [])
+                if type(stages) is not list or len(stages) > MAX_STAGES:
+                    raise ValueError("invalid evaluator stage inventory")
+                selected = [public_stage(s) for s in stages[:remaining]]
+                remaining -= len(selected)
+                status = row.get("status")
+                if status not in {
+                    "current",
+                    "unavailable",
+                    "epoch_unavailable",
+                    "invalid_or_unavailable",
+                }:
+                    raise ValueError("invalid evaluator observation status")
+                workers.append(
+                    dict(
+                        evaluator=evaluator,
+                        status=status,
+                        stages=selected,
+                        omitted_stages=len(stages) - len(selected),
+                    )
+                )
+            public["workers"] = workers
         public["observed_unix_ms"] = time.time_ns() // 1_000_000
         if public.get("eta_seconds") is not None and public.get("estimated_finish_unix_ms") is None:
             public["estimated_finish_unix_ms"] = public["observed_unix_ms"] + int(
@@ -112,6 +148,15 @@ class CohortProgressSnapshots:
             while len(self.entries) > self.maximum_cohorts:
                 self.entries.popitem(last=False)
 
+    def active_work_snapshot(self, cohort):
+        """Copy bounded emitted stages only; no native operations on HTTP GET."""
+        from .competition_cohort_execution_work import aged_stage
+
+        now = time.monotonic()
+        with self.lock:
+            values = deepcopy(tuple(self.entries.get(cohort, {}).get("active_work", {}).values()))
+        return [aged_stage(work, max(0, now - observed)) for observed, work in values]
+
     def snapshot(self, cohort):
         now = time.monotonic()
         with self.lock:
@@ -131,11 +176,17 @@ class CohortProgressSnapshots:
             "work",
             "request_start",
             "execution",
+            "execution_workers",
         ):
             if kind in entry:
                 observed, value = entry[kind]
                 age = max(0, now - observed)
                 value.update(age_seconds=round(age, 3), stale=age > 120)
+                if kind == "execution_workers":
+                    from .competition_cohort_execution_work import aged_stage
+
+                    for worker in value["workers"]:
+                        worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
                 if kind == "acceptance" and value.get("status") == "running":
                     value["elapsed_seconds"] = round(age, 3)
                 parts[kind] = value

@@ -41,6 +41,7 @@ def test_selected_dependency_manifest_is_complete_and_qualified():
         "competition_cohort_request_publication.py",
         "competition_cohort_publication_objects.py",
         "competition_cohort_lifecycle_host.py",
+        "competition_cohort_execution_work.py",
         "competition_cohort_model_delivery_candidate.py",
         "competition_cohort_review_config.py",
         "competition_cohort_service_host.py",

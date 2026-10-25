@@ -13,6 +13,7 @@ from secrets import token_hex
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from .competition_cohort_execution_work import ExecutionWorkObservations, execution_work_routes
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_origin import private_review_origin
 from .open_competition import identity
@@ -23,17 +24,16 @@ _MAX_BYTES = 2048
 _REFRESH_SECONDS = 3
 
 
-def producer_epoch_routes(signer, *, token, enabled):
+def producer_epoch_routes(signer, *, token, enabled, cohorts=()):
     """Build once per actual reviewer application; GET performs no native work."""
     expected = ("Bearer " + _credential(token)).encode()
-    raw = canonical_json_bytes(
-        dict(
-            schema="umi-execution-producer-epoch/1",
-            evaluator=identity(signer),
-            epoch_sha256=token_hex(32),
-            execution_enabled=bool(enabled),
-        )
+    body = dict(
+        schema="umi-execution-producer-epoch/1",
+        evaluator=identity(signer),
+        epoch_sha256=token_hex(32),
+        execution_enabled=bool(enabled),
     )
+    raw = canonical_json_bytes(body)
     router = APIRouter()
 
     @router.get(PRODUCER_EPOCH_PATH)
@@ -42,13 +42,26 @@ def producer_epoch_routes(signer, *, token, enabled):
             raise HTTPException(401, "reviewer authentication required")
         return Response(raw, media_type="application/json")
 
+    from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+
+    router.include_router(
+        execution_work_routes(
+            evaluator=body["evaluator"],
+            epoch=body["epoch_sha256"],
+            token=token,
+            enabled=enabled,
+            cohorts=cohorts,
+            snapshots=PUBLIC_COHORT_PROGRESS,
+        )
+    )
     return router
 
 
 def producer_epoch_client():
     """Advisory requests must not wait for long business requests' pool slots."""
     return httpx.AsyncClient(
-        trust_env=False, follow_redirects=False,
+        trust_env=False,
+        follow_redirects=False,
         limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
     )
 
@@ -64,15 +77,20 @@ class ExecutionProducerEpochs:
         }
         self.cache = {}
         self.capacity = asyncio.Semaphore(4)
+        self.work = ExecutionWorkObservations(client, self.peers, self.capacity)
         self.probes = {}
         self.attempts = self.failures = self.timeouts = 0
 
     async def _fetch(self, evaluator, origin, token):
-        async with self.capacity, self.client.stream(
-            "GET", origin.rstrip("/") + PRODUCER_EPOCH_PATH,
-            headers={"authorization": "Bearer " + token, "accept-encoding": "identity"},
-            timeout=2,
-        ) as response:
+        async with (
+            self.capacity,
+            self.client.stream(
+                "GET",
+                origin.rstrip("/") + PRODUCER_EPOCH_PATH,
+                headers={"authorization": "Bearer " + token, "accept-encoding": "identity"},
+                timeout=2,
+            ) as response,
+        ):
             self.probes[evaluator] = ("http_status", response.status_code)
             if response.status_code != 200:
                 return None
