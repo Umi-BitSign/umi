@@ -922,6 +922,26 @@ upgrade/repair entrypoint remains available when its dependency and capacity
 checks have been qualified. Retire this read-through selection only after those retained
 local archives and their recovery consumers no longer require it.
 
+A retained completed admission interval can use the same bounded source
+externalization API when its writable R2 store is selected. Its original verdict,
+provenance, source tokens, journal inode and UPDATE/DELETE mutation fences remain
+unchanged. Before the first raw source is replaced, the owning transaction adds
+an explicit marker and a fence against reintroducing a previously removed raw
+key. New tail capture remains valid. Each exact alias replacement preserves only
+its own single deletion; any prior or additional source mutation refuses the
+replacement and retains the required repair state. Interrupted publication or
+alias commit resumes from the individual durable receipts without native replay.
+Missing release markers/triggers are repair, never a legacy-layout cache miss.
+The batch reports remaining local records and net logical bytes released,
+including its added fence metadata. Completed admission without writable R2
+selection stays local and reports that missing dependency explicitly.
+
+This operation does not compact the SQLite inode or release a retained local
+proof archive. Keep those physical bytes until their native restore coverage,
+consumer-release and capacity requirements are satisfied. Read-through still
+prevents an implicit source migration during normal advancement; invoke the
+bounded owner operation deliberately for that supported retained layout.
+
 Offline `migrate_proof_archive(original, selected, evict=True)` can remove local
 archive payload files only after the complete graph is acknowledged. The caller
 must hold the original service's exclusive upgrade boundary. This library repair

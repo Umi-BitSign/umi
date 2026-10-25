@@ -210,6 +210,9 @@ async def admission_case(historical, monkeypatch, tmp_path):
         migrate=migrate,
         migrate_result=migrate_result,
         expected=reviewed_history,
+        original_control=control,
+        original_review=review,
+        decision_reader=decision_reader,
     )
 
 
@@ -493,7 +496,7 @@ async def test_direct_remote_tail_preserves_admitted_prefix_and_all_original_fen
     result = await h.reader.advance(h.item.provider, through_block=h.end)
     assert result.history.tip.block_number == h.end
     assert h.reader.progress.native_completed == h.end - c.boundary
-    assert originals(h.reader.journal) == prefix_sources
+    assert not originals(h.reader.journal)
     assert h.reader.completed_admission.load() == admission
     with h.reader.journal.read_transaction() as db:
         assert db.execute("SELECT revision FROM history_completed_admission").fetchall() == [(0,)]
@@ -509,10 +512,11 @@ async def test_direct_remote_tail_preserves_admitted_prefix_and_all_original_fen
     assert server.calls == []
     assert h.reader.checkpoints.load(h.end) == saved
     assert h.reader.completed_admission.load() == admission
-    # The existing protection still detects an ordinary source mutation.
-    kind, key, _ = prefix_sources[0]
+    # Reintroducing even identical old raw bytes must invalidate the interval;
+    # new tail captures remain allowed and do not invalidate it.
+    kind, key, raw = prefix_sources[0]
     with h.reader.journal.transaction() as db:
-        db.execute("UPDATE records SET body=body WHERE kind=? AND id=?", (kind, key))
+        db.execute("INSERT INTO records VALUES (?,?,?)", (kind, key, raw))
     with pytest.raises(HistoryCheckpointRepairRequired, match="source or marker changed"):
         h.reader.completed_admission.load()
 
