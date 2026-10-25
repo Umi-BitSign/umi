@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Preserve original model-delivery proposals, dual native reservation census, challenge proofs, signer journals and held-cohort authority. Restore the held lifecycle owner after restart; exact pending reservation reuses prior remote verification while retaining current local census. Qualify issuance, interrupted reservation, restart, retained transport selections, client continuation and reward replay without changing verification ABI.",
+  "compatibility_basis": "Preserve native signed inputs, transport generations, payload verification and completed byte facts. Bound transient connection retries to the exact HEAD/GET object and range; discard failed partial responses and never automatically replay mutations. Qualify failed reads, request bounds, cancellation, pooling, original model transport, restart and reward consumers without changing the verification ABI.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -583,7 +583,7 @@
     "r2_evidence.py": "e4fe82ea643786861775138d2bc589c78fc2add3f5e5efb28c471dd116806f00",
     "r2_limits.py": "64588dde9a472c3a7387f1239e25fcd089e5ff6d239aae78ca7231a2571ada2a",
     "r2_metadata_batch.py": "5338c07ba5aca9df3eab32d8f4baa18189722832bbf875a3e26e7be8934c8a6b",
-    "r2_multipart.py": "d526bf71e1d1b44fae98bb4f1ece837bf12d088d923f0b7f5fe0b6c50867e684",
+    "r2_multipart.py": "830e2e529f0bfb3f65c50b8ad136ad5706f59d121723374c6b945c7f9e8ef8e1",
     "r2_sigv4.py": "29254a6ba774905b91a110c311c1fa12456acf51e4294b5d9957ef2efa454caf",
     "registration_bridge.py": "4bc2940b3c598c1aeeb93d82c0bff0d23a1b6ebcd675237c57cd8c8b92a0843c",
     "resources.py": "ea9fe3b319014d91b19e271c12573faa47371bf2d759ac1b59248e794db4b1ba",
