@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from .competition_evidence_codec import checked_digest
@@ -101,11 +102,13 @@ class JournalSourceExternalizer:
         alias_kind=ALIAS_KIND,
         marker_table=MARKER_TABLE,
         repair_error=ValueError,
+        source_release_guard=None,
     ):
         self.journal, self.checkpoints, self.remote = journal, checkpoints, remote
         self.source_table, self.alias_kind = _name(source_table), _name(alias_kind)
         self.marker_table = _name(marker_table)
         self.source_kinds, self.repair_error = tuple(source_kinds), repair_error
+        self.source_release_guard = source_release_guard
 
     def _identity(self, kind, key, db):
         if kind not in self.source_kinds or type(key) is not str:
@@ -556,10 +559,10 @@ class JournalSourceExternalizer:
             "remote": reference,
         }
 
-        self._commit_alias(kind, key, token, alias)
+        metadata_charge = self._commit_alias(kind, key, token, alias)
         return {
             "restored": False,
-            "released_logical_bytes": len(raw) - len(canonical_json_bytes(alias)),
+            "released_logical_bytes": len(raw) - len(canonical_json_bytes(alias)) - metadata_charge,
         }
 
     def _commit_alias(self, kind, key, token, alias):
@@ -568,23 +571,30 @@ class JournalSourceExternalizer:
             raise ValueError("remote source alias exceeds its journal record bound")
         alias_key = digest([kind, key])
         with self.journal.transaction() as db:
-            self.checkpoints.check_schema(db)
-            if self._identity(kind, key, db) != (token[2], 1):
-                raise self.repair_error("source changed during upload; original retained")
-            if self.journal.get_raw(self.alias_kind, alias_key, db=db) is not None:
-                raise self.repair_error("remote source alias already exists; repair required")
-            self.remote.validate_reference(alias["remote"])  # metadata only, no network
-            # Release original logical capacity before charging the replacement,
-            # inside the same transaction. A full legacy owner needs no extra
-            # alias-sized headroom; capacity counters and source triggers remain
-            # enabled and any failure restores the exact original record.
-            db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, key))
-            db.execute("INSERT INTO records VALUES (?,?,?)", (self.alias_kind, alias_key, raw))
-            count, used, _ = self.journal._record_capacity(db)
-            if count > self.journal.maximum_records or used > self.journal.maximum_bytes:
-                raise ValueError("remote source replacement exceeds journal capacity")
-            if self.source_token(kind, key, db) != token:
-                raise self.repair_error("externalized source changed its original token")
+            guard = (
+                nullcontext()
+                if self.source_release_guard is None
+                else self.source_release_guard(db)
+            )
+            with guard as metadata_charge:
+                self.checkpoints.check_schema(db)
+                if self._identity(kind, key, db) != (token[2], 1):
+                    raise self.repair_error("source changed during upload; original retained")
+                if self.journal.get_raw(self.alias_kind, alias_key, db=db) is not None:
+                    raise self.repair_error("remote source alias already exists; repair required")
+                self.remote.validate_reference(alias["remote"])  # metadata only, no network
+                # Release original logical capacity before charging the replacement,
+                # inside the same transaction. A full legacy owner needs no extra
+                # alias-sized headroom; capacity counters and source triggers remain
+                # enabled and any failure restores the exact original record.
+                db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, key))
+                db.execute("INSERT INTO records VALUES (?,?,?)", (self.alias_kind, alias_key, raw))
+                count, used, _ = self.journal._record_capacity(db)
+                if count > self.journal.maximum_records or used > self.journal.maximum_bytes:
+                    raise ValueError("remote source replacement exceeds journal capacity")
+                if self.source_token(kind, key, db) != token:
+                    raise self.repair_error("externalized source changed its original token")
+        return 0 if metadata_charge is None else metadata_charge
 
     def externalize_many(self, keys):
         self._install()

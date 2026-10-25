@@ -279,6 +279,7 @@ class RewardControlHistoryReader:
             self.remote_store,
             source_kinds=SOURCE_KINDS,
             repair_error=HistoryCheckpointRepairRequired,
+            source_release_guard=self.completed_admission.preserve_source_release,
         )
         self.checkpoints.remote_sources = self.remote_sources
         self._source_tokens = {}
@@ -1040,16 +1041,15 @@ class RewardControlHistoryReader:
             return self._externalize_sources_locked(maximum_records)
 
     def _externalize_sources_locked(self, maximum_records):
-        if self.completed_admission.load() is not None:
-            # The imported result binds this original retained raw owner. New
-            # blocks still use the selected proof export archive, but deleting
-            # these legacy sources needs its own qualified dependency migration.
+        if self.completed_admission.load() is not None and (
+            self.remote_store is None or self.remote_store.config.read_only
+        ):
             result = {
                 "replicated_records": 0,
                 "restored_records": 0,
                 "released_logical_bytes": 0,
                 "state": "retained_completed_admission_sources",
-                "disk_reclamation_basis": "original_local_sources_required_by_admission_migration",
+                "disk_reclamation_basis": "selected_writable_r2_store_required",
             }
             self.progress.local_release = result
             return result

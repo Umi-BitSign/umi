@@ -8,6 +8,7 @@ ordinary appended block frames do not. Missing completion state requires repair.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 
 from .chain_evidence import FinalizedSnapshotRef
 from .competition_evidence_codec import checked_digest
@@ -18,11 +19,24 @@ from .competition_reward_history_checkpoint import (
     HistoryCheckpointRepairRequired,
 )
 from .open_competition import digest
+from .protocol import canonical_json_bytes
 
 ABI = "umi-native-completed-admission-interval/1"
 _KIND = "control_history_completed_admission"
 _DONE = "control_history_completed_admission_done"
 _TABLE = "history_completed_admission"
+_RELEASE = "control_history_completed_admission_release"
+_RELEASE_TRIGGER = "history_completed_admission_reinsert"
+
+
+def _release_trigger():
+    kinds = ",".join("'" + kind + "'" for kind in SOURCE_KINDS)
+    return (
+        "CREATE TRIGGER " + _RELEASE_TRIGGER + " BEFORE INSERT ON records "
+        "WHEN NEW.kind IN (" + kinds + ") AND EXISTS ("
+        "SELECT 1 FROM history_source_identity WHERE kind=NEW.kind AND id=NEW.id AND present=0) "
+        "BEGIN UPDATE history_completed_admission SET revision=revision+1; END"
+    )
 
 
 def _triggers():
@@ -55,6 +69,7 @@ class CompletedAdmissionCheckpoint:
         if not installed:
             if (
                 done is not None
+                or self.journal.get(_RELEASE, "original", db=db) is not None
                 or db.execute("SELECT 1 FROM records WHERE kind=? LIMIT 1", (_KIND,)).fetchone()
                 or db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='trigger' "
@@ -72,7 +87,55 @@ class CompletedAdmissionCheckpoint:
         triggers = dict(db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
         if any(triggers.get(name) != sql for name, sql in _triggers().items()):
             raise HistoryCheckpointRepairRequired("completed admission source fence changed")
+        release = self.journal.get(_RELEASE, "original", db=db)
+        reinsert = triggers.get(_RELEASE_TRIGGER)
+        if release is None:
+            if reinsert is not None:
+                raise HistoryCheckpointRepairRequired("completed admission release marker missing")
+        elif release != self._release_marker(key) or reinsert != _release_trigger():
+            raise HistoryCheckpointRepairRequired("completed admission release fence changed")
         return key
+
+    def _release_marker(self, key):
+        return {"schema": "umi-admission-source-release/1", "owner": self.blocks.owner, "key": key}
+
+    @contextmanager
+    def preserve_source_release(self, db):
+        """Keep the admitted interval across one exact native alias replacement.
+
+        The externalizer owns the immediate transaction and checks the original
+        source token, immutable R2 receipt and replacement alias. Its one DELETE
+        must be the only raw-source mutation; an existing invalidation or any
+        additional mutation refuses and rolls the entire replacement back.
+        No completion, provenance, source token or trigger is rewritten.
+        """
+        if not db.in_transaction or db.execute("PRAGMA query_only").fetchone() != (0,):
+            raise ValueError("source release requires its native writer transaction")
+        key = self._index(db)
+        charged = 0
+        if key is not None and self.journal.get(_RELEASE, "original", db=db) is None:
+            # Original admissions did not need an INSERT fence: every prefix
+            # source already occupied its key. Aliasing makes that key absent.
+            # Install its shadow/reinsertion fence atomically before deletion,
+            # while retaining the old verdict and both original triggers.
+            db.execute(_release_trigger())
+            raw = canonical_json_bytes(self._release_marker(key))
+            db.execute(
+                "INSERT INTO records VALUES (?,?,?)",
+                (_RELEASE, "original", raw),
+            )
+            charged = len(raw)
+        yield charged
+        if key is not None:
+            changed = db.execute(
+                "UPDATE history_completed_admission SET revision=0 "
+                "WHERE owner=? AND key=? AND revision=1",
+                (self.blocks.owner, key),
+            ).rowcount
+            if changed != 1:
+                raise HistoryCheckpointRepairRequired(
+                    "completed admission changed during exact source release"
+                )
 
     def load(self):
         try:
