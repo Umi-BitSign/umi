@@ -392,7 +392,12 @@ class ModelDeliveryAdoptionOwner:
                 # validates receipt heights and gates fresh participation.
                 # Its durable reservation is reconciled into control on restart.
                 if not prior:
-                    await candidate.verify(history, transition)
+                    # An exact pending control is written only after the first
+                    # candidate check and intake gate. Restart restores that
+                    # same decision; keep the fresh local dual census below,
+                    # without another remote model pass for an unchanged intent.
+                    if pending != transition:
+                        await candidate.verify(history, transition)
                     await run_owned_thread(
                         partial(
                             census_model_delivery,

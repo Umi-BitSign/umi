@@ -131,6 +131,18 @@ cooperative source/config selection and preserve the original journals and signe
 inputs. Older supported readers continue reading the unchanged original files;
 miners need no new flag, signed request or state reset for this private change.
 
+Held-cohort transport reservation proofs reopen their original lifecycle owner
+after intake restart through the same serialized native initialization as
+prepare/reserve. This restores the exact pending reservation and still checks
+both original journals before signing a fresh challenge. It does not release the
+hold or run an automatic phase. Repeating its exact pending reservation retains
+the fresh local dual census
+without repeating the completed remote model pass. Unreserved proposals still
+require their initial independent verification. The change is private to intake;
+existing miner requests, reviewer proof readers and published client formats
+remain compatible. Select the updated owner through its supported cooperative
+source/config updater, preserving the original state and signed plans.
+
 A natively verified closed request history is retained as a monotonic denial
 before collecting another registration snapshot. This does not advance finalized
 highwater, create an execution observation, complete an obligation or remove any
