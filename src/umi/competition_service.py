@@ -535,7 +535,6 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
     from .competition_service_supervision import serve_with_finality_supervision
 
     config = CompetitionServiceConfig.model_validate_json(canonical_json_bytes(config))
-    app = create_intake_app(config, policy)
     # Terminate TLS at a reviewed reverse proxy. Never trust forwarded headers or
     # accept a request-selected source of finality. One process owns this cache.
     handler, loggers = logging.StreamHandler(), []
@@ -561,6 +560,7 @@ def serve_intake(config: CompetitionServiceConfig, policy: CompetitionPolicy) ->
                 logger.addHandler(handler)
                 logger.setLevel(logging.INFO)
                 logger.propagate = False
+        app = create_intake_app(config, policy)
         serve_with_finality_supervision(
             app,
             host=config.host,

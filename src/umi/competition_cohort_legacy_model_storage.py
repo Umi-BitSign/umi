@@ -520,13 +520,37 @@ def resolve_legacy_model_storage(
     return LegacyModelStorageResolution(kind, selected, entry)
 
 
-def verify_legacy_storage_originals(authenticated, *, load_original, endpoint, bucket, report=None):
+def verify_legacy_storage_originals(
+    authenticated,
+    *,
+    load_original,
+    endpoint,
+    bucket,
+    report=None,
+    original_reuse=None,
+    original_identity=None,
+):
     """Check all pinned metadata with counted progress; no R2 bytes or payloads.
 
     Signing-side preparation must additionally compare this complete inventory
     to the fenced native census. This function cannot prove that local census
     completeness from a caller-supplied list alone.
     """
+
+    def resolve(**kwargs):
+        if original_reuse is not None:
+            return original_reuse.resolve(
+                authenticated,
+                load_original=load_original,
+                identity=original_identity,
+                endpoint=endpoint,
+                bucket=bucket,
+                **kwargs,
+            )
+        return resolve_legacy_model_storage(
+            authenticated, load_original=load_original, endpoint=endpoint, bucket=bucket, **kwargs
+        )
+
     progress = TransferProgress(
         "legacy_model_storage_originals",
         len(authenticated.legacy.entries) + len(authenticated.legacy.incumbents) + 1,
@@ -536,34 +560,20 @@ def verify_legacy_storage_originals(authenticated, *, load_original, endpoint, b
     )
     try:
         with progress:
-            resolve_legacy_model_storage(
-                authenticated,
-                load_original=load_original,
-                endpoint=endpoint,
-                bucket=bucket,
-                baseline=True,
-            )
+            resolve(baseline=True)
             progress.advance(1)
             for incumbent in authenticated.legacy.incumbents:
-                resolve_legacy_model_storage(
-                    authenticated,
-                    load_original=load_original,
-                    endpoint=endpoint,
-                    bucket=bucket,
-                    incumbent_sha256=incumbent.model_sha256,
-                )
+                resolve(incumbent_sha256=incumbent.model_sha256)
                 progress.advance(1)
             for entry in authenticated.legacy.entries:
-                if entry.payload_state == "incomplete_upload":
+                if entry.payload_state == "incomplete_upload" and original_reuse is None:
                     _verify_participant(authenticated, entry, load_original)
                 else:
-                    resolve_legacy_model_storage(
-                        authenticated,
-                        load_original=load_original,
-                        endpoint=endpoint,
-                        bucket=bucket,
-                        request_sha256=entry.request_sha256,
-                    )
+                    try:
+                        resolve(request_sha256=entry.request_sha256)
+                    except LegacyModelUploadIncomplete:
+                        if entry.payload_state != "incomplete_upload":
+                            raise
                 progress.advance(1)
     except LegacyModelStorageRepairRequired:
         progress.emit("repair_required", reason="retained_legacy_original_missing_or_damaged")

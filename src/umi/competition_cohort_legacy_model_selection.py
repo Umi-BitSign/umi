@@ -13,6 +13,12 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_legacy_model_readers import LegacyModelStorageReaders
+from .competition_cohort_legacy_model_reuse import (
+    LegacyModelOriginalReuse,
+)
+from .competition_cohort_legacy_model_reuse import (
+    original_identity as legacy_original_identity,
+)
 from .competition_cohort_legacy_model_storage import (
     MAX_INVENTORY_BYTES,
     AuthenticatedLegacyModelStorage,
@@ -90,6 +96,20 @@ class AuthenticatedLegacyModelSources:
     authenticated: dict[str, AuthenticatedLegacyModelStorage]
     original_paths: dict[str, tuple[Path, ...]]
     byte_stores: dict[str, ModelByteStoreConfig] = field(default_factory=dict)
+    original_reuse: LegacyModelOriginalReuse | None = field(default=None, compare=False)
+
+    def original_identity(self, raw_sha256):
+        paths = self.original_paths.get(raw_sha256)
+        if not paths:
+            raise LegacyModelStorageRepairRequired(
+                "legacy original is outside selected inventories"
+            )
+        try:
+            return legacy_original_identity(paths[0])
+        except FileNotFoundError as error:
+            raise LegacyModelStorageRepairRequired(
+                "selected legacy original requires repair"
+            ) from error
 
     def load_original(self, raw_sha256):
         paths = self.original_paths.get(raw_sha256)
@@ -110,7 +130,15 @@ class AuthenticatedLegacyModelSources:
         return raw
 
 
-def authenticate_legacy_model_sources(sources, *, series, policy, model_delivery_adoptions):
+def authenticate_legacy_model_sources(
+    sources,
+    *,
+    series,
+    policy,
+    model_delivery_adoptions,
+    original_verification_directory=None,
+    original_verification_repair_reason=None,
+):
     """Read and qualify selected metadata before leases, signing keys or providers."""
     selected = validate_legacy_model_selections(
         sources, series=series, policy=policy, model_delivery_adoptions=model_delivery_adoptions
@@ -187,6 +215,9 @@ def authenticate_legacy_model_sources(sources, *, series, policy, model_delivery
             for value in selected
             if value.shared_byte_store is not None
         },
+        LegacyModelOriginalReuse(
+            original_verification_directory, repair_reason=original_verification_repair_reason
+        ),
     )
     for value in authenticated.values():
         namespace = {(entry.endpoint, entry.bucket) for entry in value.preservation.models}
@@ -194,7 +225,12 @@ def authenticate_legacy_model_sources(sources, *, series, policy, model_delivery
             raise ValueError("legacy storage inventory changes its selected namespace")
         endpoint, bucket = next(iter(namespace))
         verify_legacy_storage_originals(
-            value, load_original=prepared.load_original, endpoint=endpoint, bucket=bucket
+            value,
+            load_original=prepared.load_original,
+            endpoint=endpoint,
+            bucket=bucket,
+            original_reuse=prepared.original_reuse,
+            original_identity=prepared.original_identity,
         )
     return prepared
 
@@ -217,4 +253,6 @@ def selected_legacy_model_readers(prepared, *, multipart, verification_root):
         multipart=multipart,
         verification_root=verification_root,
         byte_stores=prepared.byte_stores,
+        original_reuse=prepared.original_reuse,
+        original_identity=prepared.original_identity,
     )

@@ -1341,7 +1341,10 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
 
 
 @pytest.mark.parametrize("name", ["umi.competition_cohort_lifecycle", "umi.competition.progress"])
-def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monkeypatch, name):
+@pytest.mark.parametrize("construction_fails", [False, True])
+def test_serve_intake_enables_lifecycle_observation_logger(
+    config, policy, monkeypatch, name, construction_fails
+):
     target = logging.getLogger(name)
     before = (tuple(target.handlers), target.level, target.propagate)
     observed = []
@@ -1355,9 +1358,8 @@ def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monke
         "umi.competition_service.CompetitionServiceConfig.model_validate_json",
         lambda *_: runtime,
     )
-    monkeypatch.setattr("umi.competition_service.create_intake_app", lambda *_: object())
 
-    def serve(*_args, **_kwargs):
+    def construct(*_args, **_kwargs):
         observed.append(
             (
                 tuple(target.handlers),
@@ -1365,11 +1367,20 @@ def test_serve_intake_enables_lifecycle_observation_logger(config, policy, monke
                 target.propagate,
             )
         )
+        if construction_fails:
+            raise ValueError("construction failed after startup logging")
+        return object()
 
+    monkeypatch.setattr("umi.competition_service.create_intake_app", construct)
     monkeypatch.setattr(
-        "umi.competition_service_supervision.serve_with_finality_supervision", serve
+        "umi.competition_service_supervision.serve_with_finality_supervision",
+        lambda *_a, **_k: None,
     )
-    serve_intake(config, policy)
+    if construction_fails:
+        with pytest.raises(ValueError, match="construction failed"):
+            serve_intake(config, policy)
+    else:
+        serve_intake(config, policy)
     assert len(observed) == 1
     handlers, level, propagate = observed[0]
     assert len(handlers) == len(before[0]) + 1

@@ -604,6 +604,8 @@ class ServiceAdmissionHost:
                 series=c.series,
                 policy=policy,
                 model_delivery_adoptions=selections,
+                original_verification_directory=Path(c.legacy_model_verification_directory)
+                / "originals",
             )
         self.payloads = None
         self.r2_multipart = None

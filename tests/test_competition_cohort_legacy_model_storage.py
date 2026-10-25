@@ -604,3 +604,91 @@ def test_damaged_original_reports_repair_and_withdraws_success_eta(case):
     assert progress[-1]["eta_basis"] == "withdrawn_stalled_or_retrying"
     assert progress[-1]["completed_units"] == 0
     assert progress[-1]["total_units"] == 3
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_durable_original_reuse_preserves_participant_and_incomplete_outcomes(
+    case, tmp_path, monkeypatch, incomplete
+):
+    from umi.competition_cohort_legacy_model_reuse import (
+        LegacyModelOriginalReuse,
+        original_identity,
+    )
+    from umi.private_files import ensure_private_directory
+
+    legacy, preservation = case.legacy, case.preservation
+    if incomplete:
+        entries = tuple(
+            LegacyModelOriginals(
+                request_sha256=e.request_sha256,
+                model_sha256=e.model_sha256,
+                request_raw_sha256=e.request_raw_sha256,
+                payload_state="incomplete_upload",
+            )
+            for e in legacy.entries
+        )
+        legacy = legacy.model_copy(update={"entries": entries})
+        preservation = preservation.model_copy(
+            update={
+                "legacy_inventory_sha256": digest(legacy),
+                "models": tuple(
+                    m for m in preservation.models if m.model_sha256 == digest(case.baseline)
+                ),
+            }
+        )
+    auth = authenticated(case, legacy=legacy, preservation=preservation)
+    originals = tmp_path / "originals"
+    ensure_private_directory(originals)
+    for sha, raw in case.objects.items():
+        path = originals / (sha + ".json")
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    reads = []
+
+    def source(sha):
+        reads.append(sha)
+        return (originals / (sha + ".json")).read_bytes()
+
+    def identity(sha):
+        return original_identity(originals / (sha + ".json"))
+
+    root = tmp_path / "reuse"
+    verify_legacy_storage_originals(
+        auth,
+        load_original=source,
+        endpoint=ENDPOINT,
+        bucket=BUCKET,
+        original_reuse=LegacyModelOriginalReuse(root),
+        original_identity=identity,
+    )
+    assert reads
+    reads.clear()
+
+    def never_verify(*args, **kwargs):
+        raise AssertionError("native originals must not be reverified after restart")
+
+    monkeypatch.setattr(
+        "umi.competition_cohort_legacy_model_reuse.resolve_legacy_model_storage", never_verify
+    )
+    restarted = LegacyModelOriginalReuse(root)
+    verify_legacy_storage_originals(
+        auth,
+        load_original=source,
+        endpoint=ENDPOINT,
+        bucket=BUCKET,
+        original_reuse=restarted,
+        original_identity=identity,
+    )
+    kwargs = dict(
+        load_original=source,
+        identity=identity,
+        endpoint=ENDPOINT,
+        bucket=BUCKET,
+        request_sha256=auth.legacy.entries[0].request_sha256,
+    )
+    if incomplete:
+        with pytest.raises(LegacyModelUploadIncomplete):
+            restarted.resolve(auth, **kwargs)
+    else:
+        assert restarted.resolve(auth, **kwargs).originals == auth.legacy.entries[0]
+    assert not reads

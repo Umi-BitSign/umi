@@ -156,6 +156,9 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.state_directory)
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
     root = Path(config.state_directory) / digest(config.series)

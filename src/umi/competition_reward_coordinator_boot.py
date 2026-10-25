@@ -286,11 +286,7 @@ class RewardCoordinatorConfig(StrictProtocolModel):
                 self.proof_export_directory,
                 self.exchange_inbox,
                 self.exchange_outbox,
-                *(
-                    self.direct_model_review.stores()
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
@@ -314,6 +310,9 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(config.state_directory)
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
     async with AsyncExitStack() as resources:

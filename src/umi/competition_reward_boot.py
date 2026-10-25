@@ -281,11 +281,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
                 self.proof_export_directory,
                 *(c.resources.state_directory for c in self.legacy_chains),
-                *(
-                    self.direct_model_review.stores()
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(shared_byte_store_paths(self.legacy_model_storage) if include_shared else ()),
             )
@@ -394,6 +390,10 @@ async def run_installed_standing_rewards(
             series=config.series,
             policy=config.policy,
             model_delivery_adoptions=config.model_delivery_adoptions,
+            original_verification_directory=Path(runtime.config.state_root)
+            / "standing-rewards"
+            / digest(config.series)
+            / "legacy-original-verification",
         )
     )
     root = Path(runtime.config.state_root) / "standing-rewards" / digest(config.series)
