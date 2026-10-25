@@ -72,6 +72,15 @@ its reason; certification and scoring are separate stages. Artifact review runs
 during intake, including for replacements, and completed work resumes after
 restart rather than waiting until intake closes.
 
+During evaluation, `components.execution` counts confirmed exported results.
+`components.execution_workers.workers` separately shows cached evaluator stages,
+such as model downloads, with each stage's counts, percentage, elapsed time,
+ETA basis and freshness. A download percentage is not the cohort completion
+percentage. Exports can pause while a worker is downloading or running a model.
+An unavailable or older evaluator reports unknown stage details; an empty active
+stage list does not establish completed evaluation. These advisory reads do not
+start verification, load models or request chain data.
+
 The equivalent public read is
 `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
 Both digests appear under `proposed_admission` in the original receipt. Use the

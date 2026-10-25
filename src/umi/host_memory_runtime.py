@@ -298,11 +298,21 @@ class RequestsStageASGIBinding:
     def _permitted(self, scope):
         if self.private_role is None:
             return False
-        # This authenticated endpoint returns one cached process identity only.
-        # It reads no native state and occupies no signing/admission lane.
-        if (self.private_role == "phase_reviewer" and scope.get("method") == "GET"
-                and scope.get("path") == "/internal/cohorts/execution-producer"):
+        # These authenticated endpoints copy cached process/stage diagnostics.
+        # They read no native state and occupy no signing/admission lane.
+        if (
+            self.private_role == "phase_reviewer"
+            and scope.get("method") == "GET"
+            and scope.get("path") == "/internal/cohorts/execution-producer"
+        ):
             return True
+        if self.private_role == "phase_reviewer" and scope.get("method") == "GET":
+            path = scope.get("path", "")
+            prefix = "/internal/cohorts/execution-producer/work/"
+            if path.startswith(prefix):
+                cohort = path[len(prefix) :]
+                if len(cohort) == 64 and all(c in "0123456789abcdef" for c in cohort):
+                    return True
         paths = {
             "intake": {"/internal/cohorts/request-review": "requests_export"},
             "phase_reviewer": {

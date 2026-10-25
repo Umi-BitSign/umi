@@ -379,6 +379,7 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 await origins.start()
         app.include_router(producer_epoch_routes(
             config.signing.signer, token=vote_token, enabled=app.state.benchmark is not None,
+            cohorts=tuple(binding.cohort_sha256 for binding in config.signing.cohorts),
         ))
         await provider.start()
         logger.info("phase_review_ready config_sha256=%s", digest(config))

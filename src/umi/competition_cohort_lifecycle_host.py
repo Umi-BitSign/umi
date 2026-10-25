@@ -627,6 +627,27 @@ class LifecycleHost:
                             )
                     if observer is not None:
                         result.update(observer.diagnostics(meter.required_producers))
+                        work = getattr(observer, "work", None)
+                        if work is not None:
+                            try:
+                                workers = await work.sample(
+                                    cohort, meter.required_producers, epochs
+                                )
+                                PUBLIC_COHORT_PROGRESS.record(
+                                    "execution_workers",
+                                    dict(
+                                        cohort_sha256=cohort,
+                                        stage="evaluator_work",
+                                        scope="cached_native_evaluator_stages_not_confirmed_exports_or_rewards",
+                                        workers=workers,
+                                    ),
+                                )
+                            except Exception as error:
+                                logger.warning(
+                                    "cohort_evaluator_work_unavailable cohort=%s error_type=%s",
+                                    cohort,
+                                    type(error).__name__,
+                                )
                     PUBLIC_COHORT_PROGRESS.record("execution", result)
                     logger.info(
                         "cohort_execution_progress %s", canonical_json_bytes(result).decode()
