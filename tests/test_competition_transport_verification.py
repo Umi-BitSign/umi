@@ -154,6 +154,28 @@ def test_progress_excludes_restored_bytes_and_withdraws_stale_eta(monkeypatch):
     assert not events[-1]["certification_authority"]
 
 
+def test_long_case_budget_does_not_become_a_sixty_second_transfer_stall(monkeypatch):
+    now, events = [100.0], []
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    progress = transport.TransferProgress(
+        "model_pair_execution", 12, events.append, unit="case_role_steps", idle_stall_seconds=600
+    )
+    now[0] += 30
+    progress.advance(1)
+    now[0] += 90
+    progress.emit("running")
+    assert events[-1]["status"] == "running" and events[-1]["eta_seconds"] is not None
+    now[0] += 600
+    progress.emit("running")
+    assert events[-1]["status"] == "stalled" and events[-1]["eta_seconds"] is None
+
+
+@pytest.mark.parametrize("interval", [0, -1, True, float("nan"), float("inf")])
+def test_progress_rejects_invalid_idle_budget(interval):
+    with pytest.raises(ValueError, match="idle stall interval"):
+        transport.TransferProgress("case", 1, idle_stall_seconds=interval)
+
+
 def test_failed_full_read_never_reports_completed():
     events = []
     with (

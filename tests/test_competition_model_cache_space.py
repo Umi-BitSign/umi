@@ -22,6 +22,42 @@ from umi.private_files import ensure_private_directory
 from umi.protocol import canonical_json_bytes
 
 
+def test_resident_capacity_counts_existing_bytes_and_preserves_physical_reserve(
+    managed, monkeypatch
+):
+    cache = managed.cache
+    entries = {}
+    allocated, _, _ = cache._measure(entries=entries)
+    resident = sum(
+        size
+        for path, size in entries.items()
+        if managed.archive in path.parents
+        or path == managed.archive
+        or managed.peer in path.parents
+        or path == managed.peer
+    )
+    unrelated = allocated - resident
+    monkeypatch.setattr(
+        space.shutil, "disk_usage", lambda _: SimpleNamespace(free=cache.reserve_bytes + 4096)
+    )
+    with pytest.raises(ValueError, match="allocation lease"):
+        cache.resident_capacity()
+    with cache.allocation_lease():
+        assert cache.resident_capacity() == resident + 4096
+        monkeypatch.setattr(
+            space.shutil, "disk_usage", lambda _: SimpleNamespace(free=cache.reserve_bytes - 8192)
+        )
+        assert cache.resident_capacity() == resident - 8192
+        monkeypatch.setattr(space.shutil, "disk_usage", lambda _: SimpleNamespace(free=1024**4))
+        assert cache.resident_capacity() == cache.maximum_bytes - unrelated
+        other = cache.root / "unrelated.bin"
+        with other.open("wb") as stream:
+            stream.truncate(1024**2)
+        other.chmod(0o600)
+        assert cache.resident_capacity() == cache.maximum_bytes - unrelated - 1024**2
+        assert other.exists()
+
+
 @pytest.fixture
 def managed(tmp_path):
     from umi.open_competition import BundleFile, digest

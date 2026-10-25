@@ -219,7 +219,8 @@ async def test_completed_job_keeps_reference_for_next_batch(cache):
     assert not (s.port.cache / "slot-0002").exists()
 
 
-async def test_large_pair_keeps_exclusive_single_model_fallback(cache):
+@pytest.mark.parametrize("limit", ["quota", "physical"])
+async def test_large_pair_keeps_exclusive_single_model_fallback(cache, monkeypatch, limit):
     s, job = cache, Job(name="a")
     for name in ("a", "reference"):
         bundle = s.bundles[name]
@@ -228,7 +229,16 @@ async def test_large_pair_keeps_exclusive_single_model_fallback(cache):
             for f in bundle.files
         )
         s.bundles[name] = bundle.model_copy(update={"files": files})
-    s.port.boot = s.port.boot.model_copy(update={"maximum_allocated_bytes": 6 * 1024**2})
+    if limit == "quota":
+        s.port.boot = s.port.boot.model_copy(update={"maximum_allocated_bytes": 6 * 1024**2})
+    else:
+        from umi import competition_model_cache_space as space
+
+        def usage(_):
+            allocated, _ = BootDiskModelCache(s.port.boot, reserve_bytes=0)._allocation()
+            return SimpleNamespace(free=max(0, 6 * 1024**2 - allocated))
+
+        monkeypatch.setattr(space.shutil, "disk_usage", usage)
     async with s.helper.scope(job):
         assert s.helper.exclusive and s.admission.active == 2 and s.calls == []
         candidate = s.helper.plan(job, "candidate")
@@ -240,6 +250,129 @@ async def test_large_pair_keeps_exclusive_single_model_fallback(cache):
         assert not (first / digest(candidate.bundle)).exists()
         assert (second / digest(reference.bundle) / "model").is_dir()
     assert s.admission.active == 0
+
+
+async def test_second_pair_waits_for_physical_room_without_restarting_preparation(
+    cache, monkeypatch
+):
+    from umi import competition_model_cache_space as space
+
+    s, budget = cache, cache.helper.budget()
+    sizes = {k: budget.model_bytes(v) for k, v in s.bundles.items()}
+    physical = [sizes["a"] + sizes["reference"] + 8192]
+
+    def usage(_):
+        allocated, _ = s.helper.budget()._allocation()
+        return SimpleNamespace(free=max(0, physical[0] - allocated))
+
+    monkeypatch.setattr(space.shutil, "disk_usage", usage)
+    s.helper.capacity_poll_seconds = 0.01
+    entered = {k: asyncio.Event() for k in ("a", "b")}
+    stop = asyncio.Event()
+
+    async def pair(name):
+        async with s.helper.scope(Job(name=name)):
+            entered[name].set()
+            await stop.wait()
+
+    first = asyncio.create_task(pair("a"))
+    second = None
+    try:
+        await asyncio.wait_for(entered["a"].wait(), 3)
+        second = asyncio.create_task(pair("b"))
+        await asyncio.sleep(0.05)
+        assert not entered["b"].is_set()
+        assert sorted(s.calls) == ["a", "reference"]
+        assert len(s.helper.pairs) == 1
+        physical[0] = sum(sizes[k] for k in ("a", "b", "reference")) + 65536
+        async with s.helper.condition:
+            s.helper.condition.notify_all()
+        await asyncio.wait_for(entered["b"].wait(), 3)
+        assert sorted(s.calls) == ["a", "b", "reference"]
+    finally:
+        stop.set()
+        await asyncio.gather(first, *(() if second is None else (second,)))
+
+
+async def test_external_capacity_loss_keeps_one_owned_preparation_and_cancels_cleanly(
+    cache, monkeypatch
+):
+    s, checked, space_ready = cache, asyncio.Event(), False
+    calls = []
+
+    def fits(self, models):
+        calls.append(tuple(models))
+        checked.set()
+        return space_ready
+
+    monkeypatch.setattr(BootDiskModelCache, "fits_materializations", fits)
+    s.helper.capacity_poll_seconds = 3600
+    entered, stop = asyncio.Event(), asyncio.Event()
+
+    async def pair():
+        async with s.helper.scope(Job(name="a")):
+            entered.set()
+            await stop.wait()
+
+    task = asyncio.create_task(pair())
+    try:
+        await asyncio.wait_for(checked.wait(), 3)
+        await asyncio.sleep(0.01)
+        assert len(calls) == 1 and not entered.is_set() and s.calls == []
+        space_ready = True
+        async with s.helper.condition:
+            s.helper.condition.notify_all()
+        await asyncio.wait_for(entered.wait(), 3)
+        assert len(calls) == 2 and sorted(s.calls) == ["a", "reference"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not s.helper.pairs and not any(s.helper.readers.values())
+    assert s.admission.active == 0
+
+
+async def test_nonfitting_pair_does_not_block_a_smaller_ready_pair(cache, monkeypatch):
+    from umi import competition_model_cache_space as space
+
+    s = cache
+    for name, amount in [("a", 4 * 1024**2), ("b", 4 * 1024**2), ("reference", 1024**2)]:
+        bundle = s.bundles[name]
+        s.bundles[name] = bundle.model_copy(
+            update={
+                "files": tuple(
+                    f.model_copy(update={"size_bytes": amount}) if f.role == "weights" else f
+                    for f in bundle.files
+                )
+            }
+        )
+
+    def usage(_):
+        allocated, _ = s.helper.budget()._allocation()
+        return SimpleNamespace(free=max(0, 6 * 1024**2 - allocated))
+
+    monkeypatch.setattr(space.shutil, "disk_usage", usage)
+    s.helper.capacity_poll_seconds = 0.01
+    entered = {k: asyncio.Event() for k in ("a", "b", "c")}
+    stop = asyncio.Event()
+
+    async def pair(name):
+        async with s.helper.scope(Job(name=name)):
+            entered[name].set()
+            await stop.wait()
+
+    tasks = [asyncio.create_task(pair("a"))]
+    try:
+        await asyncio.wait_for(entered["a"].wait(), 3)
+        tasks.append(asyncio.create_task(pair("b")))
+        await asyncio.sleep(0.05)
+        assert s.admission.active == 1 and not entered["b"].is_set()
+        tasks.append(asyncio.create_task(pair("c")))
+        await asyncio.wait_for(entered["c"].wait(), 3)
+        assert not entered["b"].is_set() and s.admission.active == 2
+        assert sorted(s.calls) == ["a", "c", "reference"]
+    finally:
+        stop.set()
+        await asyncio.gather(*tasks)
 
 
 async def test_cancelled_transfer_keeps_other_pairs_readable(cache):

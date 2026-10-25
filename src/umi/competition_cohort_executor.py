@@ -241,6 +241,7 @@ class CohortExecutor(CohortExecutionAuthority):
                 total,
                 unit="case_role_steps",
                 planning_unit_seconds=(1, job_policy_timeout(self.journal)),
+                idle_stall_seconds=job_policy_timeout(self.journal),
             ) as progress:
                 progress.advance(restored, restored=True)
                 # Each ordinary advance finishes at most one step. The extra

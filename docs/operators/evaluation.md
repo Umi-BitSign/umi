@@ -539,11 +539,27 @@ concurrent jobs share the reference where possible. Unrelated cache entries are
 never removed. Legacy installations without an explicit boot cache retain their
 single-slot, one-step scheduling.
 
+Resident admission uses the smaller of the configured cache limit and actual
+managed-slot allocation plus free filesystem bytes above its reserve. Unrelated
+entries continue to occupy their quota and cannot be counted as reclaimable. A pair that fits
+the configured limit but not that physical budget uses the existing exclusive
+single-model switching path. A second pair waits for a resident peer or external
+space release without holding an inference slot, allowing a smaller ready pair
+to proceed. It does not repeatedly restart preparation. Per-write reserve
+checks still apply if another service consumes space after admission. Queue
+observations read bounded filesystem metadata, never model payloads or completed
+verification evidence.
+
 `model_pair_queue`, `model_pair_capacity` and `model_pair_execution` expose queue,
 space admission and case/role progress separately. Completed steps restored from
 the journal count separately from newly executed steps. The ETA covers that job,
 not all cohort scoring or reward activation. Cancellation drains the current
 invocation and releases scheduling ownership; restart reuses existing checkpoints.
+Pair execution's idle diagnostic uses the selected step's full supported budget,
+so an ordinary long inference is not classified as a sixty-second byte-transfer
+stall. This changes telemetry only; signed clocks and inference deadlines remain
+unchanged. `model_pair_queue` and `model_cache_capacity` distinguish initial
+physical admission and a subsequent external capacity loss.
 On startup, the worker reads only directory names in its bounded managed cache
 and a small set of recent assignment IDs. It gives matching acknowledged jobs
 one scheduling turn before continuing the unchanged fair cursor. This preference

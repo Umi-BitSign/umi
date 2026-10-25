@@ -152,6 +152,29 @@ class BootDiskModelCache:
             ((f.size_bytes + unit - 1) // unit) * unit for f in bundle.files
         )
 
+    def resident_capacity(self, cache=None):
+        """Count reusable cache allocation plus physical room above the reserve.
+
+        Call under the allocation lease. This is changing filesystem metadata,
+        never model-byte verification or durable admission authority.
+        """
+        if not self.leased:
+            raise ValueError("resident capacity requires the cache allocation lease")
+        cache = self.root / "direct-model-cache" if cache is None else Path(cache)
+        if cache == self.root or not cache.is_relative_to(self.root):
+            raise ValueError("resident model cache must be inside its allocation root")
+        entries = {}
+        allocated, _, _ = self._measure(entries=entries)
+        slots = tuple(path for path in cache.iterdir() if managed_model_slot(path, cache))
+        resident = sum(
+            size
+            for path, size in entries.items()
+            if any(path == slot or slot in path.parents for slot in slots)
+        )
+        unrelated = allocated - resident
+        free = shutil.disk_usage(self.root).free
+        return max(0, min(self.maximum_bytes - unrelated, resident + free - self.reserve_bytes))
+
     def fits_materializations(self, models):
         """Project the complete working set before admitting partial transfers."""
         if not models or any(
