@@ -10,7 +10,6 @@ import pytest
 from umi import competition_model_byte_store as stores
 from umi.competition_chunked_model_backup import ChunkedModelBackupReader
 from umi.competition_transport_verification import ByteCheckpoints
-from umi.private_files import PrivateStateBusyError
 from umi.protocol import canonical_json_bytes, sha256_hex
 
 from .test_competition_chunked_model_backup import (
@@ -228,7 +227,7 @@ async def test_export_incomplete_marker_refuses(backup, tmp_path):
 async def test_shared_store_lock_contention_is_bounded_then_reuses(backup, tmp_path):
     first = reader(backup, tmp_path)
     second = reader(other_cohort(backup), tmp_path)
-    entered, release = asyncio.Event(), asyncio.Event()
+    entered, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original = backup.remote.read_range
 
     async def block(*args, **kwargs):
@@ -239,12 +238,24 @@ async def test_shared_store_lock_contention_is_bounded_then_reuses(backup, tmp_p
     backup.remote.read_range = block
     task = asyncio.create_task(first.verify())
     await entered.wait()
+    follower = None
     try:
-        with pytest.raises(PrivateStateBusyError):
-            await second.verify()
+        follower = asyncio.create_task(
+            second.verify(
+                report=lambda event: (
+                    waiting.set()
+                    if event.get("reason_code") == "shared_byte_checkpoint_busy"
+                    else None
+                )
+            )
+        )
+        await asyncio.wait_for(waiting.wait(), timeout=3)
+        assert not follower.done()
     finally:
         release.set()
         await task
+        if follower is not None:
+            await asyncio.wait_for(follower, timeout=3)
     count = len(backup.remote.reads)
     await second.verify()
     assert len(backup.remote.reads) == count

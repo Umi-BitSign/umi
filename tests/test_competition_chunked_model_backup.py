@@ -240,6 +240,48 @@ async def test_restart_reuses_completed_remote_files_and_documents_without_gets(
     assert len(first.objects) == 7
 
 
+@pytest.mark.parametrize("same_model", [True, False])
+async def test_concurrent_readers_wait_for_shared_store_and_reuse_completed_bytes(
+    backup, tmp_path, monkeypatch, same_model
+):
+    reading, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = backup.remote.read_range
+
+    async def blocked(key, **kwargs):
+        reading.set()
+        await release.wait()
+        return await original(key, **kwargs)
+
+    def report(event):
+        if event.get("reason_code") == "shared_byte_checkpoint_busy":
+            waiting.set()
+
+    monkeypatch.setattr(backup.remote, "read_range", blocked)
+    other = backup if same_model else selected(backup.policy, weights=b"other model weights")
+    backup.remote.objects.update(other.remote.objects)
+    backup.remote.etags.update(other.remote.etags)
+    first = asyncio.create_task(reader(backup, tmp_path).verify())
+    second = None
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=3)
+        second = asyncio.create_task(
+            reader(other, tmp_path, multipart=backup.remote).verify(report=report)
+        )
+        await asyncio.wait_for(waiting.wait(), timeout=3)
+        assert not second.done()
+        release.set()
+        a, b = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        assert a.selection_sha256 == digest(selection(backup))
+        assert b.selection_sha256 == digest(selection(other))
+        assert len(backup.remote.reads) == len(backup.remote.objects)
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (first, second) if t is not None), return_exceptions=True)
+
+
 def other_cohort(case):
     other = copy.copy(case)
     other.binding = case.binding.model_copy(update={"provenance_sha256": "34" * 32})

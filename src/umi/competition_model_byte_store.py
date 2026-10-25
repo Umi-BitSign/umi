@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -176,7 +177,7 @@ def _pinned(path, pin, maximum):
     return raw
 
 
-def export_completed_byte_facts(reader, heads, *, report=None):
+def export_completed_byte_facts(reader, heads, *, report=None, checkpoint=None):
     """Build a native export from every exact completed private file result.
 
     The authenticated reader's caller owns lineage; current generations were
@@ -194,7 +195,7 @@ def export_completed_byte_facts(reader, heads, *, report=None):
             unit="files",
             planning_unit_seconds=(0.001, 0.1),
         ) as progress,
-        reader._store(progress) as saved,
+        reader._store(progress) if checkpoint is None else nullcontext(checkpoint) as saved,
     ):
         reader._migrate_remote_receipts(saved, heads, report=report)
         for record, item in zip(

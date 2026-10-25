@@ -6,6 +6,7 @@ certification or current authority. Damaged records receive visible scoped repai
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -14,7 +15,7 @@ import stat
 import sys
 import tempfile
 import time
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from itertools import count
 from pathlib import Path
@@ -28,7 +29,12 @@ from .competition_cohort_public_progress import (
 from .competition_reward_proof_archive import _publication_clock_ns
 from .competition_verification_rules import runtime_identity
 from .file_identity import file_fingerprint
-from .private_files import ensure_private_directory, lock_private_file, private_path
+from .private_files import (
+    PrivateStateBusyError,
+    ensure_private_directory,
+    lock_private_file,
+    private_path,
+)
 
 _LOG = logging.getLogger("umi.competition.progress")
 _CURRENT = ContextVar("umi_transport_progress", default=None)
@@ -465,6 +471,34 @@ def response_read_progress(total):
     else:
         with suppress(Exception):
             progress.__exit__(None, None, None)
+
+
+@asynccontextmanager
+async def owned_byte_checkpoint(context, progress):
+    """Wait for the exact shared store without restarting this operation.
+
+    Only actual native mutex contention is retryable here. Unsafe metadata,
+    missing dependencies and other errors remain failures. The event loop stays
+    available to the holder; cancellation releases any acquired original lease.
+    """
+    waited = False
+    while True:
+        try:
+            value = context.__enter__()
+            break
+        except PrivateStateBusyError:
+            waited = True
+            progress.emit("retrying", reason="shared_byte_checkpoint_busy")
+            await asyncio.sleep(0.5)
+    try:
+        if waited:
+            progress.emit("running", reason="shared_byte_checkpoint_acquired")
+        yield value
+    except BaseException:
+        if not context.__exit__(*sys.exc_info()):
+            raise
+    else:
+        context.__exit__(None, None, None)
 
 
 class ByteCheckpoints:
