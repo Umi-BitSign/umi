@@ -930,6 +930,13 @@ many original records in one bounded batch before admitting new native capture
 in that ordinary advance call. This frees logical capacity even for a full owner.
 Each completed remote receipt and exact alias survives restart; completed
 sources are not uploaded or verified again. Shutdown admits no new batch.
+The largest selected payload is released first to provide logical headroom;
+the remaining transfers overlap in at most four publisher threads. Exact alias
+commits remain serialized by the native journal. A failed transfer stops new
+work and drains active publishers, retaining every completed receipt and alias.
+This reduces request latency without changing the selected batch bound or
+storage format. It does not pack tiny records, guarantee positive space savings
+for every alias, or shrink the physical database file.
 The default is zero, omitted from historical configuration bytes, and retains
 the original no-implicit-migration behavior. Imported/read-only stores reject
 this selection. Qualify and distribute compatible owner and validator readers

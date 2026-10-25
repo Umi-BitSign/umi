@@ -13,11 +13,13 @@ import json
 import re
 import sqlite3
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
+from threading import Event
 
 from .competition_evidence_codec import checked_digest
-from .competition_remote_proof_store import MAX_PROOF_OBJECT_BYTES
+from .competition_remote_proof_store import MAX_PROOF_OBJECT_BYTES, PROOF_PUBLICATION_WORKERS
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -610,18 +612,59 @@ class JournalSourceExternalizer:
                 sizes[kind, key] = 0 if row is None else row[0]
         selected.sort(key=lambda item: sizes[item], reverse=True)
         released = restored = 0
+        stop = Event()
         with (
             r2_evidence_connection_scope(self.remote.client),
             TransferProgress(
                 "journal_source_replication", len(selected), unit="records"
             ) as progress,
         ):
+
+            def publish_lane(lane):
+                released = restored = 0
+                try:
+                    # HTTP clients belong to the publishing thread. Native
+                    # journal transactions still serialize exact alias commits;
+                    # each completed item is durable before another is admitted.
+                    with r2_evidence_connection_scope(self.remote.client):
+                        for kind, key in lane:
+                            if stop.is_set():
+                                break
+                            result = self.externalize(kind, key)
+                            released += result["released_logical_bytes"]
+                            restored += int(result["restored"])
+                            progress.advance(1, restored=result["restored"])
+                except BaseException:
+                    stop.set()
+                    raise
+                return released, restored
+
             try:
-                for kind, key in selected:
-                    result = self.externalize(kind, key)
-                    released += result["released_logical_bytes"]
-                    restored += int(result["restored"])
-                    progress.advance(1, restored=result["restored"])
+                if selected:
+                    # Release the largest payload first. A completely full
+                    # journal must gain headroom before smaller aliases can
+                    # expand; parallel network publication must not undo that.
+                    released, restored = publish_lane(selected[:1])
+                remaining = selected[1:]
+                lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(remaining)))]
+                for number, item in enumerate(remaining):
+                    lanes[number % len(lanes)].append(item)
+                if len(lanes) == 1:
+                    extra_released, extra_restored = publish_lane(lanes[0])
+                    released += extra_released
+                    restored += extra_restored
+                elif lanes:
+                    # Borrow only a fixed number of source payloads, with the
+                    # remote store's existing aggregate publication-byte bound.
+                    # On error stop admitting work and drain every owned worker.
+                    with ThreadPoolExecutor(
+                        max_workers=len(lanes), thread_name_prefix="umi-source-publish"
+                    ) as pool:
+                        futures = [pool.submit(publish_lane, lane) for lane in lanes]
+                        for future in futures:
+                            extra_released, extra_restored = future.result()
+                            released += extra_released
+                            restored += extra_restored
             except self.repair_error:
                 progress.emit("repair_required", reason="retained_source_requires_explicit_repair")
                 raise
