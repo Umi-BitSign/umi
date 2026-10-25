@@ -109,9 +109,38 @@ class LegacyModelOriginalReuse:
             ensure_private_directory(self.directory)
         self.repair_reason = repair_reason
         self.memory = OrderedDict()
+        self.contexts = OrderedDict()
         self.memory_bytes = 0
         self.lock = RLock()
         self.pid = os.getpid()
+
+    def _source_context(self, authenticated, endpoint, bucket):
+        # Native authentication returns frozen dataclasses and frozen protocol
+        # models. A new selection/policy constructs a new authenticated object;
+        # retaining that exact object also prevents Python id reuse. File
+        # dependencies are still checked afresh on every resolution below.
+        key = (id(authenticated), endpoint, bucket)
+        with self.lock:
+            retained = self.contexts.get(key)
+            if retained is not None and retained[0] is authenticated:
+                self.contexts.move_to_end(key)
+                return retained[1], retained[2]
+            cohort = digest(authenticated.original_history.plan)
+            prefix = (
+                "umi-legacy-original-resolution/1",
+                runtime_identity(),
+                digest(authenticated.policy),
+                digest(authenticated.original_history),
+                authenticated.adoption_block,
+                digest(authenticated.legacy),
+                digest(authenticated.preservation),
+                endpoint,
+                bucket,
+            )
+            self.contexts[key] = (authenticated, cohort, prefix)
+            while len(self.contexts) > 512:
+                self.contexts.popitem(last=False)
+            return cohort, prefix
 
     def _remember(self, key, receipt, stamp, size):
         previous = self.memory.pop(key, None)
@@ -139,24 +168,11 @@ class LegacyModelOriginalReuse:
     ):
         if os.getpid() != self.pid:
             raise RuntimeError("legacy original reuse cannot inherit a process lock")
-        cohort = digest(authenticated.original_history.plan)
+        cohort, prefix = self._source_context(authenticated, endpoint, bucket)
         slot = digest([request_sha256, baseline, incumbent_sha256])
-        context = digest(
-            [
-                "umi-legacy-original-resolution/1",
-                runtime_identity(),
-                digest(authenticated.policy),
-                digest(authenticated.original_history),
-                authenticated.adoption_block,
-                digest(authenticated.legacy),
-                digest(authenticated.preservation),
-                endpoint,
-                bucket,
-                request_sha256,
-                baseline,
-                incumbent_sha256,
-            ]
-        )
+        # Preserve the exact existing receipt context: no conversion or another
+        # native original verification is needed for this lookup optimization.
+        context = digest([*prefix, request_sha256, baseline, incumbent_sha256])
         path = None
         descriptor = None
         with (
@@ -301,14 +317,7 @@ class LegacyModelOriginalReuse:
                         stamp = original_identity(path)
                     self._remember(key, receipt, stamp, len(raw))
                     progress.advance(1)
-                if result.selection is None:
-                    raise LegacyModelUploadIncomplete(
-                        "legacy upload remains incomplete; resume original request"
-                    )
                 result = deepcopy(result)
-                return LegacyModelStorageResolution(
-                    result.source_kind, result.selection, result.originals
-                )
             except LegacyModelStorageRepairRequired:
                 progress.emit(
                     "repair_required", reason="legacy_original_receipt_or_source_repair_required"
@@ -318,3 +327,11 @@ class LegacyModelOriginalReuse:
                 if descriptor is not None:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                     os.close(descriptor)
+        # An incomplete upload is a completed original-metadata verification,
+        # while its payload still cannot be used. Do not label that expected
+        # result as an interrupted verification scope.
+        if result.selection is None:
+            raise LegacyModelUploadIncomplete(
+                "legacy upload remains incomplete; resume original request"
+            )
+        return LegacyModelStorageResolution(result.source_kind, result.selection, result.originals)

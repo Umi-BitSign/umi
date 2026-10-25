@@ -96,7 +96,7 @@
     "competition_cohort_legacy_model_admission.py": "e5867d994f7d29c08be1a3641a93ced20f4cde0127cea8d4f37f9fd722325630",
     "competition_cohort_legacy_model_cache.py": "c1d4221a2cae352a07309e21a795eb9492f122bd78b959cce0aa41ced1f75235",
     "competition_cohort_legacy_model_readers.py": "44606cde0e2490221a075e72d71bc9afff07229c9452b6cf8e3f7bdeaa419898",
-    "competition_cohort_legacy_model_reuse.py": "0b4905047972cc8ebfd9a7c6cc4e41f459fe62505494c3a41bce35ee2f66b1eb",
+    "competition_cohort_legacy_model_reuse.py": "c0c37dd07043e91dbef21a717c921d116525f640a1d156aa0a72320f17b45e48",
     "competition_cohort_legacy_model_selection.py": "b2c118e9940f5983bc15f9dda760af5ac7a2a53e6764df90c7e72da1c3ae9832",
     "competition_cohort_legacy_model_settlement.py": "dbce44cb72c62e44a5d054ee0f8855000d7005b871d2c64f8d0c62b6e9d8fccc",
     "competition_cohort_legacy_model_storage.py": "ff8ca96663e0d945cf26a473eb1bedbcf98300cef4ed26e722a3275db0558627",

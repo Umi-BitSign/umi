@@ -3134,6 +3134,14 @@ file identity. Unchanged original files are neither reopened nor rehashed for
 reuse, including after restart; current authority, R2 byte verification and
 admission remain independent. A changed dependency verifies only the affected
 item. Receipt paths shard each cohort's items across 256 directories.
+Within a process, the exact authenticated frozen source object retains its
+context prefix, bounded to 512 source/namespace selections. Lookups do not
+serialize the whole policy/history/inventories again. New authenticated objects
+and changed namespaces construct their own context; current original-file
+identities remain fresh. The resulting receipt context bytes are unchanged, so
+this optimization reuses prior completed receipts without conversion or replay.
+An original whose upload is incomplete still has completed metadata verification;
+its separate pending-payload outcome does not mark verification interrupted.
 
 Existing installations migrate individual completed items on their first
 verification pass, checkpointing as they go. Interrupted marker publication can
