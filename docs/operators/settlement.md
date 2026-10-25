@@ -90,6 +90,18 @@ Protocol delivery excludes producer-local hidden verification directories, locks
 and pending files. Each receiver retains its own inode-bound verification facts.
 Model artifact payload paths retain their original names.
 
+The request observer retains native closure-verification results under its
+existing journal's `request-observation-verification` directory, or the configured
+account-private native verification root. Benchmark construction, the enclosing
+service closure and that owner's export reader share completed checks. Individual
+participant results survive interruption and restart. Preserve this directory
+with the original journal during upgrades; no startup-schema or signed-format
+migration is required. A missing or damaged completed receipt requires explicit
+repair, while changed inputs receive only the affected verification. Current
+history, service observations, queue fences and read-set limits still apply.
+Independent reviewers retain their own verification ownership. Receipt reuse
+does not certify a phase or authorize rewards.
+
 
 The lifecycle's execution-rate sampler observes authenticated cached identities
 from its configured reviewer peers. Each reviewer application has a fresh epoch;

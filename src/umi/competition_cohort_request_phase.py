@@ -78,6 +78,7 @@ from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_historical_registration import HistoricalRegistration
 from .competition_round_journal import RoundJournal
+from .competition_verification_reuse import VerificationReuse, verification_owner_operation
 from .open_competition import CompetitionPolicy, digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import publish_private_model, read_private_model
@@ -192,15 +193,24 @@ class NativeRequestProgressSource:
         self.replay_bytes = maximum_replay_bytes
         # Bind the read-set limit before any source I/O.
         ReplayObjectCollector(objects, maximum_replay_bytes)
-        self.journal.put(
-            "request_phase_binding",
-            self.cohort,
-            {
-                "schema": "umi-request-phase-owner/1",
-                "intake": intake.config.model_dump(mode="json", by_alias=True),
-                "roster": digest(self.roster),
-                "catalogs": keys,
-                "transport": scoring_policy_hash(self.transport),
+        binding = {
+            "schema": "umi-request-phase-owner/1",
+            "intake": intake.config.model_dump(mode="json", by_alias=True),
+            "roster": digest(self.roster),
+            "catalogs": keys,
+            "transport": scoring_policy_hash(self.transport),
+        }
+        self.journal.put("request_phase_binding", self.cohort, binding)
+        # Builders and the enclosing service closure share this native owner's
+        # successful replay. Each participant is checkpointed on the first pass;
+        # independent reviewers still select their own verification authority.
+        self.verification_reuse = VerificationReuse(
+            journal.root / "request-observation-verification",
+            owner={
+                "kind": "request_observation",
+                "journal": str(journal.root),
+                "binding": binding,
+                "policy": digest(intake.policy),
             },
         )
         self.tail_admission_binding = ServiceTailFenceBinding(
@@ -473,6 +483,7 @@ class NativeRequestProgressSource:
                 queues_locked=False,
             )
 
+    @verification_owner_operation
     def _observe(
         self, state, capture, *, serving, opened=None, db, store, native, queues_locked
     ) -> CohortPhaseProgress:
@@ -693,6 +704,7 @@ class NativeRequestProgressSource:
     def read(self, progress: CohortPhaseProgress) -> NativeRequestReview:
         return self._read(progress, self.objects)
 
+    @verification_owner_operation
     def _read(
         self, progress: CohortPhaseProgress, objects: EndpointObjectSource
     ) -> NativeRequestReview:

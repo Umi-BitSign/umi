@@ -475,6 +475,33 @@ def test_request_observer_waits_for_service_terminal_without_repeating_work(requ
     assert h.c.queue.journal.get("service_terminal", work) == original
 
 
+def test_observation_reuses_native_benchmark_in_service_closure_and_after_restart(
+    request_owner, monkeypatch
+):
+    from umi import competition_cohort_request_closure as request
+
+    h = request_owner
+    checked = []
+    native = request.read_request_terminal
+
+    def counted(*args, **kwargs):
+        checked.append(1)
+        return native(*args, **kwargs)
+
+    monkeypatch.setattr(request, "read_request_terminal", counted)
+    progress = h.window()
+    assert progress.completion == "complete"
+    # Construction validates each original once. Wrapping that benchmark in
+    # the service closure must reuse its completed native result.
+    expected = len(h.b["terminals"])
+    assert len(checked) == expected
+    first = h.source.read(progress)
+    assert len(checked) == expected
+    h.source = h.reopen()
+    assert h.source.read(progress) == first
+    assert len(checked) == expected
+
+
 @pytest.mark.parametrize("stage", ["queue", "progress"])
 def test_interrupted_request_closure_resumes_native_work(request_owner, monkeypatch, stage):
     h = request_owner

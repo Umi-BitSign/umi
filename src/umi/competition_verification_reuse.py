@@ -503,21 +503,35 @@ def verified_replay(stage, result_model):
     return decorate
 
 
+@contextmanager
+def _verification_owner_scope(owner):
+    with owner.verification_reuse.selected():
+        try:
+            yield
+        except VerificationSourceChanged:
+            _event("verification_snapshot", "repair_required")
+            if hasattr(owner, "_release_active_inputs"):
+                owner._release_active_inputs()
+            raise
+
+
 def verification_owner_operation(function):
-    """Async entry scope copied to owned native worker threads by asyncio."""
+    """Select the owner on async entries or synchronous owned worker calls."""
+    if inspect.iscoroutinefunction(function):
+
+        @wraps(function)
+        async def asynchronous(self, *args, **kwargs):
+            with _verification_owner_scope(self), work_heartbeats():
+                return await function(self, *args, **kwargs)
+
+        return asynchronous
 
     @wraps(function)
-    async def run(self, *args, **kwargs):
-        with self.verification_reuse.selected(), work_heartbeats():
-            try:
-                return await function(self, *args, **kwargs)
-            except VerificationSourceChanged:
-                _event("verification_snapshot", "repair_required")
-                if hasattr(self, "_release_active_inputs"):
-                    self._release_active_inputs()
-                raise
+    def synchronous(self, *args, **kwargs):
+        with _verification_owner_scope(self):
+            return function(self, *args, **kwargs)
 
-    return run
+    return synchronous
 
 
 class RetainedObjectInventory:
