@@ -400,6 +400,9 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
                 token=vote_token,
                 enabled=app.state.benchmark is not None,
                 cohorts=tuple(binding.cohort_sha256 for binding in config.signing.cohorts),
+                settlement=None
+                if app.state.benchmark is None
+                else app.state.benchmark.settlement_progress,
             )
         )
         await provider.start()

@@ -86,6 +86,38 @@ class SettlementRegistrationFiles:
             )
         )
 
+    def _publication_completed(self, observation):
+        key = digest(observation)
+        archive = self.outbox
+        if archive.remote is not None:
+            # The selected owner's durable receipt also enforces namespace and
+            # explicit damage holds. It is a transport completion fact, never
+            # native proof authority or a fresh remote availability claim.
+            if archive.remote.reference_for_path("frames/registration/" + key) is not None:
+                return True
+            if not archive.legacy_read_through:
+                return False
+        try:
+            frame = archive._frame("registration", key)
+        except FileNotFoundError:
+            return False
+        if (
+            frame.kind != "registration"
+            or frame.key != key
+            or frame.context != observation.model_dump(mode="json", by_alias=True)
+            or set(frame.fields) != {"proof", "metadata"}
+        ):
+            raise ValueError("settlement proof changes its original observation")
+        # Local frames are committed after their immutable objects. Reuse that
+        # publication boundary without decoding or re-encoding old payloads.
+        # Independent consumers retain their ordinary native proof verification.
+        return True
+
+    async def ensure_published(self, observation: ExecutionBoundary) -> None:
+        observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
+        if not await run_owned_thread(self._publication_completed, observation):
+            await self.publish(observation)
+
     async def read(self, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
         return await run_owned_thread(self._read_selected, observation)

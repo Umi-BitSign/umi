@@ -6717,3 +6717,51 @@ async def test_native_allocation_export_repairs_partial_delivery_without_replay(
             assert files.allocation(digest(prepared.allocation)) == prepared.allocation
     assert "reward_allocation_export" in caplog.text
     assert digest(prepared.allocation) == p.active.decision.activation.allocation_sha256
+
+
+async def test_native_quality_publication_progress_counts_durable_actions(
+    recurring_settlement_case, monkeypatch
+):
+    from collections import OrderedDict
+    from pathlib import Path
+
+    from umi import competition_cohort_public_progress as public
+    from umi import competition_cohort_settlement_delivery as delivery
+
+    monkeypatch.setattr(public.PUBLIC_COHORT_PROGRESS, "entries", OrderedDict())
+    h = recurring_settlement_case
+    node = await h.start("Dave")
+    original = delivery.publish_private_model
+    events = []
+    fail = [True]
+    record = public.PUBLIC_COHORT_PROGRESS.record
+
+    def observed(kind, body):
+        if kind == "work" and body.get("stage") == "quality_vote_publication":
+            events.append(dict(body))
+        return record(kind, body)
+
+    def publish(path, value, **kwargs):
+        if "quality" in Path(path).parts and fail[0]:
+            fail[0] = False
+            raise OSError("interrupted original vote delivery")
+        return original(path, value, **kwargs)
+
+    monkeypatch.setattr(public.PUBLIC_COHORT_PROGRESS, "record", observed)
+    monkeypatch.setattr(delivery, "publish_private_model", publish)
+    with pytest.raises(OSError, match="interrupted original vote delivery"):
+        await node.tick()
+    assert events and all(e["completed"] == 0 for e in events)
+    assert await node.tick() == "reviewing"
+    completed = [e for e in events if e["state"] == "completed"][-1]
+    count = len(tuple(Path(node.config.exchange_outbox).glob("quality/**/*.json")))
+    assert completed["completed"] == completed["total"] == count > 0
+    prior_epoch = node.public_progress.epoch
+    node.public_progress.publish()
+    node = await h.start("Dave")
+    assert node.public_progress.epoch != prior_epoch
+    assert node.public_progress.snapshot()["percent"] is None
+    assert await node.tick() == "reviewing"
+    assert max(h.calls.values()) == 1  # Native signed votes were recovered, not signed twice.
+    completed = [e for e in events if e["state"] == "completed"][-1]
+    assert completed["completed"] == completed["total"] == count

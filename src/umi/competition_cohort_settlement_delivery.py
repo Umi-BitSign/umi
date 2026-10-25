@@ -32,6 +32,7 @@ from .competition_cohort_service_certification import (
 )
 from .competition_cohort_settlement_inputs import ReplayedSettlementInputs
 from .competition_round_journal import RoundJournal
+from .competition_work_progress import WorkProgress
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import stage_limit
 from .open_competition import Signature, digest, identity, verify_signature
@@ -164,30 +165,45 @@ class SettlementResultVotes:
 
     async def publish(self) -> None:
         deliveries = []
-        for participant in self.inputs.quality.closure.participants:
-            result = await run_owned_thread(
-                self.inputs.quality.outcome, participant.submission_sha256
-            )
-            if self.account not in {identity(r.evaluator_hotkey) for r in result.runs}:
-                continue
-            owner, slot = await run_owned_thread(self._execution, result)
-            with owner.locked(slot):
-                vote = await sign_closed_quality(owner, slot, self.inputs.quality, self.sign)
-            await run_owned_thread(
-                partial(
-                    publish_private_model,
-                    self._quality_path(self.outbox, result.submission_sha256, self.account),
-                    vote,
-                    maximum_bytes=MAX_DELIVERY_BYTES,
+        # Exact assigned slots are already declared by the authenticated
+        # closure. Count only a successfully published native vote, not signing
+        # starts or skipped/unassigned participants.
+        participants = tuple(
+            p
+            for p in self.inputs.quality.closure.participants
+            if self.account in {identity(e.evaluator_hotkey) for e in p.evaluators}
+        )
+        with WorkProgress(
+            "quality_vote_publication",
+            len(participants),
+            unit="published_votes",
+            cohort=self.cohort,
+        ) as progress:
+            for participant in participants:
+                result = await run_owned_thread(
+                    self.inputs.quality.outcome, participant.submission_sha256
                 )
-            )
-            deliveries.append(
-                RetainedResultVoteDelivery(
-                    partial(retained_quality_vote, owner, slot),
-                    digest(vote),
-                    self._quality_path(self.outbox, result.submission_sha256, self.account),
+                if self.account not in {identity(r.evaluator_hotkey) for r in result.runs}:
+                    continue
+                owner, slot = await run_owned_thread(self._execution, result)
+                with owner.locked(slot):
+                    vote = await sign_closed_quality(owner, slot, self.inputs.quality, self.sign)
+                await run_owned_thread(
+                    partial(
+                        publish_private_model,
+                        self._quality_path(self.outbox, result.submission_sha256, self.account),
+                        vote,
+                        maximum_bytes=MAX_DELIVERY_BYTES,
+                    )
                 )
-            )
+                deliveries.append(
+                    RetainedResultVoteDelivery(
+                        partial(retained_quality_vote, owner, slot),
+                        digest(vote),
+                        self._quality_path(self.outbox, result.submission_sha256, self.account),
+                    )
+                )
+                progress.advance()
         vote = await sign_service_allocation(
             self.journal, self.inputs.service, self.hotkey, self.sign
         )

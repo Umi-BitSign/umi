@@ -19,6 +19,47 @@ from umi.competition_cohort_settlement_service import (
 from umi.concurrency import run_owned_thread
 
 
+async def test_history_is_visible_only_after_original_proofs_publish(monkeypatch, tmp_path):
+    from umi import competition_cohort_settlement_service as service
+
+    node = blank()
+    node.cohort = "c" * 64
+    node.config = SimpleNamespace(exchange_outbox=str(tmp_path))
+    decisions = {
+        key: SimpleNamespace(observation=observation)
+        for key, observation in (("first", "a" * 64), ("second", "b" * 64), ("same", "a" * 64))
+    }
+    history = SimpleNamespace(
+        transitions=tuple(
+            SimpleNamespace(
+                transition=SimpleNamespace(requires_progress_evidence=True, evidence_sha256=key)
+            )
+            for key in decisions
+        )
+    )
+    node._decisions = decisions.__getitem__
+    calls, visible = [], []
+    fail = [True]
+
+    async def ensure(observation):
+        calls.append(observation)
+        if observation == "b" * 64 and fail[0]:
+            fail[0] = False
+            raise OSError("original proof export interrupted")
+
+    node.proofs = SimpleNamespace(ensure_published=ensure)
+    monkeypatch.setattr(service, "digest", lambda value: value)
+    monkeypatch.setattr(service, "history_tip", lambda _: "d" * 64)
+    monkeypatch.setattr(service, "CohortOrderHistory", lambda **values: values)
+    monkeypatch.setattr(service, "publish_private_model", lambda *args, **kw: visible.append(args))
+    with pytest.raises(OSError, match="proof export interrupted"):
+        await node._publish_history(history)
+    assert calls == ["a" * 64, "b" * 64] and not visible
+    await node._publish_history(history)
+    assert calls == ["a" * 64, "b" * 64] * 2
+    assert len(visible) == 1 and visible[0][1]["history"] is history
+
+
 def retained_input_snapshot(node, path, package, monkeypatch):
     """Represent the native first review required before compact maintenance."""
     from umi import competition_cohort_settlement_service as service
@@ -308,11 +349,12 @@ async def test_original_input_snapshot_load_runs_off_loop():
     node.journal = SimpleNamespace(get=lambda *args: None)
     loop_thread = threading.get_ident()
 
-    def load(path, model, *, maximum_bytes):
+    def load(path, model, *, maximum_bytes, expected_sha256):
         assert path.name == node.cohort + ".json"
         assert str(path.parent) == node.config.inputs_directory
         assert model is service.SettlementInputPackage
         assert maximum_bytes == node.config.maximum_package_bytes
+        assert expected_sha256 is None
         assert threading.get_ident() != loop_thread
         raise OSError("stop after original snapshot load boundary")
 

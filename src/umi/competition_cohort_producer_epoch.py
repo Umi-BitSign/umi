@@ -16,6 +16,10 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from .competition_cohort_execution_work import ExecutionWorkObservations, execution_work_routes
 from .competition_cohort_review_http import _credential
 from .competition_cohort_review_origin import private_review_origin
+from .competition_cohort_settlement_progress import (
+    SettlementProgressObservations,
+    settlement_progress_routes,
+)
 from .open_competition import identity
 from .protocol import canonical_json_bytes
 
@@ -24,7 +28,7 @@ _MAX_BYTES = 2048
 _REFRESH_SECONDS = 3
 
 
-def producer_epoch_routes(signer, *, token, enabled, cohorts=()):
+def producer_epoch_routes(signer, *, token, enabled, cohorts=(), settlement=None):
     """Build once per actual reviewer application; GET performs no native work."""
     expected = ("Bearer " + _credential(token)).encode()
     body = dict(
@@ -54,6 +58,15 @@ def producer_epoch_routes(signer, *, token, enabled, cohorts=()):
             snapshots=PUBLIC_COHORT_PROGRESS,
         )
     )
+    router.include_router(
+        settlement_progress_routes(
+            evaluator=body["evaluator"],
+            epoch=body["epoch_sha256"],
+            token=token,
+            cohorts=cohorts,
+            relay=settlement,
+        )
+    )
     return router
 
 
@@ -78,6 +91,7 @@ class ExecutionProducerEpochs:
         self.cache = {}
         self.capacity = asyncio.Semaphore(4)
         self.work = ExecutionWorkObservations(client, self.peers, self.capacity)
+        self.settlement = SettlementProgressObservations(client, self.peers, self.capacity)
         self.probes = {}
         self.attempts = self.failures = self.timeouts = 0
 

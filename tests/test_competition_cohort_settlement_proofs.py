@@ -64,6 +64,72 @@ async def test_settlement_proof_export_reuses_files_when_original_provider_is_of
     assert await reopened.read(observation) == (b"original-registration", b"original-metadata")
 
 
+async def test_completed_publication_survives_restart_without_payload_reads(
+    proof_case, monkeypatch
+):
+    files, observation, calls = proof_case
+    await files.ensure_published(observation)
+    reopened = SettlementRegistrationFiles(
+        files.provider, inbox=files.inbox.root, outbox=files.outbox.root
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("completed proof publication read or rewrote payloads")
+
+    monkeypatch.setattr(reopened, "_read", forbidden)
+    monkeypatch.setattr(reopened.outbox, "write", forbidden)
+    await reopened.ensure_published(observation)
+    assert calls == [observation]
+
+
+async def test_completed_remote_publication_uses_selected_receipt_and_preserves_damage_hold(
+    proof_case, monkeypatch
+):
+    files, observation, calls = proof_case
+    paths = []
+
+    def retained(path):
+        paths.append(path)
+        return {"durable": "selected-namespace"}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("receipt reuse read or rewrote payloads")
+
+    files.outbox.remote = SimpleNamespace(reference_for_path=retained)
+    monkeypatch.setattr(files.outbox, "_frame", forbidden)
+    await files.ensure_published(observation)
+    assert paths == ["frames/registration/" + digest(observation)] and not calls
+
+    def damaged(path):
+        raise ValueError("remote proof requires explicit original-generation repair")
+
+    files.outbox.remote.reference_for_path = damaged
+    with pytest.raises(ValueError, match="explicit original-generation repair"):
+        await files.ensure_published(observation)
+    assert not calls
+
+
+async def test_actual_remote_completion_reuses_durable_owner_metadata_after_restart(
+    proof_case, tmp_path, monkeypatch
+):
+    from .test_competition_remote_proof_store import EvidenceServer, store
+
+    files, observation, calls = proof_case
+    server = EvidenceServer()
+    files.outbox.remote = store(tmp_path / "remote-owner", server)
+    await files.ensure_published(observation)
+    assert calls == [observation] and server.objects
+    files.outbox.remote = store(tmp_path / "remote-owner", server)
+    server.calls.clear()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("completed remote proof publication reread payloads")
+
+    monkeypatch.setattr(files.outbox, "_frame", forbidden)
+    await files.ensure_published(observation)
+    assert not server.calls and calls == [observation]
+
+
 @pytest.mark.parametrize("field", ["block_hash", "evidence_sha256", "source"])
 async def test_settlement_proof_delivery_rejects_context_substitution(proof_case, field):
     files, observation, _ = proof_case
@@ -90,10 +156,10 @@ async def test_settlement_partial_proof_export_never_publishes_a_frame(proof_cas
 
     monkeypatch.setattr(module, "publish_private_model", fail_frame)
     with pytest.raises(OSError, match="disk full"):
-        await files.publish(observation)
+        await files.ensure_published(observation)
     assert not tuple((files.outbox.root / "registration").glob("*.json"))
     monkeypatch.setattr(module, "publish_private_model", original)
-    await files.publish(observation)
+    await files.ensure_published(observation)
     shutil.copytree(files.outbox.root, files.inbox.root, dirs_exist_ok=True)
     assert await files.read(observation) == (b"original-registration", b"original-metadata")
 

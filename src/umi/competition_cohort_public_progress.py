@@ -67,6 +67,10 @@ _FIELDS = (
     "reason_code",
     "model_sha256",
     "operation",
+    "evaluator",
+    "role",
+    "producer_epoch_sha256",
+    "series_sha256",
 )
 
 
@@ -102,6 +106,7 @@ class CohortProgressSnapshots:
             "execution",
             "execution_workers",
             "storage_retirement",
+            "settlement",
         }:
             return
         now = time.monotonic()
@@ -141,7 +146,12 @@ class CohortProgressSnapshots:
                     )
                 )
             public["workers"] = workers
-        public["observed_unix_ms"] = time.time_ns() // 1_000_000
+        observed_ms = time.time_ns() // 1_000_000
+        if kind == "settlement" and type(body.get("observed_unix_ms")) is int:
+            # Remote samplers must not freshen an old producer heartbeat.
+            observed_ms = body["observed_unix_ms"]
+            now -= max(0, time.time_ns() // 1_000_000 - observed_ms) / 1000
+        public["observed_unix_ms"] = observed_ms
         if public.get("eta_seconds") is not None and public.get("estimated_finish_unix_ms") is None:
             public["estimated_finish_unix_ms"] = public["observed_unix_ms"] + int(
                 public["eta_seconds"] * 1000
@@ -195,6 +205,7 @@ class CohortProgressSnapshots:
             "execution",
             "execution_workers",
             "storage_retirement",
+            "settlement",
         ):
             if kind in entry:
                 observed, value = entry[kind]
@@ -273,6 +284,20 @@ class CohortProgressSnapshots:
             ):
                 selected = parts["work"]
                 stage = selected["stage"]
+        settlement = parts.get("settlement")
+        if settlement is not None and phase in {
+            "reference_reveal",
+            "evidence",
+            "review",
+            "certification",
+            "first_admission",
+            "complete",
+        }:
+            # Intake's native loop ends at handoff. Later owner-produced stages
+            # retain their independent scope and never inherit an intake100%.
+            selected = settlement
+            phase = settlement.get("phase") or phase
+            stage = settlement.get("stage", "settlement_diagnostics_unavailable")
         result = dict(
             schema="umi-public-cohort-progress/1",
             cohort_sha256=cohort,
