@@ -719,6 +719,7 @@ def quality_from_hypotheses(
     policy: CompetitionPolicy,
     *,
     incumbent: bool = False,
+    paired_baseline_metric: bool = False,
 ) -> dict[str, Fraction]:
     """Apply content scoring and dependence gates to complete selected hypotheses.
 
@@ -727,6 +728,10 @@ def quality_from_hypotheses(
     certify execution or grant reward authority. Legacy callers supply their
     original measured resource eligibility; untimed content callers retain that
     distinction in their versioned result.
+
+    Paired model awards use the same content metric for candidate and baseline.
+    This bypasses the candidate-only dependence gate; it does not turn a failed
+    candidate observation into an invalid incumbent execution.
     """
     validate_suite_profile(suite, policy)
     if [key for key, _ in observations] != [case.case_id for case in suite.cases]:
@@ -784,7 +789,7 @@ def quality_from_hypotheses(
         )
         observed_minimum = Fraction(policy.minimum_continuous_observed_margin_bps, 10_000)
         lower_bound_floor = Fraction(policy.continuous_dependence_lower_bound_floor_bps, 10_000)
-        if not incumbent and (
+        if not (incumbent or paired_baseline_metric) and (
             not report.complete
             or report.observed_margin < observed_minimum
             or report.bootstrap_lower_bound <= lower_bound_floor

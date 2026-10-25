@@ -12,6 +12,7 @@ from umi.competition_cohort_order_signer import order_slot
 from umi.competition_cohort_quality import (
     ClosedQualityReview,
     QualityObservation,
+    measured_observation,
     quality_totals,
 )
 from umi.competition_cohort_quality_signing import (
@@ -441,3 +442,20 @@ def test_signed_failures_contribute_zero_content_quality_without_time_invention(
     result = quality_totals(observations, suite, policy)
     assert result.aggregate.numerator == "0"
     assert all(s.quality.numerator == "0" for s in result.strata)
+
+
+def test_paired_metric_preserves_failed_candidate_zero_and_strict_incumbent():
+    policy = dependence_policy()
+    suite = dependence_suite(policy)
+    outputs = outputs_for(suite, blind=True)
+    observations = tuple(measured_observation(o, policy) for o in outputs)
+    # The paired metric applies the baseline content rule to a blind candidate
+    # too, without applying the candidate-only matched-swap dependence gate.
+    paired = quality_totals(observations, suite, policy, paired_baseline_metric=True)
+    assert paired == quality_totals(observations, suite, policy, incumbent=True)
+    failures = tuple(QualityObservation(c.case_id, "miner_failure", "", False) for c in suite.cases)
+    result = quality_totals(failures, suite, policy, paired_baseline_metric=True)
+    assert result.aggregate.numerator == "0"
+    assert all(s.quality.numerator == "0" for s in result.strata)
+    with pytest.raises(ValueError, match="incumbent execution failed"):
+        quality_totals(failures, suite, policy, incumbent=True)
