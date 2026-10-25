@@ -1,3 +1,5 @@
+import { HEAD_BATCH_PATH, serveMetadata, type MetadataBindings } from "./r2-heads";
+
 type Artifact = Readonly<{
   path: string;
   key: string;
@@ -45,7 +47,7 @@ const SECURITY_HEADERS = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 };
 
-type Bindings = Env & { ARTIFACTS: R2Bucket };
+type Bindings = Env & MetadataBindings;
 type ByteRange = Readonly<{ offset: number; length: number }>;
 
 function absent(status = 404, headers: HeadersInit = {}): Response {
@@ -173,9 +175,11 @@ export async function serve(
   catalog: Catalog = CATALOG,
 ): Promise<Response> {
   const url = new URL(request.url);
-  if (url.protocol !== "https:" || url.search || !["GET", "HEAD"].includes(request.method)) {
+  if (url.protocol !== "https:" || url.search) {
     return absent();
   }
+  if (url.pathname === HEAD_BATCH_PATH) return serveMetadata(request, env);
+  if (!["GET", "HEAD"].includes(request.method)) return absent();
   if (url.pathname === "/v1/index.json") {
     if (request.headers.has("Range")) return absent(416);
     const response = indexResponse(request, catalog);
