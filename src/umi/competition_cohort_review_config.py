@@ -161,6 +161,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                         path
                         for candidate in self.model_delivery_adoption_candidates
                         for path in candidate.stores(include_shared=False)
+                        # One credential may serve both the committed direct
+                        # reader and its legacy-adoption candidate. It is
+                        # already protected below with the direct reader's
+                        # secrets; do not misclassify that exact reuse as two
+                        # overlapping mutable stores. Other collisions remain.
+                        if self.direct_model_review is None
+                        or path != Path(candidate.r2_credentials_file)
+                        or path != Path(self.direct_model_review.r2_credentials_file)
                     )
                 ),
                 *(self.proof_stores.credential_paths() if self.proof_stores else ()),
@@ -374,11 +382,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.signer_key_file,
                 self.owner_token_file,
                 self.vote_token_file,
-                *(
-                    self.direct_model_review.stores()
-                    if self.direct_model_review
-                    else ()
-                ),
+                *(self.direct_model_review.stores() if self.direct_model_review else ()),
             )
         )
         validate_shared_byte_stores(

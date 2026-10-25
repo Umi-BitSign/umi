@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_cohort_review_boot as boot
+from umi.competition_cohort_model_delivery_candidate import ModelDeliveryAdoptionCandidateConfig
 from umi.competition_cohort_review_config import PhaseReviewServiceConfig
 from umi.competition_cohort_sandbox import DirectCohortCpuSandbox
+from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_review_boot import (
@@ -18,6 +20,7 @@ from .test_competition_cohort_review_boot import (
     with_endpoint,
 )
 from .test_competition_cohort_review_boot import providers as providers
+from .test_competition_cohort_review_budget import profile, select
 from .test_competition_effective_model_reward_boot import adopted_case as adopted_case
 from .test_competition_effective_model_reward_boot import chain as chain
 from .test_competition_effective_model_reward_boot import chain_config as chain_config
@@ -58,6 +61,52 @@ def test_independent_reviewer_preserves_staged_capability_and_legacy_bytes(revie
     assert h.adopted.model_signing == h.original.model_signing
     assert h.adopted.benchmark == h.original.benchmark
     assert h.adopted.signing == h.original.signing
+
+
+@pytest.mark.parametrize("collision", [None, "source", "credential"])
+def test_adoption_can_reuse_direct_credentials_without_allowing_mutable_overlap(
+    review_case, tmp_path, collision
+):
+    c = select(review_case.staged, profile(review_case.staged.policy))
+    credentials = c.direct_model_review.r2_credentials_file
+    candidate = ModelDeliveryAdoptionCandidateConfig.model_validate(
+        {
+            "schema": "umi-model-delivery-adoption-candidate/1",
+            "source": {
+                "schema": "umi-legacy-model-storage-source/1",
+                "cohort_sha256": digest(review_case.history.selection.history.plan),
+                "directory": str(tmp_path / "candidate-originals"),
+                "baseline_model_sha256": "ab" * 32,
+            },
+            "delivery": {
+                "schema": "umi-model-delivery-profile/1",
+                "mechanism": "direct_r2_multipart_v1",
+                "part_size_bytes": 64 * 1024**2,
+                "maximum_concurrent_parts": 4,
+                "capability_ttl_seconds": 3600,
+            },
+            "r2_credentials_file": credentials,
+            "r2_bucket": c.direct_model_review.r2_bucket,
+            "verification_directory": str(tmp_path / "candidate-verification"),
+            "model_only": True,
+        }
+    )
+    if collision == "source":
+        candidate = candidate.model_copy(
+            update={
+                "source": candidate.source.model_copy(update={"directory": c.signing.directory}),
+            }
+        )
+    elif collision == "credential":
+        candidate = candidate.model_copy(update={"r2_credentials_file": c.signing.directory})
+    staged = c.model_copy(update={"model_delivery_adoption_candidates": (candidate,)})
+    if collision:
+        with pytest.raises(ValueError, match="disjoint"):
+            PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(staged))
+    else:
+        restored = PhaseReviewServiceConfig.model_validate_json(canonical_json_bytes(staged))
+        assert canonical_json_bytes(restored) == canonical_json_bytes(staged)
+        assert Path(credentials) not in restored.stores()
 
 
 def test_committed_adoption_requires_independent_reader(review_case):
