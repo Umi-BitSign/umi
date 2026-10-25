@@ -585,3 +585,39 @@ async def test_public_reads_are_refused_before_native_graphs(stage, path):
     wrapped = runtime.RequestsStageASGIBinding(forbidden, controller=stage[0])
     await wrapped({"type": "http", "method": "GET", "path": path}, forbidden, send)
     assert messages[0]["status"] == 503
+
+
+async def test_cached_public_progress_remains_visible_during_request_stage(stage):
+    seen = []
+
+    async def application(scope, receive, send):
+        assert runtime.selected_memory() is stage[0]
+        seen.append(scope["path"])
+
+    async def forbidden(*args):
+        pytest.fail("cache-only diagnostics must not consume a body or enter native reads")
+
+    wrapped = runtime.RequestsStageASGIBinding(application, controller=stage[0])
+    path = "/v1/competition/cohorts/" + "c" * 64 + "/progress"
+    await wrapped({"type": "http", "method": "GET", "path": path}, forbidden, forbidden)
+    assert seen == [path]
+    assert runtime.selected_memory() is None
+
+
+@pytest.mark.parametrize("method,suffix", [
+    ("POST", "/progress"), ("HEAD", "/progress"), ("GET", "/progress/"),
+    ("GET", "/history"), ("GET", "/progress/extra"),
+])
+async def test_request_stage_progress_exception_cannot_admit_other_work(stage, method, suffix):
+    messages = []
+
+    async def forbidden(*args):
+        pytest.fail("diagnostic exception admitted a native operation")
+
+    async def send(message):
+        messages.append(message)
+
+    path = "/v1/competition/cohorts/" + "c" * 64 + suffix
+    wrapped = runtime.RequestsStageASGIBinding(forbidden, controller=stage[0])
+    await wrapped({"type": "http", "method": method, "path": path}, forbidden, send)
+    assert messages[0]["status"] == 503
