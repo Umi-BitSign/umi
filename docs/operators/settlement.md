@@ -930,6 +930,13 @@ many original records in one bounded batch before admitting new native capture
 in that ordinary advance call. This frees logical capacity even for a full owner.
 Each completed remote receipt and exact alias survives restart; completed
 sources are not uploaded or verified again. Shutdown admits no new batch.
+The largest selected payload is released first to provide logical headroom;
+the remaining transfers overlap in at most four publisher threads. Exact alias
+commits remain serialized by the native journal. A failed transfer stops new
+work and drains active publishers, retaining every completed receipt and alias.
+This reduces request latency without changing the selected batch bound or
+storage format. It does not pack tiny records, guarantee positive space savings
+for every alias, or shrink the physical database file.
 The default is zero, omitted from historical configuration bytes, and retains
 the original no-implicit-migration behavior. Imported/read-only stores reject
 this selection. Qualify and distribute compatible owner and validator readers
@@ -3222,6 +3229,11 @@ than inheriting a short readiness timeout. Keep the operator client and private
 proxy allowances at least as large as those complete derived exchanges. Candidate
 metadata does not select transport for consumers.
 
+A reviewer's direct reader and its adoption candidate may select the same exact
+R2 credential file. The configuration protects that one credential once; it does
+not require a duplicate secret file. Metadata, verification, signing and other
+mutable stores must still be disjoint.
+
 For an originally mixed C7+ intake that is becoming public-model-only, select
 `model_only: true` in the candidate on the owner and every independent reviewer.
 This issues `umi-cohort-model-delivery-adoption/2`, explicitly binding
@@ -3273,6 +3285,12 @@ durability, baseline/incumbent selection or adoption authority. Supply that sepa
 qualified provenance when constructing the candidate. Prepare and reserve compare
 the complete inventory again, so an earlier observation cannot authorize omission
 of a later upload. Do not read live owner databases with a diagnostic process.
+`observed_at_block` is the last published lifecycle observation and can remain old
+while intake is held. An unsigned inventory's `captured_at_block` must cover all
+retained request, participation, admission and acceptance clock fields, including
+records newer than that lifecycle observation. Preserve signed originals when
+correcting an unselected envelope. Native prepare obtains fresh finalized height
+and independently checks the complete census and that capture bound before signing.
 
 Keep request identity separate from submission identity. Two signed consents can
 retain the same submission while only one reaches admission. The export and

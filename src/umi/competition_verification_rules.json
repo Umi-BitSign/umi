@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Preserve completed admission and native proof semantics while the original owner runs explicitly selected bounded R2 source release after admission restoration and before new capture. Original config bytes, immutable R2 namespace, source tokens, verdicts, journals and archive readers remain unchanged. Restart, partial interruption, shutdown, full capacity, writer/coordinator/reviewer boot and reward reuse are qualified; no new accepted proof semantics.",
+  "compatibility_basis": "Preserve native verdict, source-token and admission semantics while overlapping bounded retained-source uploads and recognizing exact reuse of direct-reader credentials by an adoption candidate. Journal commits remain serialized; credential, metadata and mutable-store collisions still refuse. Qualify supported retained reviewer selections and interruption/restart/reward reuse before release; source hashes alone do not establish certification.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -188,7 +188,7 @@
     "competition_cohort_request_worker.py": "5e88ad3edbbfe27f586f5dc25b3fe32f1b3af70f22c4174ad9e1d7410e933539",
     "competition_cohort_review_boot.py": "719521ff212936c3ad77c5bb5ef44d3a66921ab4eb8dbe0ba3e0e807e2c7e74e",
     "competition_cohort_review_budget.py": "c8da008c0bb82e53e1ced14a22d48a22b79dd72e0d7cc4dcf3f0430242d2c8ef",
-    "competition_cohort_review_config.py": "9464b34c183323d7a0f089d8dbc1a7df00fc2e08bb1e8bd4f4d0a543e8189d75",
+    "competition_cohort_review_config.py": "aa35953e68f136da75fcc2a454ca1e9ce364a97c895bb5b277919c6dd9677b61",
     "competition_cohort_review_export.py": "70c3f590add518df88e73027afab789085254438ff87e32df06872d1ca0d22e8",
     "competition_cohort_review_http.py": "336eceefd5022ccae8c71fdefd71d20025d7f7265cf41b4659ca5b86df866e67",
     "competition_cohort_review_origin.py": "80d0dfba8d2c1a1f6c1682a5316521ec4453b039c3a8545afecedd6810c59ffe",
@@ -284,7 +284,7 @@
     "competition_historical_registration.py": "f124b7c952b2aac2f5d2b927879557c2306a54baadaef3a70ab8f4152a0df844",
     "competition_history_compatibility.py": "a5f16b6f8a2f61e3d57b2d49deb12b07604ece022e8d82b500aedc469b49f87f",
     "competition_history_forecast.py": "6d6a83b8b8990004a6fe1f38abe622b9843fe89aefff01a797056435056c1f30",
-    "competition_history_source_externalization.py": "c24326842b1ff78d39589bb3b3c376c2c26e2b18db57ddb47b1a4081c3404e61",
+    "competition_history_source_externalization.py": "af92608d1829f3a0e7d28a9d3f84cdcc2405254e9320957fcec448e463fe863f",
     "competition_host_activation.py": "e212293f05b1490316dbaae995dc1b75106b231063e311572cc9ecce488c5544",
     "competition_host_anchor.py": "c23db9548ef91ec9aea32fbb645c6820bb2670fb0bc560dc9cdb62acf3f20f35",
     "competition_host_artifacts.py": "4e853626f3ebcc552e04aec2af8bf66573864500f73d6dd7b1e240debac09534",
