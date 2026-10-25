@@ -330,6 +330,69 @@ async def test_retirement_inventory_reuses_references_without_decoding_all_reque
     assert result["local_retirement"]["status"] == "fixture_inventory_observed"
 
 
+async def test_retirement_completes_before_unrelated_remote_retry(retirement, monkeypatch):
+    import asyncio
+    import threading
+
+    f = retirement
+    entered, release = threading.Event(), threading.Event()
+    native = f.delivery._remote_request
+    reference = f.uploads.retained_model
+    looked_up = []
+
+    def lookup(key):
+        looked_up.append(key)
+        return reference(key)
+
+    def slow_remote(key, *, model=None):
+        entered.set()
+        assert release.wait(5), "test remote retry was not released"
+        return native(key, model=model)
+
+    monkeypatch.setattr(f.uploads, "retained_model", lookup)
+    monkeypatch.setattr(f.delivery, "_remote_request", slow_remote)
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        task = asyncio.create_task(f.delivery.poll_once())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert f.uploads.allocations.state(f.model) == "released"
+            assert not (f.uploads.archive / f.model / "model").exists()
+            # Reconciliation reuses the inventory's immutable reference while
+            # checking fresh allocation state after the deletion.
+            assert looked_up == [digest(f.request)]
+        finally:
+            release.set()
+            await task
+
+
+async def test_incomplete_local_inventory_blocks_retirement_before_remote_poll(
+    retirement, monkeypatch
+):
+    f = retirement
+    seen = []
+
+    def missing_reference(key):
+        raise OSError("retained reference requires explicit repair")
+
+    def remote(key, *, model=None):
+        assert f.delivery.retirement.latest["reason_code"] == "original_upload_inventory_incomplete"
+        seen.append(key)
+        return None
+
+    monkeypatch.setattr(f.uploads, "retained_model", missing_reference)
+    monkeypatch.setattr(f.delivery, "_remote_request", remote)
+    monkeypatch.setattr(f.uploads, "poll_once", lambda **kwargs: {})
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        result = await f.delivery.poll_once()
+    assert seen == [digest(f.request)]
+    assert result["local_retirement"]["reason_code"] == "original_upload_inventory_incomplete"
+    assert f.uploads.allocations.state(f.model) == "local_reserved"
+    assert (f.uploads.archive / f.model / "model").is_dir()
+    assert not f.remote.reads
+
+
 async def test_wait_reports_exact_model_operation_and_safe_reason(retirement, monkeypatch, caplog):
     import logging
 
