@@ -542,7 +542,7 @@ async def test_real_retained_cpu_invocation_and_orphan_cleanup(cpu, tmp_path, in
         + (b"time.sleep(50)\n" if interrupt else b"")
         + b"print('hello')\n"
     )
-    (source / "inference.txt").unlink()
+    (source / "inference.py").unlink()
     (source / "infer.py").write_bytes(code)
     bundle = bundle.model_copy(
         update={

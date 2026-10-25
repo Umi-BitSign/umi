@@ -44,6 +44,7 @@ from .competition_cohort_participation import (
     CohortParticipationRequest,
 )
 from .competition_cohort_recovery import ModelDeliveryProfile
+from .competition_model_interface import model_python_entrypoint
 from .competition_model_source_verification import model_payload_digest
 from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
@@ -254,6 +255,7 @@ async def submit_direct_cohort_model(
     ):
         raise ValueError("direct model upload requires its signed cohort profile and hotkey")
     bundle = submission.model_bundle
+    model_python_entrypoint(bundle)
     source = Path(os.path.abspath(source))
     if fingerprints is None:
         fingerprints = await _verify_source_owned(source, bundle, policy, report, retry_seconds)

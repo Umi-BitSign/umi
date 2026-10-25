@@ -133,11 +133,12 @@ def test_mount_injection_is_rejected(runtime, path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("routed", [False, True])
 @pytest.mark.parametrize(
     "mode", ["success", "timeout", "overflow", "runtime_failure", "cleanup_failure"]
 )
 async def test_bounded_execution_removes_only_its_case_container(
-    runtime, policy, tmp_path, monkeypatch, mode
+    runtime, policy, tmp_path, monkeypatch, mode, routed
 ):
     policy = policy.model_copy(update={"evaluation_runtime_sha256": digest(runtime)})
     records = []
@@ -151,6 +152,11 @@ async def test_bounded_execution_removes_only_its_case_container(
         "provenance",
     ):
         records.append(BundleFile(path=f"{role}.py", role=role, sha256="ab" * 32, size_bytes=0))
+    if routed:
+        records.extend(
+            BundleFile(path=path, role="inference", sha256="cd" * 32, size_bytes=0)
+            for path in ("fs/route_child.py", "umi_inference.py")
+        )
     bundle = ModelBundle(
         schema="umi-model-bundle/1",
         profile="offline_bundle/1",
@@ -214,6 +220,7 @@ async def test_bounded_execution_removes_only_its_case_container(
         assert result.status == ("ok" if mode == "success" else "miner_failure")
         assert result.hypothesis == ("hello" if mode == "success" else "")
     name = calls[0][calls[0].index("--name") + 1]
+    assert calls[0][-2] == ("/model/umi_inference.py" if routed else "/model/inference.py")
     assert calls[-1] == ("/usr/bin/podman", "rm", "--force", "--ignore", "--time=0", name)
     assert "--all" not in calls[-1]
     assert not list(tmp_path.glob("umi-evaluation-input-*"))

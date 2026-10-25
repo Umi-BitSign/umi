@@ -1163,8 +1163,13 @@ Runtime v1 retains its original single `/tmp` mount and read-only shared memory.
 The version changes the runtime digest, so selecting v2 requires a policy that
 binds it explicitly. It does not alter an existing signed policy.
 
-The initial adapter supports exactly one manifest file with role `inference`,
-ending in `.py`. The pinned image supplies `/usr/local/bin/python3` and all
+The adapter uses the manifest's single file with role `inference`, ending in
+`.py`. Routed bundles may declare additional inference helpers: in that case
+the root `umi_inference.py` must have role `inference` and is the entrypoint.
+Helpers are never selected by filename order or by the assigned challenge.
+Ambiguous bundles without that root wrapper are rejected before a new upload
+reservation. Existing signed manifests, reservations and completed evaluations
+retain their original bytes and bindings. The pinned image supplies `/usr/local/bin/python3` and all
 runtime dependencies. The program receives `/input/video.mp4` as its only
 argument and writes one English hypothesis to stdout. The complete model is
 read-only at `/model`. No reference text is supplied to the container.

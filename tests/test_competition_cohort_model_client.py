@@ -48,10 +48,10 @@ from .test_competition_cohort_model_upload import (
 from .test_competition_cohort_model_upload import (
     recovery as recovery,
 )
+from .test_competition_cohort_model_upload import request_with_bundle, signed_chunk
 from .test_competition_cohort_model_upload import (
     runtime as runtime,
 )
-from .test_competition_cohort_model_upload import signed_chunk
 from .test_open_competition import wallet
 
 pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
@@ -337,7 +337,7 @@ async def test_public_upload_recovers_outage_throttle_lost_ack_and_restart(deliv
     assert any(event["status"] == "retrying" and event["eta_seconds"] is None for event in progress)
 
 
-@pytest.mark.parametrize("failure", ["wrong-wallet", "bytes", "hardlink", "symlink"])
+@pytest.mark.parametrize("failure", ["wrong-wallet", "bytes", "hardlink", "symlink", "interface"])
 async def test_local_rejections_send_nothing(delivery, failure, tmp_path):
     h = delivery
     args = options(h, httpx.MockTransport(lambda _: pytest.fail("must not send")))
@@ -345,6 +345,19 @@ async def test_local_rejections_send_nothing(delivery, failure, tmp_path):
     path = h.source / record.path
     if failure == "wrong-wallet":
         args["wallet"] = wallet("Bob")
+    elif failure == "interface":
+        sub = h.request.signed_submission.submission
+        model = sub.model_bundle.model_copy(
+            update={
+                "files": tuple(
+                    f.model_copy(update={"path": "inference.sh"}) if f.role == "inference" else f
+                    for f in sub.model_bundle.files
+                )
+            }
+        )
+        args["request"] = request_with_bundle(h.request, model)
+        # There is deliberately no matching source file. Interface rejection
+        # must happen before any payload verification, hashing or network.
     elif failure == "bytes":
         path.write_bytes(b"!" * record.size_bytes)
     elif failure == "hardlink":
@@ -353,7 +366,10 @@ async def test_local_rejections_send_nothing(delivery, failure, tmp_path):
         original = tmp_path / "original"
         path.rename(original)
         path.symlink_to(original)
-    with pytest.raises((OSError, ValueError)):
+    with pytest.raises(
+        (OSError, ValueError),
+        match="declared Python inference entrypoint" if failure == "interface" else None,
+    ):
         await client.submit_cohort_model(**args)
 
 

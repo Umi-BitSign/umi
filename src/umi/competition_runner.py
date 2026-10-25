@@ -23,6 +23,7 @@ from pydantic import Field, TypeAdapter, model_validator
 from typing_extensions import Self
 
 from .competition_artifacts import verify_preserved_bundle
+from .competition_model_interface import model_python_entrypoint
 from .competition_native import OfflineMpsRuntime
 from .concurrency import kill_and_reap
 from .open_competition import CaseOutput, CompetitionPolicy, ModelBundle, digest
@@ -321,8 +322,9 @@ async def execute_offline_case(
     """Run a verified model on one clip, with no reference text passed to it.
 
     Cold start and sandbox initialization are included in the case deadline.
-    The only supported entrypoint is one declared Python inference file that
-    reads argv[1] and emits one UTF-8 English hypothesis to stdout.
+    The selected declared Python entrypoint reads argv[1] and emits one UTF-8
+    English hypothesis to stdout. Routed bundles use the root umi_inference.py
+    wrapper when they declare additional inference helpers.
     """
     runtime = OFFLINE_RUNTIME.validate_json(canonical_json_bytes(runtime))
     if (invocation_sha256 is None) != (workspace is None):
@@ -353,9 +355,10 @@ async def execute_offline_case(
         raise EvaluationInfrastructureError("video bytes do not match the assignment")
     await verify_runtime(runtime, policy)
     verify_preserved_bundle(bundle, archive, policy)
-    entrypoints = [f.path for f in bundle.files if f.role == "inference"]
-    if len(entrypoints) != 1 or not entrypoints[0].endswith(".py"):
-        raise EvaluationInfrastructureError("CPU runtime requires one declared Python entrypoint")
+    try:
+        entrypoint = model_python_entrypoint(bundle)
+    except ValueError as error:
+        raise EvaluationInfrastructureError(str(error)) from error
     name = (
         "umi-evaluation-" + uuid.uuid4().hex
         if invocation_sha256 is None
@@ -372,7 +375,7 @@ async def execute_offline_case(
             name=name,
             model=archive / digest(bundle) / "model",
             inputs=inputs,
-            entrypoint=entrypoints[0],
+            entrypoint=entrypoint,
             maximum_inference_ms=policy.maximum_inference_ms,
         )
         started = time.monotonic()
