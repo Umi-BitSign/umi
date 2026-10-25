@@ -109,6 +109,28 @@ the selected owner history and the journal's monotonic/conflict fences are still
 checked for each execution step. No miner reset or signed-history migration is
 required for this additive private working state.
 
+Request owners also retain the first successful read of each delivered order.
+Private results bind the exact reference/object file identities, selected round
+and submission, native semantics and requests-stage bounds. Later polls copy a
+bounded private typed result and replay its original resource accounting; restart
+restores the retained result without rereading or hashing the original order.
+Changed originals or bounds and missing/damaged results expose a counted native
+repair for the affected order. File clocks that cannot establish safe identity
+reuse keep the original native reader. This does not establish completion,
+current authority, a closure or a reward; those native checks remain separate.
+
+Keep `.order-read-verification/` with the owner's retained state (or the selected
+native-verification directory). Records are divided by round to bound directory
+entries and can follow the ordinary durable R2 retention of inactive owner state.
+The typed working set defaults to 256 MiB and 2048 entries. Explicit operating
+overrides `UMI_REQUEST_ORDER_CACHE_BYTES` (up to 1 GiB) and
+`UMI_REQUEST_ORDER_CACHE_ENTRIES` (up to 16384) change only that working set;
+eviction preserves the durable results. Reuse counters report hits, misses and
+capacity pressure under `purpose=request_order`. Deploy through the supported
+cooperative source/config selection and preserve the original journals and signed
+inputs. Older supported readers continue reading the unchanged original files;
+miners need no new flag, signed request or state reset for this private change.
+
 A natively verified closed request history is retained as a monotonic denial
 before collecting another registration snapshot. This does not advance finalized
 highwater, create an execution observation, complete an obligation or remove any

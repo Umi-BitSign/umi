@@ -274,7 +274,7 @@ async def test_retained_preparation_republication_is_allowed_and_leased(stage, m
     from umi import competition_cohort_preparation_publisher as module
 
     history = SimpleNamespace(plan=object())
-    prepared = SimpleNamespace(roster=SimpleNamespace(round=object()))
+    prepared = SimpleNamespace(round_sha256="4" * 64)
     calls = []
 
     class Intake:
@@ -285,11 +285,14 @@ async def test_retained_preparation_republication_is_allowed_and_leased(stage, m
     class Owner:
         queue = SimpleNamespace(intake=Intake(), policy=object())
 
-        def retained(self, cohort, **kwargs):
+        def retained_publication(self, cohort, **kwargs):
             assert runtime._active.get() is not None
             assert cohort == C5
             calls.append("retained")
             return prepared
+
+        def retained(self, *args, **kwargs):
+            pytest.fail("internal publication reconstructed the public prepared graph")
 
         def prepare(self, *args, **kwargs):
             pytest.fail("retained publication started fresh preparation")
@@ -479,9 +482,13 @@ async def test_stage_allows_only_cached_reviewer_epoch_get_without_admission_wor
     from .test_open_competition import wallet
 
     app = FastAPI()
-    app.include_router(producer_epoch_routes(
-        wallet("Charlie").hotkey.ss58_address, token="s" * 32, enabled=True,
-    ))
+    app.include_router(
+        producer_epoch_routes(
+            wallet("Charlie").hotkey.ss58_address,
+            token="s" * 32,
+            enabled=True,
+        )
+    )
     wrapped = runtime.RequestsStageASGIBinding(
         app, controller=stage[0], private_role="phase_reviewer"
     )
