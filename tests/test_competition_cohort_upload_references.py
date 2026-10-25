@@ -99,12 +99,37 @@ def test_local_retry_reconciliation_reuses_references_after_restart(delivery, mo
     assert not calls
 
 
+def test_actual_retry_and_allocation_paths_reuse_without_full_row_reads(delivery, monkeypatch):
+    from umi.competition_cohort_model_upload_delivery import ModelUploadDelivery
+
+    h = delivery
+    keys = duplicates(h)
+    for key in keys:
+        h.owner.retained_model(key)
+    expected = h.owner.allocations.snapshot()
+    restarted = CohortModelUploads(h.owner.config, h.intake, h.owner.archive)
+    original = restarted.journal.get_raw
+
+    def no_originals(kind, key, **kwargs):
+        assert kind not in {"upload", "bundle"}, "unchanged original metadata was read again"
+        return original(kind, key, **kwargs)
+
+    monkeypatch.setattr(restarted.journal, "get_raw", no_originals)
+    reconciler = ModelUploadDelivery(restarted)
+    for _ in range(2):
+        for key in keys:
+            assert reconciler._remote_request(key) is None
+        assert restarted.allocations.snapshot() == expected
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "binding"])
 def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, caplog, damage):
     h = delivery
     keys = duplicates(h)
     h.owner.poll_once()
-    receipts = list((h.owner.journal.root / "upload-model-references").glob("*/*.json"))
+    versions = h.owner._model_references.versions
+    active_reuse = versions._reuse["umi-upload-model-reference/1"]
+    receipts = list(active_reuse.directory.glob("*.json"))
     assert len(receipts) == len(keys)
     target = receipts[0]
     if damage == "missing":
@@ -118,7 +143,7 @@ def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, c
 
         value = json.loads(target.read_bytes())
         # Publish a correctly checksummed receipt with the wrong result binding.
-        for reuse in h.owner._model_references._shards.values():
+        for reuse in versions._reuse.values():
             if reuse.directory == target.parent:
                 result = json.loads(value["result_json"])
                 result["upload_sha256"] = "f" * 64

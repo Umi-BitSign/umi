@@ -22,6 +22,7 @@ from pydantic import Field
 
 from .competition_artifacts import _directory
 from .competition_transport_verification import TransferProgress
+from .competition_upload_record_versions import UploadRecordRepairRequired, UploadRecordVersions
 from .competition_verification_reuse import VerificationReuse, metadata_completion
 from .open_competition import ModelBundle, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -64,17 +65,19 @@ def _allocation(bundle):
 
 
 class ModelReservationLedger:
-    def __init__(self, journal, *, report=None, repair_bundle_verification=False):
+    def __init__(self, journal, *, report=None, repair_bundle_verification=False, versions=None):
         if type(repair_bundle_verification) is not bool:
             raise ValueError("allocation verification repair requires an explicit boolean")
         self.journal, self.report = journal, report
         self._repair_bundle_verification = repair_bundle_verification
         self._verification_repairs = 0
+        with journal.read_transaction() as db:
+            binding = json.loads(bytes(db.execute("SELECT body FROM binding").fetchone()[0]))
+        if binding.get("schema") != "umi-cohort-model-delivery/1":
+            raise ValueError("model allocations require the native upload journal")
+        self.versions = versions or UploadRecordVersions(journal, binding, report=report)
         with journal.locked():
             with journal.read_transaction() as db:
-                binding = json.loads(bytes(db.execute("SELECT body FROM binding").fetchone()[0]))
-                if binding.get("schema") != "umi-cohort-model-delivery/1":
-                    raise ValueError("model allocations require the native upload journal")
                 self._bundle_verification = VerificationReuse(
                     journal.root / "model-allocation-verification",
                     owner={"schema": "umi-model-allocation-bundle-facts/1", "binding": binding},
@@ -140,6 +143,36 @@ class ModelReservationLedger:
             self._repair("model allocation version requires repair")
 
     def _original_allocation(self, model, db=None):
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self._original_allocation(model, db)
+
+        def validate(raw):
+            if _VerifiedAllocation.model_validate_json(raw).model_sha256 != model:
+                raise ValueError("model allocation verification binding requires repair")
+
+        try:
+            raw, repaired = self.versions.result(
+                "bundle",
+                model,
+                "umi-model-allocation-bundle-facts/1",
+                lambda snapshot: canonical_json_bytes(
+                    self._checked_original_allocation(model, snapshot)
+                ).decode(),
+                db=db,
+                validate=validate,
+                repair=self._repair_bundle_verification,
+                report=self.report,
+            )
+            value = _VerifiedAllocation.model_validate_json(raw)
+            if value.model_sha256 != model:
+                self._repair("model allocation verification binding requires repair")
+            self._verification_repairs += int(repaired)
+            return value.model_dump(mode="json", by_alias=True)
+        except UploadRecordRepairRequired as error:
+            self._repair(str(error))
+
+    def _checked_original_allocation(self, model, db=None):
         """Reuse static bundle validation; fresh accounting/fences stay in _state.
 
         Every lookup reads the current native canonical row and conflict fence.

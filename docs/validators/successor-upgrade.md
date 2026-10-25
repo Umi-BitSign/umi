@@ -3078,18 +3078,20 @@ result. This cache grants no registration, finality, admission or reward authori
 
 Retained model-upload requests similarly reuse successful static decoding and
 request-identity checks within a private, process-local 64 MiB / 256-entry cache.
-Every lookup reads the current canonical journal bytes and conflict fence first;
+Every lookup checks the current native mutation identity and conflict fence first;
 a removed, changed or held reservation cannot use an older result. Returned
 objects are private copies. Failures, evictions and inherited fork results require
 ordinary decoding. Admission, capacity, payload verification and current authority
 are checked separately and are not granted by this reuse.
 
 Upload polling first resolves a small durable request-to-model reference, then
-decodes one representative request per model. A duplicate request still reads its
-current canonical row and conflict fence on every pass. Its first reference uses
+decodes one representative request per model. A duplicate request checks its
+current mutation identity and conflict fence without rereading the full row. Its first reference uses
 the complete native signature, bundle and request-identity checks; subsequent
 polls and restarts reuse the result bound to exact bytes, owner and verifier
-semantics. Reference metadata is sharded by upload prefix. Missing or damaged
+semantics. Existing byte-bound receipts are imported once into source-version
+receipts without repeating their successful native validation. The first import
+reads the signed metadata; it never reads model payloads. Missing or damaged
 completed references report `UploadReferenceRepairRequired`; with the poll owner
 drained, `CohortModelUploads.repair_retained_references(report=...)` restores only
 affected derived facts with counted progress and an ETA. It preserves signed
@@ -3100,14 +3102,27 @@ Released allocations retain their complete request and current remote-authority
 checks before status, retry or polling can use remote storage.
 
 Legacy reservation accounting keeps completed static bundle checks in the
-existing private verification-receipt store. Exact current canonical bundle
-bytes, the owner binding and verifier semantics select each result, including
+existing private verification-receipt store. The original owner, current native
+bundle mutation identity and verifier semantics select each result, including
 after restart. Allocation snapshots still read current conflict fences,
 accounting indexes and release transitions. Missing or damaged completed receipts
 require explicit repair through `repair_model_allocation_verification`; that
 operation restores only affected derived receipts from native original bundles,
 with progress and an ETA, and cannot change capacity charges or grant a release.
-The upload journal, signed artifacts and miner/validator wire formats are unchanged.
+Original upload records, signed artifacts and miner/validator wire formats are unchanged.
+
+Upload journal migration atomically adds a small source-version index and owner
+marker, with progress and an ETA. SQL triggers track insertion, same-length
+mutation, deletion, replacement and rekeying, including writes from older supported
+writers. Existing signed record bytes, bindings, journals and clocks stay in place.
+Missing or damaged version metadata requires restoration of the original metadata;
+never delete it to force a fresh check. The marker binds the original directory
+and database identity. Historical byte-bound receipts remain readable for rollback;
+they do not need to be polled after their source-version receipt is complete.
+This is an intake-owner optimization; miner clients keep the existing protocol.
+Select a qualified intake maintenance release through the supported cooperative
+update path before claiming it is active. It does not require restarting a
+progressing reviewer, history writer, coordinator, or miner.
 
 Direct-upload polling records successful private review-file shape checks in its
 existing metadata journal. Unchanged owned file identities reuse those checks
