@@ -13,7 +13,7 @@ from umi.competition_history_source_externalization import (
     HEX_OBJECT_ENCODING,
     MARKER_TABLE,
 )
-from umi.competition_remote_proof_store import RemoteProofStore
+from umi.competition_remote_proof_store import ProofArchiveR2Config, RemoteProofStore
 from umi.competition_reward_history import RewardControlHistoryReader
 from umi.competition_reward_history_checkpoint import SOURCE_KINDS, HistoryCheckpointRepairRequired
 from umi.competition_reward_history_workers import HistoryVerificationProfile
@@ -647,8 +647,9 @@ async def test_full_owner_bounded_replication_reclaims_payload_before_small_fram
     assert result["released_logical_bytes"] > 0
 
 
+@pytest.mark.parametrize("retained_local", [False, True])
 async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
-    history_case, tmp_path, monkeypatch
+    history_case, tmp_path, monkeypatch, retained_local
 ):
     h = history_case
     await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=1)
@@ -659,7 +660,20 @@ async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
     with h.reader.journal.read_transaction() as db:
         _, used, _ = h.reader.journal._record_capacity(db)
     h.reader.journal.maximum_bytes = used
-    h.reader = reopen(h.reader, store(tmp_path / "remote", EvidenceServer()))
+    server = EvidenceServer()
+    selected_config = config(tmp_path)
+    if retained_local:
+        selected_config = ProofArchiveR2Config.model_validate(
+            selected_config.model_dump(mode="json", by_alias=True)
+            | {
+                "schema": "umi-r2-proof-archive/2",
+                "legacy_read_through": True,
+                "source_release_batch_records": 256,
+            }
+        )
+    h.reader = reopen(
+        h.reader, RemoteProofStore(tmp_path / "remote", selected_config, client=server.client())
+    )
     save = h.reader._save_fields
     captures = []
 

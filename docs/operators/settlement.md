@@ -922,6 +922,28 @@ upgrade/repair entrypoint remains available when its dependency and capacity
 checks have been qualified. Retire this read-through selection only after those retained
 local archives and their recovery consumers no longer require it.
 
+To drain retained control-history SQL sources continuously without removing
+local archive compatibility, select `"source_release_batch_records": 16` on the
+writable exported `/2` store, alongside `"legacy_read_through": true`. The native
+history owner restores its completed admission first, then moves at most that
+many original records in one bounded batch before admitting new native capture
+in that ordinary advance call. This frees logical capacity even for a full owner.
+Each completed remote receipt and exact alias survives restart; completed
+sources are not uploaded or verified again. Shutdown admits no new batch.
+The default is zero, omitted from historical configuration bytes, and retains
+the original no-implicit-migration behavior. Imported/read-only stores reject
+this selection. Qualify and distribute compatible owner and validator readers
+before adding this optional field; older readers refuse it before selection.
+Miner API, signed cohort inputs and runtime identity selection are unchanged.
+
+History progress exposes `local_release` separately from block replication:
+completed/total current source records, remaining local records, logical bytes
+released, the current batch's elapsed time and a remaining-upload-time estimate.
+The source percentage includes new direct remote captures, so its denominator
+can grow. Its measured ETA excludes intervening history advancement and newly
+captured sources; it is not the history, certification or reward finish time.
+The operation retains local proof archives and does not compact the SQL inode.
+
 A retained completed admission interval can use the same bounded source
 externalization API when its writable R2 store is selected. Its original verdict,
 provenance, source tokens, journal inode and UPDATE/DELETE mutation fences remain

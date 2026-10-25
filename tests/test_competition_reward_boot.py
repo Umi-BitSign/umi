@@ -668,14 +668,20 @@ def test_content_reader_does_not_confuse_signed_envelope_with_decision_identity(
         files.decision(digest(decision.decision))
 
 
-@pytest.mark.parametrize("legacy_read_through", [False, True])
+@pytest.mark.parametrize(
+    "legacy_read_through,source_release_batch_records", [(False, 0), (True, 0), (True, 1)]
+)
 async def test_r2_writer_boot_retains_archive_selection_across_restart(
-    inputs, tmp_path, monkeypatch, legacy_read_through
+    inputs, tmp_path, monkeypatch, legacy_read_through, source_release_batch_records
 ):
     from .test_competition_remote_proof_store import select_remote_proofs
 
     inputs.value, opened, _ = select_remote_proofs(
-        inputs.value, tmp_path, monkeypatch, legacy_read_through=legacy_read_through
+        inputs.value,
+        tmp_path,
+        monkeypatch,
+        legacy_read_through=legacy_read_through,
+        source_release_batch_records=source_release_batch_records,
     )
     for _ in range(2):
         await test_native_assembly_preserves_configuration_and_closes_owned_providers(
@@ -683,3 +689,9 @@ async def test_r2_writer_boot_retains_archive_selection_across_restart(
         )
     assert len(opened) == 4
     assert [s.config.read_only for s in opened] == [True, False, True, False]
+    assert [s.config.source_release_batch_records for s in opened] == [
+        0,
+        source_release_batch_records,
+        0,
+        source_release_batch_records,
+    ]

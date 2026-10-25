@@ -5,12 +5,14 @@ from contextlib import contextmanager
 import pytest
 
 from umi.competition_history_source_externalization import ALIAS_KIND
+from umi.competition_remote_proof_store import ProofArchiveR2Config, RemoteProofStore
 from umi.competition_reward_decision_review import review_reward_decision
 from umi.competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from umi.competition_reward_signing import RewardDecisionSigner
 
 from .test_competition_history_source_externalization import originals, reopen
 from .test_competition_remote_proof_store import EvidenceServer, store
+from .test_competition_remote_proof_store import config as proof_config
 from .test_competition_reward_admission_migration import admission_case as admission_case
 from .test_competition_reward_admission_migration import chain as chain
 from .test_competition_reward_admission_migration import chain_config as chain_config
@@ -25,6 +27,154 @@ from .test_competition_reward_admission_migration import series_case as series_c
 from .test_competition_reward_history_checkpoints import prohibit_proof_replay
 
 pytestmark = pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
+
+
+async def test_selected_read_through_release_runs_once_after_restoration_and_resumes_without_replay(
+    admission_case, tmp_path, monkeypatch
+):
+    c, h = admission_case, admission_case.h
+    admitted = await c.migrate()
+    server = EvidenceServer()
+    configured = ProofArchiveR2Config.model_validate(
+        proof_config(tmp_path).model_dump(mode="json", by_alias=True)
+        | {
+            "schema": "umi-r2-proof-archive/2",
+            "legacy_read_through": True,
+            "source_release_batch_records": 1,
+        }
+    )
+
+    def selected():
+        return RemoteProofStore(tmp_path / "remote", configured, client=server.client())
+
+    before = len(originals(h.reader.journal))
+    h.reader = reopen(h.reader, selected())
+    original_inode = h.reader.journal.path.stat().st_ino
+    native = h.reader._externalize_sources_locked
+    calls = []
+
+    def release(maximum):
+        assert h.reader._next > c.boundary, "release started before native admission restoration"
+        calls.append(maximum)
+        return native(maximum)
+
+    monkeypatch.setattr(h.reader, "_externalize_sources_locked", release)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
+    assert calls == [1]
+    assert len(originals(h.reader.journal)) == before - 1
+    assert h.reader.completed_admission.load() == admitted
+    progress = h.reader.progress.latest["local_release"]
+    assert progress["remaining_local_records"] == before - 1
+    assert progress["total_records"] == before
+    assert progress["completed_records"] == 1
+    assert progress["eta_seconds"] > 0 and progress["elapsed_seconds"] > 0
+    assert "excludes_advancement" in progress["eta_basis"]
+    h.reader.remote_store.evict_cache()
+    h.reader = reopen(h.reader, selected())
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
+    assert len(originals(h.reader.journal)) == before - 2
+    assert h.reader.completed_admission.load() == admitted
+    assert h.reader.journal.path.stat().st_ino == original_inode
+    while originals(h.reader.journal):
+        await h.reader.advance(h.item.provider, through_block=c.boundary)
+    server.calls.clear()
+    h.reader = reopen(h.reader, selected())
+    prohibit_proof_replay(monkeypatch, h.reader)
+    await h.reader.advance(h.item.provider, through_block=c.boundary)
+    progress = h.reader.progress.latest["local_release"]
+    assert progress["remaining_local_records"] == 0 and progress["percent"] == 100
+    assert progress["state"] == "completed" and progress["eta_seconds"] == 0
+    assert not server.calls, "completed migration reread or republished retained payloads"
+
+
+async def test_selected_read_through_release_drains_without_admitting_a_new_batch(
+    admission_case, tmp_path, monkeypatch
+):
+    import asyncio
+
+    c, h = admission_case, admission_case.h
+    await c.migrate()
+    server = EvidenceServer()
+    configured = ProofArchiveR2Config.model_validate(
+        proof_config(tmp_path).model_dump(mode="json", by_alias=True)
+        | {
+            "schema": "umi-r2-proof-archive/2",
+            "legacy_read_through": True,
+            "source_release_batch_records": 1,
+        }
+    )
+    h.reader = reopen(
+        h.reader, RemoteProofStore(tmp_path / "remote", configured, client=server.client())
+    )
+    stop = asyncio.Event()
+    h.reader.shutdown_event = stop
+    restore = h.reader._restore_completed_admission
+
+    async def finish(*args, **kwargs):
+        result = await restore(*args, **kwargs)
+        stop.set()
+        return result
+
+    def forbidden(_):
+        raise AssertionError("stop admitted another source migration batch")
+
+    monkeypatch.setattr(h.reader, "_restore_completed_admission", finish)
+    monkeypatch.setattr(h.reader, "_externalize_sources_locked", forbidden)
+    await h.reader.advance(h.item.provider, through_block=c.boundary)
+    assert h.reader.progress.local_release is None
+
+
+async def test_selected_release_retry_keeps_completed_item_and_resumes_the_remaining_owner(
+    admission_case, tmp_path, monkeypatch
+):
+    c, h = admission_case, admission_case.h
+    admitted = await c.migrate()
+    server = EvidenceServer()
+    configured = ProofArchiveR2Config.model_validate(
+        proof_config(tmp_path).model_dump(mode="json", by_alias=True)
+        | {
+            "schema": "umi-r2-proof-archive/2",
+            "legacy_read_through": True,
+            "source_release_batch_records": 2,
+        }
+    )
+
+    def selected():
+        return RemoteProofStore(tmp_path / "remote", configured, client=server.client())
+
+    before = len(originals(h.reader.journal))
+    h.reader = reopen(h.reader, selected())
+    externalize = h.reader.remote_sources.externalize
+    completed = []
+
+    def interrupted(kind, key):
+        if completed:
+            raise OSError("interrupted after a completed exact alias")
+        result = externalize(kind, key)
+        completed.append((kind, key))
+        return result
+
+    monkeypatch.setattr(h.reader.remote_sources, "externalize", interrupted)
+    prohibit_proof_replay(monkeypatch, h.reader)
+    with pytest.raises(OSError, match="completed exact alias"):
+        await h.reader.advance(h.item.provider, through_block=c.boundary)
+    assert len(originals(h.reader.journal)) == before - 1
+    assert h.reader.completed_admission.load() == admitted
+    assert h.reader.progress.latest["state"] == "retrying"
+    first_objects = set(server.objects)
+    server.calls.clear()
+    h.reader = reopen(h.reader, selected())
+    prohibit_proof_replay(monkeypatch, h.reader)
+    assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
+    assert len(originals(h.reader.journal)) == before - 3
+    assert h.reader.completed_admission.load() == admitted
+    assert all(
+        path.removeprefix("/umi-proof-artifacts/") not in first_objects
+        for method, path in server.calls
+        if method == "PUT"
+    )
 
 
 async def test_admitted_source_release_is_bounded_and_restart_never_replays_native_work(
