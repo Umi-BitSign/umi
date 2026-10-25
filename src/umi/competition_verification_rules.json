@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.",
+  "compatibility_basis": "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, interruption and reward lifecycle fixture parity; source manifest alone does not establish certification. Update only after qualification; advance ABI when accepted semantics change.; exact retained reservation reads and bounded successful obligation decoding preserve full current capacity, typed allowances, holds, schema fences and native receipt ABI; SQLite diagnostics add redacted standard error codes only",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -343,7 +343,7 @@
     "competition_package_reuse.py": "7ca4057b1ca09b648fd9c1df024266b84130102617ca9e68930aebae59c99065",
     "competition_package_reuse_cli.py": "a0babb00444715dfe3c5b126896cf6bb516cc54ee3c8a0ebb7b94e099df010d8",
     "competition_policy_lineage.py": "449c16ecaac6573f83272f03ab8267064e0b1f76d9162ad147f3206f0430f6a7",
-    "competition_progress.py": "292ef50a823a876f95c7686e89bebf57007fc00a1d22f2b98e394455d82237f8",
+    "competition_progress.py": "010d56f121f5cd7e2f0eb4fb9d2ad626e717f3999cb4f69c397c5184e1cad214",
     "competition_promotion_delivery.py": "7e9ef107c7aa22f4752f9fffa6645bec108625801f015cd9143211e0eac200ae",
     "competition_proof_archive_migration.py": "ec19e73139cb426142b83925cc83d78e381f39a38dd1d936f6db8d82cc59bfac",
     "competition_proof_archive_selection.py": "a2b1f46aa7a009f3bdd29a0a546b75b0ef3c199079a3b22d9f03aaf4a7937b5d",
@@ -477,8 +477,9 @@
     "competition_reward_writer_sources.py": "b72807f3424c4bddb4efa2e341680bf4ab5a37372a1d43ca4938cd78643bd0bc",
     "competition_round_assets.py": "7c60ffad0ec932ac31e6fe020ad02f5ee61e6640dc3e686dba8b6f23acf70f6e",
     "competition_round_discovery.py": "9abce137aef37cf1c401a164034ee1fcd043a6593385979eb66c8b81b3a40c18",
-    "competition_round_journal.py": "72c8ce857998028913200362c511f92d85c94c3896d301ceba99fbe0645da7a8",
+    "competition_round_journal.py": "008e4027d40f6f2702a8b47775a9a0d8c3a6c1fdbd80ba32ced01440b4a56643",
     "competition_round_plan.py": "e9a711590dfa44f71a9ead60aa2de3e9d5d6cae0793e90e0a6ab1addd8c49034",
+    "competition_round_reservation_reuse.py": "8a875c1fad7f0ea4a9bac3d4b79008bb01dc7bc3903345c1a440ba4026bce995",
     "competition_round_rpc_migration.py": "f3a486a5d2985211176f02b667ac080b82bdd60835e4f677b52c36952b1f6f44",
     "competition_rounds.py": "0ec33058fcaa2404d4965e7558377f1ec21b061ef5b38c5fa21b0890c892827f",
     "competition_runner.py": "748dbc2ea85cc419649c26bad41a9219b107d053fb3c084c038eb19e8c439d13",

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -88,6 +89,17 @@ def configure_progress_logging():
 
 
 def _reason(error):
+    if isinstance(error, sqlite3.Error):
+        code = _sqlite_details(error).get("sqlite_errorcode")
+        return {
+            5: "sqlite_busy",
+            6: "sqlite_locked",
+            8: "sqlite_readonly",
+            10: "sqlite_io_error",
+            11: "sqlite_corrupt",
+            13: "sqlite_full",
+            14: "sqlite_cannot_open",
+        }.get(None if code is None else code & 255, "sqlite_error")
     native = getattr(error, "reason_code", None)
     if (
         type(error).__module__.startswith("umi.")
@@ -114,6 +126,28 @@ def _reason(error):
     return "internal_error"
 
 
+def _sqlite_details(error):
+    """Expose numeric native failures, never SQL, paths or exception text.
+
+    Older supported Python versions may omit these attributes. Names must be
+    constants from the running sqlite3 module and agree with the numeric code.
+    """
+    if not isinstance(error, sqlite3.Error):
+        return {}
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is not int or not 0 <= code <= 65535:
+        return {}
+    result = {"sqlite_errorcode": code}
+    name = getattr(error, "sqlite_errorname", None)
+    if (
+        type(name) is str
+        and re.fullmatch(r"SQLITE_[A-Z0-9_]{1,64}", name)
+        and getattr(sqlite3, name, None) == code
+    ):
+        result["sqlite_errorname"] = name
+    return result
+
+
 def _failure_details(error):
     causes, seen = [], set()
     while error is not None and id(error) not in seen and len(causes) < 8:
@@ -135,6 +169,7 @@ def _failure_details(error):
                 "error_type": (type(error).__module__ + "." + type(error).__qualname__)[:200],
                 "reason_code": _reason(error),
                 "source_frames": frames[-8:],
+                **_sqlite_details(error),
             }
         )
         if isinstance(error, ValidatorChainError):

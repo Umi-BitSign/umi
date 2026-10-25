@@ -3101,6 +3101,20 @@ check, so requests still reserved locally need no full decoding on every sweep.
 Released allocations retain their complete request and current remote-authority
 checks before status, retry or polling can use remote storage.
 
+Round-journal retries of an identical retained reservation use a fresh read-only
+snapshot rather than taking SQLite's writer slot. The reader still checks the
+exact batch, current conflict holds, typed allowance columns, retained originals,
+schema fences and complete capacity totals, including changed local limits.
+Successful decoding of bounded canonical obligation bytes is reused within a
+32 MiB / 65,536-entry process cache; returned mappings remain private. Failed or
+changed bytes and new processes decode normally. Capacity and authority decisions
+are never cached. This preserves existing generation-0 and generation-2 journals,
+signed grants and miner/validator startup schemas without a storage migration.
+Select the qualified reviewer/settlement maintenance source through the existing
+update path; source publication alone does not establish installed adoption.
+SQLite failure reports include only a validated numeric code and known symbolic
+name alongside their reason, excluding exception text, SQL and private paths.
+
 Legacy reservation accounting keeps completed static bundle checks in the
 existing private verification-receipt store. The original owner, current native
 bundle mutation identity and verifier semantics select each result, including

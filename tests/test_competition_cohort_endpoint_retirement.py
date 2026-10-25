@@ -394,3 +394,26 @@ async def test_signed_conflict_does_not_discard_original_response(retiring, monk
     assert p.delivery_recovery.retained(p.retire_slot, p.case_id) == saved
     assert p.retirement.retained(p.retire_slot, p.case_id) is None
     assert p.model.calls == 1
+
+
+async def test_pending_retirement_retry_does_not_reserve_writer_again(retiring, monkeypatch):
+    p = retiring
+    recovery = p.delivery_recovery
+
+    async def unavailable(_assignment):
+        raise OSError("owned origin temporarily unavailable")
+
+    monkeypatch.setattr(recovery.origin, "collect", unavailable)
+    # The first attempt retains its original capacity reservation before origin
+    # capture. A retry must preserve that obligation without retaking the writer.
+    with pytest.raises(OSError, match="origin temporarily unavailable"):
+        await p.retire()
+
+    def unexpected_writer(*args, **kwargs):
+        raise AssertionError("unchanged retirement reservation acquired the journal writer")
+
+    monkeypatch.setattr(recovery.journal.journal, "transaction", unexpected_writer)
+    for _ in range(2):
+        with pytest.raises(OSError, match="origin temporarily unavailable"):
+            await p.retire()
+    assert p.retirement.retained(p.retire_slot, p.case_id) is None
