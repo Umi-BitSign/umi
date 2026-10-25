@@ -569,3 +569,78 @@ def test_original_receipts_preserve_explicit_disk_reserve(legacy_boot, tmp_path,
             original_verification_directory=root,
         )
     assert not list(root.glob("*/*/*.json"))
+
+
+def test_unchanged_authenticated_context_is_not_serialized_again(
+    legacy_boot, tmp_path, monkeypatch
+):
+    import umi.competition_cohort_legacy_model_reuse as reuse
+
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+    prepared = authenticate_legacy_model_sources(
+        c.config.legacy_model_storage,
+        series=c.config.series,
+        policy=c.config.policy,
+        model_delivery_adoptions=c.config.model_delivery_adoptions,
+        original_verification_directory=root,
+    )
+    authenticated = prepared.authenticated[c.source.cohort_sha256]
+    original = reuse.digest
+    protected = (
+        authenticated.policy,
+        authenticated.original_history,
+        authenticated.original_history.plan,
+        authenticated.legacy,
+        authenticated.preservation,
+    )
+
+    def no_repeat(value):
+        assert all(value is not model for model in protected), (
+            "unchanged immutable input was serialized again"
+        )
+        return original(value)
+
+    monkeypatch.setattr(reuse, "digest", no_repeat)
+    remote = Remote({})
+    readers = selected_legacy_model_readers(
+        prepared, multipart=remote, verification_root=tmp_path / "durable"
+    )
+    assert readers.resolve(c.source.cohort_sha256, baseline=True).selection.bundle == c.bundle
+    assert not remote.reads
+
+
+def test_original_receipt_context_keeps_existing_wire_bytes(legacy_boot, tmp_path):
+    import json
+
+    from umi.competition_verification_rules import runtime_identity
+
+    c = legacy_boot
+    root = tmp_path / "original-verification"
+    prepared = authenticate_legacy_model_sources(
+        c.config.legacy_model_storage,
+        series=c.config.series,
+        policy=c.config.policy,
+        model_delivery_adoptions=c.config.model_delivery_adoptions,
+        original_verification_directory=root,
+    )
+    value = prepared.authenticated[c.source.cohort_sha256]
+    (receipt,) = root.glob("*/*/*.json")
+    data = json.loads(receipt.read_bytes())
+    expected = digest(
+        [
+            "umi-legacy-original-resolution/1",
+            runtime_identity(),
+            digest(value.policy),
+            digest(value.original_history),
+            value.adoption_block,
+            digest(value.legacy),
+            digest(value.preservation),
+            value.preservation.models[0].endpoint,
+            value.preservation.models[0].bucket,
+            None,
+            True,
+            None,
+        ]
+    )
+    assert data["context"] == expected
