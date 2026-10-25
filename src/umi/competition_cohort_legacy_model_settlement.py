@@ -158,7 +158,9 @@ class LegacyModelSettlementStorage:
         resolution = self.resolution(receipt.original_request_sha256)
         reader = self.reader(resolution)
         snapshot = check_legacy_settlement_metadata(receipts, receipt)
-        expected = {chunk.key: (key, chunk.size_bytes) for key, chunk in reader.chunks.items()}
+        expected = {
+            reader._key(chunk): (key, chunk.size_bytes) for key, chunk in reader.chunks.items()
+        }
         actual = {item.key: (item.sha256, item.size_bytes) for item in snapshot.objects}
         if (
             receipt.cohort_sha256 != self.authenticated.legacy.cohort_sha256
