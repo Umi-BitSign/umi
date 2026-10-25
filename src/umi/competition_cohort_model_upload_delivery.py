@@ -72,10 +72,13 @@ class ModelUploadDelivery:
             request.signed_submission.submission.model_bundle, allow_local=False
         )
 
-    def _remote_request(self, key: str) -> CohortParticipationRequest | None:
+    def _remote_request(self, key: str, *, model=None) -> CohortParticipationRequest | None:
         # Local allocations need only the exact model reference and fresh
         # allocation fence. Decode the complete request only for remote work.
-        model = self.uploads.retained_model(key)
+        # The recurring poll already resolved this immutable upload reference.
+        # Allocation state and owned authority are still checked after retirement.
+        if model is None:
+            model = self.uploads.retained_model(key)
         if self.uploads.allocations.state(model) not in {"release_prepared", "released"}:
             return None
         request = self.uploads.retained(key)
@@ -139,18 +142,38 @@ class ModelUploadDelivery:
         )
         keys = await run_owned_thread(self.uploads.journal.keys, "upload")
         groups = {}
+        models = {}
         grouped_all = True
+        retired = None
+        if self.retirement is not None:
+            # Build the complete local reference inventory before remote retries.
+            # Retirement owns its required remote checks for the selected batch;
+            # an unrelated released upload must not postpone local reclamation.
+            with TransferProgress(
+                "local_model_retirement_inventory", len(keys), report, unit="requests"
+            ) as progress:
+                for key in keys:
+                    try:
+                        model = await run_owned_thread(self.uploads.retained_model, key)
+                        models[key] = model
+                        groups.setdefault(model, []).append(key)
+                    except (OSError, ValueError, sqlite3.Error):
+                        grouped_all = False
+                        progress.emit("retrying", reason="original_upload_inventory_incomplete")
+                    progress.advance(1)
+            retired = (
+                await self.retirement.poll_once(groups, generation)
+                if grouped_all
+                else self.retirement.blocked_inventory(groups)
+            )
         with TransferProgress(
             "legacy_model_remote_reconciliation", len(keys), report, unit="requests"
         ) as progress:
             for key in keys:
-                grouped = self.retirement is None
                 try:
-                    if self.retirement is not None:
-                        model = await run_owned_thread(self.uploads.retained_model, key)
-                        groups.setdefault(model, []).append(key)
-                        grouped = True
-                    request = await run_owned_thread(self._remote_request, key)
+                    request = await run_owned_thread(
+                        partial(self._remote_request, key, model=models.get(key))
+                    )
                     if request is not None:
                         owner = self._payload_owner(request)
                         if digest(request) in owner.verified:
@@ -159,18 +182,10 @@ class ModelUploadDelivery:
                             await owner.ensure_owned(request)
                     progress.advance(1)
                 except (OSError, ValueError, sqlite3.Error):
-                    grouped_all = grouped_all and grouped
                     # Missing/damaged storage retains a pending model in the
                     # native poll below. Do not turn a failed check into a
                     # success, and continue independent models in this cycle.
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
-            retired = None
-            if self.retirement is not None:
-                retired = (
-                    await self.retirement.poll_once(groups, generation)
-                    if grouped_all
-                    else self.retirement.blocked_inventory(groups)
-                )
             result = await run_owned_thread(
                 partial(
                     self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review

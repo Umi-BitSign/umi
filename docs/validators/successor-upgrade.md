@@ -3146,8 +3146,14 @@ without changing signed profiles, state paths, journals or consumer declarations
 
 The ordinary intake upload task groups existing source-version model references
 without rereading full original requests. It decodes only the selected retirement
-batch, before unrelated local-model polling, and retires at most `batch_models`
-(default 1) per pass. It reuses completed
+batch and retires at most `batch_models` (default 1) per pass. Retirement runs
+after the complete local inventory and before remote retry reconciliation or
+unrelated local-model polling; a slow released upload cannot hold eligible local
+bytes until the entire reconciliation pass finishes. Inventory preparation has
+its own counted progress and ETA. Remote retries reuse the resolved immutable
+model references while reading allocation state afresh after retirement. A failed
+inventory entry blocks deletion until repaired; a concurrent new original still
+invalidates the existing inventory-generation fence. It reuses completed
 R2 verification, protects models referenced by every closed cohort still using
 local storage, and refuses an open local intake. `protected_models` can preserve
 additional shared model dependencies. It fences local writes under the upload,
