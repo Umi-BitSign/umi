@@ -111,27 +111,42 @@ class R2MultipartClient:
         for attempt in range(1, 4):
             try:
                 return await self._exchange_once(method, key, **options)
-            except _R2HTTPFailure as error:
+            except OSError as error:
+                status = error.http_status if isinstance(error, _R2HTTPFailure) else None
+                transport = isinstance(
+                    error.__cause__,
+                    (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError),
+                )
+                if status is None and not transport:
+                    raise
                 retry = (
                     method in {"HEAD", "GET"}
-                    and error.http_status in {429, 500, 502, 503, 504}
+                    and (transport or status in {429, 500, 502, 503, 504})
                     and attempt < 3
                 )
-                delay = max(0.25 * 2 ** (attempt - 1), error.retry_after) if retry else None
+                retry_after = error.retry_after if isinstance(error, _R2HTTPFailure) else 0
+                delay = max(0.25 * 2 ** (attempt - 1), retry_after) if retry else None
                 _LOG.warning(
                     "r2_request_status %s",
                     json.dumps(
                         dict(
                             stage="r2_request",
                             method=method,
-                            http_status=error.http_status,
+                            http_status=status,
+                            transport_error_type=type(error.__cause__).__name__
+                            if transport
+                            else None,
                             attempt=attempt,
                             maximum_attempts=3 if method in {"HEAD", "GET"} else 1,
                             completed=0,
                             total=1,
                             elapsed_seconds=time.monotonic() - started,
                             eta_seconds=None,
-                            eta_basis="bounded_read_retry" if retry else "provider_refusal",
+                            eta_basis="bounded_read_retry"
+                            if retry
+                            else "transport_unavailable"
+                            if transport
+                            else "provider_refusal",
                             stalled_or_retrying=retry,
                             retry_seconds=delay,
                             certification_authority=False,

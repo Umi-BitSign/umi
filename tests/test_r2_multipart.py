@@ -226,6 +226,89 @@ async def test_read_retries_are_bounded_and_never_replay_mutations(
     assert len(calls) == attempts
 
 
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError],
+)
+async def test_connection_failure_retries_only_the_failed_read(
+    monkeypatch, caplog, method, error_type
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise error_type("private-provider-url-and-credentials", request=request)
+        return httpx.Response(200, content=b"complete verified response")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    async with client.connection_scope():
+        response = await client._exchange(method, KEY, at=AT)
+    assert response.content == b"complete verified response"
+    assert len(requests) == 2 and waits == [0.25]
+    assert requests[0].url == requests[1].url
+    assert requests[0].headers == requests[1].headers
+    assert error_type.__name__ in caplog.text
+    assert KEY not in caplog.text and "private-provider" not in caplog.text
+    assert '"elapsed_seconds":' in caplog.text and '"retry_seconds":0.25' in caplog.text
+
+
+@pytest.mark.parametrize(
+    "method,attempts", [("HEAD", 3), ("GET", 3), ("POST", 1), ("PUT", 1), ("DELETE", 1)]
+)
+async def test_connection_retry_is_bounded_and_never_repeats_mutation(
+    monkeypatch, method, attempts
+):
+    calls = []
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        raise httpx.ReadError(
+            "response lost after provider may have accepted mutation", request=request
+        )
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match="transport unavailable"):
+        await client._exchange(method, KEY, at=AT)
+    assert len(calls) == attempts
+
+
+async def test_range_retry_discards_failed_partial_response(monkeypatch):
+    calls, closed = [], []
+
+    class Partial(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"ab"
+            raise httpx.ReadError("partial provider response lost")
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def pause(_):
+        pass
+
+    def send(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, stream=Partial())
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-3/4"}, content=b"abcd")
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    assert await client.read_range(KEY, offset=0, size_bytes=4, at=AT) == b"abcd"
+    assert len(calls) == 2 and closed == [True]
+    assert all(r.headers["range"] == "bytes=0-3" for r in calls)
+
+
 @pytest.mark.asyncio
 async def test_success_response_stops_at_configured_byte_bound():
     chunks_read = 0

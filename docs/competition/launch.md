@@ -162,6 +162,14 @@ visible while unrelated uploads or exports run concurrently. R2 verification
 reports bytes and promotion copies report parts within their cohort's work.
 Native R2 readers may select the [authenticated metadata batch transport](../../deploy/public-model-artifacts/README.md#private-metadata-transport)
 without changing signed submissions, model identities, clocks or byte checkpoints.
+Individual R2 HEAD/GET requests retry transient connection failures and temporary
+provider status errors at most three times, preserving the exact selected object
+and range. A failed partial response is discarded. Retry diagnostics expose the
+attempt, transport error type, elapsed time and delay without provider details or
+object credentials. Mutating requests retain their existing single-attempt
+behavior; an ambiguous completion still requires native reconciliation. This
+private read fix uses the ordinary consumer source/config update path and changes
+no miner request, signed history, runtime requirement or retained verification ABI.
 Keep historical credential exports for services that have not adopted the updated
 reader; opt in through a new private export and the supported cooperative updater.
 Intake counts cover latest accepted model submissions before registration
