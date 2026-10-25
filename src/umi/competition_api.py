@@ -21,6 +21,7 @@ from .competition_chain import RegistrationCapture
 from .competition_cohort_api import CohortModelPayloads, cohort_routes
 from .competition_cohort_intake import CohortIntake
 from .competition_cohort_public_api import CohortPublicApiConfig, cohort_public_routes
+from .competition_cohort_public_progress import is_cached_cohort_progress_request
 from .competition_execution import ExecutionBoundary
 from .competition_intake_archive import LoadedIntakeArchive
 from .competition_launch import IntakeRuntimeSource, PublicIntakeDeployment, PublicRoundSchedule
@@ -170,6 +171,7 @@ def create_app(
     capacities = {
         "submission": asyncio.Semaphore(limits.maximum_concurrent_submissions),
         "read": asyncio.Semaphore(limits.maximum_concurrent_reads),
+        "progress": asyncio.Semaphore(limits.maximum_concurrent_reads),
         "readiness": asyncio.Semaphore(limits.maximum_concurrent_readiness),
         "model_upload": asyncio.Semaphore(
             1 if cohort_model_uploads is None else cohort_model_uploads.maximum_concurrent_uploads
@@ -178,7 +180,11 @@ def create_app(
 
     @app.middleware("http")
     async def bound_public_requests(request: Request, call_next):
-        if request.url.path == "/v1/competition/readiness" or (
+        if is_cached_cohort_progress_request(request.method, request.url.path):
+            # This bounded snapshot performs no native reads or RPC. Slow status
+            # readers must not occupy its slots while work/restoration advances.
+            capacity = capacities["progress"]
+        elif request.url.path == "/v1/competition/readiness" or (
             request.url.path.startswith(
                 ("/v1/competition/cohorts/", "/v1/competition/service-work/")
             )

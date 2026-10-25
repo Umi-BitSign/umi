@@ -39,6 +39,11 @@ preserving all completed work. A new sample needs three completed models and fiv
 minutes before an estimate is issued. Older reviewers without the optional cached
 identity endpoint keep counts available and report an unknown ETA. Public polling
 reads only the retained in-process snapshot; it triggers no RPC or verification.
+The exact progress GET has its own bounded read lane, using the configured
+`maximum_concurrent_reads` limit. Slow native/status reads cannot consume its
+slots. It remains available under the request-certification memory guard; that
+exception grants no admission, native-read or submission authority. Unknown
+cohorts still return 404.
 
 File pages accept `file_index`, `offset` and `limit` (1–128 pieces). A preserved
 chunk page has SHA-256 and byte size per piece. A concatenated R2 payload page

@@ -70,6 +70,18 @@ _FIELDS = (
 )
 
 
+def is_cached_cohort_progress_request(method, path):
+    """Select only the fixed cache-only GET route, never another public read."""
+    prefix, suffix = "/v1/competition/cohorts/", "/progress"
+    return (
+        method == "GET"
+        and isinstance(path, str)
+        and path.startswith(prefix)
+        and path.endswith(suffix)
+        and re.fullmatch(r"[0-9a-f]{64}", path[len(prefix) : -len(suffix)]) is not None
+    )
+
+
 class CohortProgressSnapshots:
     def __init__(self, maximum_cohorts=256):
         self.lock = RLock()

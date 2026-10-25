@@ -16,6 +16,7 @@ from typing import Annotated
 
 from pydantic import Field, ValidationError, model_validator
 
+from .competition_cohort_public_progress import is_cached_cohort_progress_request
 from .concurrency import run_owned_thread
 from .host_memory_admission import HostMemoryAdmission, HostMemoryLease, _absolute
 from .host_memory_request_bounds import stage_evidence_budget
@@ -288,8 +289,8 @@ def bind_memory_controller(controller):
 class RequestsStageASGIBinding:
     """Cover lifespan children and independent HTTP tasks with the same policy.
 
-    Public routes are not qualified during requests closure and refuse before
-    reading bodies or native state. Private owner/reviewer routes have fixed scopes.
+    Cache-only public progress stays visible during requests closure. Other public
+    routes refuse before reading bodies or native state. Private routes have fixed scopes.
     """
 
     def __init__(self, app, *, controller, private_role=None):
@@ -297,7 +298,7 @@ class RequestsStageASGIBinding:
 
     def _permitted(self, scope):
         if self.private_role is None:
-            return False
+            return is_cached_cohort_progress_request(scope.get("method"), scope.get("path"))
         # These authenticated endpoints copy cached process/stage diagnostics.
         # They read no native state and occupy no signing/admission lane.
         if (
