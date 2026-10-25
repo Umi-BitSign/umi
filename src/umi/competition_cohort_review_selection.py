@@ -1,5 +1,6 @@
 """Select native reviewers lazily from the host's immutable series manifest."""
 
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from .competition_cohort_service_quality import ServiceTerms
 from .competition_cohort_service_work import SignedServiceWorkCatalog
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import CompetitionStore
+from .competition_verification_reuse import VerificationReuse
+from .competition_work_progress import work_heartbeats
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import bounded_stage_declarations, stage_count
 from .host_memory_runtime import memory_operation, requests_stage_policy
@@ -53,6 +56,15 @@ class SelectedPhaseReviewer:
     ):
         self.config, self.provider = config, provider
         self.policy, self.cohorts = config.policy, config.signing.cohorts
+        self.request_verification = VerificationReuse(
+            Path(config.signing.directory) / "request-verification",
+            owner={
+                "kind": "selected_request_review",
+                "signer": config.signing.signer,
+                "source_owner": config.owner_hotkey,
+                "policy": digest(config.policy),
+            },
+        )
         phase_export_timeout = (
             config.phase_review_budget.export_exchange_seconds
             if config.phase_review_budget is not None
@@ -228,7 +240,11 @@ class SelectedPhaseReviewer:
         scope=lambda self, progress: (progress.cohort_sha256, progress.phase),
     )
     async def review(self, progress):
-        return await (await self._select(progress)).review(progress)
+        scope = (
+            self.request_verification.selected() if progress.phase == "requests" else nullcontext()
+        )
+        with scope, work_heartbeats():
+            return await (await self._select(progress)).review(progress)
 
     @memory_operation(
         operation="requests_decision",
@@ -238,4 +254,8 @@ class SelectedPhaseReviewer:
         progress = evidence.progress.progress
         if (transition.cohort_sha256, transition.phase) != (progress.cohort_sha256, progress.phase):
             raise ValueError("decision scope differs from its reserved progress")
-        return await (await self._select(progress)).decision(transition, evidence)
+        scope = (
+            self.request_verification.selected() if progress.phase == "requests" else nullcontext()
+        )
+        with scope, work_heartbeats():
+            return await (await self._select(progress)).decision(transition, evidence)

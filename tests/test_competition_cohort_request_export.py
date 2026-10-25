@@ -186,6 +186,7 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
     from pathlib import Path
     from types import SimpleNamespace
 
+    from umi import competition_cohort_request_closure as request_closure
     from umi import competition_cohort_review_boot as boot
     from umi import competition_host_activation as activation
     from umi.competition_reward_decisions import StandingRewardSeries
@@ -272,6 +273,21 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
     h.provider.start, h.provider.aclose = start, close
     monkeypatch.setattr(boot, "HistoricalRegistrationProvider", lambda *args: h.provider)
     monkeypatch.setattr(boot, "sign_object", signing)
+    native_terminal = request_closure.read_request_terminal
+    terminal_checks, selected_reviewers = [], []
+    selected_type = boot.SelectedPhaseReviewer
+
+    def counted_terminal(*args, **kwargs):
+        terminal_checks.append(1)
+        return native_terminal(*args, **kwargs)
+
+    def selected_reviewer(*args, **kwargs):
+        value = selected_type(*args, **kwargs)
+        selected_reviewers.append((args, kwargs, value))
+        return value
+
+    monkeypatch.setattr(request_closure, "read_request_terminal", counted_terminal)
+    monkeypatch.setattr(boot, "SelectedPhaseReviewer", selected_reviewer)
     owner = FastAPI()
     owner.include_router(request_review_routes(h.exporter, token="owner-private-token" * 3))
     client_type = httpx.AsyncClient
@@ -335,6 +351,19 @@ async def test_configured_host_recovers_missing_inputs_and_redelivers_native_vot
         assert signatures == []
         terms_path.write_bytes(canonical_json_bytes(terms))
         vote = await peer(client).attest(progress)
+        assert len(terminal_checks) == len(h.b["terminals"])
+        args, kwargs, _ = selected_reviewers[-1]
+        # A fresh selected reviewer reuses its own prior native result, while
+        # owner exports remain under a separate verification authority.
+        restarted_review = selected_type(*args, **kwargs)
+        assert await restarted_review.review(progress) == h.source.read(progress).record
+        assert len(terminal_checks) == len(h.b["terminals"])
+        # Completed semantic checks cannot bypass this reviewer's original
+        # proof port or grant a new phase vote from damaged proof transport.
+        h.bad_proof = True
+        with pytest.raises(ValueError, match="original proof invalid"):
+            await restarted_review.review(progress)
+        h.bad_proof = False
     assert signatures == [digest(progress)]
     h.offline = True
     h.block += 100_000
