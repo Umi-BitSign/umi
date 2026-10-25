@@ -670,7 +670,8 @@ class CohortIntake:
     def _parsed_records(self, db, history, *, track: str | None = None, hotkey: str | None = None):
         tips = {digest(history.genesis), *(digest(s.transition) for s in history.transitions)}
         clauses = ["cohort=?"]
-        parameters = [digest(history.plan)]
+        cohort = digest(history.plan)
+        parameters = [cohort]
         if track is not None:
             clauses.append("track=?")
             parameters.append(track)
@@ -690,7 +691,7 @@ class CohortIntake:
             retained = read_participation(raw)
             if (
                 retained.proposed_admission.recovery_tip_sha256 != tip
-                or retained.proposed_admission.cohort_sha256 != digest(history.plan)
+                or retained.proposed_admission.cohort_sha256 != cohort
                 or (
                     track is not None
                     and retained.request.signed_submission.submission.track != track
