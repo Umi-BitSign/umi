@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -204,15 +205,14 @@ class NativeRequestProgressSource:
         # Builders and the enclosing service closure share this native owner's
         # successful replay. Each participant is checkpointed on the first pass;
         # independent reviewers still select their own verification authority.
-        self.verification_reuse = VerificationReuse(
-            journal.root / "request-observation-verification",
-            owner={
-                "kind": "request_observation",
-                "journal": str(journal.root),
-                "binding": binding,
-                "policy": digest(intake.policy),
-            },
-        )
+        self._verification_lock = Lock()
+        self._verification_reuse = None
+        self._verification_owner = {
+            "kind": "request_observation",
+            "journal": str(journal.root),
+            "binding": binding,
+            "policy": digest(intake.policy),
+        }
         self.tail_admission_binding = ServiceTailFenceBinding(
             schema="umi-private-service-tail-fence-binding/1",
             directory=str(self.queues[0].journal.root / "cohort-tail-admission"),
@@ -224,6 +224,47 @@ class NativeRequestProgressSource:
         # the lifecycle owner's live SQLite journal.
         for queue in self.queues:
             queue.bind_tail_admission_fence(self.tail_admission_binding)
+
+    @property
+    def verification_reuse(self):
+        return self.select_verification()
+
+    def select_verification(self, publication_factory=None):
+        """Keep one native owner's receipts across observation and publication.
+
+        The configured host attaches its existing publisher before observing.
+        Standalone observers retain their own selection. Persist that choice
+        before any checks so constructor ordering and restart cannot switch
+        namespaces and discard completed work.
+        """
+        with self._verification_lock:
+            if self._verification_reuse is None:
+                saved = self.journal.get("request_verification_owner", self.cohort)
+                kinds = {
+                    kind: {"schema": "umi-private-request-verification-owner/1", "owner": kind}
+                    for kind in ("observation", "publication")
+                }
+                if saved is not None and saved not in kinds.values():
+                    raise ValueError("request verification owner requires explicit repair")
+                kind = (
+                    saved["owner"]
+                    if saved is not None
+                    else "publication"
+                    if publication_factory is not None
+                    else "observation"
+                )
+                if kind == "publication":
+                    if publication_factory is None:
+                        raise ValueError("request publication verification owner is not configured")
+                    selected = publication_factory()
+                else:
+                    selected = VerificationReuse(
+                        self.journal.root / "request-observation-verification",
+                        owner=self._verification_owner,
+                    )
+                self.journal.put("request_verification_owner", self.cohort, kinds[kind])
+                self._verification_reuse = selected
+            return self._verification_reuse
 
     def _availability(self, store):
         return CohortServiceAvailability(

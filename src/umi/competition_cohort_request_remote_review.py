@@ -161,8 +161,10 @@ class RemoteRequestProgressReviewer:
     async def review(self, progress: CohortPhaseProgress) -> RequestProgressReviewRecord:
         exported, original = await self._read(progress)
         # Pin the complete canonical evidence before releasing its large object
-        # graph. Both independent reads still perform full native replay; the
-        # digest also detects changes outside the compact native review result.
+        # graph. Both reads authenticate their full inputs; the selected host
+        # reuses successful unchanged semantic checks under its own durable
+        # verification scope. The digest also detects changes outside the
+        # compact native review result.
         with WorkProgress(
             "request_export_digest", 1, unit="exports", cohort=progress.cohort_sha256
         ) as hashing:

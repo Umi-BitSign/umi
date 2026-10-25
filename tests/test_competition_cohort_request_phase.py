@@ -481,6 +481,7 @@ def test_observation_reuses_native_benchmark_in_service_closure_and_after_restar
     from umi import competition_cohort_request_closure as request
 
     h = request_owner
+    monkeypatch.delenv("UMI_NATIVE_VERIFICATION_DIRECTORY", raising=False)
     checked = []
     native = request.read_request_terminal
 
@@ -684,6 +685,85 @@ async def test_request_publication_recovers_after_certification(
         assert set(map(digest, proofs)) == set(digest(d.observation) for d in delivered.decisions)
         exported = control.publisher._export(h.block)
         assert all(control.publisher.files(k) == raw for k, raw in exported.objects.items())
+
+
+@pytest.mark.parametrize("observe_first", [False, True])
+async def test_observer_and_publisher_share_completed_checks_across_restart(
+    request_owner, tmp_path, monkeypatch, observe_first
+):
+    from umi import competition_cohort_request_closure as request
+    from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
+
+    h = request_owner
+    monkeypatch.delenv("UMI_NATIVE_VERIFICATION_DIRECTORY", raising=False)
+    checked = []
+    native = request.read_request_terminal
+
+    def counted(*args, **kwargs):
+        checked.append(1)
+        return native(*args, **kwargs)
+
+    monkeypatch.setattr(request, "read_request_terminal", counted)
+    if observe_first:
+        h.window()
+
+    async def proof(observation):
+        pass
+
+    def publication(decisions):
+        return CohortRequestSettlementPublisher(
+            h.source,
+            h.provider.collect,
+            decisions,
+            proof,
+            sources=h.sources,
+            history_directory=tmp_path / "shared-handoff",
+        )
+
+    with request_controller(h, tmp_path, publication) as control:
+        if not observe_first:
+            h.window()
+        expected = len(h.b["terminals"])
+        assert len(checked) == expected
+        selected = control.publisher.verification_reuse
+        assert selected is h.source.verification_reuse
+        namespace = (
+            "request-observation-verification"
+            if observe_first
+            else "request-publication/verification"
+        )
+        assert selected.directory == h.source.journal.root / namespace
+        await control.reopen().tick()
+        assert control.store.status(h.cohort)[0].phase == "reference_reveal"
+        assert len(checked) == expected
+        retained = {p: p.read_bytes() for p in selected.directory.glob("*.json")}
+        assert retained
+        if not observe_first:
+            # Earlier supported publishers have these same receipts without
+            # the new owner-selection record. Preserve their namespace and bytes.
+            with h.source.journal.transaction() as db:
+                db.execute(
+                    "DELETE FROM records WHERE kind='request_verification_owner' AND id=?",
+                    (h.cohort,),
+                )
+        h.source = h.reopen()
+        restarted = publication(control.decision)
+        assert restarted.verification_reuse.directory == selected.directory
+        await restarted(h.intake.history(h.cohort))
+        assert len(checked) == expected
+        assert all(p.read_bytes() == raw for p, raw in retained.items())
+
+
+def test_damaged_request_verification_selection_requires_repair(request_owner):
+    h = request_owner
+    h.source.journal.put(
+        "request_verification_owner",
+        h.cohort,
+        {"schema": "umi-private-request-verification-owner/1", "owner": "foreign"},
+    )
+    with pytest.raises(ValueError, match="verification owner requires explicit repair"):
+        h.sample()
+    assert h.source._verification_reuse is None
 
 
 async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(

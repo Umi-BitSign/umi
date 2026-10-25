@@ -90,7 +90,7 @@ Protocol delivery excludes producer-local hidden verification directories, locks
 and pending files. Each receiver retains its own inode-bound verification facts.
 Model artifact payload paths retain their original names.
 
-The request observer retains native closure-verification results under its
+A standalone request observer retains native closure-verification results under its
 existing journal's `request-observation-verification` directory, or the configured
 account-private native verification root. Benchmark construction, the enclosing
 service closure and that owner's export reader share completed checks. Individual
@@ -101,6 +101,24 @@ repair, while changed inputs receive only the affected verification. Current
 history, service observations, queue fences and read-set limits still apply.
 Independent reviewers retain their own verification ownership. Receipt reuse
 does not certify a phase or authorize rewards.
+
+Configured lifecycle hosts attach the existing request-publication verifier
+before observation, preserving its earlier receipt namespace. Observation,
+export and publication then share that same native owner's successful results.
+A standalone observer keeps its own selection if publication is attached later.
+The native journal retains this private selection before checks begin, so a
+restart preserves the chosen namespace. A publication-owned source must restore
+its configured publisher before borrowing those results; malformed selection
+metadata requires explicit repair.
+
+The selected phase reviewer keeps request-review receipts below its existing
+signing directory in `request-verification`, or in the selected account-private
+native verification root. Its two challenged owner reads and later decision
+reuse that reviewer's completed semantic checks. Each read still authenticates
+the owner's fresh signature and exact inputs; independent registration proofs
+and current finality remain required. The observer's receipts cannot authorize
+the independent reviewer. Updaters retain these directories with the original
+signing state; existing startup configurations need no new field.
 
 
 The lifecycle's execution-rate sampler observes authenticated cached identities
