@@ -1503,3 +1503,63 @@ async def test_direct_empty_supporting_file_repairs_retained_hold_without_zero_b
     assert result["reviews_held"] == result["objects_failed"] == 0
     assert owner.journal.get("direct-review-hold", digest(bundle)) == hold
     assert (tmp_path / "empty-reviews" / (digest(bundle) + ".json")).exists()
+
+
+async def test_poll_input_uses_one_transaction_and_rechecks_conflict_holds(direct, monkeypatch):
+    from contextlib import contextmanager
+
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    key = digest(reservation.reservation)
+    original = direct.owner.journal.read_transaction
+    calls = []
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        calls.append(1)
+        with original(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(direct.owner.journal, "read_transaction", counted)
+    verified, retained, hold = direct.owner._poll_input(key)
+    assert not verified and retained == reservation and hold is None
+    assert len(calls) == 1
+    # This is the native fixture's conflict fence, not a production database.
+    with direct.owner.journal.transaction() as db:
+        db.execute("INSERT INTO holds VALUES (?)", (key,))
+    with pytest.raises(ValueError, match="conflict held"):
+        direct.owner._poll_input(key)
+    assert len(calls) == 2, "each poll must open a fresh fenced snapshot"
+
+
+async def test_completed_poll_journal_reads_are_off_event_loop(direct, monkeypatch):
+    import threading
+
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    event_loop_thread = threading.get_ident()
+    original = direct.owner.journal.read_transaction
+    from contextlib import contextmanager
+
+    threads = []
+
+    @contextmanager
+    def off_loop(*args, **kwargs):
+        current = threading.get_ident()
+        assert current != event_loop_thread, "completed upload polling must not block async traffic"
+        threads.append(current)
+        with original(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(direct.owner.journal, "read_transaction", off_loop)
+    reads_before = direct.multipart.read_calls
+    result = await direct.owner.poll_once(now_unix_ms=1_800_000_012_000)
+    assert result["objects_verified"] == 1
+    assert threads and direct.multipart.read_calls == reads_before

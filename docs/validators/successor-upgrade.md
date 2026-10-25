@@ -3135,6 +3135,15 @@ its authenticated R2 bindings. A stale declaration, missing consumer or changed
 selection blocks retirement. Keep these declarations and the retirement journal
 on durable storage, outside disposable model caches.
 
+Direct-upload polling reads each reservation's verification flag, reservation
+index/body and hold from one fresh native read transaction on an owned thread.
+The inventory and final metadata snapshot also run off the event loop. Completed
+uploads therefore need neither repeated per-field transaction/schema setup nor
+synchronous journal I/O in the async transport loop. Conflict fences are checked
+within every current snapshot; actual verification, admission, cleanup and signing
+keep their existing fresh authority checks. Select this intake maintenance source
+without changing signed profiles, state paths, journals or consumer declarations.
+
 The ordinary intake upload task groups existing source-version model references
 without rereading full original requests. It decodes only the selected retirement
 batch, before unrelated local-model polling, and retires at most `batch_models`
@@ -3148,7 +3157,10 @@ only after both payload directories are absent. Manifests, original signed
 requests, review evidence and journals remain. Missing or damaged completion
 records report repair; retirement does not initiate another model-byte pass.
 Cached public progress exposes `storage_retirement`, with counted completion,
-retired allocated bytes, elapsed time, ETA basis and waiting status. These are
+retired allocated bytes, elapsed time, ETA basis and waiting status. The current
+model identity, operation and stable reason code identify consumer binding, remote
+byte completion, local verification and lease failures without publishing
+private exception text. Each new attempt clears an earlier waiting state. These are
 payload-unlink counts; concurrent filesystem use can change free space separately.
 
 Select the compatible source and private configuration together on intake,
