@@ -23,6 +23,7 @@ from umi.competition_cohort_intake import history_tip
 from umi.competition_cohort_legacy_model_selection import LegacyModelStorageSourceConfig
 from umi.competition_cohort_lifecycle import PHASES, CohortLifecycleService
 from umi.competition_cohort_model_delivery_api import (
+    PREPARE_RESERVED_PATH,
     ROOT,
     ModelDeliveryAdoptionCommit,
     ModelDeliveryAdoptionOwner,
@@ -566,6 +567,115 @@ async def test_exact_pending_reserve_reuses_completed_remote_work(owner_api, mon
     assert a.store.status(i.case.cohort)[1] == i.transition
     assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == i.transition
     assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+
+
+def prepare_request(a):
+    return ModelDeliveryAdoptionPrepare(
+        schema="umi-model-delivery-adoption-prepare/1",
+        series_sha256=digest(a.series),
+        cohort_sha256=a.i.case.cohort,
+        predecessor_sha256=history_tip(a.i.case.history),
+    )
+
+
+@pytest.mark.parametrize("model_only", [True, False], indirect=True)
+async def test_prepare_reserved_reviews_once_and_recovers_exact_response_after_restart(
+    owner_api, monkeypatch, caplog
+):
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=a.app), base_url="https://owner.example"
+    ) as client:
+        assert (
+            await post(client, PREPARE_RESERVED_PATH, request, token="h" * 32)
+        ).status_code == 401
+        response = await post(client, PREPARE_RESERVED_PATH, request)
+        assert response.status_code == 200, response.text
+        proposal = ModelDeliveryAdoptionProposal.model_validate_json(response.content)
+        assert a.store.status(i.case.cohort)[1] == proposal.transition
+        assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == proposal.transition
+        assert i.remote.heads and i.remote.reads
+        assert '"stage":"adoption_preparation_owned_finality"' in caplog.text
+        assert '"stage":"adoption_reservation_owned_finality"' in caplog.text
+
+        async def forbidden(*args, **kwargs):
+            pytest.fail("atomic preparation repeated completed remote verification")
+
+        monkeypatch.setattr(i.remote, "head", forbidden)
+        monkeypatch.setattr(i.remote, "read_range", forbidden)
+        # Older reservation callers still reconcile the exact pending proposal.
+        assert (await post(client, ROOT + "/reserve", proposal)).content == response.content
+        a.host.nodes.clear()
+        a.host.model_delivery_candidates.clear()
+        a.host.model_delivery_candidates[i.case.cohort] = ModelDeliveryAdoptionCandidate(
+            i.config, i.case.policy, multipart=i.remote
+        )
+
+        async def reopen(cohort):
+            a.host.nodes[cohort] = a.node
+            return a.node
+
+        a.host.node = reopen
+        repeat = await post(client, PREPARE_RESERVED_PATH, request)
+        assert repeat.status_code == 200 and repeat.content == response.content
+    assert a.host.config.automatic_progression_hold_cohorts == (i.case.cohort,)
+    assert a.node.controller._history()[0] == i.case.history
+
+
+async def test_prepare_reserved_recovers_intake_fence_after_control_reservation_failure(
+    owner_api, monkeypatch
+):
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    original = a.store.reserve_exact
+
+    def fail(transition):
+        raise OSError("simulated control-owner interruption")
+
+    monkeypatch.setattr(a.store, "reserve_exact", fail)
+    with pytest.raises(OSError, match="control-owner interruption"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    pending = i.case.owner.intake.pending_policy_adoption(i.case.cohort)
+    assert pending is not None and a.store.status(i.case.cohort)[1] is None
+    reads, heads = tuple(i.remote.reads), tuple(i.remote.heads)
+    monkeypatch.setattr(a.store, "reserve_exact", original)
+    raw = await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    assert ModelDeliveryAdoptionProposal.model_validate_json(raw).transition == pending
+    assert tuple(i.remote.reads) == reads and tuple(i.remote.heads) == heads
+    assert a.store.status(i.case.cohort)[1] == pending
+
+
+async def test_prepare_reserved_fresh_finality_refusal_leaves_both_owners_unreserved(owner_api):
+    a, i = owner_api, owner_api.i
+    blocks = iter((221, 220))
+
+    async def current():
+        return next(blocks)
+
+    a.host.provider.current_finalized_block = current
+    with pytest.raises(ValueError, match="finality regressed"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(prepare_request(a))
+    assert a.store.status(i.case.cohort)[1] is None
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) is None
+
+
+async def test_prepare_reserved_repeat_refuses_changed_private_candidate(owner_api):
+    a, i = owner_api, owner_api.i
+    request = prepare_request(a)
+    await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    pending = a.store.status(i.case.cohort)[1]
+    other = i.config.model_copy(
+        update={"delivery": i.config.delivery.model_copy(update={"part_size_bytes": 10 * 1024**2})}
+    )
+    a.host.model_delivery_candidates[i.case.cohort] = ModelDeliveryAdoptionCandidate(
+        other, i.case.policy, multipart=i.remote
+    )
+    with pytest.raises(ValueError, match="conflicts with pending control"):
+        await ModelDeliveryAdoptionOwner(a.host, "prepare-reserved").respond(request)
+    assert a.store.status(i.case.cohort)[1] == pending
+    assert i.case.owner.intake.pending_policy_adoption(i.case.cohort) == pending
 
 
 def replace_candidate_inventory(i, legacy):
