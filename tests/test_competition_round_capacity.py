@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -667,3 +668,81 @@ def test_highwater_rejects_invalid_observation_without_changing_state(journal, b
     with pytest.raises(ValueError):
         journal.observe(bad)
     assert state(journal) == before
+
+
+def _reserve_competing_writer(root, ready, release):
+    """Separate native owner, exercising real rollback-mode process locks."""
+    owner = RoundJournal(root, {"purpose": "capacity"}, maximum_rounds=4)
+    with owner.transaction() as db:
+        db.execute("INSERT INTO holds VALUES ('one')")
+        ready.set()
+        if not release.wait(30):
+            raise RuntimeError("test did not release competing writer")
+
+
+def test_exact_reservation_retry_reads_through_other_process_writer(journal):
+    import multiprocessing
+
+    receipt = journal.reserve_records("batch", (spec(),))
+    context = multiprocessing.get_context("spawn")
+    ready, release = context.Event(), context.Event()
+    writer = context.Process(target=_reserve_competing_writer, args=(journal.root, ready, release))
+    writer.start()
+    try:
+        assert ready.wait(30), "competing process did not acquire its writer"
+        # This must finish while the other process owns RESERVED and has a
+        # not-yet-committed hold. The old retry unconditionally took the writer.
+        assert journal.reserve_records("batch", (spec(),)) == receipt
+        assert journal.reservation("batch") == receipt
+    finally:
+        release.set()
+        writer.join(30)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(10)
+    assert writer.exitcode == 0
+    with pytest.raises(ValueError, match="conflict held"):
+        journal.reserve_records("batch", (spec(),))
+
+
+def test_exact_reservation_reuses_only_successful_decoding_not_current_bounds(journal, monkeypatch):
+    import umi.competition_round_reservation_reuse as reuse
+
+    journal.reserve_records("batch", tuple(spec(key=str(i)) for i in range(20)))
+    original = RoundJournal._canonical_document
+    calls = []
+    # Empty only this isolated test's process cache, before its first native pass.
+    monkeypatch.setattr(reuse, "_entries", OrderedDict())
+    monkeypatch.setattr(reuse, "_bytes", 0)
+
+    def decode(raw):
+        value = original(raw)
+        if set(value) == {"kind", "key", "maximum_bytes", "value_sha256"}:
+            calls.append(raw)
+        return value
+
+    monkeypatch.setattr(RoundJournal, "_canonical_document", staticmethod(decode))
+    receipt = journal.reserve_records("batch", tuple(spec(key=str(i)) for i in range(20)))
+    assert len(calls) == 20
+    calls.clear()
+    assert journal.reserve_records("batch", tuple(spec(key=str(i)) for i in range(20))) == receipt
+    assert journal.reservation("batch") == receipt
+    assert calls == []
+    # Current aggregate capacity is never memoized along with canonical JSON.
+    journal.maximum_bytes = 1024
+    with pytest.raises(ValueError, match="capacity exhausted"):
+        journal.reserve_records("batch", tuple(spec(key=str(i)) for i in range(20)))
+
+
+def test_retry_preserves_borrowed_writer_atomicity_and_public_read_only_refusal(journal):
+    with pytest.raises(RuntimeError, match="rollback"), journal.transaction() as db:
+        journal.reserve_records("batch", (spec(),), db=db)
+        raise RuntimeError("rollback")
+    assert journal.reservation("batch") is None
+    receipt = journal.reserve_records("batch", (spec(),))
+    reopened = RoundJournal(
+        journal.root, {"purpose": "capacity"}, maximum_rounds=4, existing_only=True, read_only=True
+    )
+    assert reopened.reservation("batch") == receipt
+    with pytest.raises(ValueError, match="read-only"):
+        reopened.reserve_records("batch", (spec(),))
