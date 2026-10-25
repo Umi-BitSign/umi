@@ -110,7 +110,7 @@ class ModelUploadRetirement:
                 protected.update(saved["models"])
         return protected
 
-    def _report(self, requests, *, completed, total, state="running", reason=None):
+    def _report(self, cohorts, *, completed, total, state="running", reason=None):
         elapsed = time.monotonic() - self.started
         eta = (
             (total - completed) * elapsed / self.completed_samples
@@ -141,13 +141,13 @@ class ModelUploadRetirement:
             certification_authority=False,
         )
         self.latest = body
-        for cohort in {r.consent.consent.cohort_sha256 for r in requests}:
+        for cohort in cohorts:
             PUBLIC_COHORT_PROGRESS.record("storage_retirement", dict(body, cohort_sha256=cohort))
         return body
 
     def blocked_inventory(self, groups):
         return self._report(
-            [r for rows in groups.values() for r in rows],
+            self.delivery.preserved.sources.authenticated,
             completed=0,
             total=len(groups) + 1,
             state="repair_required",
@@ -160,7 +160,7 @@ class ModelUploadRetirement:
             protected = await run_owned_thread(self._protected_models)
         except (OSError, ValueError) as error:
             return self._report(
-                [r for rows in groups.values() for r in rows],
+                self.delivery.preserved.sources.authenticated,
                 completed=0,
                 total=len(groups),
                 state="waiting",
@@ -176,8 +176,8 @@ class ModelUploadRetirement:
             for model in completed_models
             for record in (self.journal.get("model_layout", model) or {}).get("files", ())
         )
-        requests = [request for model in models for request in groups[model]]
-        self._report(requests, completed=completed, total=len(models))
+        cohorts = self.delivery.preserved.sources.authenticated
+        self._report(cohorts, completed=completed, total=len(models))
         if not models or completed == len(models):
             return self.latest
         attempted = 0
@@ -185,8 +185,12 @@ class ModelUploadRetirement:
             model = models[(self.cursor + offset) % len(models)]
             if self.uploads.allocations.state(model) == "released":
                 continue
-            selected = groups[model]
             try:
+                # The inventory already has durable native request-to-model facts.
+                # Decode only this batch's originals, never every historical row.
+                selected = [
+                    await run_owned_thread(self.uploads.retained, key) for key in groups[model]
+                ]
                 # Fail on absent consumers before doing any remote metadata work.
                 with model_storage_consumer_release(
                     self.config,
@@ -208,10 +212,10 @@ class ModelUploadRetirement:
                 self.completed_samples += 1
                 completed += 1
                 self.released_bytes += released
-                self._report(requests, completed=completed, total=len(models))
+                self._report(cohorts, completed=completed, total=len(models))
             except (OSError, ValueError) as error:
                 self._report(
-                    requests,
+                    cohorts,
                     completed=completed,
                     total=len(models),
                     state="waiting",

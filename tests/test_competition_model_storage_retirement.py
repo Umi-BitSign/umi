@@ -291,3 +291,40 @@ async def test_unexpected_archive_file_is_retained_without_capacity_credit(retir
     assert f.uploads.allocations.state(f.model) == "release_prepared"
     assert extra.read_bytes() == b"unrecognized user data must survive"
     assert f.delivery.retirement.latest["stalled_or_retrying"]
+
+
+async def test_retirement_inventory_reuses_references_without_decoding_all_requests(
+    retirement, monkeypatch
+):
+    f = retirement
+    key = digest(f.request)
+    assert f.uploads.retained_model(key) == f.model
+    generation = f.uploads._model_references.versions.inventory_identity()
+    seen = []
+
+    class InventoryOnly:
+        async def poll_once(self, groups, actual):
+            assert groups == {f.model: [key]}
+            assert actual == generation
+            seen.append("retirement")
+            return {"status": "fixture_inventory_observed"}
+
+    def no_full_request(*args, **kwargs):
+        raise AssertionError("inventory must not materialize full historical requests")
+
+    def ordinary_poll(**kwargs):
+        assert seen == ["retirement"], "cleanup must not wait for unrelated model polling"
+        return {"status": "fixture_normal_poll"}
+
+    f.delivery.retirement = InventoryOnly()
+    monkeypatch.setattr(f.uploads, "retained", no_full_request)
+    monkeypatch.setattr(f.uploads, "poll_once", ordinary_poll)
+    original = f.uploads.journal.get_raw
+
+    def no_original(kind, identity, **kwargs):
+        assert kind != "upload", "unchanged source-version references must not reread originals"
+        return original(kind, identity, **kwargs)
+
+    monkeypatch.setattr(f.uploads.journal, "get_raw", no_original)
+    result = await f.delivery.poll_once()
+    assert result["local_retirement"]["status"] == "fixture_inventory_observed"

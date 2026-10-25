@@ -147,9 +147,8 @@ class ModelUploadDelivery:
                 grouped = self.retirement is None
                 try:
                     if self.retirement is not None:
-                        retained = await run_owned_thread(self.uploads.retained, key)
-                        model = retained.signed_submission.submission.model_revision
-                        groups.setdefault(model, []).append(retained)
+                        model = await run_owned_thread(self.uploads.retained_model, key)
+                        groups.setdefault(model, []).append(key)
                         grouped = True
                     request = await run_owned_thread(self._remote_request, key)
                     if request is not None:
@@ -165,15 +164,20 @@ class ModelUploadDelivery:
                     # native poll below. Do not turn a failed check into a
                     # success, and continue independent models in this cycle.
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
+            retired = None
+            if self.retirement is not None:
+                retired = (
+                    await self.retirement.poll_once(groups, generation)
+                    if grouped_all
+                    else self.retirement.blocked_inventory(groups)
+                )
             result = await run_owned_thread(
                 partial(
                     self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review
                 )
             )
-        if self.retirement is not None and grouped_all:
-            result["local_retirement"] = await self.retirement.poll_once(groups, generation)
-        elif self.retirement is not None:
-            result["local_retirement"] = self.retirement.blocked_inventory(groups)
+        if retired is not None:
+            result["local_retirement"] = retired
         return result
 
     async def put_chunk(

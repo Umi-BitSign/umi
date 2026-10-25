@@ -3135,8 +3135,10 @@ its authenticated R2 bindings. A stale declaration, missing consumer or changed
 selection blocks retirement. Keep these declarations and the retirement journal
 on durable storage, outside disposable model caches.
 
-The ordinary intake upload task groups the retained originals in its existing
-poll and retires at most `batch_models` (default 1) per pass. It reuses completed
+The ordinary intake upload task groups existing source-version model references
+without rereading full original requests. It decodes only the selected retirement
+batch, before unrelated local-model polling, and retires at most `batch_models`
+(default 1) per pass. It reuses completed
 R2 verification, protects models referenced by every closed cohort still using
 local storage, and refuses an open local intake. `protected_models` can preserve
 additional shared model dependencies. It fences local writes under the upload,
