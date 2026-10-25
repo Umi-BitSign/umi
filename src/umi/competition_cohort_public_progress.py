@@ -65,6 +65,8 @@ _FIELDS = (
     "rate_probe_timeouts",
     "released_local_bytes",
     "reason_code",
+    "model_sha256",
+    "operation",
 )
 
 

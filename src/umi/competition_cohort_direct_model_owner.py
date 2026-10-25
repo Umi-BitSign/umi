@@ -888,14 +888,19 @@ class DirectModelUploadOwner:
             raise ValueError("direct upload provider is unavailable")
         return signed, reservation, attempt, provider
 
-    def _reservation_by_digest(self, reservation_sha256: str) -> SignedDirectModelUploadReservation:
-        raw_index = self.journal.get("direct-reservation-index", reservation_sha256)
+    def _reservation_by_digest(
+        self, reservation_sha256: str, *, db=None
+    ) -> SignedDirectModelUploadReservation:
+        if db is None:
+            with self.journal.read_transaction() as db:
+                return self._reservation_by_digest(reservation_sha256, db=db)
+        raw_index = self.journal.get("direct-reservation-index", reservation_sha256, db=db)
         if raw_index is None:
             raise FileNotFoundError("direct upload reservation is unavailable")
         index = _DirectModelReservationIndex.model_validate_json(canonical_json_bytes(raw_index))
         if index.reservation_sha256 != reservation_sha256:
             raise ValueError("direct upload reservation index changed")
-        raw = self.journal.get("direct-reservation", index.attempt_id)
+        raw = self.journal.get("direct-reservation", index.attempt_id, db=db)
         if raw is None:
             raise ValueError("direct upload reservation index is incomplete")
         retained = SignedDirectModelUploadReservation.model_validate_json(canonical_json_bytes(raw))
@@ -1383,6 +1388,16 @@ class DirectModelUploadOwner:
             raise ValueError("rejected object cleanup intent changed")
         return now_unix_ms >= intent.retain_until_unix_ms
 
+    def _poll_input(self, reservation_sha256):
+        """One fresh, fenced snapshot; no connection escapes its owned thread."""
+        with self.journal.read_transaction() as db:
+            verified = (
+                self.journal.get("direct-verification", reservation_sha256, db=db) is not None
+            )
+            reservation = self._reservation_by_digest(reservation_sha256, db=db)
+            hold = self.journal.get("direct-verification-hold", reservation_sha256, db=db)
+        return verified, reservation, hold
+
     async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
 
@@ -1391,11 +1406,12 @@ class DirectModelUploadOwner:
         cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = ""
         examined = 0
-        for reservation_sha256 in self.journal.keys("direct-object"):
-            verified = self.journal.get("direct-verification", reservation_sha256) is not None
-            reservation = self._reservation_by_digest(reservation_sha256)
+        keys = await run_owned_thread(self.journal.keys, "direct-object")
+        for reservation_sha256 in keys:
+            verified, reservation, verification_hold = await run_owned_thread(
+                self._poll_input, reservation_sha256
+            )
             model_sha256 = reservation.reservation.payload.model_sha256
-            verification_hold = self.journal.get("direct-verification-hold", reservation_sha256)
             reviewed = self.config.standing_review_policy is None
             if self.config.admission_reviews_directory is not None:
                 try:
@@ -1415,7 +1431,7 @@ class DirectModelUploadOwner:
                 ready += 1
             if verified and reviewed:
                 continue
-            review_hold = self._current_review_hold(reservation)
+            review_hold = await run_owned_thread(self._current_review_hold, reservation)
             if verification_hold is not None:
                 failed += 1
                 last_error = verification_hold["reason_code"]
@@ -1564,7 +1580,7 @@ class DirectModelUploadOwner:
             "objects_cleaned": cleaned,
             "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
-            **self.journal.metadata_snapshot(),
+            **await run_owned_thread(self.journal.metadata_snapshot),
         }
 
 

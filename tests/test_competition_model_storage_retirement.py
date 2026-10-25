@@ -328,3 +328,39 @@ async def test_retirement_inventory_reuses_references_without_decoding_all_reque
     monkeypatch.setattr(f.uploads.journal, "get_raw", no_original)
     result = await f.delivery.poll_once()
     assert result["local_retirement"]["status"] == "fixture_inventory_observed"
+
+
+async def test_wait_reports_exact_model_operation_and_safe_reason(retirement, monkeypatch, caplog):
+    import logging
+
+    from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+
+    f = retirement
+    f.owner.legacy_payloads.verified.clear()
+
+    async def missing(*args, **kwargs):
+        raise OSError("shared file migration requires completed native bytes and documents")
+
+    monkeypatch.setattr(f.owner.legacy_payloads, "ensure_owned", missing)
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+            await f.delivery.poll_once()
+    latest = f.delivery.retirement.latest
+    assert latest["model_sha256"] == f.model
+    assert latest["operation"] == "remote_payload_ownership"
+    assert latest["reason_code"] == "completed_remote_bytes_missing"
+    assert latest["error_type"] == "OSError"
+    cohort = f.request.consent.consent.cohort_sha256
+    public = PUBLIC_COHORT_PROGRESS.snapshot(cohort)["components"]["storage_retirement"]
+    assert public["model_sha256"] == f.model and public["reason_code"] == latest["reason_code"]
+    assert "completed_remote_bytes_missing" in caplog.text
+    assert f.uploads.allocations.state(f.model) == "local_reserved"
+
+
+def test_retirement_reason_does_not_publish_private_exception_text(receipt_scenario, recovery):
+    from umi.competition_cohort_model_retirement import retirement_failure_reason
+
+    reason = retirement_failure_reason("remote_payload_ownership", OSError("SECRET /private/key"))
+    assert reason == "remote_payload_ownership_OSError"
+    assert "SECRET" not in reason and "private" not in reason

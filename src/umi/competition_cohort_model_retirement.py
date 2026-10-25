@@ -9,6 +9,7 @@ unlink. The ordinary intake background task resumes interrupted items.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import time
@@ -28,6 +29,57 @@ from .competition_transport_verification import TransferProgress
 from .concurrency import run_owned_thread
 from .open_competition import digest
 from .private_files import lock_private_file
+from .protocol import canonical_json_bytes
+
+logger = logging.getLogger("umi.competition.progress")
+
+_FAILURES = dict(
+    [
+        ("model storage consumer declaration is no longer live", "consumer_not_live"),
+        (
+            "model storage consumer has not selected this preserved remote model",
+            "consumer_model_binding_missing",
+        ),
+        (
+            "released model awaits its authenticated remote retry owner",
+            "remote_retry_owner_missing",
+        ),
+        (
+            "shared file migration requires completed native bytes and documents",
+            "completed_remote_bytes_missing",
+        ),
+        ("owned model byte verification requires repair", "completed_remote_bytes_damaged"),
+        ("retained model chunk is unavailable", "remote_object_missing"),
+        (
+            "local archive verification requires explicit repair before retirement",
+            "completed_local_verification_missing",
+        ),
+        ("retirement waits for native completed staging release", "staging_payload_still_present"),
+        (
+            "original upload inventory advanced; use the next native background scan",
+            "upload_inventory_advanced",
+        ),
+        (
+            "remote retry requires its retained original participation",
+            "original_participation_missing",
+        ),
+        ("remote retry requires its original admission certificate", "original_admission_missing"),
+    ]
+)
+
+
+def retirement_failure_reason(operation, error):
+    """Expose stable native diagnostics without paths, tokens or exception text."""
+    if str(error) in _FAILURES:
+        return _FAILURES[str(error)]
+    if isinstance(error, FileNotFoundError):
+        return operation + "_file_missing"
+    if isinstance(error, BlockingIOError):
+        return operation + "_lease_busy"
+    status = getattr(error, "http_status", None)
+    if type(status) is int and 400 <= status <= 599:
+        return operation + "_http_" + str(status)
+    return operation + "_" + type(error).__name__
 
 
 class ModelUploadRetirement:
@@ -110,7 +162,18 @@ class ModelUploadRetirement:
                 protected.update(saved["models"])
         return protected
 
-    def _report(self, cohorts, *, completed, total, state="running", reason=None):
+    def _report(
+        self,
+        cohorts,
+        *,
+        completed,
+        total,
+        state="running",
+        reason=None,
+        model=None,
+        operation="inventory",
+        error_type=None,
+    ):
         elapsed = time.monotonic() - self.started
         eta = (
             (total - completed) * elapsed / self.completed_samples
@@ -137,12 +200,16 @@ class ModelUploadRetirement:
             stalled_or_retrying=state != "running",
             blocked_count=int(reason is not None),
             reason_code=reason,
+            model_sha256=model,
+            operation=operation,
+            error_type=error_type,
             released_local_bytes=self.released_bytes,
             certification_authority=False,
         )
         self.latest = body
         for cohort in cohorts:
             PUBLIC_COHORT_PROGRESS.record("storage_retirement", dict(body, cohort_sha256=cohort))
+        logger.info("cohort_model_retirement %s", canonical_json_bytes(body).decode("ascii"))
         return body
 
     def blocked_inventory(self, groups):
@@ -185,12 +252,22 @@ class ModelUploadRetirement:
             model = models[(self.cursor + offset) % len(models)]
             if self.uploads.allocations.state(model) == "released":
                 continue
+            operation = "retained_requests"
+
+            def report_operation(stage, completed=completed, model=model):
+                self._report(
+                    cohorts, completed=completed, total=len(models), model=model, operation=stage
+                )
+
             try:
+                report_operation(operation)
                 # The inventory already has durable native request-to-model facts.
                 # Decode only this batch's originals, never every historical row.
                 selected = [
                     await run_owned_thread(self.uploads.retained, key) for key in groups[model]
                 ]
+                operation = "consumer_release"
+                report_operation(operation)
                 # Fail on absent consumers before doing any remote metadata work.
                 with model_storage_consumer_release(
                     self.config,
@@ -200,6 +277,8 @@ class ModelUploadRetirement:
                     sources=self.delivery.preserved.sources,
                 ):
                     pass
+                operation = "remote_payload_ownership"
+                report_operation(operation)
                 for request in selected:
                     owner = self.delivery._payload_owner(request)
                     try:
@@ -208,18 +287,29 @@ class ModelUploadRetirement:
                         if digest(request) in owner.verified:
                             raise  # Damage is repair, never an implicit payload hash pass.
                         await owner.ensure_owned(request, completed_only=True)
+                operation = "local_payload_retirement"
+                report_operation(operation)
                 released = await run_owned_thread(self._retire, model, selected, generation)
                 self.completed_samples += 1
                 completed += 1
                 self.released_bytes += released
-                self._report(cohorts, completed=completed, total=len(models))
+                self._report(
+                    cohorts,
+                    completed=completed,
+                    total=len(models),
+                    model=model,
+                    operation="model_retired",
+                )
             except (OSError, ValueError) as error:
                 self._report(
                     cohorts,
                     completed=completed,
                     total=len(models),
                     state="waiting",
-                    reason="consumer_or_retained_storage_unavailable_" + type(error).__name__,
+                    reason=retirement_failure_reason(operation, error),
+                    model=model,
+                    operation=operation,
+                    error_type=type(error).__name__,
                 )
             attempted += 1
             if attempted >= self.config.batch_models:
