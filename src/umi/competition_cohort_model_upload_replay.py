@@ -57,6 +57,12 @@ class ContinuedModelUploadPayloads:
             for entry in selected.legacy.entries
         )
 
+    def has_owned_selection(self, request):
+        return self.contains(request) and self.acceptances.has_retained_selection(
+            request.consent.consent.cohort_sha256,
+            digest(request.signed_submission.submission),
+        )
+
     def _owned_source(self, request):
         if self.uploads.retained(digest(request)) != request or not self.contains(request):
             raise ValueError("continued retry differs from its frozen original request")
@@ -104,7 +110,7 @@ class ContinuedModelUploadPayloads:
         ):
             raise OSError("continued model changed its preserved remote generation")
 
-    async def ensure_owned(self, request):
+    async def ensure_owned(self, request, *, completed_only=False):
         key = digest(request)
         self.verified.pop(key, None)
         with TransferProgress(

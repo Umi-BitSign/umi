@@ -38,6 +38,7 @@ from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
+from .competition_model_storage_leases import ModelStorageConsumerConfig
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -89,6 +90,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
     legacy_model_storage: LegacyModelStorageSelections = ()
+    model_storage_consumer: ModelStorageConsumerConfig | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
@@ -120,6 +122,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("model_delivery_adoptions", None)
         if not self.legacy_model_storage:
             value.pop("legacy_model_storage", None)
+        if self.model_storage_consumer is None:
+            value.pop("model_storage_consumer", None)
         if not self.model_delivery_adoption_candidates:
             value.pop("model_delivery_adoption_candidates", None)
         return value
@@ -155,6 +159,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                 self.inputs_directory,
                 self.promotion_directory,
                 self.proof_import_directory,
+                *((self.model_storage_consumer.directory,) if self.model_storage_consumer else ()),
                 *(source.directory for source in self.legacy_model_storage),
                 *(
                     dict.fromkeys(
@@ -222,6 +227,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selection(self):
+        if self.model_storage_consumer is not None and not self.legacy_model_storage:
+            raise ValueError("model storage consumer requires authenticated remote model sources")
         if self.proof_stores is not None and self.proof_stores.exported is not None:
             raise ValueError("phase reviewer accepts only an imported proof transport")
         checked_budget(

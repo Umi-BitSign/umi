@@ -152,6 +152,16 @@ class UploadRecordVersions:
             raise UploadRecordRepairRequired("upload record source is missing")
         return digest([self.owner, kind, key, row[0]])
 
+    def inventory_identity(self):
+        """Fence a bounded upload inventory without rereading original requests."""
+        with self.journal.read_transaction() as db:
+            self.check(db)
+            count, revisions, present = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(revision),0),COALESCE(SUM(present),0) "
+                "FROM upload_record_versions WHERE kind='upload'"
+            ).fetchone()
+            return self.owner, count, str(revisions), present
+
     def result(self, kind, key, profile, verify, *, db, validate=None, repair=False, report=None):
         token = self.identity(kind, key, db=db)
         reuse = self._reuse.get(profile)

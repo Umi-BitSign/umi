@@ -350,6 +350,12 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def peers(self):
+        if (
+            self.model_uploads is not None
+            and self.model_uploads.retirement is not None
+            and not self.legacy_model_storage
+        ):
+            raise ValueError("model retirement requires authenticated preserved R2 sources")
         if bool(self.legacy_model_storage) != (
             self.legacy_model_verification_directory is not None
         ):
@@ -744,6 +750,21 @@ class ServiceAdmissionHost:
             self.continued_payloads = ContinuedModelUploadPayloads(
                 self.uploads, self.legacy_payloads.sources, self.models.owner, self.direct_uploads
             )
+        self.upload_delivery = None
+        if self.uploads is not None and self.legacy_payloads is not None:
+            self.upload_delivery = ModelUploadDelivery(
+                self.uploads,
+                remote_payloads=self.legacy_payloads,
+                continued_payloads=self.continued_payloads,
+            )
+            if self.uploads.config.retirement is not None:
+                from .competition_cohort_model_retirement import ModelUploadRetirement
+
+                self.upload_delivery.retirement = ModelUploadRetirement(
+                    self.uploads,
+                    self.upload_delivery,
+                    series=c.series,
+                )
         if self.uploads is not None or self.direct_uploads is not None:
             self.payloads = CohortModelPayloadRouter(
                 c.series.cohorts,
@@ -834,11 +855,12 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         if self.legacy_payloads is None:
             return await run_owned_thread(self.uploads.poll_once)
-        return await ModelUploadDelivery(
+        delivery = getattr(self, "upload_delivery", None) or ModelUploadDelivery(
             self.uploads,
             remote_payloads=self.legacy_payloads,
             continued_payloads=self.continued_payloads,
-        ).poll_once()
+        )
+        return await delivery.poll_once()
 
     async def _poll_direct_uploads(self):
         authorize_memory(None, None, "intake")

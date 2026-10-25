@@ -3124,6 +3124,41 @@ Select a qualified intake maintenance release through the supported cooperative
 update path before claiming it is active. It does not require restarting a
 progressing reviewer, history writer, coordinator, or miner.
 
+Automatic legacy payload retirement is selected through
+`recoverable_service.model_uploads.retirement`. Configure `consumers` with every
+policy evaluator's reviewer and settlement service: each entry has `kind`,
+`hotkey` and an owned `directory`. Each corresponding service selects that same
+directory in `model_storage_consumer`. Use separate directories, mode 2750 with
+a shared read-only service group when the intake and consumer accounts differ.
+The consumer holds process-lifetime leases and publishes a signed declaration of
+its authenticated R2 bindings. A stale declaration, missing consumer or changed
+selection blocks retirement. Keep these declarations and the retirement journal
+on durable storage, outside disposable model caches.
+
+The ordinary intake upload task groups the retained originals in its existing
+poll and retires at most `batch_models` (default 1) per pass. It reuses completed
+R2 verification, protects models referenced by every closed cohort still using
+local storage, and refuses an open local intake. `protected_models` can preserve
+additional shared model dependencies. It fences local writes under the upload,
+archive and journal leases, records each unlink intent and completion durably,
+and resumes interrupted deletion after restart. It credits reservation capacity
+only after both payload directories are absent. Manifests, original signed
+requests, review evidence and journals remain. Missing or damaged completion
+records report repair; retirement does not initiate another model-byte pass.
+Cached public progress exposes `storage_retirement`, with counted completion,
+retired allocated bytes, elapsed time, ETA basis and waiting status. These are
+payload-unlink counts; concurrent filesystem use can change free space separately.
+
+Select the compatible source and private configuration together on intake,
+reviewers and settlement through the supported cooperative maintenance update.
+Before enabling retirement, confirm every selected consumer publishes its exact
+R2 binding. Miner HTTP retry schemas and public validator reward rows do not
+change: exact old requests use their preserved R2 delivery or their newer
+independently accepted continuation without recreating local payloads. Keep this
+reader on recovery and automatic-update selections after retirement; a rollback
+to a predecessor that requires removed local payloads is unsupported. A public
+miner or validator does not need these coordinator-local lease directories.
+
 Asynchronous chunked/direct model checks wait cooperatively when another native
 reader holds the exact byte-checkpoint mutex. Chunked materialization, byte export
 and shared files use the same wait path. A busy checkpoint reports `retrying`

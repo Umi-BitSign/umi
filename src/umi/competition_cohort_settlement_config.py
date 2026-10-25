@@ -21,6 +21,7 @@ from .competition_cohort_model_transport_selection import (
 from .competition_cohort_recovery import verify_recovery_authority
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
+from .competition_model_storage_leases import ModelStorageConsumerConfig
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_boot import ObjectCapacity, _disjoint
 from .competition_reward_decisions import StandingRewardSeries
@@ -95,6 +96,7 @@ class SettlementServiceConfig(StrictProtocolModel):
     direct_model_review: DirectModelReviewSourceConfig | None = None
     model_delivery_adoptions: ModelDeliveryAdoptionSelections = ()
     legacy_model_storage: LegacyModelStorageSelections = ()
+    model_storage_consumer: ModelStorageConsumerConfig | None = None
     automatic_progression_hold_cohorts: Annotated[tuple[Hex32, ...], Field(max_length=512)] = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
@@ -102,6 +104,8 @@ class SettlementServiceConfig(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def serialize(self, handler):
         value = handler(self)
+        if self.model_storage_consumer is None:
+            value.pop("model_storage_consumer", None)
         if self.proof_stores is None:
             value.pop("proof_stores", None)
         if not self.shared_registration_archives:
@@ -127,6 +131,7 @@ class SettlementServiceConfig(StrictProtocolModel):
             Path(p)
             for p in (
                 self.state_directory,
+                *((self.model_storage_consumer.directory,) if self.model_storage_consumer else ()),
                 self.chain.state_directory,
                 self.inputs_directory,
                 self.history_directory,
@@ -149,6 +154,8 @@ class SettlementServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def bindings(self):
+        if self.model_storage_consumer is not None and not self.legacy_model_storage:
+            raise ValueError("model storage consumer requires authenticated remote model sources")
         verify_reward_manifest(canonical_json_bytes(self.manifest), self.series, self.policy)
         verify_recovery_authority(self.series.recovery, self.policy)
         groups = {identity(e.hotkey): e.control_group for e in self.policy.evaluators}
