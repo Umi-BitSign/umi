@@ -86,6 +86,24 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 logger = logging.getLogger(__name__)
 
 
+def _observation_terminal_reader(read):
+    """Share exact owned reads within one observation, without hashing a round.
+
+    The source still authenticates each terminal. These keys grant no authority
+    and never survive the observation: another observation must see new arrivals.
+    Retain the order itself so Python cannot reuse its object ID for another read.
+    """
+    reads = {}
+
+    def terminal(order, evaluator):
+        key = id(order), identity(evaluator)
+        if key not in reads:
+            reads[key] = (order, read(order, evaluator))
+        return reads[key][1]
+
+    return terminal
+
+
 class RequestProgressReviewRecord(StrictProtocolModel):
     schema_: Literal["umi-request-progress-review/1", "umi-request-progress-review/2"] = Field(
         alias="schema"
@@ -491,15 +509,11 @@ class NativeRequestProgressSource:
                 q.config.catalog_sha256: owner
                 for q, owner in zip(self.queues, self.services, strict=True)
             }
-            benchmark_reads, service_reads, paid_partials = {}, {}, {}
+            service_reads, paid_partials = {}, {}
             pending_partials = []
             admissions_locked = False
 
-            def benchmark_terminal(order, evaluator):
-                key = (digest(order), identity(evaluator))
-                if key not in benchmark_reads:
-                    benchmark_reads[key] = self.terminals(order, evaluator)
-                return benchmark_reads[key]
+            benchmark_terminal = _observation_terminal_reader(self.terminals)
 
             def service_terminal(assignment):
                 key = digest(assignment)

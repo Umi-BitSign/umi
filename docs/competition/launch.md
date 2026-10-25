@@ -75,6 +75,11 @@ because its implementation exists.
 
 ## Certification progress
 
+Request-phase observations share each exact order/evaluator terminal read within
+that observation, without serializing the order's complete round for a lookup.
+Later observations read terminals again so new arrivals remain visible. This
+local bookkeeping grants no proof, closure or certification authority.
+
 Model artifact acceptance runs continuously during intake, including while an
 operator holds automatic progression. Latest replacement submissions take
 priority over the ordinary export scan. Keep the upload, acceptance and reviewer
