@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
 import sys
@@ -105,6 +106,7 @@ class TransferProgress:
         planning_work_bytes=None,
         total_operations=None,
         planning_unit_seconds=(1.0, 300.0),
+        idle_stall_seconds=None,
     ):
         self.stage, self.total, self.report = stage, total, report
         self.unit = unit
@@ -116,6 +118,15 @@ class TransferProgress:
         self.completed_operations = self.native_operations = 0
         self.planning_work_bytes = planning_work_bytes
         self.planning_unit_seconds = planning_unit_seconds
+        if idle_stall_seconds is not None:
+            if (
+                isinstance(idle_stall_seconds, bool)
+                or not isinstance(idle_stall_seconds, (int, float))
+                or not math.isfinite(idle_stall_seconds)
+                or idle_stall_seconds <= 0
+            ):
+                raise ValueError("progress idle stall interval must be positive and finite")
+            self.stalled_seconds = idle_stall_seconds
         self.last_emit = 0.0
         self.token = None
         self.started = self.changed = self.rate_started = time.monotonic()
