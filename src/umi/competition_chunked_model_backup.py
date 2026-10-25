@@ -25,6 +25,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -55,6 +56,7 @@ from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, ModelBundle, digest, validate_bundle_policy
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
+from .r2_metadata_batch import R2MetadataBatchUnavailable
 from .r2_multipart import R2MultipartClient, pooled_r2_reads
 
 CHUNK_BYTES = 8 * 1024**2
@@ -336,26 +338,73 @@ class ChunkedModelBackupReader:
         with TransferProgress(stage, len(chunks), report, unit="objects") as progress:
             pending = iter(sorted(chunks.items()))
 
+            def consume(key, chunk, head):
+                if head is None:
+                    raise OSError("retained model chunk is unavailable")
+                if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
+                    progress.emit("repair_required", reason="chunked_model_generation_changed")
+                    raise ValueError("retained model chunk metadata differs")
+                value = ChunkedObjectGeneration(
+                    key=self._key(chunk), sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
+                )
+                if expected is not None and value != expected[key]:
+                    progress.emit("repair_required", reason="chunked_model_generation_changed")
+                    raise ValueError("retained model chunk generation changed")
+                values[key] = value
+                progress.advance(1)
+                if operation_progress is not None:
+                    operation_progress.advance_operations(1)
+
+            limit = getattr(self.multipart, "head_batch_limit", 0)
+            if limit:
+                if type(limit) is not int or not 1 <= limit <= 32:
+                    raise ValueError("chunked model metadata batch limit differs")
+                size = min(limit, self.metadata_workers)
+                batch_enabled = True
+                while True:
+                    group = tuple(islice(pending, size))
+                    if not group:
+                        break
+                    self._namespace()
+                    heads = None
+                    if batch_enabled:
+                        try:
+                            heads = await self.multipart.head_batch(
+                                tuple(self._key(c) for _, c in group)
+                            )
+                        except R2MetadataBatchUnavailable as error:
+                            # One failed proxy exchange per operation, rather than
+                            # repeating an auth/quota failure for every batch.
+                            batch_enabled = False
+                            progress.emit("retrying", reason=error.reason_code + "_fallback_s3")
+
+                    if heads is not None and any(value == 503 for value in heads.values()):
+                        batch_enabled = False
+
+                    async def one(key, chunk, batch_heads=heads):
+                        object_key = self._key(chunk)
+                        head = None if batch_heads is None else batch_heads[object_key]
+                        if batch_heads is None or head == 503:
+                            if head == 503:
+                                progress.emit("retrying", reason="r2_batch_item_fallback_s3")
+                            head = await self.multipart.head(object_key)
+                        consume(key, chunk, head)
+
+                    tasks = [asyncio.create_task(one(k, c)) for k, c in group]
+                    try:
+                        await asyncio.gather(*tasks)
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                return values
+
             async def worker():
                 for key, chunk in pending:
                     self._namespace()
-                    object_key = self._key(chunk)
-                    head = await self.multipart.head(object_key)
-                    if head is None:
-                        raise OSError("retained model chunk is unavailable")
-                    if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
-                        progress.emit("repair_required", reason="chunked_model_generation_changed")
-                        raise ValueError("retained model chunk metadata differs")
-                    value = ChunkedObjectGeneration(
-                        key=object_key, sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
-                    )
-                    if expected is not None and value != expected[key]:
-                        progress.emit("repair_required", reason="chunked_model_generation_changed")
-                        raise ValueError("retained model chunk generation changed")
-                    values[key] = value
-                    progress.advance(1)
-                    if operation_progress is not None:
-                        operation_progress.advance_operations(1)
+                    head = await self.multipart.head(self._key(chunk))
+                    consume(key, chunk, head)
 
             tasks = [
                 asyncio.create_task(worker())

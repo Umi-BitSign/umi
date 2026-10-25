@@ -126,6 +126,10 @@ After selected-roster certification completes, the current stage follows phase
 review and decision certification. Their waiting heartbeats and ETAs remain
 visible while unrelated uploads or exports run concurrently. R2 verification
 reports bytes and promotion copies report parts within their cohort's work.
+Native R2 readers may select the [authenticated metadata batch transport](../../deploy/public-model-artifacts/README.md#private-metadata-transport)
+without changing signed submissions, model identities, clocks or byte checkpoints.
+Keep historical credential exports for services that have not adopted the updated
+reader; opt in through a new private export and the supported cooperative updater.
 Intake counts cover latest accepted model submissions before registration
 filtering; selected-roster counts cover the native seal's actual selection.
 Percentages and ETAs apply to their stated stage, not the whole cohort.

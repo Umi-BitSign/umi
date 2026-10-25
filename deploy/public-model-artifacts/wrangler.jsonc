@@ -5,6 +5,10 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": false,
+  "vars": {
+    "METADATA_ENDPOINT": "https://91287420c3cb985d6d726f4ddd730b18.r2.cloudflarestorage.com",
+    "METADATA_BUCKET": "umi-model-artifacts"
+  },
   "routes": [
     {
       "pattern": "artifacts.umi.vision",

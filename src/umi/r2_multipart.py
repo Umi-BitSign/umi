@@ -17,6 +17,7 @@ import httpx
 from .competition_cohort_direct_model_upload import DirectModelUploadPart
 from .r2_connection_pool import R2ConnectionPool
 from .r2_limits import R2_MAXIMUM_PART_BYTES, R2_MAXIMUM_PARTS, R2_MINIMUM_PART_BYTES
+from .r2_metadata_batch import MAX_HEAD_KEYS, R2MetadataBatch
 from .r2_sigv4 import R2SigV4
 
 _MAXIMUM_RESPONSE_BYTES = 64 * 1024
@@ -86,6 +87,20 @@ class R2MultipartClient:
         self.transport = transport
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 15))
         self._connections = R2ConnectionPool(transport=transport, timeout=self.timeout)
+        self._metadata_batch = (
+            R2MetadataBatch(signer, self._connections)
+            if signer.credentials.metadata_batch_origin is not None
+            else None
+        )
+
+    @property
+    def head_batch_limit(self) -> int:
+        return MAX_HEAD_KEYS if self._metadata_batch is not None else 0
+
+    async def head_batch(self, keys: tuple[str, ...]):
+        if self._metadata_batch is None:
+            raise ValueError("R2 metadata batch is not configured")
+        return await self._metadata_batch.heads(keys)
 
     def connection_scope(self) -> AbstractAsyncContextManager[None]:
         """Reuse connections until all overlapping scopes and requests drain."""
