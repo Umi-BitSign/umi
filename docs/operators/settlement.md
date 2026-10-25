@@ -3308,26 +3308,37 @@ between consents. This refresh requirement remains while operators consume
 preflight observations produced by older owners; the signed originals and their
 journals require no migration.
 
-1. `POST /prepare` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
+1. `POST /prepare-reserved` accepts `ModelDeliveryAdoptionPrepare` with series, cohort and
    predecessor. The existing owner obtains native finalized height, authenticates
    both inventory files and verifies their R2 bytes with durable file checkpoints.
-   It compares the complete census against the original intake and upload journals.
-2. `POST /reserve` receives the exact `ModelDeliveryAdoptionProposal`. It repeats
-   the current census under intake then upload-journal locks, reserves the intake
+   After that one remote review, it obtains fresh owned finality and compares
+   the complete census under intake then upload-journal locks. It reserves the intake
    fence before releasing those locks, then reserves the same control transition.
    New uploads, participation, admission certificates, acceptance intents and
    acceptance certificates wait. Existing exact original retries retain their
-   bytes. A crash between reservations resumes the same intake pending transition.
-3. Each independent reviewer's `POST /vote` replays the native history and owned
+   bytes. The response is the existing `ModelDeliveryAdoptionProposal`. Repeating
+   the same request recovers the original pending transition, including a crash
+   between reservations, without another remote scan. Changed private candidates
+   or predecessors refuse. After commit, inspect the published history instead
+   of starting another preparation.
+2. Collect one representative per distinct evaluator control group required by
+   policy. Each selected reviewer's `POST /vote` replays the native history and owned
    finality, checks its privately selected metadata and R2 bytes, then obtains a
    fresh owner-signed `/reservation` challenge proof. That proof requires both
    exact reservations and rechecks the original census. The existing signer uses
    the same predecessor slot as closure and request-tail adoption, preventing
    conflicting votes. Byte verification and census expose progress and substage
    ETAs; interrupted byte review resumes successful file checkpoints.
-4. Assemble votes with `assemble_model_delivery_adoption`, then `POST /commit`
+3. Assemble votes with `assemble_model_delivery_adoption`, then `POST /commit`
    a `ModelDeliveryAdoptionCommit`. It verifies the original quorum and publishes
    through the ordinary history path. Retry the same bytes after interruption.
+
+Older supported owners and callers retain `/prepare` and `/reserve`. `/prepare`
+does not reserve; a separate first `/reserve` reviews its remote candidate again.
+Use the installed atomic route for automated transitions. Exact pending `/reserve`
+retries still reconcile the local dual census without a new remote review.
+Both forms preserve the original journals, signing slots, plans, clocks and holds;
+the operator credential and independent quorum remain required.
 
 An explicit authenticated operator call can initialize the original lifecycle
 owner while automatic progression is held; it does not tick a phase or remove

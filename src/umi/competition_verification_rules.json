@@ -1,7 +1,7 @@
 {
   "schema": "umi-native-verification-dependencies/1",
   "abi": "umi-native-request-verification/1",
-  "compatibility_basis": "Forward only cached bounded evaluator stage diagnostics over an authenticated read-only endpoint. Preserve signed cohort bytes, execution/export authority and the native verification ABI. Qualify older peers, restart epoch isolation, stale/failed diagnostics, request-stage admission, native lifecycle restart and public/miner compatibility; no polling-triggered native work.",
+  "compatibility_basis": "An explicit prepare-reserved owner operation reviews the selected remote inputs once, obtains fresh owned finality, and preserves the existing native intake/control reservation fences. Qualify old prepare/reserve contracts, lost responses, partial dual-owner recovery, restart, changed candidate refusal and native quorum/commit. Signed bytes and verification ABI are unchanged.",
   "sources": {
     "aggregate_json.py": "7bf1d296b863d6fc64edd2268dd3e2b6efd0ee27c4ef4815a587a8a70788295a",
     "anchors.py": "c0be8a0ef21afd5bfc2f2a8368ebb4beba63f005a7a153179880eeb94d7c47f2",
@@ -110,7 +110,7 @@
     "competition_cohort_model_acceptance_worker.py": "27137d89ad70bb7df2b0ac43244b7fc9ec6710ac3169ca132f0b0c1c1dd804ad",
     "competition_cohort_model_award.py": "36bfd53900852e44b33ef91b1d1dd5077d4b361c7c0df1c7dd8b721777632eec",
     "competition_cohort_model_client.py": "342e23fdab029b6b83e4f71ef11026e58b300c00de0de9b5730654f524463cca",
-    "competition_cohort_model_delivery_api.py": "6833bd45e4822c2805e3f4583f329db6e28194826378053b5b56f51d57857a66",
+    "competition_cohort_model_delivery_api.py": "f00cfc20c592bd62098dbebf60e7267fb4d85611e6ad22cb77702f620083eeba",
     "competition_cohort_model_delivery_candidate.py": "6b0b52d4b819e9da09ac7d583d2ca4a03db897650dd9e3829e9084961b7e14ce",
     "competition_cohort_model_delivery_census.py": "49af97e478995c8773d034317d3fb9fccb3b62bcf0ae15c4365a04295c6813fa",
     "competition_cohort_model_delivery_preflight.py": "db374659af65fea81ec9c6aaedee15a90f781a333bf6c38520ed53d29d975e71",
