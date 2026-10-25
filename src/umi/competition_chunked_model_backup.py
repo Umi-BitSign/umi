@@ -612,14 +612,22 @@ class ChunkedModelBackupReader:
                 saved = await stack.enter_async_context(
                     owned_byte_checkpoint(self._store(progress), progress)
                 )
-                self._migrate_remote_receipts(saved, heads, report=report)
-                import_completed_byte_facts(
-                    self,
-                    saved,
-                    heads,
-                    self.byte_store_imports,
-                    document_paths=document_paths,
-                    report=report,
+                # These bounded metadata passes can restore thousands of files
+                # without a network await. Keep the existing byte lease until
+                # their owned worker drains, including on cancellation.
+                await run_owned_thread(
+                    partial(self._migrate_remote_receipts, saved, heads, report=report)
+                )
+                await run_owned_thread(
+                    partial(
+                        import_completed_byte_facts,
+                        self,
+                        saved,
+                        heads,
+                        self.byte_store_imports,
+                        document_paths=document_paths,
+                        report=report,
+                    )
                 )
                 for record, item in zip(bundle.files, self.selection.package.files, strict=True):
                     async with owned_byte_checkpoint(

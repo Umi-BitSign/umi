@@ -100,3 +100,25 @@ async def test_unsafe_lock_is_refused_without_retry(tmp_path):
         async with owned_byte_checkpoint(ByteCheckpoints(root, {}, progress), progress):
             raise AssertionError("unsafe store was accepted")
     assert not any(r.get("reason_code") == "shared_byte_checkpoint_busy" for r in reports)
+
+
+async def test_cancellation_at_post_acquisition_yield_releases_the_exact_lease(tmp_path):
+    root = tmp_path / "store"
+
+    class CancelOnEnter(ByteCheckpoints):
+        def __enter__(self):
+            saved = super().__enter__()
+            asyncio.current_task().cancel()
+            return saved
+
+    with TransferProgress("test", 1) as progress:
+
+        async def consume():
+            async with owned_byte_checkpoint(CancelOnEnter(root, {}, progress), progress):
+                pytest.fail("cancelled acquisition entered its consumer")
+
+        task = asyncio.create_task(consume())
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with ByteCheckpoints(root, {}, progress):
+            pass

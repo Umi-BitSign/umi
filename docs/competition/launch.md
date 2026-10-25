@@ -88,6 +88,12 @@ Completed certificates and votes survive restart and are reused. Closure still
 uses the native finalized-registration filter and exact certificates; a last-minute
 upload or an unresolved review can leave unfinished work at closure.
 
+Restoring completed model-file byte checkpoints yields between files so cached
+progress and other service requests can run. Bulk receipt migration and byte-fact
+imports use owned metadata workers; cancellation drains them before releasing
+their original byte-store lease. These operations reuse successful byte verdicts
+without fetching or rehashing completed model payloads.
+
 Roster reviewers reuse their own committed admission verdicts for exact original
 participations. Unfinished records receive native proof review and an atomic
 checkpoint before their progress count advances. These private results bind the

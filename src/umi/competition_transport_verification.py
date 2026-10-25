@@ -502,6 +502,10 @@ async def owned_byte_checkpoint(context, progress):
             progress.emit("retrying", reason="shared_byte_checkpoint_busy")
             await asyncio.sleep(0.5)
     try:
+        # A restored file may perform no network await at all. Yield while its
+        # acquired lease is covered by cleanup, so a long run of completed files
+        # cannot monopolize the service loop or leak a lease on cancellation.
+        await asyncio.sleep(0)
         if waited:
             progress.emit("running", reason="shared_byte_checkpoint_acquired")
         yield value
