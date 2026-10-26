@@ -1837,9 +1837,9 @@ predecessor's. Omitted fields preserve the original canonical startup bytes.
 Keep the original host approval, state directories and journal identities;
 the separately signed adoption is selected by the root-owned startup configuration.
 `prepare_reward_adoption_boot_candidates` takes the canonical coordinator and
-writer boot bytes plus one quorum-signed initial adoption. It rejects divergent
-signed lineages and returns matching candidate boots without opening the package
-or changing either service. Retain the returned writer supplemental bytes as an
+writer boot bytes, all current reviewer boot bytes, and one quorum-signed initial
+adoption. It rejects divergent signed lineages and returns matching candidate
+boots without opening the package or changing any service. Retain the returned writer supplemental bytes as an
 exact root-owned `0444` control and pin their raw SHA-256 in the native writer
 broker. The cooperative service handoff still has to select both candidate
 boots and verify their running readers before a reward offer is unblocked.

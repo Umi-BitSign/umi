@@ -28,6 +28,7 @@ class RewardAdoptionBootCandidates:
     coordinator: bytes
     writer: bytes
     writer_supplemental: bytes
+    reviewers: tuple[bytes, ...] = ()
 
 
 def _candidate(original: bytes, selected: RewardAdoptionSelection, kind):
@@ -44,25 +45,41 @@ def prepare_reward_adoption_boot_candidates(
     coordinator_raw: bytes,
     writer_raw: bytes,
     signed: SignedRewardModelAdoption,
+    *,
+    reviewer_raws: tuple[bytes, ...] = (),
 ) -> RewardAdoptionBootCandidates:
-    """Extend both original boots with the same authenticated initial adoption.
+    """Extend all native reward boots with one authenticated initial adoption.
 
     Inputs are compact native boot metadata. No package object, model payload,
     journal, key, RPC endpoint or installed service is opened here.
     """
     coordinator = RewardCoordinatorConfig.model_validate_json(coordinator_raw)
     writer = StandingRewardBootConfig.model_validate_json(writer_raw)
+    reviewers = tuple(RewardCoordinatorConfig.model_validate_json(raw) for raw in reviewer_raws)
     if (
         canonical_json_bytes(coordinator) != coordinator_raw
         or canonical_json_bytes(writer) != writer_raw
+        or any(
+            canonical_json_bytes(value) != raw
+            for value, raw in zip(reviewers, reviewer_raws, strict=True)
+        )
     ):
         raise ValueError("reward handoff requires canonical installed boot bytes")
     if (
-        coordinator.series != writer.series
+        coordinator.role != "coordinator"
+        or coordinator.series != writer.series
         or coordinator.policy != writer.policy
         or coordinator.reward_adoptions != writer.reward_adoptions
     ):
         raise ValueError("coordinator and writer disagree on signed reward lineage")
+    if any(
+        reviewer.role != "reviewer"
+        or reviewer.series != coordinator.series
+        or reviewer.policy != coordinator.policy
+        or reviewer.reward_adoptions != coordinator.reward_adoptions
+        for reviewer in reviewers
+    ):
+        raise ValueError("reviewer disagrees on signed reward lineage")
     selected = select_signed_initial_reward_adoption(
         coordinator.reward_adoptions,
         signed,
@@ -74,4 +91,7 @@ def prepare_reward_adoption_boot_candidates(
         coordinator=_candidate(coordinator_raw, selected, RewardCoordinatorConfig),
         writer=_candidate(writer_raw, selected, StandingRewardBootConfig),
         writer_supplemental=canonical_json_bytes(selected),
+        reviewers=tuple(
+            _candidate(raw, selected, RewardCoordinatorConfig) for raw in reviewer_raws
+        ),
     )

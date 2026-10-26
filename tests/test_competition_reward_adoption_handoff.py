@@ -23,6 +23,7 @@ from .test_competition_reward_decisions import control as control
 from .test_competition_reward_decisions import policy as policy
 from .test_competition_reward_decisions import series_case as series_case
 from .test_competition_reward_decisions import signatures
+from .test_open_competition import wallet
 
 
 @pytest.fixture
@@ -71,9 +72,7 @@ def test_candidate_handoff_changes_only_reward_selection_and_repeats_exactly(han
             "reward_adoptions"
         }
         assert kind.model_validate_json(candidate).reward_adoptions == staged.selection
-    repeated = prepare_reward_adoption_boot_candidates(
-        staged.coordinator, staged.writer, signed
-    )
+    repeated = prepare_reward_adoption_boot_candidates(staged.coordinator, staged.writer, signed)
     assert repeated == staged
 
 
@@ -97,3 +96,50 @@ def test_candidate_handoff_refuses_noncanonical_input(handoff):
     coordinator, writer, signed = handoff
     with pytest.raises(ValueError, match="canonical installed boot"):
         prepare_reward_adoption_boot_candidates(b" " + coordinator, writer, signed)
+
+
+def test_candidate_handoff_selects_matching_reviewer_and_refuses_split_lineage(handoff):
+    coordinator, writer, signed = handoff
+    original = json.loads(coordinator)
+    reviewer = RewardCoordinatorConfig.model_validate_json(
+        canonical_json_bytes(
+            original
+            | {
+                "role": "reviewer",
+                "signer_hotkey": wallet("Dave").hotkey.ss58_address,
+                "signer_key_file": original["signer_key_file"] + "-reviewer",
+                "control_key_file": None,
+                "readback_directory": None,
+                "settlement_directory": None,
+                "state_directory": original["state_directory"] + "-reviewer",
+                "exchange_inbox": original["exchange_inbox"] + "-reviewer",
+                "exchange_outbox": original["exchange_outbox"] + "-reviewer",
+            }
+        )
+    )
+    reviewer_raw = canonical_json_bytes(reviewer)
+    staged = prepare_reward_adoption_boot_candidates(
+        coordinator, writer, signed, reviewer_raws=(reviewer_raw,)
+    )
+    assert len(staged.reviewers) == 1
+    assert (
+        RewardCoordinatorConfig.model_validate_json(staged.reviewers[0]).reward_adoptions
+        == staged.selection
+    )
+    assert (
+        prepare_reward_adoption_boot_candidates(
+            staged.coordinator,
+            staged.writer,
+            signed,
+            reviewer_raws=staged.reviewers,
+        )
+        == staged
+    )
+    with pytest.raises(ValueError, match="reviewer disagrees"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator, writer, signed, reviewer_raws=staged.reviewers
+        )
+    with pytest.raises(ValueError, match="canonical installed boot"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator, writer, signed, reviewer_raws=(b" " + reviewer_raw,)
+        )
