@@ -160,6 +160,7 @@ def test_reference_publisher_candidate_follows_the_same_signed_selection(handoff
         signed,
         reference_publisher_config_raw=reference,
         reference_current_boot_raw=coordinator,
+        reference_current_boot_path=installed.config.coordinator_config,
         coordinator_candidate_path=target,
     )
     assert REFERENCE_PUBLISHER_CONFIG_MODE == 0o600
@@ -179,6 +180,7 @@ def test_reference_publisher_candidate_follows_the_same_signed_selection(handoff
             signed,
             reference_publisher_config_raw=staged.reference_publisher_config,
             reference_current_boot_raw=staged.coordinator,
+            reference_current_boot_path=target,
             coordinator_candidate_path=target,
         )
         == staged
@@ -197,6 +199,7 @@ def test_reference_publisher_candidate_refuses_split_lineage(handoff, installed)
             signed,
             reference_publisher_config_raw=reference,
             reference_current_boot_raw=staged.coordinator,
+            reference_current_boot_path=installed.config.coordinator_config,
             coordinator_candidate_path=target,
         )
     with pytest.raises(ValueError, match="absolute boot path"):
@@ -206,5 +209,16 @@ def test_reference_publisher_candidate_refuses_split_lineage(handoff, installed)
             signed,
             reference_publisher_config_raw=reference,
             reference_current_boot_raw=coordinator,
+            reference_current_boot_path=installed.config.coordinator_config,
             coordinator_candidate_path="relative.json",
+        )
+    with pytest.raises(ValueError, match="current boot path differs"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator,
+            writer,
+            signed,
+            reference_publisher_config_raw=reference,
+            reference_current_boot_raw=coordinator,
+            reference_current_boot_path="/var/lib/unrelated.json",
+            coordinator_candidate_path=target,
         )

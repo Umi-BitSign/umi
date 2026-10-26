@@ -54,14 +54,15 @@ def prepare_reward_adoption_boot_candidates(
     reviewer_raws: tuple[bytes, ...] = (),
     reference_publisher_config_raw: bytes | None = None,
     reference_current_boot_raw: bytes | None = None,
+    reference_current_boot_path: str | None = None,
     coordinator_candidate_path: str | None = None,
 ) -> RewardAdoptionBootCandidates:
     """Extend native reward boots and optional publisher pointer with one adoption.
 
     Inputs are compact native boot metadata. No package object, model payload,
     journal, key, RPC endpoint or installed service is opened here. The caller
-    supplies publisher boot bytes from its configured current path and must
-    install the candidate before restarting the publisher.
+    supplies publisher boot bytes from its configured current path, names that
+    exact path, and must install the candidate before restarting the publisher.
     """
     coordinator = RewardCoordinatorConfig.model_validate_json(coordinator_raw)
     writer = StandingRewardBootConfig.model_validate_json(writer_raw)
@@ -96,12 +97,14 @@ def prepare_reward_adoption_boot_candidates(
         for value in (
             reference_publisher_config_raw,
             reference_current_boot_raw,
+            reference_current_boot_path,
             coordinator_candidate_path,
         )
     ):
         if (
             reference_publisher_config_raw is None
             or reference_current_boot_raw is None
+            or reference_current_boot_path is None
             or coordinator_candidate_path is None
         ):
             raise ValueError(
@@ -124,6 +127,8 @@ def prepare_reward_adoption_boot_candidates(
             or current_reference.reward_adoptions != coordinator.reward_adoptions
         ):
             raise ValueError("reference publisher disagrees on signed reward lineage")
+        if reference_config.coordinator_config != reference_current_boot_path:
+            raise ValueError("reference publisher current boot path differs from config")
         if not Path(coordinator_candidate_path).is_absolute():
             raise ValueError("reference publisher target must be an absolute boot path")
     selected = select_signed_initial_reward_adoption(
