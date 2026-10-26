@@ -248,6 +248,31 @@ def test_expired_horizon_cli_reports_only_safe_numeric_diagnostics(
     assert record["selected_horizon"] == 9317800 and record["current_block"] == 9327218
 
 
+def test_reference_observer_failure_reports_redacted_cause(
+    installed, tmp_path, monkeypatch, capsys
+):
+    from umi import translation_reference_cli as cli
+
+    async def observer_stopped(_config):
+        cause = RuntimeError("private provider URL and token must stay hidden")
+        cause.reason_code = "proof_rpc_rate_limited"
+        raise RuntimeError("owned_finality_observer_stopped") from cause
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", observer_stopped)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    output = capsys.readouterr().out
+    record = json.loads(output)
+    assert record["error_chain"] == [
+        {"error_type": "RuntimeError", "reason_code": "owned_finality_observer_stopped"},
+        {"error_type": "RuntimeError", "reason_code": "proof_rpc_rate_limited"},
+    ]
+    assert "private provider URL" not in output and "token" not in output
+
+
 def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):
     source = tmp_path / "signed.json"
     source.write_bytes(b"signed original")

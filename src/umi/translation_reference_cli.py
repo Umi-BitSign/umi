@@ -18,6 +18,36 @@ from .translation_reference_config import (
     selected_inputs,
 )
 
+_SAFE_RUNTIME_ERRORS = frozenset(
+    {"owned_finality_observer_stopped", "owned_finality_provider_closed"}
+)
+_SAFE_CAUSE_REASONS = frozenset(
+    {"proof_rpc_rate_limited", "proof_rpc_failed", "proof_rpc_error", "validation_failed"}
+)
+
+
+def _redacted_error_chain(error):
+    """Retain typed observer failures without printing RPC URLs or exception text."""
+    result = []
+    seen = set()
+    current = error
+    while current is not None and len(result) < 4 and id(current) not in seen:
+        seen.add(id(current))
+        item = {"error_type": type(current).__name__}
+        reason = getattr(current, "reason_code", None)
+        if isinstance(reason, str) and reason in _SAFE_CAUSE_REASONS:
+            item["reason_code"] = reason
+        elif (
+            isinstance(current, RuntimeError)
+            and len(current.args) == 1
+            and isinstance(current.args[0], str)
+            and current.args[0] in _SAFE_RUNTIME_ERRORS
+        ):
+            item["reason_code"] = current.args[0]
+        result.append(item)
+        current = current.__cause__
+    return result
+
 
 def report(value):
     print(
@@ -99,6 +129,7 @@ def main(argv=None):
                 eta_seconds=None,
                 eta_basis="repair required; completion is not forecast",
                 recovery="restore_original_inputs_or_supported_configuration_no_reset",
+                error_chain=_redacted_error_chain(error),
                 **(
                     dict(
                         reason_code="reference_directive_horizon_expired",
