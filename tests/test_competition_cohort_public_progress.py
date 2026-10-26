@@ -176,6 +176,41 @@ def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch, stage
     assert result["components"]["intake_certification"]["completed"] == 54
 
 
+def test_active_verification_overrides_certificate_idle_stall():
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=77,
+            total=82,
+            blocked_count=0,
+            repair_required=False,
+            stalled_or_retrying=True,
+            eta_basis="certificate_completion_idle",
+        ),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="remote_model_verification",
+            state="running",
+            completed=3,
+            total=4,
+            percent=75,
+            stalled_or_retrying=False,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "remote_model_verification"
+    assert result["percent"] == 75
+    assert result["stalled_or_retrying"] is False
+    assert result["components"]["intake_certification"]["completed"] == 77
+
+
 def test_stale_intake_count_uses_live_acceptance_only_until_work_refreshes(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])

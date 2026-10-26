@@ -255,9 +255,17 @@ class CohortProgressSnapshots:
                         selected = certification
                         stage = "model_certification"
                     break
-            if stage == "model_certification" and selected.get("stale"):
-                # An old roster meter must not hide a live acceptance attempt.
-                # Keep its last count in components until its owner refreshes it.
+            if stage == "model_certification" and (
+                selected.get("stale")
+                or (
+                    selected.get("stalled_or_retrying")
+                    and not selected.get("blocked_count")
+                    and not selected.get("repair_required")
+                )
+            ):
+                # A roster meter can lack new certificates while the owner is
+                # actively verifying the next model. Show that live work and
+                # keep the certificate count in components.
                 work = parts.get("work")
                 live_work = (
                     work is not None
