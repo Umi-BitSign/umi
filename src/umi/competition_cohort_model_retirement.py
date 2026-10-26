@@ -327,7 +327,18 @@ class ModelUploadRetirement:
             )
         raw = _preserved_verification_record(bundle, self.uploads.archive)
         if not _has_preserved_verification(bundle, self.uploads.archive, raw):
-            raise OSError("local archive verification requires explicit repair before retirement")
+            receipt = self.uploads.archive / (".verified-" + model + ".json")
+            if os.path.lexists(receipt):
+                # A retained but mismatched receipt signals changed or damaged
+                # local content. Never turn that into an ordinary cache miss.
+                raise OSError(
+                    "local archive verification requires explicit repair before retirement"
+                )
+            # No local receipt is needed to discard this scoped archive. The
+            # caller already holds current consumer-release declarations and
+            # authenticated remote ownership for every original request; the
+            # manifest/tree check above and the identities below fence unlink.
+            # Avoid hashing local bytes solely to delete their last copy.
         if list((stage / "model").iterdir()) or any(stage.glob("partial-*")):
             raise OSError("retirement waits for native completed staging release")
         root = self.uploads.archive / model / "model"

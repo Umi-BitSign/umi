@@ -1398,6 +1398,14 @@ its private receipt. Source schema 2 also requires benchmark materialization on
 a bounded filesystem whose device differs from every configured protected root;
 put that workspace on a dedicated mounted volume before starting the service.
 
+For legacy local model cleanup, the intake owner first requires authenticated
+remote payload ownership for every original request and current release from
+every configured model consumer. It then fences the exact signed local archive
+tree and journals each unlink. An absent local archive verification receipt does
+not cause a second payload hash pass solely to delete those bytes; a present but
+mismatched receipt still requires explicit repair. Signed manifests, requests,
+admissions, journals and remote objects remain retained.
+
 Schema versions 3 and 4 are the standing-series successors of versions 1 and 2.
 They include the immediate predecessor series, opportunity manifest and
 eligibility runtime selected by the signed boundary. Every coordinator and
@@ -3372,6 +3380,9 @@ batch when contention clears. Native signatures, indexes and current intake
 history are checked; sealing still verifies the complete inventory and current
 registration. Restart gives current candidates a turn immediately while retained
 admission blocks, completion ordinals and signed records remain intact.
+Direct R2 promotion copies independent parts in bounded waves of at most four,
+also capped by the signed delivery profile. The owner drains a failed wave before
+aborting the multipart upload and still verifies the new preserved object.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture

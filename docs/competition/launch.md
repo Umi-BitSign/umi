@@ -174,6 +174,9 @@ After selected-roster certification completes, the current stage follows phase
 review and decision certification. Their waiting heartbeats and ETAs remain
 visible while unrelated uploads or exports run concurrently. R2 verification
 reports bytes and promotion copies report parts within their cohort's work.
+The owner copies up to four independent R2 parts at once, bounded by the signed
+delivery profile. It completes parts in their original order and verifies the
+new preserved object before recording promotion.
 Native R2 readers may select the [authenticated metadata batch transport](../../deploy/public-model-artifacts/README.md#private-metadata-transport)
 without changing signed submissions, model identities, clocks or byte checkpoints.
 Individual R2 HEAD/GET requests retry transient connection failures and temporary

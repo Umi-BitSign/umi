@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from umi.competition_cohort_direct_model_owner import (
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
     DirectModelUploadPending,
+    _copy_promotion_parts,
 )
 from umi.competition_cohort_direct_model_upload import (
     DirectModelPayload,
@@ -760,6 +762,117 @@ async def test_promotion_verifies_canonical_copy_before_resumable_staging_cleanu
     direct.multipart.objects[preserved_key] = (payload.total_bytes, "replacement-etag")
     with pytest.raises(ValueError, match="changed after promotion"):
         await direct.owner.promote(publication, now_unix_ms=1_800_000_015_000)
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_bounds_parallel_parts_and_preserves_completion_order(
+    receipt_scenario,
+):
+    class MultipartCopy:
+        active = peak = 0
+
+        async def copy_part(self, _, *, part_number, size_bytes, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0.002 * (5 - (part_number % 4)))
+                return DirectModelUploadPart(
+                    part_number=part_number,
+                    size_bytes=size_bytes,
+                    etag=f"{part_number:032x}",
+                )
+            finally:
+                self.active -= 1
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    size = 5 * 1024**2
+    multipart, progress = MultipartCopy(), Progress()
+    payload = SimpleNamespace(total_parts=9, part_size_bytes=size, total_bytes=9 * size)
+    parts = await _copy_promotion_parts(
+        multipart, "preserved", "staging", "upload", payload, 4, progress
+    )
+
+    assert multipart.peak == 4 and multipart.active == 0
+    assert [part.part_number for part in parts] == list(range(1, 10))
+    assert progress.completed == len(parts) == 9
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_drains_failed_wave_before_aborting(receipt_scenario):
+    class MultipartCopy:
+        def __init__(self):
+            self.active = 0
+            self.started = []
+
+        async def copy_part(self, _, *, part_number, size_bytes, **kwargs):
+            self.active += 1
+            self.started.append(part_number)
+            try:
+                await asyncio.sleep(0.01 if part_number != 2 else 0.001)
+                if part_number == 2:
+                    raise OSError("copy failed")
+                return DirectModelUploadPart(
+                    part_number=part_number,
+                    size_bytes=size_bytes,
+                    etag=f"{part_number:032x}",
+                )
+            finally:
+                self.active -= 1
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    size = 5 * 1024**2
+    multipart, progress = MultipartCopy(), Progress()
+    payload = SimpleNamespace(total_parts=8, part_size_bytes=size, total_bytes=8 * size)
+    with pytest.raises(OSError, match="copy failed"):
+        await _copy_promotion_parts(
+            multipart, "preserved", "staging", "upload", payload, 4, progress
+        )
+    assert multipart.active == 0
+    assert multipart.started == [1, 2, 3, 4]
+    assert progress.completed == 3
+
+
+@pytest.mark.asyncio
+async def test_promotion_copy_failure_aborts_and_retries_original_source(direct, monkeypatch):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+    completed = await direct.owner.complete(
+        signed_completion(reservation, direct.payload.payload),
+        now_unix_ms=1_800_000_010_000,
+    )
+    await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
+    publication = promotion_publication(direct, reservation)
+    source_key = direct.owner.journal.get("direct-intent", reservation.reservation.attempt_id)[
+        "object_key"
+    ]
+    original = direct.multipart.copy_part
+    completed_uploads = len(direct.multipart.complete_calls)
+
+    async def failed_copy(*args, **kwargs):
+        raise OSError("part copy unavailable")
+
+    monkeypatch.setattr(direct.multipart, "copy_part", failed_copy)
+    with pytest.raises(OSError, match="part copy unavailable"):
+        await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
+    assert len(direct.multipart.abort_calls) == 1
+    assert len(direct.multipart.complete_calls) == completed_uploads
+    assert source_key in direct.multipart.objects
+
+    monkeypatch.setattr(direct.multipart, "copy_part", original)
+    receipt = await direct.owner.promote(publication, now_unix_ms=1_800_000_013_000)
+    assert receipt.model_sha256 == direct.payload.payload.model_sha256
+    assert len(direct.multipart.abort_calls) == 1
 
 
 @pytest.mark.asyncio

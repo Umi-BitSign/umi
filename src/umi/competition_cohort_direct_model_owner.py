@@ -188,6 +188,61 @@ def _at(unix_ms: int) -> datetime:
     return datetime.fromtimestamp(unix_ms / 1000, tz=timezone.utc)
 
 
+async def _copy_promotion_parts(
+    multipart,
+    destination_key,
+    source_key,
+    upload_id,
+    payload,
+    copy_width,
+    progress,
+) -> tuple[DirectModelUploadPart, ...]:
+    """Copy independent R2 parts in bounded waves, then return provider order."""
+
+    if type(copy_width) is not int or not 1 <= copy_width <= 4:
+        raise ValueError("direct model promotion copy width differs")
+    parts = []
+    offset = 0
+
+    async def copy_one(part_number, part_offset, part_size):
+        part = await multipart.copy_part(
+            destination_key,
+            source_key=source_key,
+            upload_id=upload_id,
+            part_number=part_number,
+            offset=part_offset,
+            size_bytes=part_size,
+            source_size_bytes=payload.total_bytes,
+        )
+        if (
+            not isinstance(part, DirectModelUploadPart)
+            or part.part_number != part_number
+            or part.size_bytes != part_size
+        ):
+            raise ValueError("direct model promotion part differs")
+        progress.advance()
+        return part
+
+    for first in range(1, payload.total_parts + 1, copy_width):
+        requests = []
+        for part_number in range(first, min(first + copy_width, payload.total_parts + 1)):
+            size = min(payload.part_size_bytes, payload.total_bytes - offset)
+            requests.append((part_number, offset, size))
+            offset += size
+        # Preserve ownership until all in-flight requests settle. A failed
+        # request then leaves no local task racing the caller's multipart abort.
+        copied = await asyncio.gather(
+            *(copy_one(*request) for request in requests), return_exceptions=True
+        )
+        for result in copied:
+            if isinstance(result, BaseException):
+                raise result
+            parts.append(result)
+    if offset != payload.total_bytes:
+        raise ValueError("direct model promotion part geometry differs")
+    return tuple(parts)
+
+
 class DirectModelUploadOwner:
     """Single-service owner for retained direct R2 multipart attempts."""
 
@@ -1238,33 +1293,28 @@ class DirectModelUploadOwner:
             if preserved_head is None:
                 upload_id = await self.multipart.create(preserved_key)
                 try:
-                    parts: list[DirectModelUploadPart] = []
-                    offset = 0
+                    # S3 multipart parts are independent. Bound server-side copy
+                    # concurrency by the signed delivery profile, then submit
+                    # the returned parts in their original order. Each batch
+                    # drains before failure handling aborts the upload.
+                    copy_width = min(4, self.config.delivery.maximum_concurrent_parts)
                     with WorkProgress(
                         "model_promotion_copy",
                         payload.total_parts,
                         unit="parts",
                         cohort=acceptance.cohort_sha256,
                     ) as progress:
-                        for part_number in range(1, payload.total_parts + 1):
-                            size = min(payload.part_size_bytes, payload.total_bytes - offset)
-                            parts.append(
-                                await self.multipart.copy_part(
-                                    preserved_key,
-                                    source_key=source_key,
-                                    upload_id=upload_id,
-                                    part_number=part_number,
-                                    offset=offset,
-                                    size_bytes=size,
-                                    source_size_bytes=payload.total_bytes,
-                                )
-                            )
-                            offset += size
-                            progress.advance()
-                    if offset != payload.total_bytes:
-                        raise ValueError("direct model promotion part geometry differs")
+                        parts = await _copy_promotion_parts(
+                            self.multipart,
+                            preserved_key,
+                            source_key,
+                            upload_id,
+                            payload,
+                            copy_width,
+                            progress,
+                        )
                     provider_etag = await self.multipart.complete(
-                        preserved_key, upload_id=upload_id, parts=tuple(parts)
+                        preserved_key, upload_id=upload_id, parts=parts
                     )
                 except BaseException:
                     with suppress(OSError, ValueError):
