@@ -794,8 +794,9 @@ async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
 
     monkeypatch.setattr(h.reader, "_save_fields", assert_reclaimed)
     result = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
-    assert result.next_block == h.reader.first_block + 2
-    assert captures == [h.reader.first_block + 1]
+    # Restoring the constant-sized ordered fold consumes no new-block budget.
+    assert result.next_block == h.reader.first_block + 3
+    assert captures == [h.reader.first_block + 1, h.reader.first_block + 2]
     assert h.reader.checkpoints.load(h.reader.first_block) == original
     assert h.reader.checkpoints.load(h.reader.first_block + 1) is not None
 

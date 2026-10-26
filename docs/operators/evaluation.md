@@ -408,10 +408,48 @@ the series. Both roles capture native history and reward opportunity evidence
 while evaluation continues, so peer review does not wait to begin its history
 scan until the first vote request. The reviewer never loads the control
 transaction key. A separate history preparation process must release its service
-lock before the ordinary service starts; restart still requires native replay
-of retained proof bytes. Completing a separate full scan first does not remove
-that replay cost. History preparation alone cannot certify an allocation or
-activate reward weights.
+lock before the ordinary service starts. The native owner retains successful
+block checkpoints and the already applied ordered history fold in the original
+journal. Restart restores that fold with fresh owned tip finality; unchanged
+blocks do not repeat proof replay or per-block source reconstruction. Sparse
+anchors preserve older history prefixes with at most 63 metadata records. A first
+upgrade from per-block-only results builds the fold once during normal bounded
+restoration. Changed sources, damaged records or changed verification semantics
+require explicit scoped repair; they never silently fall back to a full replay.
+Exact source publication to R2 preserves the original identities and the fold.
+The writer, coordinator and supported read-only history consumers share this
+reader. Preserve their original journal and supported automatic update path;
+installing source alone does not establish deployment. History preparation
+alone cannot certify an allocation or activate reward weights.
+
+For an explicitly selected writable `umi-r2-proof-archive/2` export store,
+`archive_backfill_batch_frames` enables the owner's bounded background delivery
+cursor. Existing local frames keep their exact decoder-valid recipe and chunk
+encoding; new destinations can copy the checkpoint-bound compact sources.
+Completed object/frame receipts and each completed height survive interruption,
+without another native proof check. The cursor also handles a completed initial
+admission interval without manufacturing per-block verdicts. Delivery status,
+counted progress and its scoped ETA appear under `archive_delivery`; capture,
+verification and ordered application remain separate. Delivery errors retain
+that cursor and withdraw its ETA while native history continues.
+
+`archive_release_batch_files` separately selects bounded local release and
+requires `archive_release_consumer_abi: umi-proof-read-release-lease/1` plus the
+backfill cursor. Select that ABI only after checking the actual writer,
+coordinator, reviewers, recovery readers and rollback selection all use the
+supported R2 readers and read/release leases. An old process is not covered by a
+new package on disk. The default is no online eviction. An active local reader
+defers cleanup; each unlink has a durable exact-file intent, directory fsync and
+completion, so restart credits its allocated bytes once. Shared objects can be
+released after their own immutable R2 completion because selected readers prefer
+that remote generation. Unknown files, private journals, provenance, signed
+inputs and `.remote-state` remain intact. Preserve index capacity for the durable
+cursor and per-file records; capacity or changed-source failures require the
+reported repair rather than deleting metadata. Upgrade the selected supported
+hosts before adopting these optional fields; original configurations serialize
+without them and keep their signed bytes. Do not restart an active old owner
+merely to install this optimization before its current activation work finishes.
+
 
 Historical ancestry recovery verifies bounded batches. When a batch retains
 verified links but has not reached its fixed target, the ordinary coordinator

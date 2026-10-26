@@ -18,7 +18,7 @@ import hashlib
 import secrets
 import sqlite3
 import time
-from contextlib import suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -55,12 +55,19 @@ from .competition_reward_control_writes import (
     capture_control_writes,
     validate_control_writes,
 )
+from .competition_reward_history_archive_backfill import HistoryArchiveBackfill
 from .competition_reward_history_checkpoint import (
     SOURCE_KINDS,
     HistoryCheckpointRepairRequired,
     HistoryCheckpoints,
 )
 from .competition_reward_history_export import export_completed_checkpoint
+from .competition_reward_history_frontier import (
+    ANCHOR_INTERVAL,
+    FoldedHistoryFrontier,
+    folded_checkpoint,
+    remember_export_range,
+)
 from .competition_reward_history_parallel import advance_parallel_locked
 from .competition_reward_history_progress import HistoryProgress
 from .competition_reward_history_workers import HistoryVerificationProfile
@@ -273,13 +280,14 @@ class RewardControlHistoryReader:
         )
         self.checkpoints = HistoryCheckpoints(self.journal, binding)
         self.completed_admission = CompletedAdmissionCheckpoint(self.checkpoints)
+        self.folded_frontier = FoldedHistoryFrontier(self.checkpoints)
         self.remote_sources = JournalSourceExternalizer(
             self.journal,
             self.checkpoints,
             self.remote_store,
             source_kinds=SOURCE_KINDS,
             repair_error=HistoryCheckpointRepairRequired,
-            source_release_guard=self.completed_admission.preserve_source_release,
+            source_release_guard=self._preserve_source_release,
         )
         self.checkpoints.remote_sources = self.remote_sources
         self._source_tokens = {}
@@ -300,8 +308,31 @@ class RewardControlHistoryReader:
         # Only entries verified or restored by this owner enter this index. Keep a tip,
         # proof digest and list lengths, not a copy of the growing write list.
         self._prefixes: dict[int, tuple[FinalizedSnapshotRef, str, int, int]] = {}
+        self._folded_tip = None
+        self._pending_folded_anchors = {}
+        self._folded_restored = False
+        self._folded_durable_through = first_block - 1
+        self._folded_origin_seals = {}
+        self._folded_export_identity = None
+        self._folded_export_ranges = {}
+        self._archive_backfill = None
+        self._archive_export_progress_next = first_block
+
+    @contextmanager
+    def _preserve_source_release(self, db):
+        with ExitStack() as stack:
+            admission = stack.enter_context(self.completed_admission.preserve_source_release(db))
+            folded = stack.enter_context(self.folded_frontier.preserve_source_release(db))
+            yield admission + folded
 
     def _prefix(self, height: int) -> OwnedRewardControlHistory:
+        if (
+            height not in self._prefixes
+            and self._folded_restored
+            and self._folded_tip is not None
+            and self.progress.completed_admission_through < height < self._next
+        ):
+            self._restore_sparse_prefix(height)
         saved = self._prefixes.get(height)
         if saved is None:
             raise ValueError("control history prefix has not been natively verified")
@@ -760,6 +791,7 @@ class RewardControlHistoryReader:
                 return ControlHistoryProgress(self._next, through_block, history)
             with self.journal.locked():
                 await self._restore_completed_admission(provider, through_block)
+                await self._restore_folded_frontier(provider, through_block)
                 release_batch = (
                     self.remote_store.config.source_release_batch_records
                     if self.remote_store is not None and not self.journal.read_only
@@ -781,6 +813,7 @@ class RewardControlHistoryReader:
                     await advance_parallel_locked(self, provider, last)
                 else:
                     await self._advance_capture_locked(provider, last, stop=self.shutdown_event)
+                await run_owned_thread(self.folded_frontier.remember, self)
                 history = None
                 if self._next == through_block + 1:
                     history = self._prefix(through_block)
@@ -827,6 +860,114 @@ class RewardControlHistoryReader:
         self.progress.completed_admission_through = boundary
         self.progress.report(self, "running", force=True)
 
+    def _restore_sparse_prefix(self, height):
+        loaded = self.folded_frontier.load(height)
+        if loaded is None or loaded[1] is None:
+            raise HistoryCheckpointRepairRequired("folded history prefix anchor is missing")
+        value, prefix, state, _ = loaded
+        first = prefix["snapshot"]["block_number"] + 1
+        if height - first >= ANCHOR_INTERVAL:
+            raise HistoryCheckpointRepairRequired("folded history prefix anchor has a gap")
+        values = self.checkpoints.load_many(first, height) if first <= height else []
+        if len(values) != max(0, height - first + 1):
+            raise HistoryCheckpointRepairRequired("folded history prefix tail is missing")
+        for item in values:
+            prefix = folded_checkpoint(prefix, item)
+        self.folded_frontier.recheck(state, value["remote"], value["origin_seals"])
+        self._prefixes[height] = (
+            FinalizedSnapshotRef(**prefix["snapshot"]),
+            prefix["evidence"],
+            prefix["writes"],
+            prefix["unresolved"],
+        )
+
+    async def _restore_folded_frontier(self, provider, target):
+        if self._repair_reason or (
+            self._folded_restored
+            and (target < self._next or self._folded_durable_through < self._next)
+        ):
+            return
+        prior_stage, prior_preparation = self.progress.stage, self.progress.preparation
+        self.progress.preparation_start(
+            "checkpoint_folded_frontier_loading", self._next, "restore_owned_ordered_fold"
+        )
+        loaded = await run_owned_thread(self.folded_frontier.load, target)
+        if loaded is None:
+            self.progress.stage, self.progress.preparation = prior_stage, prior_preparation
+            self._folded_restored = True
+            return
+        value, prefix, state, checkpoint_tip = loaded
+        self._folded_durable_through = state[2]
+        if prefix is None:
+            if target > self.progress.completed_admission_through:
+                raise HistoryCheckpointRepairRequired("folded history prefix anchor is missing")
+            # The exact aggregate-admission boundary was just restored through
+            # its own native owner. It has no per-block tail anchor. Retain the
+            # later folded frontier for a subsequent larger requested scope.
+            await run_owned_thread(
+                self.folded_frontier.recheck, state, value["remote"], value["origin_seals"]
+            )
+            self._folded_export_ranges = value["export_ranges"]
+            self._folded_origin_seals = value["origin_seals"]
+            self.progress.restore_folded_inventory(self, state[2], self._folded_export_ranges)
+            self.progress.stage, self.progress.preparation = prior_stage, prior_preparation
+            self._folded_restored = True
+            return
+        export_identity = None if self.export_archive is None else self._export_identity()
+        self._folded_export_identity = value["export_identity"]
+        if self.export_archive is not None and (
+            value["export_identity"] != export_identity or export_identity is None
+        ):
+            total = value["tip"]["snapshot"]["block_number"] - self.first_block + 1
+            self.progress.archive_delivery = dict(
+                stage="history_archive_delivery_migration",
+                state="pending",
+                source_export_identity=value["export_identity"],
+                destination_export_identity=export_identity,
+                first_block=self.first_block,
+                through_block=self.first_block + total - 1,
+                completed_blocks=0,
+                total_blocks=total,
+                percent=0,
+                elapsed_seconds=0,
+                eta_seconds=None,
+                planning_eta_seconds=[total / 100, total],
+                eta_basis="planning_delivery_only_1_to_100_frames_per_second_unmeasured",
+                stalled=False,
+                retrying=False,
+                native_fold_reused=True,
+            )
+        boundary = prefix["snapshot"]["block_number"]
+        if boundary < self._next:
+            self.progress.stage, self.progress.preparation = prior_stage, prior_preparation
+            self._folded_restored = True
+            return
+        self.progress.restore_start(self._next, boundary - self._next + 1)
+        self.progress.report(self, "running", force=True)
+        await self._validate_checkpoint_tip(provider, prefix, completed_checkpoint=checkpoint_tip)
+        await run_owned_thread(
+            self.folded_frontier.recheck, state, value["remote"], value["origin_seals"]
+        )
+        snapshot = FinalizedSnapshotRef(**prefix["snapshot"])
+        self._writes = [HistoricalControlWrite(*w) for w in value["writes"][: prefix["writes"]]]
+        self._unresolved = value["unresolved"][: prefix["unresolved"]]
+        self._tip = _HistoryTip(snapshot, prefix["control_sha256"], prefix["committed_at_block"])
+        self._evidence_sha256 = prefix["evidence"]
+        self._prefixes[boundary] = (
+            snapshot,
+            prefix["evidence"],
+            len(self._writes),
+            len(self._unresolved),
+        )
+        self.progress.restored_completed += boundary - self._next + 1
+        self._next = boundary + 1
+        self._folded_tip = prefix
+        self._folded_export_ranges = value["export_ranges"]
+        self.progress.restore_folded_inventory(self, state[2], self._folded_export_ranges)
+        self._folded_origin_seals = value["origin_seals"]
+        self._folded_restored = True
+        self.progress.report(self, "running", force=True)
+
     def _apply_checkpoint(self, value):
         self.progress.record("verified", value["snapshot"]["block_number"])
         self.progress.applied(value["snapshot"]["block_number"])
@@ -867,6 +1008,22 @@ class RewardControlHistoryReader:
             len(self._writes),
             len(self._unresolved),
         )
+        for identity in value["exports"]:
+            remember_export_range(
+                self._folded_export_ranges.setdefault(identity, []), self._next, self._next
+            )
+        first_fold = self._folded_tip is None
+        self._folded_tip = dict(
+            snapshot=value["snapshot"],
+            header=value["header"],
+            control_sha256=slot.control_sha256,
+            committed_at_block=slot.committed_at_block,
+            evidence=self._evidence_sha256,
+            writes=len(self._writes),
+            unresolved=len(self._unresolved),
+        )
+        if first_fold or (self._next - self.first_block) % ANCHOR_INTERVAL == 0:
+            self._pending_folded_anchors[self._next] = self._folded_tip
         self._source_tokens.pop(self._next, None)
         self._next += 1
         self.progress.report(self, "running")
@@ -1119,6 +1276,61 @@ class RewardControlHistoryReader:
     def _shutdown_requested(self):
         return self.shutdown_event is not None and self.shutdown_event.is_set()
 
+    async def _maintain_archive_backfill(self):
+        archive = self.export_archive
+        remote = None if archive is None else archive.remote
+        if remote is None or remote.config.read_only or not archive.legacy_read_through:
+            return
+        config = remote.config
+        if not config.archive_backfill_batch_frames and not config.archive_release_batch_files:
+            return
+        if self._shutdown_requested() or self.journal.read_only:
+            return
+        try:
+            async with self._lock:
+                with self.journal.locked():
+                    if self._archive_backfill is None:
+                        self._archive_backfill = await run_owned_thread(
+                            HistoryArchiveBackfill, self, _FIELDS
+                        )
+                    report = await run_owned_thread(
+                        self._archive_backfill.run,
+                        config.archive_backfill_batch_frames,
+                        config.archive_release_batch_files,
+                    )
+                    if report is not None:
+                        low, high = self.first_block, report["next_block"] - 1
+                        identity = self._export_identity()
+                        remember_export_range(
+                            self._folded_export_ranges.setdefault(identity, []), low, high
+                        )
+                        for height in range(self._archive_export_progress_next, high + 1):
+                            self.progress.record("exported", height)
+                        self._archive_export_progress_next = max(
+                            self._archive_export_progress_next, high + 1
+                        )
+                        self.progress.archive_delivery = report
+                        if report["state"] == "completed":
+                            self._folded_export_identity = self._export_identity()
+        except Exception as error:
+            # Delivery is independent background work. Native capture and
+            # existing owned history continue; archive consumers retain their
+            # ordinary explicit missing/damaged-content refusal.
+            self.progress.archive_delivery = dict(
+                self.progress.archive_delivery or {},
+                stage="history_archive_delivery_migration",
+                state="repair_required"
+                if isinstance(error, HistoryCheckpointRepairRequired)
+                else "retrying",
+                error_type=type(error).__name__,
+                eta_seconds=None,
+                planning_eta_seconds=None,
+                eta_basis="withdrawn_archive_delivery_retry_or_repair",
+                stalled=False,
+                retrying=True,
+            )
+            self.progress.report(self, "running", force=True)
+
     async def _observed_advance(self, provider, *, through_block, maximum_blocks):
         stop = asyncio.Event()
         # Preserve native argument rejection before starting diagnostics.
@@ -1148,6 +1360,7 @@ class RewardControlHistoryReader:
                 self.progress.report(self, "running", force=True)
                 async with self._lock:
                     await run_owned_thread(self._externalize_sources, 256)
+            await self._maintain_archive_backfill()
             self.progress.report(self, "completed" if result.history is not None else "pending")
             return result
         except BaseException as error:
@@ -1199,6 +1412,13 @@ class RewardControlHistoryReader:
                 # their native proofs. Continued bounded repair calls retain this
                 # cursor and reason until the selected interval is complete.
                 async with self._lock:
+                    await run_owned_thread(self.folded_frontier.reset_for_repair)
+                    self._folded_tip = None
+                    self._folded_origin_seals.clear()
+                    self._folded_export_ranges.clear()
+                    self.checkpoints._original_export_origins.clear()
+                    self._pending_folded_anchors.clear()
+                    self._folded_restored = False
                     self._next = self.first_block
                     self._tip = None
                     self._writes.clear()

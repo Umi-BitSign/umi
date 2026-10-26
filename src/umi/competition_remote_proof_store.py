@@ -42,6 +42,9 @@ class ProofArchiveR2Config(StrictProtocolModel):
     timeout_seconds: Annotated[int, Field(ge=1, le=300)] = 60
     legacy_read_through: bool = False
     source_release_batch_records: Annotated[int, Field(ge=0, le=4096)] = 0
+    archive_backfill_batch_frames: Annotated[int, Field(ge=0, le=256)] = 0
+    archive_release_batch_files: Annotated[int, Field(ge=0, le=4096)] = 0
+    archive_release_consumer_abi: Literal["umi-proof-read-release-lease/1"] | None = None
 
     @model_validator(mode="after")
     def legacy_selection(self):
@@ -49,6 +52,14 @@ class ProofArchiveR2Config(StrictProtocolModel):
             raise ValueError("retained local proof reads require explicit archive/2 selection")
         if self.source_release_batch_records and (not self.legacy_read_through or self.read_only):
             raise ValueError("source release requires writable retained-local archive/2 selection")
+        if (self.archive_backfill_batch_frames or self.archive_release_batch_files) and (
+            not self.legacy_read_through or self.read_only
+        ):
+            raise ValueError("online archive migration requires writable retained-local archive/2")
+        if self.archive_release_batch_files and not self.archive_backfill_batch_frames:
+            raise ValueError("online archive release requires its bounded backfill cursor")
+        if self.archive_release_batch_files and self.archive_release_consumer_abi is None:
+            raise ValueError("online release requires explicit selected-consumer lease ABI")
         return self
 
     @model_serializer(mode="wrap")
@@ -58,6 +69,13 @@ class ProofArchiveR2Config(StrictProtocolModel):
             value.pop("legacy_read_through", None)
         if not self.source_release_batch_records:
             value.pop("source_release_batch_records", None)
+        for name in (
+            "archive_backfill_batch_frames",
+            "archive_release_batch_files",
+            "archive_release_consumer_abi",
+        ):
+            if not getattr(self, name):
+                value.pop(name, None)
         return value
 
 

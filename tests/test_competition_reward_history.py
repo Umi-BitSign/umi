@@ -450,9 +450,9 @@ async def test_history_replays_saved_prefix_after_restart_then_finishes_missing_
     with pytest.raises(ValueError, match="not been natively verified"):
         await h.reader.verified_prefix(first)
     replay = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
-    assert replay.history is None and replay.next_block == first + 2
+    assert replay.history is None and replay.next_block == first + 4
     assert await h.reader.verified_prefix(first) == prefix
-    assert h.body_requests == [first, first + 1]
+    assert h.body_requests == [first, first + 1, first + 2, first + 3]
     result = (await h.reader.advance(h.item.provider, through_block=h.end)).history
     assert await h.reader.verified_prefix(first) == prefix
     assert await h.reader.verified_prefix(h.end) == result
@@ -877,6 +877,7 @@ async def test_wrong_native_prefetched_height_never_schedules_a_following_frame(
     h.reader = await h.restart()
     # Exercise native preparation, rather than the independently tested durable
     # result restore path, so the injected wrong native height is actually used.
+    monkeypatch.setattr(h.reader.folded_frontier, "load", lambda target: None)
     monkeypatch.setattr(h.reader.checkpoints, "load", lambda height: None)
     monkeypatch.setattr(h.reader.checkpoints, "load_many", lambda first, last: [])
     prepare = h.reader._prepare
