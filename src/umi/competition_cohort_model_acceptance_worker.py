@@ -294,6 +294,13 @@ class ModelAcceptanceWorker:
     async def poll_once(self):
         ready = pending = 0
         error_type = ""
+        # Restore the public counters for active successor intake before old
+        # cohort exports can occupy this owner after a restart. This is the
+        # ordinary inventory observation moved earlier, not another pass.
+        reported = set()
+        for cohort in self.priority_cohorts:
+            await self._report_inventory(cohort)
+            reported.add(cohort)
         priority_entries = {}
         for cohort in self.priority_cohorts:
             try:
@@ -306,14 +313,21 @@ class ModelAcceptanceWorker:
                 # A diagnostic scheduling hint never suppresses the native scan.
                 continue
         urgent = any(priority_entries.values())
-        for binding in self.owner.intake.config.cohorts:
+        bindings = self.owner.intake.config.cohorts
+        ordered = (
+            sorted(bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts)
+            if urgent
+            else bindings
+        )
+        for binding in ordered:
             cohort = binding.cohort_sha256
             # While released intake has unfinished latest models, still advance
             # held cohorts, but do not make it wait behind their full batches.
             # Once that backlog clears all cohorts regain the normal fair scan.
             batch = self.batch_size if not urgent or cohort in self.priority_cohorts else 1
             try:
-                await self._report_inventory(cohort)
+                if cohort not in reported:
+                    await self._report_inventory(cohort)
                 entries = await run_owned_thread(
                     partial(
                         self.owner.entries,
