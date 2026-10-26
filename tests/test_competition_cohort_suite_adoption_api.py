@@ -26,6 +26,7 @@ from umi.competition_cohort_suite_adoption_api import (
 from umi.competition_cohort_suite_adoption_candidate import (
     EvaluationSuiteAdoptionCandidate,
     EvaluationSuiteAdoptionCandidateConfig,
+    require_successor_suite_diversity,
 )
 from umi.competition_cohort_suite_adoption_reservation import (
     EvaluationSuiteReservationReader,
@@ -57,6 +58,34 @@ def selection_case(policy):
     c = selector_case_fixture.__wrapped__(policy)
     c.inventory, c.counts = categorized(c)
     return c
+
+
+def test_successor_adoption_requires_broad_continuous_sources(selection_case):
+    counts = selection_case.counts
+    require_successor_suite_diversity(6, counts)
+    with pytest.raises(ValueError, match="source cap"):
+        require_successor_suite_diversity(7, counts)
+    capped = counts.model_copy(
+        update={
+            "continuous": 4,
+            "maximum_continuous_dataset_share_bps": 5000,
+            "minimum_continuous_topics": 4,
+        }
+    )
+    require_successor_suite_diversity(7, capped)
+    with pytest.raises(ValueError, match="fingerspelling sources"):
+        require_successor_suite_diversity(8, capped)
+    broader = capped.model_copy(
+        update={
+            "minimum_fingerspelling_datasets": 2,
+            "maximum_fingerspelling_dataset_share_bps": 7500,
+        }
+    )
+    require_successor_suite_diversity(8, broader)
+    with pytest.raises(ValueError, match="source cap"):
+        require_successor_suite_diversity(
+            8, capped.model_copy(update={"maximum_continuous_dataset_share_bps": 5001})
+        )
 
 
 @pytest.fixture

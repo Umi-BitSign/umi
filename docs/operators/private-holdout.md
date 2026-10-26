@@ -84,25 +84,14 @@ contributor supplies it, disclose that access and any influence on selection.
 
 ### Broader source coverage and overlap exclusion
 
-Use independent corpora and recording groups rather than treating another media
-transform of the same source as new evaluation data. Suitable source families
-include [How2Sign](https://how2sign.github.io/) instructional continuous ASL,
-[Microsoft ASL-STEM Wiki](https://www.microsoft.com/en-us/research/project/asl-stem-wiki/)
-continuous scientific explanations, and
-[ChicagoFSWild](https://ttic.uchicago.edu/~klivescu/ChicagoFSWild.htm)
-fingerspelling in natural recordings. Keep FSboard's sentence phrases as well as
-names, addresses and numbers represented in the fingerspelling pool. Retain the
-source's exact labeled interval and English reference; isolated vocabulary must
-not be relabeled as continuous translation or fingerspelling without evidence.
-Published annotations and their limitations support preparation without requiring
-a new grading panel.
-
-How2Sign's realigned sentence metadata carries original recording IDs and exact
-intervals, while its supplied sentence table does not identify signers. ASL-STEM
-Wiki supplies participant, article, topic and sentence identities. ChicagoFSWild
-supplies source URLs, signer IDs and fingerspelling labels; a cropped sequence
-filename is not an independent source recording. Confirm actual frame rate and
-clip boundaries during media preparation.
+Use independent corpora, topics, recording groups and signers rather than
+treating another media transform of the same source as new evaluation data.
+Include fingerspelled sentence phrases, names, addresses and numbers. Retain
+each source's exact labeled interval and English reference; isolated vocabulary
+must not be relabeled as continuous translation or fingerspelling without
+evidence. Confirm actual frame rate, clip boundaries and signer identity during
+media preparation. Keep the current protected source inventory outside the
+public repository and miner-facing reports.
 
 Prepare prospective suites with the metadata-only selector:
 
@@ -137,6 +126,18 @@ unknown metadata cannot fill a known-coverage requirement. The default requires
 two continuous corpora, two known signers in each task and two continuous topics.
 It prefers balanced datasets and less represented known signers/topics, and
 refuses unmet quotas instead of duplicating cases or relaxing exclusions.
+Set `maximum_continuous_dataset_share_bps` and
+`maximum_fingerspelling_dataset_share_bps` when a task has multiple independent
+sources. These are per-task upper bounds; selection refuses a pool that cannot
+meet them. An authenticated C7 or later suite adoption requires a continuous
+source cap of at most 50% and at least four continuous topics. Historical
+selection inputs retain their original bytes and interpretation. Source balance
+does not prove that public clips were excluded from model training, so exposure
+claims must remain explicit in the private report.
+For C8 and later, adoption also requires at least two fingerspelling sources,
+with no more than 75% of fingerspelling cases from one source. This requirement
+must be met together with the four fingerspelling categories; a missing source
+holds adoption until real labeled media is available.
 
 Native suite adoption also requires explicit fingerspelling coverage of sentences,
 names, addresses and numbers. Tag each candidate with `fingerspelling_category`
@@ -155,9 +156,9 @@ record identified by `reference_qa_sha256`. Strict selection defaults to
 signers separate across selected tasks. Include known training/development signer
 groups and previous selected suites in later exclusion inputs. Acquisition-only
 planning may retain unknown rows explicitly, but the native adoption reviewer
-refuses relaxed selection settings or missing QA/signer identities. How2Sign's
-unknown signer rows therefore need additional verified signer information before
-adoption. Do not invent identities from a cropped filename or silently classify
+refuses relaxed selection settings or missing QA/signer identities. Source rows
+without signer identity need additional verified information before adoption.
+Do not invent identities from a cropped filename or silently classify
 unknown training exposure as unseen.
 
 The private preparation and selection report retain original provenance and

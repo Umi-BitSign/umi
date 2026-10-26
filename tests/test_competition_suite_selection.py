@@ -92,6 +92,43 @@ def test_diverse_selection_preserves_publisher_references_and_is_order_independe
     )
 
 
+def test_declared_dataset_share_cap_refuses_concentrated_public_source(case):
+    counts = case.counts.model_copy(update={"maximum_continuous_dataset_share_bps": 5000})
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, counts=counts)
+    third = candidate(
+        7,
+        "A new sentence about the weather in town",
+        dataset="IndependentContinuous",
+        signer=7,
+        topic="Weather",
+    )
+    inventory = case.inventory.model_copy(update={"cases": (*case.inventory.cases, third)})
+    suite, report = select(case, inventory=inventory, counts=counts)
+    assert len(suite.cases) == 6
+    assert report["selected_by_task_and_dataset"]["continuous"] == {
+        "ASL-STEM": 1,
+        "How2Sign": 1,
+        "IndependentContinuous": 1,
+    }
+
+
+def test_declared_fingerspelling_share_cap_requires_another_source(case):
+    counts = case.counts.model_copy(update={"maximum_fingerspelling_dataset_share_bps": 5000})
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, counts=counts)
+    third = candidate(
+        8,
+        "Oak Lane",
+        task="fingerspelling",
+        dataset="IndependentFingerspelling",
+        signer=8,
+    )
+    inventory = case.inventory.model_copy(update={"cases": (*case.inventory.cases, third)})
+    _, report = select(case, inventory=inventory, counts=counts)
+    assert max(report["selected_by_task_and_dataset"]["fingerspelling"].values()) == 1
+
+
 @pytest.mark.parametrize("damage", ["sentence", "source", "signer", "near_sentence"])
 def test_known_training_or_exposed_text_and_group_overlap_is_excluded(case, damage):
     c = case
