@@ -475,7 +475,7 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
     prepared = await prepare(h)
     entered, release = asyncio.Event(), asyncio.Event()
     thread_entered, thread_release = Event(), Event()
-    calls = {name: 0 for name in ("models", "direct_uploads", "legacy_uploads")}
+    calls = {name: 0 for name in ("models", "model_inventory", "direct_uploads", "legacy_uploads")}
     active = {name: 0 for name in calls}
     peak = {name: 0 for name in calls}
 
@@ -506,7 +506,10 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
 
     host.uploads = SimpleNamespace(poll_once=legacy)
     host.direct_uploads = SimpleNamespace(poll_once=lambda: asynchronous("direct_uploads"))
-    host.models = SimpleNamespace(poll_once=lambda: asynchronous("models"))
+    host.models = SimpleNamespace(
+        poll_once=lambda: asynchronous("models"),
+        report_inventory_once=lambda: asynchronous("model_inventory"),
+    )
     stop = asyncio.Event()
     polling = asyncio.create_task(host._poll(stop))
     try:
@@ -564,7 +567,10 @@ async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle,
             model_closed.set()
 
     host.uploads = SimpleNamespace(poll_once=upload)
-    host.models = SimpleNamespace(poll_once=model)
+    host.models = SimpleNamespace(
+        poll_once=model,
+        report_inventory_once=lambda: asyncio.sleep(0, result={"status": "inventory"}),
+    )
     task = asyncio.create_task(host._poll(asyncio.Event()))
     try:
 
@@ -586,7 +592,9 @@ async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle,
     assert finished.is_set() and model_closed.is_set()
 
 
-@pytest.mark.parametrize("failed", ["catalogs", "models", "legacy_uploads", "direct_uploads"])
+@pytest.mark.parametrize(
+    "failed", ["catalogs", "models", "model_inventory", "legacy_uploads", "direct_uploads"]
+)
 async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_path, failed):
     from types import SimpleNamespace
 
@@ -598,7 +606,7 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
         h.provider.collect,
         h.provider.retained_archive,
     )
-    names = ("catalogs", "models", "legacy_uploads", "direct_uploads")
+    names = ("catalogs", "models", "model_inventory", "legacy_uploads", "direct_uploads")
     entered = {name: asyncio.Event() for name in names}
     closed = {name: asyncio.Event() for name in names}
 
@@ -617,6 +625,7 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
     for name, method in (
         ("catalogs", "_poll_catalogs"),
         ("models", "_poll_models"),
+        ("model_inventory", "_poll_model_inventory"),
         ("legacy_uploads", "_poll_legacy_uploads"),
         ("direct_uploads", "_poll_direct_uploads"),
     ):

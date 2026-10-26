@@ -282,6 +282,7 @@ class ModelAcceptanceWorker:
                 "cohort_intake_model_certification_progress %s",
                 canonical_json_bytes(report).decode(),
             )
+            return True
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
             # Diagnostics cannot alter certification, reserve another writer or
             # turn missing measurement into a native admission failure.
@@ -290,14 +291,34 @@ class ModelAcceptanceWorker:
                 cohort,
                 type(error).__name__,
             )
+            return False
+
+    async def report_inventory_once(self):
+        """Observe each retained roster independently of long model reviews."""
+        started = time.monotonic()
+        bindings = self.owner.intake.config.cohorts
+        observed = 0
+        for binding in bindings:
+            observed += bool(await self._report_inventory(binding.cohort_sha256))
+        return {
+            "stage": "model_certification_inventory",
+            "status": "completed" if observed == len(bindings) else "retrying",
+            "completed": observed,
+            "total": len(bindings),
+            "percent": 100 * observed / len(bindings) if bindings else 100,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "eta_seconds": 0 if observed == len(bindings) else None,
+            "eta_basis": "completed" if observed == len(bindings) else "retry_next_poll",
+            "stalled_or_retrying": observed != len(bindings),
+            "reason_code": None if observed == len(bindings) else "native_inventory_unavailable",
+            "chain_submission_authorized": False,
+        }
 
     async def poll_once(self):
         ready = pending = 0
         error_type = ""
-        # Move the existing bounded pending lookup and inventory observation
-        # ahead of acceptance work for every configured cohort. This restores
-        # public counts after restart even when no priority was configured and
-        # discovers the current successor from retained owner state.
+        # Discover pending successors before acceptance work. The independent
+        # inventory owner refreshes public counts even during a long review.
         bindings = self.owner.intake.config.cohorts
         probe_order = sorted(
             bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts
@@ -312,7 +333,6 @@ class ModelAcceptanceWorker:
                         self.owner.pending_latest_entries, cohort, limit=min(self.batch_size, 16)
                     )
                 )
-            await self._report_inventory(cohort)
         urgent = any(priority_entries.values())
         ordered = (
             sorted(
@@ -358,7 +378,6 @@ class ModelAcceptanceWorker:
                         pending += 1
                         error_type = type(error).__name__
                 self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
-                await self._report_inventory(cohort)
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__

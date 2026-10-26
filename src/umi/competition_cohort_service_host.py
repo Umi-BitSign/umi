@@ -872,8 +872,13 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         return await self.models.poll_once()
 
+    async def _poll_model_inventory(self):
+        authorize_memory(None, None, "intake")
+        return await self.models.report_inventory_once()
+
     async def poll_once(self) -> dict:
         """One complete reconciliation for callers requesting a bounded cycle."""
+        inventory = None if self.models is None else await self._poll_model_inventory()
         legacy = None if self.uploads is None else await self._poll_legacy_uploads()
         direct = None if self.direct_uploads is None else await self._poll_direct_uploads()
         if legacy is not None and direct is not None:
@@ -883,6 +888,7 @@ class ServiceAdmissionHost:
         models = None if self.models is None else await self._poll_models()
         return {
             **await self._poll_catalogs(),
+            "model_inventory": inventory,
             "model_acceptance": models,
             "model_delivery": uploads,
         }
@@ -1032,6 +1038,7 @@ class ServiceAdmissionHost:
             callbacks.append(("direct_uploads", self._poll_direct_uploads))
         if self.models is not None:
             callbacks.append(("models", self._poll_models))
+            callbacks.append(("model_inventory", self._poll_model_inventory))
         async with AsyncExitStack() as owners:
             tasks = []
             for component, callback in callbacks:
