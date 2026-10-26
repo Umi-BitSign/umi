@@ -872,9 +872,9 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         return await self.models.poll_once()
 
-    async def _poll_model_inventory(self):
+    async def _poll_model_inventory(self, cohorts=None):
         authorize_memory(None, None, "intake")
-        return await self.models.report_inventory_once()
+        return await self.models.report_inventory_once(cohorts)
 
     async def poll_once(self) -> dict:
         """One complete reconciliation for callers requesting a bounded cycle."""
@@ -1038,7 +1038,18 @@ class ServiceAdmissionHost:
             callbacks.append(("direct_uploads", self._poll_direct_uploads))
         if self.models is not None:
             callbacks.append(("models", self._poll_models))
-            callbacks.append(("model_inventory", self._poll_model_inventory))
+            cohorts = tuple(binding.cohort_sha256 for binding in self.intake.config.cohorts)
+            inventory_owner_count = min(16, len(cohorts))
+            for index in range(inventory_owner_count):
+                # The selected six cohorts get separate bounded observers.
+                # A slow historical read cannot age a successor's count.
+                group = cohorts[index::inventory_owner_count]
+                callbacks.append(
+                    (
+                        f"model_inventory_{index:02d}",
+                        partial(self._poll_model_inventory, group),
+                    )
+                )
         async with AsyncExitStack() as owners:
             tasks = []
             for component, callback in callbacks:
