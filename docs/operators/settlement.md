@@ -915,8 +915,10 @@ the retained registration and finality stores, and audits the finality store
 under the new limit. The namespace and registration steps report counted
 progress and planning ETAs. An interrupted start resumes the same files; it
 does not create a fresh proof history. Confirm a sustained advancing finalized
-head before removing the predecessor field from the publisher config. A
-capacity increase reserves a ceiling; it does not preallocate that disk space.
+head after selection. Retain the publisher's predecessor field while historical
+admission evidence still names its old chain configuration; removing it needs a
+separate qualified reader transition. A capacity increase reserves a ceiling;
+it does not preallocate that disk space.
 
 Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
 `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable

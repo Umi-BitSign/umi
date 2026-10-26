@@ -152,6 +152,10 @@ async def test_reference_publisher_carries_declared_cache_predecessor(installed)
     try:
         assert service.provider.config.maximum_cache_bytes == 512 * 1024**2
         assert service.provider.config.previous_maximum_cache_bytes == 256 * 1024**2
+        predecessor = service.provider.config.model_copy(
+            update={"maximum_cache_bytes": 256 * 1024**2, "previous_maximum_cache_bytes": None}
+        )
+        assert service.reader.admission_chain_config_sha256 == digest(predecessor)
     finally:
         await service.provider.aclose()
 

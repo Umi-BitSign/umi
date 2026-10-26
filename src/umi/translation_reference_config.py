@@ -61,9 +61,9 @@ class ReferencePublisherConfig(StrictProtocolModel):
     state_directory: Directory
     resources: CompetitionChainResources
     maximum_cache_bytes: Annotated[int, Field(ge=64 * 1024**2, le=16 * 1024**3)]
-    previous_maximum_cache_bytes: Annotated[
-        int, Field(ge=64 * 1024**2, le=16 * 1024**3)
-    ] | None = None
+    previous_maximum_cache_bytes: Annotated[int, Field(ge=64 * 1024**2, le=16 * 1024**3)] | None = (
+        None
+    )
     maximum_journal_bytes: Annotated[int, Field(ge=1024**2, le=1024**3)]
     credentials_file: Directory
     endpoint: str
@@ -278,6 +278,18 @@ def build_reference_service(config: ReferencePublisherConfig, *, progress=None):
         selected.policy,
         expected_series_sha256=digest(selected.series),
         expected_chain_config_sha256=digest(chain),
+        expected_admission_chain_config_sha256=(
+            digest(
+                chain.model_copy(
+                    update={
+                        "maximum_cache_bytes": config.previous_maximum_cache_bytes,
+                        "previous_maximum_cache_bytes": None,
+                    }
+                )
+            )
+            if config.previous_maximum_cache_bytes is not None
+            else None
+        ),
         maximum_bytes=config.maximum_journal_bytes,
         reward_adoptions=selected.reward_adoptions,
     )
