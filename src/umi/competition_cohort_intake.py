@@ -498,9 +498,16 @@ class CohortIntake:
         crash between intake and control reservation retries these same bytes;
         ordinary signed history publication releases the fence after commit.
         """
+        return self._reserve_policy_adoption(proposal, "adopt_request_tail_rule")
+
+    def reserve_evaluation_suite_adoption(self, proposal):
+        """Fence the same original intake while the exact suite intent is pending."""
+        return self._reserve_policy_adoption(proposal, "adopt_evaluation_suite")
+
+    def _reserve_policy_adoption(self, proposal, operation):
         proposal = CohortRecoveryTransition.model_validate_json(canonical_json_bytes(proposal))
-        if proposal.operation != "adopt_request_tail_rule":
-            raise ValueError("intake rule reservation requires an adoption transition")
+        if proposal.operation != operation:
+            raise ValueError("intake reservation requires its exact adoption operation")
         cohort = proposal.cohort_sha256
         self._allowed(cohort)
         with self._connection() as (db, store):

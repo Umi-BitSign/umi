@@ -48,7 +48,9 @@ class CohortParticipationStatus(StrictProtocolModel):
     track: Track
     phase: Phase | Literal["complete", "revoked"]
     intake_fenced: bool
-    pending_policy_adoption: Literal["adopt_model_delivery", "adopt_request_tail_rule"] | None
+    pending_policy_adoption: (
+        Literal["adopt_model_delivery", "adopt_request_tail_rule", "adopt_evaluation_suite"] | None
+    )
     latest: RetainedParticipationStatus | None
     requested_consent_sha256: Hex32 | None
     requested_consent_status: Literal["not_requested", "not_retained", "latest", "superseded"]

@@ -108,6 +108,8 @@ def _pending_control_status(transition: CohortRecoveryTransition) -> str:
         return "awaiting_model_delivery_adoption_certificate"
     if transition.operation == "adopt_request_tail_rule":
         return "awaiting_request_tail_adoption_certificate"
+    if transition.operation == "adopt_evaluation_suite":
+        return "awaiting_evaluation_suite_adoption_certificate"
     raise ValueError("pending control is not a separately certified operation")
 
 

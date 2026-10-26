@@ -24,6 +24,7 @@ from .competition_cohort_participation import (
     verify_participant_admission,
 )
 from .competition_cohort_recovery import Block
+from .competition_cohort_suite_adoption import selected_evaluation_suite
 from .competition_evidence import (
     EvaluationRunScope,
     IndependentEvaluationEvidence,
@@ -122,7 +123,7 @@ def verify_recoverable_round_participant(
         round_.cohort_sha256 != view.state.cohort_sha256
         or round_.policy_sha256 != digest(policy)
         or round_.sequence != history.plan.sequence
-        or round_.suite_sha256 != history.plan.suite_sha256
+        or round_.suite_sha256 != selected_evaluation_suite(history.plan, view.state)
         or round_.intake_closure_sha256 != digest(intake)
         or round_.runtime_sha256 != policy.evaluation_runtime_sha256
         or participant not in round_.participants

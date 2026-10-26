@@ -69,10 +69,102 @@ Provide the dataset privately to the evaluation operators, with:
   duplicates and known near-duplicates out of competing splits. Do not claim
   unseen-signer performance without a signer-disjoint test.
 
-The source may be a private training corpus, but the evaluation portion must
-have been held back from training and tuning. Public development examples are
+Private evaluation may use data under any recorded license, including research-only
+and noncommercial datasets. Retain the publisher's license, attribution, provenance
+and disclosure restrictions with the private inputs. This permission does not
+change the licenses or contribution-rights checks for publicly distributed model
+bundles.
+
+Call a suite a training-excluded holdout only when its evaluation portion was
+held back from training and tuning. An unfamiliar public dataset or an unpublished
+choice of public clips does not establish that property. Report known and unknown
+upstream exposure for a public-source benchmark. Public development examples are
 separate from the protected pool. Prefer an independently held pool; if a
 contributor supplies it, disclose that access and any influence on selection.
+
+### Broader source coverage and overlap exclusion
+
+Use independent corpora and recording groups rather than treating another media
+transform of the same source as new evaluation data. Suitable source families
+include [How2Sign](https://how2sign.github.io/) instructional continuous ASL,
+[Microsoft ASL-STEM Wiki](https://www.microsoft.com/en-us/research/project/asl-stem-wiki/)
+continuous scientific explanations, and
+[ChicagoFSWild](https://ttic.uchicago.edu/~klivescu/ChicagoFSWild.htm)
+fingerspelling in natural recordings. Keep FSboard's sentence phrases as well as
+names, addresses and numbers represented in the fingerspelling pool. Retain the
+source's exact labeled interval and English reference; isolated vocabulary must
+not be relabeled as continuous translation or fingerspelling without evidence.
+Published annotations and their limitations support preparation without requiring
+a new grading panel.
+
+How2Sign's realigned sentence metadata carries original recording IDs and exact
+intervals, while its supplied sentence table does not identify signers. ASL-STEM
+Wiki supplies participant, article, topic and sentence identities. ChicagoFSWild
+supplies source URLs, signer IDs and fingerspelling labels; a cropped sequence
+filename is not an independent source recording. Confirm actual frame rate and
+clip boundaries during media preparation.
+
+Prepare prospective suites with the metadata-only selector:
+
+```sh
+python -m umi.competition_suite_selection_cli \
+  --policy /PRIVATE/policy.json \
+  --inventory /PRIVATE/candidates.json \
+  --exclusions /PRIVATE/exclusions.json \
+  --counts /PRIVATE/selection-counts.json \
+  --selection-key /PRIVATE/selection.key \
+  --destination /PRIVATE/prepared-suite
+```
+
+Keep case inputs and output directories private; the published policy can use
+its existing public read-only path. The 32-byte selection key remains
+outside the report. `umi-private-suite-candidates/1` retains each exact single-
+reference case, dataset/version, original recording-group digest, provenance,
+license, attribution, exposure declaration and any known signer/topic metadata.
+Issue a case only after the actual transformed video and its digest exist; an
+acquisition URL or CSV row is not a verified video. The
+`umi-private-suite-exclusions/1` input binds the metadata inventories supplying
+known training/development references, previous suites and source/signer groups.
+Use stable original recording identities across crops, encodings and aliases.
+
+Selection excludes exact scorer-normalized and whitespace-equivalent references,
+known source/signer overlap and lexical-near sentences with at least four unique
+tokens. Its default near threshold is 80% token-set Jaccard similarity; record
+the selected threshold with the suite. This catches a defined lexical similarity,
+not arbitrary semantic paraphrases. It never edits references or changes CER/WER.
+Required corpus, known-signer and topic coverage are explicit in the counts input;
+unknown metadata cannot fill a known-coverage requirement. The default requires
+two continuous corpora, two known signers in each task and two continuous topics.
+It prefers balanced datasets and less represented known signers/topics, and
+refuses unmet quotas instead of duplicating cases or relaxing exclusions.
+
+Native suite adoption also requires explicit fingerspelling coverage of sentences,
+names, addresses and numbers. Tag each candidate with `fingerspelling_category`
+and bind that same category in its reference-QA record. Set
+`fingerspelling_category_minimums` in the counts input, for example
+`{"sentence":1,"name":1,"address":1,"number":1}`; each minimum must be positive
+and their sum must fit the requested fingerspelling count. Selection reserves
+enough remaining slots to meet every category even in a larger pool. It refuses
+a shortage instead of relabeling examples. Older standalone preparation inputs
+may omit category quotas and retain their original bytes; they cannot authorize
+native adoption until the explicit four-category requirements are supplied.
+
+Adoptable cases also require a known signer and a retained reference/interval QA
+record identified by `reference_qa_sha256`. Strict selection defaults to
+`require_qualified_cases: true` and `distinct_signer_per_case: true`, keeping
+signers separate across selected tasks. Include known training/development signer
+groups and previous selected suites in later exclusion inputs. Acquisition-only
+planning may retain unknown rows explicitly, but the native adoption reviewer
+refuses relaxed selection settings or missing QA/signer identities. How2Sign's
+unknown signer rows therefore need additional verified signer information before
+adoption. Do not invent identities from a cropped filename or silently classify
+unknown training exposure as unseen.
+
+The private preparation and selection report retain original provenance and
+exposure counts. Exact retries reuse completed selection and restore interrupted
+output publication. Media remains in the bounded active working set with durable
+R2 storage under the normal case-delivery path; this command performs no media
+download, inference, signing or cohort activation.
 
 <a id="open-competition-private-holdout--approved-launch-input-contract"></a>
 
@@ -81,6 +173,60 @@ contributor supplies it, disclose that access and any influence on selection.
 The signed policy and suite define the reference count, required strata, stratum
 weights, enabled tracks and allocation. A successor plan may change an unopened
 cohort before intake. An active plan retains its original allocation and meaning.
+
+An existing intake cohort can select a better benchmark through an authenticated
+`adopt_evaluation_suite` history transition before intake closes. The version 5
+transition binds its original plan, previously selected suite, new suite and
+private selection-manifest identity. It preserves the cohort digest, accepted
+submissions, admissions, signed clocks and reward/scoring policy. Never replace
+the signed plan or overwrite a committed suite file. The existing owner reserves
+the exact predecessor and the selected independent reviewers verify the suite and
+private delivery before normal quorum publication. Deployment must first update
+all history readers, miners, evaluators, validators and their supported automatic
+update paths to understand this explicit version.
+
+Preparation, execution and settlement resolve the suite from that authenticated
+history. Run the incumbent quality-floor model and all submitted models on the
+same adopted suite; an old numeric score from another corpus is not a comparable
+cutoff. Once intake closes, another suite amendment is refused. In-progress and
+completed evaluations, including C6, retain their original suite and results.
+
+Configure `evaluation_suite_adoption_candidates` on the owner and every selected
+reviewer. Each candidate names its exact suite, selection report, inventory,
+exclusions and selection-key files; private videos and reference-QA evidence;
+the pinned ffmpeg/ffprobe binaries and hashes; and a durable per-owner
+verification directory. `verification_owner_hotkey` must match the actual owner
+or reviewer signer. Select the complete phase-review resource budget. Preserve
+completed per-item checks across interruption, restart and suite replacement;
+missing or changed completion metadata requires the supported explicit repair.
+
+`reference_qa_directory` retains private canonical
+`<reference_qa_sha256>.json` files with schema `umi-suite-reference-qa/1`. Each
+binds the exact case and references, source/signer groups, provenance, annotation
+source and limitations. Its interval is either a full publisher-labeled clip
+without invented bounds, an exact integer-millisecond source range, or a
+start/end-exclusive source-frame range with evidenced rational frame rate.
+Preparation must complete the selection, per-case QA and pinned media checks
+before returning a proposal. Their owner-bound receipts are independent, so a
+suite replacement can reuse unchanged media. Byte and shape checks authenticate
+these retained inputs; actual ASL reference correctness remains an annotation/QA
+claim and must be supported by that evidence.
+
+First qualification runs outside live intake/controller/sampling locks. On
+reentry the owner compares the same selected history, predecessor and immutable
+input identities before reserving the original journals. Changed state is refused
+without repeating a media pass under those locks, so intake remains available
+while a new candidate is first being checked.
+
+The owner uses its separate `evaluation_suite_operator_token_file` for
+`/internal/cohorts/evaluation-suite-adoption/prepare`, `/reserve` and `/commit`.
+Preparation binds the original series, cohort and current predecessor. Reservation
+fences the original intake and control journals without closing intake. Reviewers
+use the normal vote token at `/vote` and independently verify exact selector,
+QA evidence and media; fresh `/reservation` evidence uses the owner export token.
+Repeat preparation after reservation recovers the original proposal and observed
+block, then normal quorum commit publishes the append-only history. This operation
+does not reseal a cohort, close intake or start scoring; Sam controls those steps.
 
 ### Prospective dependence-gated input contract
 
