@@ -110,6 +110,28 @@ EvaluationSuiteAdoptionCandidates = Annotated[
 ]
 
 
+def require_successor_suite_diversity(sequence: int, counts: SuiteSelectionCounts) -> None:
+    """Apply new adoption rules without reinterpreting earlier signed suites."""
+    if sequence >= 7 and (
+        counts.maximum_continuous_dataset_share_bps is None
+        or counts.maximum_continuous_dataset_share_bps > 5000
+        or counts.minimum_continuous_topics < 4
+    ):
+        raise ValueError(
+            "C7+ suite adoption requires a continuous source cap of 50% "
+            "and at least four distinct topics"
+        )
+    if sequence >= 7 and (
+        counts.minimum_fingerspelling_datasets < 2
+        or counts.maximum_fingerspelling_dataset_share_bps is None
+        or counts.maximum_fingerspelling_dataset_share_bps > 7500
+    ):
+        raise ValueError(
+            "C7+ suite adoption requires at least two fingerspelling sources "
+            "and a maximum 75% share from one source"
+        )
+
+
 def validate_suite_adoption_candidates(candidates, cohorts):
     keys = tuple(c.cohort_sha256 for c in candidates)
     if keys != tuple(sorted(set(keys))) or not set(keys) <= set(cohorts):
@@ -210,6 +232,7 @@ class EvaluationSuiteAdoptionCandidate:
         counts = SuiteSelectionCounts.model_validate(manifest["counts"])
         if not counts.require_qualified_cases or not counts.distinct_signer_per_case:
             raise ValueError("suite adoption requires qualified cases and distinct known signers")
+        require_successor_suite_diversity(history.plan.sequence, counts)
         if counts.fingerspelling_category_minimums is None:
             raise ValueError(
                 "suite adoption requires explicit four-category fingerspelling minimums"
