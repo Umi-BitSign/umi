@@ -25,9 +25,11 @@ async def test_successor_inventory_has_one_independent_pass(
             )
         )
 
-        def pending_latest_entries(self, cohort, *, limit):
+        def pending_latest_entries(self, cohort, *, limit, offset):
             events.append(("pending", cohort))
-            return [("new", object())] if cohort == successor and successor_pending else []
+            if cohort == successor and successor_pending:
+                return [("new", object())][offset : offset + limit]
+            return []
 
         def entries(self, cohort, *, after, limit):
             events.append(("entries", cohort))
