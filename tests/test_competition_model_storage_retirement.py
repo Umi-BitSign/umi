@@ -133,6 +133,37 @@ async def test_background_poll_retires_then_restarts_and_reuses_original_request
         assert not (f.uploads.archive / f.model / "model").exists()
 
 
+async def test_remote_reconciliation_uses_one_representative_per_model(
+    retirement, monkeypatch
+):
+    f = retirement
+    key = digest(f.request)
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        await f.delivery.poll_once()
+        assert f.uploads.allocations.state(f.model) == "released"
+
+        original_keys = f.uploads.journal.keys
+        original_request = f.delivery._remote_request
+        checked = []
+
+        def duplicate_keys(kind):
+            keys = original_keys(kind)
+            return [key, key, key] if kind == "upload" else keys
+
+        def counted_request(upload_key, *, model=None):
+            checked.append(upload_key)
+            return original_request(upload_key, model=model)
+
+        monkeypatch.setattr(f.uploads.journal, "keys", duplicate_keys)
+        monkeypatch.setattr(f.delivery, "_remote_request", counted_request)
+        result = await f.delivery.poll_once()
+
+    assert checked == [key]
+    assert result["models_preserved"] == 1
+    assert result["models_pending"] == 0
+
+
 async def test_missing_local_receipt_retires_only_after_remote_and_consumer_release(
     retirement, monkeypatch
 ):
