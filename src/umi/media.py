@@ -355,12 +355,19 @@ def _decode_snapshot(
         executable,
         "-v",
         "error",
+        # FFmpeg sizes decoder/filter/encoder thread pools from the host CPU
+        # count. On large hosts that can exceed the bounded child's address
+        # space before a conforming HD clip yields its first frame.
+        "-filter_threads",
+        "1",
         "-i",
         str(snapshot.path),
         "-map",
         "0:v:0",
         "-fps_mode",
         "passthrough",
+        "-threads",
+        "1",
         "-pix_fmt",
         "rgb24",
         "-f",

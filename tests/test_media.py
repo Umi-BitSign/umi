@@ -321,6 +321,65 @@ def test_pinned_inspection_uses_private_verified_tools_after_sources_are_swapped
     assert all(not path.exists() for path in invoked_paths)
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux")
+    or shutil.which("ffmpeg") is None
+    or shutil.which("ffprobe") is None,
+    reason="requires the Linux bounded media runner and FFmpeg tools",
+)
+def test_pinned_inspection_decodes_hd_clip_within_child_memory_limit(tmp_path) -> None:
+    ffmpeg = Path(shutil.which("ffmpeg"))
+    ffprobe = Path(shutil.which("ffprobe"))
+    clip = tmp_path / "hd.mp4"
+    subprocess.run(
+        [
+            str(ffmpeg),
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=960x720:r=30:d=2",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-map_metadata",
+            "-1",
+            "-map_metadata:s:v:0",
+            "-1",
+            "-metadata",
+            "encoder=",
+            "-metadata:s:v:0",
+            "language=und",
+            "-metadata:s:v:0",
+            "handler_name=VideoHandler",
+            "-metadata:s:v:0",
+            "encoder=",
+            "-fflags",
+            "+bitexact",
+            str(clip),
+        ],
+        check=True,
+        timeout=30,
+    )
+    result = inspect_media_pinned(
+        clip,
+        ffmpeg=str(ffmpeg),
+        ffprobe=str(ffprobe),
+        expected_ffmpeg_sha256=hashlib.sha256(ffmpeg.read_bytes()).hexdigest(),
+        expected_ffprobe_sha256=hashlib.sha256(ffprobe.read_bytes()).hexdigest(),
+    )
+    assert result.frames.frame_count == 60
+    assert result.frames.executables_content_pinned
+
+
 def test_pinned_inspection_rejects_a_tool_hash_mismatch_before_invocation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
