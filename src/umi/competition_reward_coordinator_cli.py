@@ -36,6 +36,7 @@ def _logs():
                 "coverage_collector",
                 "history_progress",
                 "history_checkpoint",
+                "checkpoint_progress",
                 "history_repair",
             )
         ),

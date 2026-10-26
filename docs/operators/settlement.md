@@ -825,6 +825,12 @@ ahead-of-prefix verification rates are separate; history ETAs use newly verified
 ordered blocks per wall-clock second, including retries and cooldowns.
 `local_release` separately reports original SQL records moved to R2 and
 logical bytes released. It does not report a smaller SQLite file on disk.
+During a retained-history restore, `reward_history_checkpoint_metadata_progress`
+reports the current bounded metadata load or post-finality recheck with checked
+blocks, elapsed time, a scoped ETA and stalled/retrying flags. The standing
+writer, coordinator, admission runner and cutover command all forward these
+records to their service logs. A completed metadata check is reuse of a retained
+result; it grants no new native verification or reward activation credit.
 
 A native readonly observer of an existing R2 history must also select the original
 replication receipt owner. `RemoteProofStore` accepts an explicit
