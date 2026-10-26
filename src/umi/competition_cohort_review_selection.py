@@ -23,6 +23,9 @@ from .competition_cohort_review_config import PhaseReviewServiceConfig
 from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_cohort_service_quality import ServiceTerms
 from .competition_cohort_service_work import SignedServiceWorkCatalog
+from .competition_cohort_suite_adoption_api import EvaluationSuiteAdoptionReviewer
+from .competition_cohort_suite_adoption_candidate import EvaluationSuiteAdoptionCandidate
+from .competition_cohort_suite_adoption_reservation import EvaluationSuiteReservationReader
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_store import CompetitionStore
 from .competition_verification_reuse import VerificationReuse
@@ -156,6 +159,26 @@ class SelectedPhaseReviewer:
             candidates={
                 value.source.cohort_sha256: ModelDeliveryAdoptionCandidate(value, self.policy)
                 for value in config.model_delivery_adoption_candidates
+            },
+            budget=config.phase_review_budget,
+        )
+
+        self.evaluation_suite_adoption = EvaluationSuiteAdoptionReviewer(
+            config.series,
+            self.policy,
+            provider,
+            self.adoption.history,
+            EvaluationSuiteReservationReader(
+                client,
+                config.owner_origin,
+                token=token,
+                owner=config.owner_hotkey,
+                timeout_seconds=adoption_export_timeout,
+                complete_exchange=config.phase_review_budget is not None,
+            ),
+            candidates={
+                c.cohort_sha256: EvaluationSuiteAdoptionCandidate(c, self.policy)
+                for c in config.evaluation_suite_adoption_candidates
             },
             budget=config.phase_review_budget,
         )

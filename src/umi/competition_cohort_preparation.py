@@ -26,6 +26,7 @@ from .competition_cohort_roster import (
     RecoverableRosterEvidence,
     RecoverableRosterParticipant,
 )
+from .competition_cohort_suite_adoption import selected_evaluation_suite
 from .competition_execution import ExecutionBoundary
 from .competition_settlement import PromotionHeadBinding
 from .open_competition import CompetitionPolicy, Track, digest
@@ -136,7 +137,7 @@ def prepare_cohort_round(
         cohort_sha256=digest(history.plan),
         intake_closure_sha256=digest(closing),
         sequence=history.plan.sequence,
-        suite_sha256=history.plan.suite_sha256,
+        suite_sha256=selected_evaluation_suite(history.plan, view.state),
         incumbent_model_sha256=promotion.model_sha256,
         runtime_sha256=policy.evaluation_runtime_sha256,
         eligible_tracks=eligible_tracks,

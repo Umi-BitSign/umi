@@ -42,6 +42,7 @@ from .competition_cohort_review_selection import SelectedPhaseReviewer
 from .competition_cohort_service_selection import SelectedServiceReviewer
 from .competition_cohort_service_vote_http import service_vote_routes
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
+from .competition_cohort_suite_adoption_api import evaluation_suite_adoption_vote_routes
 from .competition_cohort_window_http import RemoteWindowClient
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_host_activation import _read_root_control_path
@@ -227,6 +228,15 @@ async def phase_review_app(config: PhaseReviewServiceConfig):
         )
         app.include_router(
             model_delivery_adoption_vote_routes(
+                signer,
+                config.series,
+                token=vote_token,
+                timeout_seconds=config.review_timeout_seconds,
+                budget=config.phase_review_budget,
+            )
+        )
+        app.include_router(
+            evaluation_suite_adoption_vote_routes(
                 signer,
                 config.series,
                 token=vote_token,

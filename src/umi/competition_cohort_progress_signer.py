@@ -30,6 +30,7 @@ from .competition_cohort_recovery import (
 )
 from .competition_cohort_request_phase import RequestProgressReviewRecord
 from .competition_cohort_request_rule_api import require_adoption
+from .competition_cohort_suite_adoption_api import require_adoption as require_suite_adoption
 from .competition_progress import log_phase
 from .competition_round_journal import RoundJournal
 from .competition_work_progress import review_scope
@@ -205,6 +206,18 @@ class CohortProgressSigner:
 
         async def review():
             return await self.reviewer.model_delivery_adoption(transition)
+
+        slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
+        return await self._vote("phase_decision", slot, transition, review)
+
+    @log_phase("cohort_evaluation_suite_adoption_vote")
+    async def certify_evaluation_suite_adoption(self, transition):
+        transition = require_suite_adoption(transition)
+        if transition.cohort_sha256 not in {c.cohort_sha256 for c in self.config.cohorts}:
+            raise ValueError("suite vote is outside configured cohorts")
+
+        async def review():
+            return await self.reviewer.evaluation_suite_adoption(transition)
 
         slot = digest({"cohort": transition.cohort_sha256, "tip": transition.predecessor_sha256})
         return await self._vote("phase_decision", slot, transition, review)

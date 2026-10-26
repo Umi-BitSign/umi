@@ -36,6 +36,10 @@ from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_origin import private_review_origin
 from .competition_cohort_service_budget import service_execution_budget
 from .competition_cohort_service_review import ServiceReviewConfig
+from .competition_cohort_suite_adoption_candidate import (
+    EvaluationSuiteAdoptionCandidates,
+    validate_suite_adoption_candidates,
+)
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_model_storage_leases import ModelStorageConsumerConfig
@@ -92,6 +96,7 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
     legacy_model_storage: LegacyModelStorageSelections = ()
     model_storage_consumer: ModelStorageConsumerConfig | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
+    evaluation_suite_adoption_candidates: EvaluationSuiteAdoptionCandidates = ()
 
     host_memory_admission: HostMemoryAdmissionSelection | None = None
 
@@ -126,6 +131,8 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
             value.pop("model_storage_consumer", None)
         if not self.model_delivery_adoption_candidates:
             value.pop("model_delivery_adoption_candidates", None)
+        if not self.evaluation_suite_adoption_candidates:
+            value.pop("evaluation_suite_adoption_candidates", None)
         return value
 
     @property
@@ -153,6 +160,14 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
                     )
                     if include_shared
                     else ()
+                ),
+                *(
+                    dict.fromkeys(
+                        p
+                        for c in self.evaluation_suite_adoption_candidates
+                        for p in c.stores()
+                        if self.benchmark is None or p != Path(self.benchmark.videos_directory)
+                    )
                 ),
                 self.chain.state_directory,
                 self.signing.directory,
@@ -217,8 +232,18 @@ class PhaseReviewServiceConfig(StrictProtocolModel):
 
     @model_validator(mode="after")
     def selected_adoption_candidates(self):
-        if self.model_delivery_adoption_candidates and self.phase_review_budget is None:
-            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        validate_suite_adoption_candidates(
+            self.evaluation_suite_adoption_candidates, (digest(p) for p in self.series.cohorts)
+        )
+        if any(
+            identity(c.verification_owner_hotkey) != identity(self.signing.signer)
+            for c in self.evaluation_suite_adoption_candidates
+        ):
+            raise ValueError("suite verification must belong to the selected independent reviewer")
+        if (
+            self.model_delivery_adoption_candidates or self.evaluation_suite_adoption_candidates
+        ) and self.phase_review_budget is None:
+            raise ValueError("policy adoption requires a selected full phase review budget")
         validate_adoption_candidates(
             self.model_delivery_adoption_candidates,
             (digest(plan) for plan in self.series.cohorts if plan.sequence > 5),

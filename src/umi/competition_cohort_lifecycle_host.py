@@ -49,6 +49,10 @@ from .competition_cohort_settlement_boot import settlement_store
 from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_proofs import SettlementRegistrationFiles
+from .competition_cohort_suite_adoption_candidate import (
+    EvaluationSuiteAdoptionCandidates,
+    validate_suite_adoption_candidates,
+)
 from .competition_execution import execution_boundary
 from .competition_forecast import ForecastAttempt, ForecastCapacityRequired, ForecastLedger
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
@@ -57,7 +61,7 @@ from .competition_round_journal import RoundJournal
 from .concurrency import run_owned_thread, wait_for_owned
 from .host_memory_request_bounds import bounded_stage_declarations, check_stage_json, stage_count
 from .host_memory_runtime import authorize_memory, requests_stage_policy
-from .open_competition import digest
+from .open_competition import digest, identity
 from .policy import ScoringPolicy, scoring_policy_hash
 from .private_files import Directory, publish_private_model, read_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -86,6 +90,8 @@ class LifecycleHostConfig(StrictProtocolModel):
     automatic_progression_hold_cohorts: tuple[Hex32, ...] = ()
     model_delivery_operator_token_file: Directory | None = None
     model_delivery_adoption_candidates: ModelDeliveryAdoptionCandidates = ()
+    evaluation_suite_operator_token_file: Directory | None = None
+    evaluation_suite_adoption_candidates: EvaluationSuiteAdoptionCandidates = ()
 
     @model_serializer(mode="wrap")
     def preserve_legacy(self, handler):
@@ -102,6 +108,10 @@ class LifecycleHostConfig(StrictProtocolModel):
             value.pop("model_delivery_operator_token_file", None)
         if not self.model_delivery_adoption_candidates:
             value.pop("model_delivery_adoption_candidates", None)
+        if self.evaluation_suite_operator_token_file is None:
+            value.pop("evaluation_suite_operator_token_file", None)
+        if not self.evaluation_suite_adoption_candidates:
+            value.pop("evaluation_suite_adoption_candidates", None)
         return value
 
     @model_validator(mode="after")
@@ -124,11 +134,21 @@ class LifecycleHostConfig(StrictProtocolModel):
                     for p in (
                         self.request_tail_operator_token_file,
                         self.model_delivery_operator_token_file,
+                        self.evaluation_suite_operator_token_file,
                     )
                     if p is not None
                 ),
             ),
         )
+        validate_suite_adoption_candidates(
+            self.evaluation_suite_adoption_candidates,
+            (entry.cohort_sha256 for entry in self.sources.intake.cohorts),
+        )
+        if (
+            self.evaluation_suite_adoption_candidates
+            and self.evaluation_suite_operator_token_file is None
+        ):
+            raise ValueError("suite adoption requires a separate operator credential")
         holds = self.automatic_progression_hold_cohorts
         allowed = {entry.cohort_sha256 for entry in self.sources.intake.cohorts}
         if len(holds) != len(set(holds)) or not set(holds) <= allowed:
@@ -147,6 +167,16 @@ class LifecycleHostConfig(StrictProtocolModel):
                         c.source for c in self.model_delivery_adoption_candidates
                     )
                     if include_shared
+                    else ()
+                ),
+                *(
+                    dict.fromkeys(
+                        p for c in self.evaluation_suite_adoption_candidates for p in c.stores()
+                    )
+                ),
+                *(
+                    (self.evaluation_suite_operator_token_file,)
+                    if self.evaluation_suite_operator_token_file is not None
                     else ()
                 ),
                 self.directory,
@@ -176,6 +206,7 @@ class LifecycleHost:
     ):
         self.service, self.resources, self.client = service, resources, client
         self.model_delivery_candidates = {}
+        self.evaluation_suite_candidates = {}
         self.model_delivery_serial = asyncio.Lock()
         self.config = LifecycleHostConfig.model_validate_json(
             canonical_json_bytes(service.config.lifecycle)
@@ -183,8 +214,15 @@ class LifecycleHost:
         c, owner = self.config, service.config.admission_owner
         if owner is None or service.provider is None:
             raise ValueError("cohort lifecycle requires the owned admission runtime")
-        if c.model_delivery_adoption_candidates and owner.phase_review_budget is None:
-            raise ValueError("model delivery adoption requires a selected full phase review budget")
+        if any(
+            identity(c.verification_owner_hotkey) != identity(owner.owner_hotkey)
+            for c in c.evaluation_suite_adoption_candidates
+        ):
+            raise ValueError("suite verification must belong to the selected admission owner")
+        if (
+            c.model_delivery_adoption_candidates or c.evaluation_suite_adoption_candidates
+        ) and owner.phase_review_budget is None:
+            raise ValueError("policy adoption requires a selected full phase review budget")
         if (
             c.sources.intake != service.intake.config
             or c.sources.eligible_tracks != service.intake.tracks

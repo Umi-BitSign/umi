@@ -27,6 +27,7 @@ from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWor
 from .competition_cohort_settlement_config import SettlementOriginalSources
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_cohort_settlement_inputs import SettlementInputPackage, prepare_settlement_inputs
+from .competition_cohort_suite_adoption import selected_evaluation_suite
 from .competition_endpoint_execution import RetainedRevealPulse
 from .competition_reward_manifest import RewardReplayRequirement
 from .competition_work_progress import work_operation
@@ -124,7 +125,9 @@ def assemble_settlement_inputs(
     )
     if tuple(digest(c.catalog) for c in catalogs) != requirement.catalog_sha256s:
         raise ValueError("settlement catalog delivery changes the approved inventory")
-    suite = EvaluationSuite.model_validate_json(objects(history.plan.suite_sha256))
+    suite = EvaluationSuite.model_validate_json(
+        objects(selected_evaluation_suite(history.plan, view.state))
+    )
     transport = source_file(
         Path(sources.transport_directory) / (terms.transport_policy_sha256 + ".json"),
         ScoringPolicy,

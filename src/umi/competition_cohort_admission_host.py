@@ -54,6 +54,8 @@ from .competition_cohort_review_boot import _token
 from .competition_cohort_review_budget import PhaseReviewBudget, checked_budget
 from .competition_cohort_review_http import CohortReviewPeerConfig
 from .competition_cohort_service_export import service_work_routes
+from .competition_cohort_suite_adoption_api import evaluation_suite_adoption_owner_routes
+from .competition_cohort_suite_adoption_reservation import evaluation_suite_reservation_routes
 from .competition_cohort_window_http import LocalWindowClient, window_routes
 from .competition_cohort_window_owner import CohortWindowOwner, WindowOwnerConfig
 from .competition_cohort_window_store import CohortMinerWindowStore
@@ -238,7 +240,12 @@ async def admission_owner_app(
         if service_host is not None and service_host.config.lifecycle is not None:
             epoch_client = await resources.enter_async_context(producer_epoch_client())
             lifecycle = await run_owned_thread(
-                LifecycleHost, service_host, resources, client, credentials, sign,
+                LifecycleHost,
+                service_host,
+                resources,
+                client,
+                credentials,
+                sign,
                 epoch_client,
             )
         review_timeout_seconds = min(peer.timeout_seconds for peer in c.reviewers)
@@ -262,11 +269,13 @@ async def admission_owner_app(
             app.add_middleware(
                 RequestsStageASGIBinding, controller=selected_memory(), private_role="intake"
             )
+        operator_tokens = []
         if lifecycle is not None and lifecycle.config.request_tail_operator_token_file is not None:
             operator_token = _token(lifecycle.config.request_tail_operator_token_file)
             if operator_token in (token, *credentials):
                 raise ValueError("request-rule control requires a separate operator credential")
             app.include_router(request_tail_adoption_owner_routes(lifecycle, token=operator_token))
+            operator_tokens.append(operator_token)
         if (
             lifecycle is not None
             and lifecycle.config.model_delivery_operator_token_file is not None
@@ -277,6 +286,15 @@ async def admission_owner_app(
             app.include_router(
                 model_delivery_adoption_owner_routes(lifecycle, token=model_operator_token)
             )
+            operator_tokens.append(model_operator_token)
+        if (
+            lifecycle is not None
+            and lifecycle.config.evaluation_suite_operator_token_file is not None
+        ):
+            suite_token = _token(lifecycle.config.evaluation_suite_operator_token_file)
+            if suite_token in (token, *credentials, *operator_tokens):
+                raise ValueError("suite adoption requires a separate operator credential")
+            app.include_router(evaluation_suite_adoption_owner_routes(lifecycle, token=suite_token))
         app.include_router(
             admission_history_routes(
                 AdmissionHistoryExporter(queue, c.owner_hotkey, sign),
@@ -304,6 +322,7 @@ async def admission_owner_app(
         if lifecycle is not None:
             app.include_router(request_tail_reservation_routes(lifecycle, token=token))
             app.include_router(model_delivery_reservation_routes(lifecycle, token=token))
+            app.include_router(evaluation_suite_reservation_routes(lifecycle, token=token))
         app.state.intake_review_exporter = IntakeReviewExporter(
             NativeIntakeProgressSource(
                 intake, maximum_sample_gap_blocks=c.maximum_sample_gap_blocks
