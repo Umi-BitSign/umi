@@ -1817,6 +1817,18 @@ revision lineage, pending transactions and the finalized activation lock must
 be qualified across coordinator, reviewer, coverage and writer before cutover.
 Public status must identify the selected authority, cohort and adoption.
 
+The standing offer path holds C6 and later cohorts until they select the C5-style
+2.5-point band width, 0.75 decay between occupied bands and within each band,
+and one basis point duplicate tolerance. A matching native signed authority or
+a matching separately signed reward adoption satisfies this guard. The guard
+logs `reward_offer_waiting_for_c5_style_economics` once per cohort per process
+while an adoption is absent or has different parameters; it never constructs
+an original-rule activation for that cohort. Prepare and sign an adoption only
+after the original certified package exists, then select its complete lineage
+on the coordinator, reviewer and writer through their supported update paths.
+The guard itself grants no signing authority and does not change the original
+signed cohort history or scoring results.
+
 Select the complete signed adoption lineage in `reward_adoptions` on the
 coordinator, reviewers and standing writer. A successor consuming an adopted
 predecessor also selects that predecessor's lineage in

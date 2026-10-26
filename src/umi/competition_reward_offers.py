@@ -4,9 +4,12 @@ These are discovery inputs. The coordinator still replays their original native
 evidence before retaining a decision or asking any evaluator to sign it.
 """
 
+import logging
 from pathlib import Path
 
+from .competition_cohort_recovery import GeometricModelRewardCohortAuthority
 from .competition_cohort_reward_package import CohortRewardPackage
+from .competition_geometric_rewards import GeometricRewardParameters
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
@@ -34,6 +37,25 @@ from .competition_verification_snapshot import verified_package_digest
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
+
+logger = logging.getLogger(__name__)
+_C5_MODEL_REWARD_PARAMETERS = GeometricRewardParameters(
+    band_width_bps=250,
+    band_decay_bps=7500,
+    within_band_decay_bps=7500,
+    score_duplicate_tolerance_bps=1,
+)
+
+
+def successor_reward_rule_ready(plan, authority, adoption) -> bool:
+    """Gate C6+ offers on the intended C5 economics, without changing signed inputs."""
+    if plan.sequence < 6:
+        return True
+    if adoption is not None:
+        return adoption.adoption.parameters == _C5_MODEL_REWARD_PARAMETERS
+    if isinstance(authority, GeometricModelRewardCohortAuthority):
+        return authority.model_reward_parameters == _C5_MODEL_REWARD_PARAMETERS
+    return False
 
 
 class StandingRewardOffers:
@@ -65,6 +87,7 @@ class StandingRewardOffers:
         self.reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
         self.settlements = Path(private_path(str(settlements)))
         self.packages = files.package_store
+        self._reported_missing_successor_adoptions: set[str] = set()
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
         prefix = verify_reward_decisions(
@@ -77,6 +100,17 @@ class StandingRewardOffers:
             or cohort != digest(self.series.cohorts[index])
         ):
             raise ValueError("reward offer must extend the next admitted cohort")
+        adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
+        if not successor_reward_rule_ready(
+            self.series.cohorts[index], self.series.recovery.authority, adoption
+        ):
+            if cohort not in self._reported_missing_successor_adoptions:
+                logger.warning(
+                    "reward_offer_waiting_for_c5_style_economics cohort_sha256=%s",
+                    cohort,
+                )
+                self._reported_missing_successor_adoptions.add(cohort)
+            return None
         # Completion is small and may take hours. Check it before reparsing a
         # potentially large settlement package on its first preparation.
         prior = digest(self.handoff)
@@ -122,7 +156,6 @@ class StandingRewardOffers:
         # repeats exact immutable publication; it cannot reserve a signing slot.
         self.files.retain_package(package)
         tip = history.transitions[-1].transition if history.transitions else history.genesis
-        adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
         return RewardActivation(
             cohort_sha256=cohort,
             allocation_sha256=digest(package.allocation),
