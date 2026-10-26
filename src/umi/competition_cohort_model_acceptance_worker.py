@@ -502,15 +502,24 @@ class ModelAcceptanceWorker:
                                 and deferred
                                 and key == deferred[0]
                             ):
-                                # Retried provider failure keeps its saved
-                                # offset, so other submissions still advance.
-                                self._provider_retries[cohort] = (key, 0)
+                                # The retry came from the queue head. Its
+                                # ordinary offset still points to the next
+                                # other submission when the retry fails.
+                                if isinstance(error, RegistrationProviderTimeout):
+                                    self._provider_retries[cohort] = (key, 0)
+                                else:
+                                    self._provider_retries.pop(cohort, None)
                             else:
                                 # A failed latest entry remains pending.
                                 self._priority_offsets[cohort] = (
                                     self._priority_offsets.get(cohort, 0) + 1
                                 )
-                                if deferred:
+                                if deferred and key == deferred[0]:
+                                    if isinstance(error, RegistrationProviderTimeout):
+                                        self._provider_retries[cohort] = (key, 0)
+                                    else:
+                                        self._provider_retries.pop(cohort, None)
+                                elif deferred:
                                     self._provider_retries[cohort] = (
                                         deferred[0], deferred[1] + 1
                                     )

@@ -233,3 +233,42 @@ async def test_replaced_timeout_submission_is_not_retried(tmp_path):
 
     assert attempts.count((first, "old")) == 1
     assert report["registration_provider_retries"] == []
+
+
+@pytest.mark.asyncio
+async def test_changed_failure_does_not_keep_provider_retry(tmp_path):
+    first, other = "a" * 64, "b" * 64
+    pending = {first: [f"a{n}" for n in range(7)], other: [f"b{n}" for n in range(7)]}
+    attempted = []
+
+    class Owner:
+        intake = SimpleNamespace(
+            config=SimpleNamespace(
+                cohorts=tuple(SimpleNamespace(cohort_sha256=c) for c in (first, other))
+            )
+        )
+
+        def pending_latest_entries(self, cohort, *, limit, offset):
+            return tuple((key, key) for key in pending[cohort][offset : offset + limit])
+
+        def entries(self, cohort, *, after, limit):
+            return ()
+
+    worker = ModelAcceptanceWorker(Owner(), None, tmp_path, tmp_path)
+
+    async def accept(cohort, submission):
+        attempted.append((cohort, submission))
+        if submission == "a0":
+            if attempted.count((first, "a0")) == 1:
+                raise RegistrationProviderTimeout("registration collection timed out")
+            raise OSError("review input unavailable")
+        pending[cohort].remove(submission)
+
+    worker._one = accept
+    reports = [await worker.poll_once() for _ in range(5)]
+    assert [key for cohort, key in attempted if cohort == first] == [
+        "a0", "a1", "a2", "a3", "a0"
+    ]
+    assert reports[4]["registration_provider_retries"] == []
+    await worker.poll_once()
+    assert set(attempted[-2:]) == {(first, "a4"), (other, "b5")}
