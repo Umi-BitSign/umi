@@ -65,11 +65,33 @@ separate statuses.
 
 ## Download with restart support
 
-Run `python -m umi.competition_cohort_public_download_cli --help` for the installed
-client's arguments. Select the configured public API origin and identities from
-the model catalog:
+Run `python -m umi.competition_cohort_public_download_cli --help` in a current
+UMI Python environment for the installed client's arguments. The C6 catalog is
+paginated at 100 items; read both pages and select an item with
+`download_available: true`:
 
-`python -m umi.competition_cohort_public_download_cli --api https://api.example.org --cohort COHORT_SHA256 --model MODEL_SHA256 --output /absolute/model-download`
+```text
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=0&limit=100
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=100&limit=100
+```
+
+Use the item's `model_sha256`, not its `submission_sha256` or UID. For example,
+this downloads the C6 UID 5 model into a new directory:
+
+```sh
+python -m umi.competition_cohort_public_download_cli \
+  --api https://api.umi.vision \
+  --cohort 06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af \
+  --model 77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa \
+  --output /absolute/path/to/new-output-directory
+```
+
+For another model or cohort, replace the digest arguments with values from its
+catalog and continue pagination using `next_offset` until null. The download
+metadata endpoint returns renewable, short-lived capabilities; don't use a
+capability URL as a permanent link. C6's concatenated payload has file ranges
+and no ready-made tar archive. The client assembles and verifies the native
+files automatically.
 
 The client writes `manifest.json` plus `model/` in a new, private output directory.
 It supports original 8 MiB preserved chunks and C6+ concatenated payload ranges,
