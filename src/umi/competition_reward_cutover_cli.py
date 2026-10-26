@@ -44,6 +44,7 @@ def _logs():
         "umi.competition_reward_cutover_runtime",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_checkpoint_progress",
         "umi.competition_round_journal",
         "umi.competition.progress",
     ):

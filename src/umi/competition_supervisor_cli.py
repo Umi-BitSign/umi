@@ -416,6 +416,7 @@ def _standing_logs():
         "umi.competition_reward_coverage_collector",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_checkpoint_progress",
         "umi.competition_reward_history_repair",
         "umi.competition_round_journal",
     ):
