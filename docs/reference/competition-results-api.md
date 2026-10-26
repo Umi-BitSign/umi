@@ -152,9 +152,38 @@ missing checkpoint artifact or conflicting immutable artifact is an explicit
 repair hold: restore the exact content-addressed metadata from the publication
 backup before retrying. Never delete a checkpoint to force a fresh publication,
 or replace signed inputs or native receipts to resolve a publication problem.
-Retain the small publication metadata and checkpoints durably in R2. Configure a timer
-to rerun publication as C6 and later intake, artifact acceptance and R2 promotion
-advance. Refresh explicit pins only to newly authenticated native exports.
+Retain the small publication metadata and checkpoints durably in R2. For automatic
+certified C6+ catalogs, run
+`python -m umi.competition_cohort_public_cli publish-certified --config /absolute/catalog-watch.json --watch`.
+Its `NativePublicCatalogWatchConfig` selects `score_directory`, `state_directory`,
+`cohorts` and a native `CohortPublicPublisherConfig` `template`. The selected score
+artifact schedules publication; release still requires the original signed
+admission, supported contribution terms, artifact acceptance and completed
+preservation receipts. The output scope is `sealed_roster`, including unselected
+reward candidates, rather than all historical intake revisions.
+
+The template must preserve the native intake's original complete cohort/authority
+bindings and `eligible_tracks`, even when current public submissions support only
+models. This read-only binding does not reopen endpoint admission. A
+`direct_promotion_source` selects the actual owner upload directory, owner UID and
+hotkey, R2 endpoint/bucket and standing-review-policy digest. It derives each
+original promotion journal binding from that cohort's retained transport history.
+For retained chunk packages, `legacy_sources` maps cohort IDs to the same pinned
+association/package metadata used by manual publication. Models outside the
+certified catalog are ignored, and only missing download transports are added.
+Successful original checks survive restart and incremental transport publication;
+completed or damaged records never silently become fresh native verification.
+
+Keep one publisher for each selected cohort/output directory. Refresh the watch
+configuration automatically from the actual selected intake configuration as its
+series changes; the watcher reloads an atomically replaced configuration. Preserve
+completed state and independently deliver the resulting bounded `artifacts/` and
+`cohorts/` metadata to the API account, artifacts first. No native owner restart,
+chain RPC, model payload access or reward activation gate is needed. The current
+public download client supports both retained chunk packages and concatenated
+payload ranges. Its default HTTPX client sends `python-httpx/<version>` with
+`trust_env=False`; raw Python-urllib requests can be rejected by the gateway, so
+use the supported client or an explicit accepted User-Agent for custom clients.
 
 ## Serve separately or through intake
 

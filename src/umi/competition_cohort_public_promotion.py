@@ -11,7 +11,10 @@ from pathlib import Path
 
 from .competition_cohort_direct_model_owner import DirectModelPromotion
 from .competition_cohort_direct_model_upload import preserved_model_object_key
-from .open_competition import digest
+from .competition_cohort_model_transport_selection import retained_model_delivery_adoption
+from .competition_cohort_recovery import cohort_model_delivery
+from .open_competition import Hotkey, digest
+from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 
@@ -90,3 +93,35 @@ class PublicPromotionJournal(StrictProtocolModel):
             return result
         finally:
             os.close(fd)
+
+
+class NativePublicPromotionSource(StrictProtocolModel):
+    """Root-selected original owner namespace; no lookup or new preservation."""
+
+    directory: Directory
+    owner_uid: int
+    owner_hotkey: Hotkey
+    r2_endpoint: str
+    r2_bucket: str
+    standing_review_policy_sha256: Hex32 | None
+
+    def for_history(self, history):
+        adoption = retained_model_delivery_adoption(history)
+        delivery = cohort_model_delivery(history.plan) if adoption is None else adoption.delivery
+        if delivery.mechanism != "direct_r2_multipart_v1":
+            return None
+        cohort = digest(history.plan)
+        binding = dict(
+            schema="umi-direct-model-upload-owner-binding/1",
+            cohort_sha256=cohort,
+            owner_hotkey=self.owner_hotkey,
+            delivery=delivery.model_dump(mode="json", by_alias=True),
+            r2_endpoint=self.r2_endpoint,
+            r2_bucket=self.r2_bucket,
+            standing_review_policy_sha256=self.standing_review_policy_sha256,
+        )
+        return PublicPromotionJournal(
+            path=str(Path(self.directory) / cohort / "journal/rounds.sqlite3"),
+            owner_uid=self.owner_uid,
+            binding_sha256=hashlib.sha256(canonical_json_bytes(binding)).hexdigest(),
+        )

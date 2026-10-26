@@ -11,13 +11,16 @@ from .open_competition import digest
 from .protocol import canonical_json_bytes
 
 
-def export_public_model_inventory(intake, cohort: str) -> PublicModelInventory:
+def export_public_model_inventory(
+    intake, cohort: str, *, with_projection=False, submission_sha256s=None
+):
     """Use one owned read snapshot; no proof collection, RPC or payload reads.
 
     The existing native retained-record decoder and indexed cohort binding remain
     authoritative. Pending participation is not certified admission. Artifact
     review may remain pending and is reported separately by the public catalog.
     """
+    wanted = None if submission_sha256s is None else frozenset(submission_sha256s)
     intake._allowed(cohort)
     with intake._connection(prefer_history=True) as (db, store):
         history = store.published_history(cohort)
@@ -32,6 +35,10 @@ def export_public_model_inventory(intake, cohort: str) -> PublicModelInventory:
             "public_admitted_model_inventory", total, unit="records", cohort=cohort
         ) as progress:
             for consent, _, record in intake._parsed_records(db, history, track="model"):
+                key = digest(record.request.signed_submission.submission)
+                if wanted is not None and key not in wanted:
+                    progress.advance()
+                    continue
                 raw = db.execute(
                     "SELECT substr(body,1,65537) FROM cohort_admission_certificates "
                     "WHERE consent=?",
@@ -63,6 +70,8 @@ def export_public_model_inventory(intake, cohort: str) -> PublicModelInventory:
                     ):
                         participants[key] = participant
                 progress.advance()
+        if wanted is not None and wanted != participants.keys():
+            raise ValueError("certified public model selection lacks original admissions")
         acceptances = []
         if "cohort_model_acceptances" in tables:
             for submission in sorted(participants):
@@ -79,12 +88,12 @@ def export_public_model_inventory(intake, cohort: str) -> PublicModelInventory:
                     acceptances.append(CertifiedModelArtifactAcceptance.model_validate_json(row[0]))
         result = PublicModelInventory(
             schema="umi-native-public-model-inventory/1",
-            scope="all_admitted_model_submissions",
+            scope="all_admitted_model_submissions" if wanted is None else "sealed_roster",
             policy=intake.policy,
             history=history,
             participants=tuple(participants[k] for k in sorted(participants)),
             acceptances=tuple(acceptances),
         )
     # Signature/arithmetic work runs after the read transaction has released.
-    project_models(result)
-    return result
+    catalog, bundles = project_models(result)
+    return (result, catalog, bundles) if with_projection else result
