@@ -219,8 +219,12 @@ class CohortProgressSnapshots:
 
                     for worker in value["workers"]:
                         worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
-                if kind == "acceptance" and value.get("status") == "running":
-                    value["elapsed_seconds"] = round(age, 3)
+                if (kind == "acceptance" and value.get("status") == "running") or kind in {
+                    "certification",
+                    "intake_certification",
+                }:
+                    if kind == "acceptance":
+                        value["elapsed_seconds"] = round(age, 3)
                     planning = value.get("planning_eta_seconds")
                     if (
                         isinstance(planning, list)

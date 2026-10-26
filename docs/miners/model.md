@@ -112,6 +112,11 @@ This reports stage progress, not your model's quality score. A null ETA includes
 its reason; certification and scoring are separate stages. Artifact review runs
 during intake, including for replacements, and completed work resumes after
 restart rather than waiting until intake closes.
+After a replacement changes the latest-submission roster, certification has no
+comparable completion rate yet. Until the first certificate in that roster,
+`planning_eta_seconds` gives a labeled 30–1,200-second range per remaining
+certificate, based on prior completed acceptance stages. It counts down and is
+withdrawn if progress goes idle; it is not an end-to-end cohort forecast.
 
 During evaluation, `components.execution` counts confirmed exported results.
 `components.execution_workers.workers` separately shows cached evaluator stages,

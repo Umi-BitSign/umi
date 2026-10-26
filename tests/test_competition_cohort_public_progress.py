@@ -62,6 +62,32 @@ def test_acceptance_planning_range_counts_down_without_external_work(monkeypatch
     assert overdue["stalled_or_retrying"] is True
 
 
+def test_certification_planning_range_counts_down_on_public_reads(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=82,
+            total=83,
+            percent=100 * 82 / 83,
+            elapsed_seconds=20,
+            planning_eta_seconds=[30, 1200],
+            eta_basis="planning_30_to_1200_seconds_per_remaining_certificate",
+        ),
+    )
+    now[0] = 30.0
+    current = state.snapshot(C)
+    assert current["planning_eta_seconds"] == [10, 1180]
+    assert current["components"]["intake_certification"]["elapsed_seconds"] == 20
+    now[0] = 1211.0
+    overdue = state.snapshot(C)
+    assert overdue["planning_eta_seconds"] is None
+    assert overdue["stalled_or_retrying"] is True
+
+
 def test_restart_is_unknown_and_stale_or_overdue_measurements_withdraw_eta(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
