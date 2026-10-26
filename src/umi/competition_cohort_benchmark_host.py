@@ -30,6 +30,7 @@ from .competition_cohort_reference_cache import CohortReferenceModelCache
 from .competition_cohort_request_export_worker import RequestExportWorker
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_sandbox import CohortCpuSandbox, DirectCohortCpuSandbox
+from .competition_cohort_settlement_progress import SettlementProgressRelay
 from .competition_reward_boot import _disjoint
 from .competition_round_journal import RoundJournal
 from .concurrency import await_owned_task
@@ -46,7 +47,7 @@ class BenchmarkWorkerFailure(RuntimeError):
     """Report which owned worker stopped without exposing private exception text."""
 
     def __init__(self, worker: str):
-        if worker not in {"execution", "exports", "endpoints"}:
+        if worker not in {"execution", "exports", "endpoints", "settlement_progress"}:
             raise ValueError("benchmark worker name is invalid")
         self.reason_code = f"benchmark_{worker}_worker_stopped"
         super().__init__(self.reason_code)
@@ -259,7 +260,17 @@ class BenchmarkHost:
         )
         self.tasks, self.last_reports = {}, {}
         self.stop = None
-        self.workers = {"execution": self.worker, "exports": self.exporter}
+        self.settlement_progress = SettlementProgressRelay(
+            self.execution.journal.root,
+            series=digest(config.series),
+            evaluator=identity(c.execution.signer),
+            cohorts=tuple(self.execution.cohorts),
+        )
+        self.workers = {
+            "execution": self.worker,
+            "exports": self.exporter,
+            "settlement_progress": self.settlement_progress,
+        }
 
     def report(self, name, result):
         previous = self.last_reports.get(name)

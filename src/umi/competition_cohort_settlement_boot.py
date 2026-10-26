@@ -326,7 +326,21 @@ async def run_settlement_service(config: SettlementServiceConfig, stop: asyncio.
                 else {}
             ),
         )
+
+        async def progress_snapshots():
+            # Only already-emitted metadata crosses this advisory bridge. Its
+            # failure must not change native settlement or future cohort holds.
+            while not stop.is_set():
+                for node in nodes:
+                    with suppress(Exception):
+                        progress = getattr(node, "public_progress", None)
+                        if progress is not None:
+                            await run_owned_thread(progress.publish)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=5)
+
         tasks = [asyncio.create_task(scheduler.run(stop))]
+        tasks.append(asyncio.create_task(progress_snapshots()))
         tasks.append(asyncio.create_task(preparation.run(stop)))
         if exports is not None:
             tasks.append(asyncio.create_task(exports.run(stop, poll_seconds=config.poll_seconds)))

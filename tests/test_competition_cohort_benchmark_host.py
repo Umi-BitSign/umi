@@ -142,7 +142,7 @@ async def test_host_runs_workers_and_drains_cancelled_inference(native):
     try:
         await asyncio.wait_for(entered.wait(), 20)
         assert not task.done()
-        assert set(host.tasks) == {"execution", "exports"}
+        assert set(host.tasks) == {"execution", "exports", "settlement_progress"}
     finally:
         stop.set()
         await asyncio.wait_for(task, 20)

@@ -655,6 +655,29 @@ class LifecycleHost:
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=min(30, self.config.poll_seconds))
 
+        async def settlement_progress_loop():
+            from .competition_cohort_settlement_progress import PHASES
+
+            while not stop.is_set():
+                observer = getattr(self, "producer_epochs", None)
+                for cohort, node in tuple(getattr(self, "nodes", {}).items()):
+                    if getattr(node, "phase", None) not in PHASES or not hasattr(
+                        observer, "settlement"
+                    ):
+                        continue
+                    try:
+                        epochs = await observer.sample(tuple(observer.peers))
+                        body = await observer.settlement.sample(
+                            cohort, epochs, series=digest(self.service.config.series)
+                        )
+                    except Exception:
+                        # A diagnostic transport must not stop native lifecycle
+                        # or freshen its previous successful owner observation.
+                        continue
+                    PUBLIC_COHORT_PROGRESS.record("settlement", body)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=15)
+
         async def cohort_loop(cohort):
             if cohort in self.config.automatic_progression_hold_cohorts:
                 # Do not construct a controller, publish history, sample, seal,
@@ -715,6 +738,7 @@ class LifecycleHost:
             if stage is None or digest(p) == stage.cohort_sha256
         ]
         tasks.append(asyncio.create_task(execution_progress_loop()))
+        tasks.append(asyncio.create_task(settlement_progress_loop()))
         try:
             await asyncio.gather(*tasks)
         finally:

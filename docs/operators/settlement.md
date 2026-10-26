@@ -3966,6 +3966,19 @@ package, preserving its previous immutable completion.
 Observed receipt or generation damage stays held even if the original
 later reappears, until explicit scoped repair succeeds.
 
+Each chunk-generation confirmation retains one bounded native HTTP connection
+scope across all metadata batches, including direct legacy receipt and coverage
+restore callers. Nested reader scopes share that pool and cancellation drains
+owned requests before close. Every later confirmation still fetches fresh object
+metadata and refuses changed generations; transport reuse caches no HEAD result.
+
+The advisory artifact-preparation lane checks existing completion metadata without
+repeating remote generation confirmation on each poll or restart. A missing
+receipt uses the existing native preparation or explicit original-completion
+repair path; damaged metadata remains pending. This background readiness grants
+no scoring, closure or chain authority. Final settlement and coverage restoration
+still require fresh generations from the actual selected remote objects.
+
 Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
 under the original model receipt directory. The immutable completion ledger
 detects lost per-item qualification files before new capture can repeat native

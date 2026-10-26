@@ -581,6 +581,12 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     settlement = DirectModelSettlementVerifier(
         verifier, reviews.owner.archive, reviews.root / "settlement-receipts"
     )
+    retained_heads = source.heads_read
+    preparation = SettlementArtifactPreparation(
+        config, SimpleNamespace(directory=early_root), {reviews.cohort: settlement}
+    )
+    assert (await preparation.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     await settlement.ensure(participant, certificate)
     assert source.ranges_read == retained_reads
     receipt_path = settlement._path(certificate)
@@ -592,10 +598,15 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     receipt_path.chmod(0o400)
     with pytest.raises(ValueError, match="differs from accepted artifact"):
         settlement.verify_candidate(certificate, participant)
+    retained_heads = source.heads_read
+    assert (await preparation.poll_once(asyncio.Event()))["entries_pending"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     receipt_path.chmod(0o600)
     receipt_path.write_bytes(canonical_json_bytes(receipt))
     receipt_path.chmod(0o400)
     source.etag = "changed-after-settlement-verification"
+    assert (await preparation.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert source.heads_read == retained_heads and source.ranges_read == retained_reads
     with pytest.raises(ValueError, match="changed after verification"):
         await settlement.ensure(participant, certificate)
     source.etag = "read-only-object"

@@ -267,12 +267,35 @@ async def test_settlement_preparation_uses_selected_legacy_r2(remote_case, tmp_p
     )
     result = await worker.poll_once(asyncio.Event())
     assert result["entries_ready"] == 1 and result["entries_pending"] == 0
-    reads = tuple(c.remote.reads)
+    reads, heads = tuple(c.remote.reads), tuple(c.remote.heads)
     restarted = SettlementArtifactPreparation(
         config, SimpleNamespace(directory=root), {c.case.cohort: c.verifier}
     )
     assert (await restarted.poll_once(asyncio.Event()))["entries_ready"] == 1
-    assert tuple(c.remote.reads) == reads
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
+    receipt_path = c.verifier._path(c.certificate)
+    original_receipt = receipt_path.read_bytes()
+    receipt_path.unlink()
+    assert (await restarted.poll_once(asyncio.Event()))["entries_ready"] == 1
+    assert receipt_path.read_bytes() == original_receipt and tuple(c.remote.reads) == reads
+    heads = tuple(c.remote.heads)
+    # Background readiness confers no freshness or settlement authority. The
+    # final native consumer must still detect a changed remote generation.
+    key = next(iter(c.remote.etags))
+    c.remote.etags[key] = "changed-generation"
+    result = await restarted.poll_once(asyncio.Event())
+    assert result["entries_ready"] == 1 and result["entries_pending"] == 0
+    assert result["scoring_authorized"] is result["chain_submission_authorized"] is False
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
+    with pytest.raises(LegacyModelStorageRepairRequired):
+        await c.verifier.ensure_all((c.participant,), (c.certificate,))
+    # Damaged completion metadata remains pending; advisory polling must not
+    # silently rebuild or fetch payloads to make that record ready.
+    c.verifier._path(c.certificate).write_bytes(b"{broken")
+    heads = tuple(c.remote.heads)
+    result = await restarted.poll_once(asyncio.Event())
+    assert result["entries_ready"] == 0 and result["entries_pending"] == 1
+    assert tuple(c.remote.reads) == reads and tuple(c.remote.heads) == heads
 
 
 async def test_compact_coverage_replays_original_legacy_acceptance_without_payload_reads(

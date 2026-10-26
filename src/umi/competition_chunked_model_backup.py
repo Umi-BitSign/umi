@@ -327,6 +327,7 @@ class ChunkedModelBackupReader:
             "namespace": self._namespace(),
         }
 
+    @pooled_r2_reads
     async def _heads(self, report, chunks=None, *, expected=None, operation_progress=None):
         chunks = self.chunks if chunks is None else chunks
         values = {}

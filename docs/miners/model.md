@@ -81,6 +81,17 @@ An unavailable or older evaluator reports unknown stage details; an empty active
 stage list does not establish completed evaluation. These advisory reads do not
 start verification, load models or request chain data.
 
+After the request handoff, `components.settlement` reports the selected native
+settlement owner's phase, current stage, counts, retry status and scoped ETA.
+`quality_vote_publication` counts original assigned votes only after publication
+succeeds. It does not count signing attempts, and it never combines evaluator
+percentages. A native package publication is separate from chain reward activation.
+Unknown totals and insufficient rate samples remain `null`; stale or retrying
+observations withdraw their ETA. Producer timestamps and restart epochs are
+preserved through the reviewer relay, so repeated API polling cannot make a
+stopped producer look current. Older reviewers without this diagnostic route
+report settlement diagnostics unavailable. The public GET reads memory only.
+
 The equivalent public read is
 `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
 Both digests appear under `proposed_admission` in the original receipt. Use the

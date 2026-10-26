@@ -17,10 +17,10 @@ from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_registration_archive import MAX_ARCHIVE_BYTES, MAX_METADATA_BYTES
 from .competition_remote_proof_store import ProofArchiveStores
-from .competition_reward_proof_archive import RewardProofArchive
+from .competition_reward_proof_archive import MAX_FRAME_BYTES, RewardProofArchive
 from .concurrency import run_owned_thread
 from .open_competition import digest
-from .private_files import private_path
+from .private_files import private_path, publish_private_model
 from .protocol import canonical_json_bytes
 
 
@@ -85,6 +85,45 @@ class SettlementRegistrationFiles:
                 fields={"proof": raw, "metadata": metadata},
             )
         )
+
+    def _publication_completed(self, observation):
+        key = digest(observation)
+        archive = self.outbox
+        if archive.remote is not None:
+            # The selected owner's durable receipt also enforces namespace and
+            # explicit damage holds. It is a transport completion fact, never
+            # native proof authority or a fresh remote availability claim.
+            if archive.remote.reference_for_path("frames/registration/" + key) is not None:
+                return True
+            if not archive.legacy_read_through:
+                return False
+        try:
+            frame = archive._frame("registration", key)
+        except FileNotFoundError:
+            return False
+        if (
+            frame.kind != "registration"
+            or frame.key != key
+            or frame.context != observation.model_dump(mode="json", by_alias=True)
+            or set(frame.fields) != {"proof", "metadata"}
+        ):
+            raise ValueError("settlement proof changes its original observation")
+        # Local frames are committed after their immutable objects. Reuse that
+        # publication boundary without decoding or re-encoding old payloads.
+        # Independent consumers retain their ordinary native proof verification.
+        # Retry only the small frame's publication/directory sync: its earlier
+        # rename may have succeeded immediately before a lost durability ack.
+        publish_private_model(
+            archive.root / "registration" / (key + ".json"),
+            frame,
+            maximum_bytes=MAX_FRAME_BYTES,
+        )
+        return True
+
+    async def ensure_published(self, observation: ExecutionBoundary) -> None:
+        observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
+        if not await run_owned_thread(self._publication_completed, observation):
+            await self.publish(observation)
 
     async def read(self, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))

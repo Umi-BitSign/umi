@@ -3034,6 +3034,29 @@ signed transition. Historical finite bootstrap or policy expiry still applies
 if successor work is delayed; this is separate from the current no-sunset
 registration bridge.
 
+Native settlement publishes bounded advisory progress snapshots beneath each
+selected original execution directory, in `.settlement-progress/<series>/`.
+The corresponding reviewer's background worker reads those small files and its
+existing authenticated producer endpoint relays cached settlement diagnostics.
+Intake samples the relay after request handoff and serves its existing public
+progress cache. No new listener, credential, config field, journal conversion or
+public client upgrade is required. Select the qualified settlement, reviewer and
+intake maintenance sources together through their existing update paths before
+claiming this bridge is installed. Existing older reviewers return unavailable.
+Keep native producer timestamps and epochs unchanged during relay/restart; metadata
+alone never supplies a phase certificate, package validation or reward activation.
+Failure of this advisory bridge must not stop native work or release a future
+cohort hold. The small snapshots survive restart while their bounded process
+caches and rate estimates restart; missing/currently unavailable observations
+remain unknown and old observations become stale.
+
+Settlement publishes every history decision's original registration proof before
+making that history visible to peers, including when local signatures complete
+quorum without a peer request. Existing durable export receipts survive restart;
+completed proof payloads are not recaptured or replayed for delivery. Missing
+exports resume through the native owner before history publication, and explicit
+transport damage holds remain repair holds.
+
 Reviewer assignment reads reuse private parsed objects after static proof
 verification, with fresh retained-input and conflict checks on every read.
 The exact assignment is read in a short read-only snapshot; static verification

@@ -248,7 +248,8 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
     async def control(provider, height):
         return "native-control"
 
-    monkeypatch.setattr(module, "verify_reward_decision_proposal", lambda *args: args[-1])
+    monkeypatch.setattr(module, "verify_reward_decision_proposal", lambda *args, **kw: args[-1])
+    monkeypatch.setattr(module, "digest", lambda value: value)
     monkeypatch.setattr(
         module, "review_reward_decision", lambda *args, **kwargs: "compact-decision"
     )
@@ -258,8 +259,9 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
     owner.history = SimpleNamespace(verified_prefix=verified, review_control=control)
     owner.provider = object()
     owner.reader = SimpleNamespace(
-        series="series",
+        series=SimpleNamespace(cohorts=("previous", "next")),
         policy="policy",
+        reward_adoptions=(),
         review_history=lambda *args: SimpleNamespace(
             selection=SimpleNamespace(decision_sha256="predecessor")
         ),
@@ -286,8 +288,9 @@ async def test_reward_opportunity_runs_before_package_admission(provisioned, mon
         owner.opportunity = opportunity
         owner.files = SimpleNamespace(verified_package=package, maximum_package_bytes=1024)
         body = SimpleNamespace(
+            kind="activate",
             observed_at_block=1,
-            activation=SimpleNamespace(package_sha256="original"),
+            activation=SimpleNamespace(package_sha256="original", cohort_sha256="next"),
             sequence=2,
             predecessor_sha256="predecessor",
         )
