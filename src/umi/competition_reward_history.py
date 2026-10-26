@@ -65,6 +65,7 @@ from .competition_reward_history_export import export_completed_checkpoint
 from .competition_reward_history_frontier import (
     ANCHOR_INTERVAL,
     FoldedHistoryFrontier,
+    FrontierTransportMigrationRequired,
     folded_checkpoint,
     remember_export_range,
 )
@@ -790,6 +791,7 @@ class RewardControlHistoryReader:
                 history = self._prefix(through_block) if self._next == through_block + 1 else None
                 return ControlHistoryProgress(self._next, through_block, history)
             with self.journal.locked():
+                await run_owned_thread(self.folded_frontier.begin_advance)
                 await self._restore_completed_admission(provider, through_block)
                 await self._restore_folded_frontier(provider, through_block)
                 release_batch = (
@@ -891,7 +893,17 @@ class RewardControlHistoryReader:
         self.progress.preparation_start(
             "checkpoint_folded_frontier_loading", self._next, "restore_owned_ordered_fold"
         )
-        loaded = await run_owned_thread(self.folded_frontier.load, target)
+        try:
+            loaded = await run_owned_thread(self.folded_frontier.load, target)
+        except FrontierTransportMigrationRequired as error:
+            self.progress.frontier_reuse = dict(
+                state="transport_dependency_metadata_adoption",
+                reason=str(error),
+                frontier_restart_reuse=False,
+            )
+            self.progress.stage, self.progress.preparation = prior_stage, prior_preparation
+            self._folded_restored = True
+            return
         if loaded is None:
             self.progress.stage, self.progress.preparation = prior_stage, prior_preparation
             self._folded_restored = True

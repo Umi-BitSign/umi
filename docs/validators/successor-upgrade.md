@@ -3521,3 +3521,18 @@ input files, identity records, result journals and signing journals remain
 mandatory for restart. These lifetime boundaries do not themselves prove an RSS
 limit; host admission must reserve active inventories across pending polls and
 account for all simultaneously selected cohorts and other consumers.
+
+
+Durable native history and coverage folds bind remote receipt enrollment epochs
+and mutation generations. The small owner migration preserves the existing
+completion ledger, original receipt bytes and native proof ABI; ordinary receipt
+appends keep the generation stable. Original receipt updates/deletes, damage and
+hold changes invalidate a bound fold even when their counts stay equal. Losing
+or reenrolling an already guarded component requires explicit metadata repair.
+Restore the exact original transport receipt first, then use the existing native
+checkpoint repair path: unchanged successful block results survive without proof
+replay, including bounded repair, restart and repeat execution. A legacy read-only
+producer without the component remains supported through per-reference metadata
+checks, with an explicit `waiting_for_receipt_owner_upgrade` status; it cannot
+supply a durable fast frontier until its owner has installed the component. New
+remote input dependencies receive one counted metadata adoption before reuse.

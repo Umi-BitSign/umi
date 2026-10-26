@@ -53,6 +53,7 @@ class HistoryProgress:
         self.remote_export_selected = False
         self.local_release = None
         self.archive_delivery = None
+        self.frontier_reuse = None
         self.preparation = None
         self.restoration = None
         self.ancestry_progress = None
@@ -483,6 +484,7 @@ class HistoryProgress:
                 else "remote_delivery_receipts_not_available_to_history_owner",
                 "local_release": self.local_release,
                 "archive_delivery": self.archive_delivery,
+                "frontier_reuse": self.frontier_reuse,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
                 "completed_tip_finality_refreshes": self.completed_tip_refreshes,

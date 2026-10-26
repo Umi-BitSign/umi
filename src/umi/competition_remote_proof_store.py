@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_evidence_codec import MAX_EVIDENCE_BYTES, checked_digest
+from .competition_remote_proof_generation import install_generation, validate_generation
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
 from .open_competition import digest
@@ -190,6 +191,7 @@ class _ProofIndex(RoundJournal):
             (1, "umi-r2-proof-completion/1", digest(json.loads(binding[0][0])), completed)
         ]:
             raise ValueError("remote proof completion owner damaged; restore original metadata")
+        validate_generation(db, digest(json.loads(binding[0][0])))
         # This private capability does not enable reservation-generation semantics.
         return 0
 
@@ -300,6 +302,7 @@ class RemoteProofStore:
             maximum_record_bytes=64 * 1024,
         )
         self.journal.migrate_completions(self.namespace_sha256)
+        install_generation(self.journal, self.namespace_sha256)
         self.receipt_source = None
         if receipt_source_directory is not None:
             self.receipt_source = _ProofIndex(

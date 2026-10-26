@@ -15,6 +15,7 @@ from functools import wraps
 
 from . import competition_reward_admission_provenance as provenance
 from .chain_evidence import FinalizedSnapshotRef
+from .competition_remote_proof_generation import generation_identity
 from .competition_reward_checkpoint_tip import _issue_checkpoint_tip
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .open_competition import digest
@@ -145,11 +146,53 @@ def folded_checkpoint(previous, value):
     )
 
 
+class FrontierTransportMigrationRequired(HistoryCheckpointRepairRequired):
+    """New receipt dependencies need one explicitly counted metadata adoption."""
+
+
+def _unfenced(remote):
+    return remote is not None and any(
+        i.get("receipt_generation") is None for i in remote["indexes"]
+    )
+
+
+def _check_remote_identity(saved, current):
+    if saved == current:
+        return
+    if saved is None and current is not None:
+        raise FrontierTransportMigrationRequired(
+            "new remote receipt dependency requires counted metadata adoption"
+        )
+    if saved is None or current is None or saved["namespace"] != current["namespace"]:
+        raise HistoryCheckpointRepairRequired("folded history remote namespace changed")
+    previous = {tuple(i["database"]): i for i in saved["indexes"]}
+    now = {tuple(i["database"]): i for i in current["indexes"]}
+    if any(i.get("receipt_generation") is None for i in previous.values()):
+        raise HistoryCheckpointRepairRequired(
+            "stored frontier lacks receipt mutation generation; explicit metadata repair required"
+        )
+    if any(now.get(key) != item for key, item in previous.items()) or any(
+        item.get("receipt_generation") is None
+        or item["receipt_generation"]["revision"]
+        or item["damaged"]
+        or item["holds"]
+        for key, item in now.items()
+        if key not in previous
+    ):
+        raise HistoryCheckpointRepairRequired(
+            "folded history remote receipt generation or damage changed; "
+            "scoped metadata repair required"
+        )
+
+
 class FoldedHistoryFrontier:
     def __init__(self, checkpoints):
         self.blocks, self.journal = checkpoints, checkpoints.journal
         self.marker = dict(schema=SCHEMA, owner=checkpoints.owner, semantics=checkpoints.semantics)
         self.triggers = _triggers()
+        self._remote_started = False
+        self._accepted_remote = None
+        self._transport_migration = False
         if self.journal.read_only or self.journal.existing_only:
             return
         marker_before = self.journal.get(_MARKER, "owner")
@@ -266,11 +309,13 @@ class FoldedHistoryFrontier:
                     "WHERE kind='remote_proof_damage'"
                 ).fetchone()
                 holds = db.execute("SELECT COUNT(*) FROM holds").fetchone()[0]
+                receipt_generation = generation_identity(db)
             indexes.append(
                 dict(
                     database=[info.st_dev, info.st_ino, info.st_uid],
                     damaged=0 if count is None else count[0],
                     holds=holds,
+                    receipt_generation=receipt_generation,
                 )
             )
         return dict(namespace=remote.namespace_sha256, indexes=indexes)
@@ -333,24 +378,9 @@ class FoldedHistoryFrontier:
                 prefix = anchor["prefix"]
         remote = self.remote_identity()
         saved = value["remote"]
-        if saved is not None and saved != remote:
-            # A supported read-only consumer adds its empty local receipt index
-            # while preserving the producer as receipt_source. Retain every
-            # original dependency and require new indexes to have no damage.
-            if remote is None or saved["namespace"] != remote["namespace"]:
-                raise HistoryCheckpointRepairRequired("folded history remote namespace changed")
-            previous = {tuple(i["database"]): i for i in saved["indexes"]}
-            current = {tuple(i["database"]): i for i in remote["indexes"]}
-            if any(current.get(key) != item for key, item in previous.items()) or any(
-                item["damaged"] or item["holds"]
-                for key, item in current.items()
-                if key not in previous
-            ):
-                raise HistoryCheckpointRepairRequired(
-                    "folded history remote source owner or damage changed"
-                )
-        # Local-only folds have no prior remote dependency. New read-only
-        # indexes add no authority over already retained immutable receipts.
+        if saved is None and remote is not None:
+            self._transport_migration = True
+        _check_remote_identity(saved, remote)
         value = dict(value, remote=remote)
         self.check_origin_seals(value["origin_seals"])
         return (
@@ -373,6 +403,17 @@ class FoldedHistoryFrontier:
             )
 
         self.check_origin_seals(origin_seals)
+        self._accepted_remote = remote
+        self._remote_started = True
+
+    def begin_advance(self):
+        """Fence the first pass as well as later fold extensions across I/O."""
+        current = self.remote_identity()
+        if self._remote_started:
+            _check_remote_identity(self._accepted_remote, current)
+        else:
+            self._accepted_remote = current
+            self._remote_started = True
 
     @contextmanager
     def preserve_source_release(self, db):
@@ -389,6 +430,9 @@ class FoldedHistoryFrontier:
                 )
 
     def reset_for_repair(self):
+        self._remote_started = False
+        self._accepted_remote = None
+        self._transport_migration = False
         generation = secrets.token_hex(16)
 
         def reset(db):
@@ -413,6 +457,8 @@ class FoldedHistoryFrontier:
         if tip is None:
             return
         remote = self.remote_identity()
+        if self._remote_started:
+            _check_remote_identity(self._accepted_remote, remote)
         with self.journal.read_transaction() as db:
             state = self.state(db)
             if state is None:
@@ -422,8 +468,29 @@ class FoldedHistoryFrontier:
                 raise HistoryCheckpointRepairRequired(
                     "folded history frontier mutation requires explicit repair"
                 )
+            if old is not None and old["remote"] is not None:
+                _check_remote_identity(old["remote"], remote)
+            if _unfenced(remote):
+                reader.progress.frontier_reuse = dict(
+                    state="waiting_for_receipt_owner_upgrade",
+                    reason=(
+                        "legacy read-only receipt producer lacks mutation generation; "
+                        "using native per-receipt metadata checks"
+                    ),
+                    frontier_restart_reuse=False,
+                )
+                return
             if state[2] > tip["snapshot"]["block_number"]:
                 return
+            if (
+                old is not None
+                and old["remote"] is None
+                and remote is not None
+                and not self._transport_migration
+            ):
+                raise HistoryCheckpointRepairRequired(
+                    "unqualified remote frontier dependency adoption"
+                )
         anchors = [
             dict(context=self.marker, prefix=prefix)
             for prefix in reader._pending_folded_anchors.values()
@@ -469,3 +536,7 @@ class FoldedHistoryFrontier:
 
         self.journal.put_many(records, index=commit)
         reader._pending_folded_anchors.clear()
+        self._accepted_remote = remote
+        self._remote_started = True
+        self._transport_migration = False
+        reader.progress.frontier_reuse = dict(state="available", frontier_restart_reuse=True)

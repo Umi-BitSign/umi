@@ -37,7 +37,10 @@ def test_observer_reads_original_metadata_and_new_receipts_without_network_or_co
     assert producer.journal.path.read_bytes() == before
     assert server.calls == []
     with observer.journal.read_transaction() as db:
-        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (0,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM records WHERE kind IN "
+            "('remote_proof_object','remote_proof_completion')"
+        ).fetchone() == (0,)
     second = producer.put_bytes(b"newly completed source")
     server.calls.clear()
     assert observer.validate_reference(second).key == second["key"]
