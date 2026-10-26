@@ -394,6 +394,14 @@ its root account; do not move wallets or switch accounts to install this client:
 )
 ```
 
+On macOS, `python3` may be Apple's Python 3.9. The installer detects that and
+restarts itself under an installed Python 3.10–3.14 before fetching the
+manifest. It checks Python commands on `PATH`, then the standard Homebrew
+locations. If your supported Python is elsewhere, set
+`UMI_MODEL_CLIENT_PYTHON=/absolute/path/to/python3` for the command above.
+The installer stops with an explicit prerequisite error if none is available;
+it does not change the endpoint miner or its Python environment.
+
 The installer verifies the current manifest against public status and requires
 the model track to be available. It installs the selected exact source revision
 and its locked dependencies in a separate, noneditable virtual environment under

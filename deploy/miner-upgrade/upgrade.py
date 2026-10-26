@@ -1516,6 +1516,49 @@ def model_client_run(*arguments: str) -> subprocess.CompletedProcess:
     return result
 
 
+def ensure_model_client_python(*, running_version=None, candidate_paths=None) -> None:
+    """Re-exec the model client installer before fetching a manifest on old Python."""
+    version = sys.version_info[:2] if running_version is None else running_version
+    if (3, 10) <= tuple(version) < (3, 15):
+        return
+    if sys.platform not in {"linux", "darwin"}:
+        raise ValueError("the model client requires Linux/macOS and Python 3.10 through 3.14")
+    requested = os.environ.get("UMI_MODEL_CLIENT_PYTHON")
+    if candidate_paths is None:
+        names = (
+            "python3.12", "python3.13", "python3.14", "python3.11", "python3.10",
+            "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3.13",
+            "/opt/homebrew/bin/python3.14", "/opt/homebrew/bin/python3.11",
+            "/opt/homebrew/bin/python3.10", "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3.12", "/usr/local/bin/python3.13",
+            "/usr/local/bin/python3.14", "/usr/local/bin/python3.11",
+            "/usr/local/bin/python3.10", "/usr/local/bin/python3", "python3",
+        )
+        candidate_paths = (requested,) if requested else names
+    seen = set()
+    for name in candidate_paths:
+        candidate = shutil.which(name)
+        if candidate is None or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [candidate, "-I", "-B", "-c",
+                 "import sys; raise SystemExit(0 if sys.platform in ('linux', 'darwin') "
+                 "and (3, 10) <= sys.version_info[:2] < (3, 15) else 1)"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            os.execv(candidate, [candidate, "-I", "-B", *sys.argv])
+            raise RuntimeError("supported Python re-exec unexpectedly returned")
+    raise ValueError(
+        "the model client requires Python 3.10 through 3.14; install one or set "
+        "UMI_MODEL_CLIENT_PYTHON to its executable path"
+    )
+
+
 def model_client_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
@@ -2833,6 +2876,7 @@ def _main() -> None:
         if args.public_model_track == "no":
             parser.error("--install-model-client requires public-model participation")
         args.public_model_track = "yes"
+        ensure_model_client_python()
     elif args.public_model_track is None:
         parser.error("--public-model-track is required for endpoint upgrades")
     progress_stage("manifest")
@@ -2853,6 +2897,8 @@ def _main() -> None:
                 "runtime_revision": manifest["runtime"]["revision"],
                 "endpoint_service_unchanged": True,
                 "directory": str(args.model_client_directory),
+                "installer_python": sys.executable,
+                "installer_python_version": platform.python_version(),
             }
         else:
             report = install_model_client(manifest, args.model_client_directory)

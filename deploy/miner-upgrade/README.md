@@ -20,7 +20,10 @@ Stage counts, elapsed time and historical-duration ETA are emitted without a new
 execution deadline.
 
 `--install-model-client` is an independent user installation mode for Linux and
-macOS with Python 3.10 through 3.14. It validates the same manifest/status binding,
+macOS with Python 3.10 through 3.14. When invoked with an older system Python,
+it selects an already installed supported interpreter before fetching the
+manifest; `UMI_MODEL_CLIENT_PYTHON` can name a supported interpreter outside the
+usual PATH or Homebrew locations. It validates the same manifest/status binding,
 then installs the exact source and locked dependencies without discovering an
 endpoint or using its environment. See the connection guide for its commands,
 repeat-install behavior and retained release directories. Model-only track intent
