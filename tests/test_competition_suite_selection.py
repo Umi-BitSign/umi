@@ -172,6 +172,7 @@ def test_cli_reuses_completed_preparation_and_restores_interrupted_output(
     args.selection_key.chmod(0o600)
     first = cli.prepare(args)
     assert not first["reused_preparation"]
+    args.policy.chmod(0o444)
     (args.destination / "selection-report.json").unlink()
 
     def forbidden(*args, **kwargs):

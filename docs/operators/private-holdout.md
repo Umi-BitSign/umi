@@ -116,7 +116,8 @@ python -m umi.competition_suite_selection_cli \
   --destination /PRIVATE/prepared-suite
 ```
 
-All inputs and output directories are private. The 32-byte selection key remains
+Keep case inputs and output directories private; the published policy can use
+its existing public read-only path. The 32-byte selection key remains
 outside the report. `umi-private-suite-candidates/1` retains each exact single-
 reference case, dataset/version, original recording-group digest, provenance,
 license, attribution, exposure declaration and any known signer/topic metadata.

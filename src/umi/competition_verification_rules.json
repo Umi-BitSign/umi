@@ -646,7 +646,7 @@
     "competition_cohort_suite_adoption_candidate.py": "d3de259ea469f96337ad8138f29fd8ca42e19805a8c150002fa6924bc5a8efa4",
     "competition_cohort_suite_adoption_reservation.py": "cd7e2ec679a2e1ad33395f51d3700016323a292c21a45a26ff89051660361c7e",
     "competition_suite_selection.py": "0cac6cb97b6ce439a474b00994ab870bdf8093eb6f8ac6027d08e555fca8abc1",
-    "competition_suite_selection_cli.py": "345a7c37f72bc1fa7fabfe5890d7f58a008cd8f07db81a3c56b2b00c07124449",
+    "competition_suite_selection_cli.py": "a72594f5686a1c8aeb100b5e2cf4b1d17535e431614998fe9469e7d8b3bd92e2",
     "competition_suite_reference_qa.py": "db6f0b95b5be0d9dc431db2a6d84dc02e65449ec1695ca86845da39801510f50"
   },
   "external_distributions": {

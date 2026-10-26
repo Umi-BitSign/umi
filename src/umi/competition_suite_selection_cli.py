@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import Field, RootModel
 
+from .competition_commands.common import load_json
 from .competition_progress import configure_progress_logging
 from .competition_suite_selection import (
     SuiteCandidateInventory,
@@ -37,7 +38,9 @@ def prepare(args):
     inventory = read_private_model(args.inventory, SuiteCandidateInventory)
     exclusions = read_private_model(args.exclusions, SuiteExclusions)
     counts = read_private_model(args.counts, SuiteSelectionCounts)
-    policy = read_private_model(args.policy, CompetitionPolicy)
+    # Published policy is public input (including the installed root-owned
+    # read-only layout); private data/key checks remain on the other files.
+    policy = load_json(str(args.policy), CompetitionPolicy)
     key = _read_private_bytes(args.selection_key, maximum_bytes=32)
     bindings = dict(
         inventory=digest(inventory),
