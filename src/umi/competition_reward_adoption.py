@@ -257,6 +257,43 @@ def prepare_initial_reward_adoption(
     )
 
 
+def select_signed_initial_reward_adoption(
+    previous: RewardAdoptionSelection | None,
+    signed: SignedRewardModelAdoption,
+    *,
+    series,
+    policy: CompetitionPolicy,
+) -> RewardAdoptionSelection:
+    """Idempotently extend an authenticated selection with one signed cohort body.
+
+    This pure selection does not install a host config or activate rewards.
+    Repeating the exact signed body reuses the existing immutable selection;
+    replacing a revision requires the separate native revision procedure.
+    """
+    old = verify_adoption_selection(previous, series, policy)
+    signed = SignedRewardModelAdoption.model_validate_json(canonical_json_bytes(signed))
+    body = signed.adoption
+    if body.revision != 1:
+        raise ValueError("initial reward selection requires revision one")
+    retained = None if old is None else old.latest(body.cohort_sha256)
+    if retained is not None:
+        if retained != signed:
+            raise ValueError("reward adoption already selected different signed bytes")
+        return old
+    selected = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1",
+        adoptions=tuple(
+            sorted(
+                (*(() if old is None else old.adoptions), signed),
+                key=lambda value: (value.adoption.cohort_sha256, value.adoption.revision),
+            )
+        ),
+        maximum_decisions=1024 if old is None else old.maximum_decisions,
+    )
+    verify_adoption_selection(selected, series, policy)
+    return selected
+
+
 def verify_reward_adoption(
     selection, sha, *, series, policy, activation=None, package=None, current_block=None
 ) -> RewardModelAdoption:
