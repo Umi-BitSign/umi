@@ -1,7 +1,9 @@
 """Proof delivery preserves bytes; native finality review is a separate check."""
 
 import json
+import os
 import shutil
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -80,6 +82,42 @@ async def test_completed_publication_survives_restart_without_payload_reads(
     monkeypatch.setattr(reopened.outbox, "write", forbidden)
     await reopened.ensure_published(observation)
     assert calls == [observation]
+
+
+async def test_local_frame_lost_directory_ack_retries_without_payload_republication(
+    proof_case, monkeypatch
+):
+    from umi import private_files
+
+    files, observation, calls = proof_case
+    sync = private_files.os.fsync
+    failed = []
+
+    def fsync(fd):
+        info = os.fstat(fd)
+        directory = files.outbox.root / "registration"
+        if (
+            stat.S_ISDIR(info.st_mode)
+            and directory.exists()
+            and (info.st_dev, info.st_ino) == (directory.stat().st_dev, directory.stat().st_ino)
+        ):
+            if not failed:
+                failed.append(True)
+                raise OSError("lost registration frame directory acknowledgement")
+        return sync(fd)
+
+    monkeypatch.setattr(private_files.os, "fsync", fsync)
+    with pytest.raises(OSError, match="directory acknowledgement"):
+        await files.ensure_published(observation)
+    assert (files.outbox.root / "registration" / (digest(observation) + ".json")).exists()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("lost frame acknowledgement repeated proof payload publication")
+
+    monkeypatch.setattr(files, "_read", forbidden)
+    monkeypatch.setattr(files.outbox, "write", forbidden)
+    await files.ensure_published(observation)
+    assert calls == [observation] and failed == [True]
 
 
 async def test_completed_remote_publication_uses_selected_receipt_and_preserves_damage_hold(
