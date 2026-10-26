@@ -133,8 +133,31 @@ async def test_background_poll_retires_then_restarts_and_reuses_original_request
         assert not (f.uploads.archive / f.model / "model").exists()
 
 
+async def test_missing_local_receipt_retires_only_after_remote_and_consumer_release(
+    retirement, monkeypatch
+):
+    f = retirement
+    receipt = f.uploads.archive / (".verified-" + f.model + ".json")
+    assert receipt.is_file()
+    receipt.unlink()
+
+    def forbidden_reverification(*args, **kwargs):
+        raise AssertionError("retirement must not hash local model bytes again")
+
+    monkeypatch.setattr(
+        "umi.competition_artifacts.verify_bundle_directory", forbidden_reverification
+    )
+    async with AsyncExitStack() as stack:
+        await consumers(f, stack)
+        await f.delivery.poll_once()
+    assert f.uploads.allocations.state(f.model) == "released"
+    assert not (f.uploads.archive / f.model / "model").exists()
+    assert not f.remote.reads
+
+
 async def test_absent_consumer_never_fences_or_unlinks_native_payload(retirement):
     f = retirement
+    (f.uploads.archive / (".verified-" + f.model + ".json")).unlink()
     await f.delivery.poll_once()
     assert f.uploads.allocations.state(f.model) == "local_reserved"
     assert (f.uploads.archive / f.model / "model").is_dir()
@@ -233,6 +256,7 @@ async def test_changed_original_inventory_prevents_release(retirement, monkeypat
 
 async def test_missing_completed_remote_receipt_requires_repair(retirement, monkeypatch):
     f = retirement
+    (f.uploads.archive / (".verified-" + f.model + ".json")).unlink()
 
     async def missing(*args, **kwargs):
         assert kwargs.get("completed_only"), "retirement must not start a payload verification pass"
