@@ -3966,6 +3966,12 @@ package, preserving its previous immutable completion.
 Observed receipt or generation damage stays held even if the original
 later reappears, until explicit scoped repair succeeds.
 
+Each chunk-generation confirmation retains one bounded native HTTP connection
+scope across all metadata batches, including direct legacy receipt and coverage
+restore callers. Nested reader scopes share that pool and cancellation drains
+owned requests before close. Every later confirmation still fetches fresh object
+metadata and refuses changed generations; transport reuse caches no HEAD result.
+
 Keep `coverage-qualification-owner.json` and `coverage-qualification-ledger/`
 under the original model receipt directory. The immutable completion ledger
 detects lost per-item qualification files before new capture can repeat native
