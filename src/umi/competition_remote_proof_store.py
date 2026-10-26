@@ -11,7 +11,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from threading import Condition, Event, RLock
 from typing import Annotated, Literal
@@ -413,26 +413,55 @@ class RemoteProofStore:
         This attests completed replication, not a new remote availability probe. Any
         fetch still checks the observed object generation and authenticates its bytes.
         """
-        reference = RemoteProofReference.model_validate(value)
-        if reference.namespace_sha256 != self.namespace_sha256 or not reference.key.startswith(
-            self.config.prefix + "/"
-        ):
-            raise ValueError("remote proof reference selects another authenticated namespace")
-        # Reuse the receipt owner's connection for its independent damage hold.
-        # Each call still opens fresh snapshots; no receipt or hold is cached
-        # across references, checkpoint batches, finality checks or restarts.
+        with self.reference_snapshot() as validate:
+            return validate(value)
+
+    @contextmanager
+    def reference_snapshot(self):
+        """Check at most 256 references in fresh, bounded receipt snapshots.
+
+        Callers already holding source metadata open these afterward, and close
+        them before any finality check. Every later batch reopens both owners;
+        receipt/schema/hold facts never become cross-batch cached verdicts.
+        """
         owner = self.receipt_source or self.journal
-        with owner.read_transaction() as db:
-            if self._retained_snapshot(reference.key, db) != reference:
-                raise ValueError("remote proof replication receipt is missing or damaged")
-            if owner.get("remote_proof_damage", self._damage_key(reference), db=db) is not None:
-                raise ValueError("remote proof requires explicit original-generation repair")
-        if (
-            self.receipt_source is not None
-            and self.journal.get("remote_proof_damage", self._damage_key(reference)) is not None
+        with (
+            owner.read_transaction() as db,
+            (
+                self.journal.read_transaction()
+                if self.receipt_source is not None
+                else nullcontext(db)
+            ) as damage_db,
         ):
-            raise ValueError("remote proof requires explicit original-generation repair")
-        return reference
+            active, remaining = True, 256
+
+            def validate(value):
+                nonlocal remaining
+                if not active or remaining == 0:
+                    raise ValueError("remote proof receipt snapshot is closed or exhausted")
+                remaining -= 1
+                reference = RemoteProofReference.model_validate(value)
+                if (
+                    reference.namespace_sha256 != self.namespace_sha256
+                    or not reference.key.startswith(self.config.prefix + "/")
+                ):
+                    raise ValueError(
+                        "remote proof reference selects another authenticated namespace"
+                    )
+                if self._retained_snapshot(reference.key, db) != reference:
+                    raise ValueError("remote proof replication receipt is missing or damaged")
+                key = self._damage_key(reference)
+                if owner.get("remote_proof_damage", key, db=db) is not None or (
+                    self.receipt_source is not None
+                    and self.journal.get("remote_proof_damage", key, db=damage_db) is not None
+                ):
+                    raise ValueError("remote proof requires explicit original-generation repair")
+                return reference
+
+            try:
+                yield validate
+            finally:
+                active = False
 
     def repair_reference(self, value: dict) -> None:
         """Requalify the exact original generation; never adopt changed bytes.

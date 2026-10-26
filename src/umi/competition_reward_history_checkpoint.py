@@ -332,6 +332,17 @@ class HistoryCheckpoints:
                 if missing
                 else {}
             )
+            rechecked = (
+                dict(
+                    zip(
+                        reused,
+                        self.remote_sources.recheck_snapshot_tokens(list(reused.values())),
+                        strict=True,
+                    )
+                )
+                if reused
+                else {}
+            )
             for identity in group:
                 if identity in fresh:
                     fact = fresh[identity]
@@ -340,7 +351,7 @@ class HistoryCheckpoints:
                     # Remote indexes can change independently of this SQL
                     # snapshot; every reused receipt still receives its check.
                     fact = reused[identity]
-                    token = self.remote_sources.recheck_snapshot_token(fact)
+                    token = rechecked[identity]
                 _remember_source_token(snapshot_tokens, identity, fact)
                 out.append(token)
         return out

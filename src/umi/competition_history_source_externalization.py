@@ -14,7 +14,7 @@ import re
 import sqlite3
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from threading import Event
 
@@ -112,6 +112,18 @@ class JournalSourceExternalizer:
         self.source_kinds, self.repair_error = tuple(source_kinds), repair_error
         self.source_release_guard = source_release_guard
 
+    @contextmanager
+    def _reference_snapshot(self, enabled):
+        try:
+            with self.remote.reference_snapshot() if enabled else nullcontext(None) as validate:
+                yield validate
+        except (TypeError, KeyError, ValueError) as error:
+            if isinstance(error, self.repair_error):
+                raise
+            raise self.repair_error(
+                "remote source alias or receipt damaged; repair required"
+            ) from error
+
     def _identity(self, kind, key, db):
         if kind not in self.source_kinds or type(key) is not str:
             raise self.repair_error("unsupported remote source kind or key")
@@ -131,7 +143,7 @@ class JournalSourceExternalizer:
             raise self.repair_error("source identity missing or conflict held; repair required")
         return row
 
-    def _alias(self, kind, key, db):
+    def _alias(self, kind, key, db, *, validate_reference=None):
         try:
             value = self.journal.get(self.alias_kind, digest([kind, key]), db=db)
             if value is None:
@@ -153,7 +165,7 @@ class JournalSourceExternalizer:
             ):
                 raise ValueError("invalid remote source alias")
             checked_digest(value["raw_sha256"])
-            reference = self.remote.validate_reference(value["remote"])
+            reference = (validate_reference or self.remote.validate_reference)(value["remote"])
             if value["schema"] == SCHEMA:
                 if (reference.content_sha256, reference.size_bytes) != (
                     value["raw_sha256"],
@@ -182,8 +194,8 @@ class JournalSourceExternalizer:
         row = self._identity(kind, key, db)
         return self._snapshot_token(kind, key, row, db)
 
-    def _snapshot_token(self, kind, key, row, db):
-        alias = self._alias(kind, key, db)
+    def _snapshot_token(self, kind, key, row, db, *, validate_reference=None):
+        alias = self._alias(kind, key, db, validate_reference=validate_reference)
         if alias is None:
             if row[1] != 1:
                 raise self.repair_error("remote source alias missing; explicit repair required")
@@ -247,34 +259,51 @@ class JournalSourceExternalizer:
         if len(rows) != len(unique) or set(by_key) != set(unique):
             raise self.repair_error("source identity metadata changed; repair required")
         results = []
-        for kind, key in keys:
-            revision, present, record, held, alias, alias_held = by_key[kind, key]
-            if (
-                type(revision) is not int
-                or revision < 0
-                or present not in (0, 1)
-                or bool(present) != (record is not None)
-                or held is not None
-            ):
-                raise self.repair_error("source identity missing or conflict held; repair required")
-            if alias is not None or alias_held is not None or present != 1:
-                results.append(self._snapshot_token(kind, key, (revision, present), db))
-            else:
-                results.append(_SourceSnapshotToken((kind, key, revision), None))
+        with self._reference_snapshot(
+            self.remote is not None and any(row[4] is not None for row in by_key.values())
+        ) as validate:
+            for kind, key in keys:
+                revision, present, record, held, alias, alias_held = by_key[kind, key]
+                if (
+                    type(revision) is not int
+                    or revision < 0
+                    or present not in (0, 1)
+                    or bool(present) != (record is not None)
+                    or held is not None
+                ):
+                    raise self.repair_error(
+                        "source identity missing or conflict held; repair required"
+                    )
+                if alias is not None or alias_held is not None or present != 1:
+                    results.append(
+                        self._snapshot_token(
+                            kind, key, (revision, present), db, validate_reference=validate
+                        )
+                    )
+                else:
+                    results.append(_SourceSnapshotToken((kind, key, revision), None))
         return results
 
     def recheck_snapshot_token(self, fact: _SourceSnapshotToken):
-        """The remote index is outside the source SQL snapshot; never memoize it."""
-        if fact.remote_reference is not None:
+        return self.recheck_snapshot_tokens([fact])[0]
+
+    def recheck_snapshot_tokens(self, facts: Sequence[_SourceSnapshotToken]):
+        """Fresh independent receipt/damage snapshots for this bounded recheck."""
+        if not 1 <= len(facts) <= 256:
+            raise ValueError("source metadata batch requires 1 to 256 keys")
+        if any(fact.remote_reference is not None for fact in facts):
             try:
                 if self.remote is None:
                     raise ValueError("remote source owner is unavailable")
-                self.remote.validate_reference(fact.remote_reference)
+                with self.remote.reference_snapshot() as validate:
+                    for fact in facts:
+                        if fact.remote_reference is not None:
+                            validate(fact.remote_reference)
             except (TypeError, KeyError, ValueError) as error:
                 raise self.repair_error(
                     "remote source alias or receipt damaged; repair required"
                 ) from error
-        return list(fact.token)
+        return [list(fact.token) for fact in facts]
 
     def get_raw(self, kind, key, *, db):
         alias = self._alias(kind, key, db)

@@ -133,9 +133,11 @@ async def test_cached_remote_token_rechecks_damage_outside_sql_snapshot(
         source = _CheckpointSourceSnapshot(checkpoints, db)
         assert checkpoints._load_snapshot(h.old.height, db, source)
 
-        def damaged(_reference):
-            raise ValueError("remote proof requires explicit original-generation repair")
+        # The receipt owner is independent of the source snapshot. A new real
+        # damage hold must be observed even when source tokens are reusable.
+        from umi.competition_remote_proof_store import RemoteProofReference
 
-        monkeypatch.setattr(h.reader.remote_store, "validate_reference", damaged)
+        fact = next(f for f in source.tokens.values() if f.remote_reference is not None)
+        h.reader.remote_store._hold(RemoteProofReference.model_validate(fact.remote_reference))
         with pytest.raises(HistoryCheckpointRepairRequired, match="receipt damaged"):
             checkpoints._load_snapshot(h.old.height, db, source)

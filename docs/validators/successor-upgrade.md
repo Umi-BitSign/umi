@@ -1137,6 +1137,16 @@ without compatible original-owner checkpoints must replay the proofs. Restoring
 unchanged successful checkpoints does not reread the original proof payloads and
 does not turn those local results into portable proof authority.
 
+History and coverage restoration check remote receipt metadata in batches of at
+most 256 source references. Each batch opens fresh read-only snapshots of the
+receipt owner and any independent consumer damage holds, after the source
+snapshot. Schema and owner checks are shared within that batch; every reference
+still checks its original completion and damage status. These snapshots close
+before finality refresh and are reopened for subsequent rechecks. No payload
+read, remote availability probe, signed-format migration or verdict expiration
+is introduced. This applies to both coordinator and validator readers and their
+supported host updates; it does not require a public miner-client format change.
+
 Each retained history frame reads its chunk references and proof objects through
 one native query-only database snapshot. It does not reserve the writer slot or
 open a connection per object. The next frame load takes a fresh snapshot and

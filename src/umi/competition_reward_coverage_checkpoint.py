@@ -251,11 +251,16 @@ class CoverageCheckpoints:
 
     def sources(self, keys, db):
         self.check_schema(db)
+        keys = sorted(set(keys))
         values = []
-        for kind, key in sorted(set(keys)):
-            if self.externalized is not None:
-                values.append(self.externalized.source_token(kind, key, db))
-                continue
+        if self.externalized is not None:
+            for start in range(0, len(keys), 256):
+                values.extend(
+                    list(fact.token)
+                    for fact in self.externalized.snapshot_tokens(keys[start : start + 256], db)
+                )
+            return values
+        for kind, key in keys:
             row = db.execute(
                 "SELECT revision,present FROM coverage_source_identity WHERE kind=? AND id=?",
                 (kind, key),
