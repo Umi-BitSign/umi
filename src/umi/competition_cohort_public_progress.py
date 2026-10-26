@@ -71,6 +71,8 @@ _FIELDS = (
     "role",
     "producer_epoch_sha256",
     "series_sha256",
+    "publication",
+    "refresh",
 )
 
 

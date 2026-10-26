@@ -77,6 +77,18 @@ selection changes no signed format, native proof semantics or historical clocks.
 
 ## Work progress and ETA logs
 
+The coordinator retains advisory package-publication observations under its native
+settlement root's `publication-progress/` directory. After restart it binds the
+selected native authenticated certification closure to the configured owner-private
+output's filesystem identity, without reading its payload or repeating proofs.
+Preserve these small receipts and their completion markers. In the public settlement
+component, completed publication stays at 100% while `refresh` reports the current
+auxiliary work, including its retries and scoped ETA. `publication` records the
+original observation time; legacy adoption is explicitly metadata-only. A missing,
+damaged or changed receipt/output reports its specific repair reason rather than
+silently restarting publication. These observations confer no native verification,
+certification, reward activation or permission to skip current checks.
+
 For model-only paired-baseline awards, a signed failed candidate case contributes
 zero quality. It does not become an incumbent failure or stop the roster's
 settlement. Candidate and frozen baseline use the same content metric; the

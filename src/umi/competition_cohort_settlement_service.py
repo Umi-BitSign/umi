@@ -154,12 +154,24 @@ class CohortSettlementService:
         self.reward_package_reference: tuple[Path, str] | None = None
         self.terminal_certification_sha256: str | None = None
         self.reference = False
+        from .competition_cohort_publication_progress import NativePublicationProgress
+
         self.public_progress = SettlementProgressProducer(
             (e.journal.root for e in executions if self.cohort in e.cohorts),
             series=digest(config.series),
             cohort=self.cohort,
             evaluator=identity(config.signer_hotkey),
             role=config.role,
+            publication=NativePublicationProgress(
+                root / "publication-progress",
+                Path(config.settlement_directory) / (self.cohort + ".json"),
+                series=digest(config.series),
+                cohort=self.cohort,
+                evaluator=identity(config.signer_hotkey),
+                maximum_package_bytes=config.maximum_package_bytes,
+            )
+            if config.role == "coordinator"
+            else None,
         )
 
     def _progress(self, stage, **values):
@@ -685,7 +697,15 @@ class CohortSettlementService:
 
     @memory_operation
     async def _selected_history(self):
-        return await self._receive_history(await self._handoff())
+        history = await self._receive_history(await self._handoff())
+        # Native authenticated selection supplies the closure; a package filename
+        # alone never establishes a completed diagnostic or native authority.
+        if self.config.role == "coordinator" and any(
+            item.transition.phase == "certification" and item.transition.operation == "close_phase"
+            for item in history.transitions
+        ):
+            self.public_progress.bind_publication(self._certification_prefix(history))
+        return history
 
     @staticmethod
     def _certification_prefix(history):
