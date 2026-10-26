@@ -243,25 +243,33 @@ class CohortProgressSnapshots:
                 # An old roster meter must not hide a live acceptance attempt.
                 # Keep its last count in components until its owner refreshes it.
                 work = parts.get("work")
-                if (
+                live_work = (
                     work is not None
                     and not work["stale"]
                     and work.get("state") in {"started", "running", "waiting"}
-                    and work.get("stage", "").startswith(("model_acceptance_", "model_promotion_"))
+                    and isinstance(work.get("stage"), str)
                     and entry["work"][0] >= entry.get("phase_started", 0)
+                )
+                acceptance = parts.get("acceptance")
+                live_acceptance = (
+                    acceptance is not None
+                    and not acceptance["stale"]
+                    and acceptance.get("status") == "running"
+                    and isinstance(acceptance.get("stage"), str)
+                )
+                if live_work and work["stage"].startswith(
+                    ("model_acceptance_", "model_promotion_")
                 ):
                     selected = work
                     stage = work["stage"]
-                else:
-                    acceptance = parts.get("acceptance")
-                    if (
-                        acceptance is not None
-                        and not acceptance["stale"]
-                        and acceptance.get("status") == "running"
-                        and isinstance(acceptance.get("stage"), str)
-                    ):
-                        selected = acceptance
-                        stage = "model_acceptance_" + acceptance["stage"]
+                elif live_acceptance:
+                    selected = acceptance
+                    stage = "model_acceptance_" + acceptance["stage"]
+                elif live_work:
+                    # Nested transfer stages can outlive their enclosing
+                    # acceptance heartbeat while still reporting live bytes.
+                    selected = work
+                    stage = work["stage"]
         quorum_stage = {
             "progress_review": f"{phase}_progress_quorum",
             "decision_certification": f"{phase}_decision_quorum",
