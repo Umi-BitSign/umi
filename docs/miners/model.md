@@ -116,7 +116,8 @@ After a replacement changes the latest-submission roster, certification has no
 comparable completion rate yet. Until the first certificate in that roster,
 `planning_eta_seconds` gives a labeled 30–1,200-second range per remaining
 certificate, based on prior completed acceptance stages. It counts down and is
-withdrawn if progress goes idle; it is not an end-to-end cohort forecast.
+withdrawn if progress goes idle. It excludes waiting behind other cohorts and
+is not an end-to-end cohort forecast.
 
 During evaluation, `components.execution` counts confirmed exported results.
 `components.execution_workers.workers` separately shows cached evaluator stages,

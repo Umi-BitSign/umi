@@ -109,7 +109,7 @@ class ModelCertificationProgress:
                 ),
                 eta_assumptions=(
                     "remaining models have comparable cost; "
-                    "no unresolved holds or new roster replacements"
+                    "no unresolved holds, new roster replacements or cross-cohort queue wait"
                 ),
                 estimated_finish_unix_ms=None if eta is None else int((time.time() + eta) * 1000),
                 blocked_count=len(holds),
