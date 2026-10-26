@@ -118,7 +118,11 @@ async def test_background_poll_retires_then_restarts_and_reuses_original_request
     manifest = (f.uploads.archive / f.model / "manifest.json").read_bytes()
     async with AsyncExitStack() as stack:
         await consumers(f, stack)
-        await f.delivery.poll_once()
+        reports = []
+        await f.delivery.poll_once(report=reports.append)
+        native = [r for r in reports if r.get("stage") == "native_model_upload_poll"]
+        assert native[-1]["status"] == "completed"
+        assert native[-1]["completed_units"] == native[-1]["total_units"] == 1
         assert f.uploads.allocations.state(f.model) == "released"
         assert not (f.uploads.archive / f.model / "model").exists()
         assert not (f.uploads.root / "files" / f.model / "model").exists()

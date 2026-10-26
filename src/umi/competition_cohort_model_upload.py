@@ -555,21 +555,30 @@ class CohortModelUploads:
         finally:
             os.close(lease)
 
-    def poll_once(self, *, remote_payloads=None, remote_review=None):
+    def poll_once(self, *, remote_payloads=None, remote_review=None, report=None):
         """Finalize delivery in the service worker, outside HTTP request deadlines."""
         if remote_payloads is not None and remote_payloads.intake is not self.intake:
             raise ValueError("remote model polling requires the same native intake owner")
+        keys = self.journal.keys("upload")
+        with TransferProgress(
+            "native_model_upload_poll", len(keys), report, unit="requests"
+        ) as progress:
+            return self._poll_once_keys(keys, remote_payloads, remote_review, progress)
+
+    def _poll_once_keys(self, keys, remote_payloads, remote_review, progress):
         ready = pending = 0
         reviews_ready = reviews_pending = reviews_held = 0
         review_hold_reason = ""
         error_type = ""
         seen = set()
-        for key in self.journal.keys("upload"):
+        for key in keys:
+            duplicate = False
             try:
                 # Current mutation/conflict fences precede reuse; unchanged
                 # duplicate rows need neither a payload read nor another hash.
                 model = self.retained_model(key)
                 if model in seen:
+                    duplicate = True
                     continue
                 seen.add(model)
                 request = self.retained(key)
@@ -627,6 +636,8 @@ class CohortModelUploads:
             except (OSError, ValueError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__
+            finally:
+                progress.advance(1, restored=duplicate)
         return {
             "models_preserved": ready,
             "models_pending": pending,
