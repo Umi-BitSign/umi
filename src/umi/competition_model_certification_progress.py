@@ -56,9 +56,7 @@ class ModelCertificationProgress:
                 0
                 if not remaining
                 else (
-                    remaining / rate
-                    if rate and not holds and not regressed and not idle
-                    else None
+                    remaining / rate if rate and not holds and not regressed and not idle else None
                 )
             )
             # A replacement roster has no comparable completion rate yet. Show
@@ -115,9 +113,7 @@ class ModelCertificationProgress:
                 blocked_count=len(holds),
                 blocked=holds,
                 repair_required=regressed,
-                stalled_or_retrying=bool(holds)
-                or regressed
-                or idle,
+                stalled_or_retrying=bool(holds) or regressed or idle,
                 rate_scope="this observer process and unchanged selected roster",
                 certification_authority=False,
             )

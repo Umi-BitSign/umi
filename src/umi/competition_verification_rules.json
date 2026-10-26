@@ -330,7 +330,7 @@
     "competition_model_byte_store.py": "85dae9417bdf1a8375da4d817f1fcf8181cd8adbfa6a4cb085df897d5d700419",
     "competition_model_byte_store_cli.py": "b74ed988b6bca0dddd6b0fe4d13b5df4c6cab719d8ffb80d897a4ce821fd162f",
     "competition_model_cache_space.py": "2ff7afbdb875c7736a8226e5aae188a77d9713f3875f0049e4702c8c7e073e04",
-    "competition_model_certification_progress.py": "703f4ea58fd557c9d6868fab0376f963a13342fdd27d9c9c67b07dbce80e0471",
+    "competition_model_certification_progress.py": "cf2fb9bac3e9d7e7ba86ebf778e5cf0e3bd662a7a40cebf9b3c4f6237bdc1a39",
     "competition_model_interface.py": "527633a2efd8511b5ae53f77be01635260cdfff304ef97b9c3e6f59a4b4f15df",
     "competition_model_materialization.py": "b675e3277a46467ef7515bc325a4becc3690560e6780d1f25ca683ac6bb5aaf0",
     "competition_model_review_file.py": "8a7f3695aa88221b98ab4af6d55170964a51eb4f870bc5465bfe08590938d2d0",
