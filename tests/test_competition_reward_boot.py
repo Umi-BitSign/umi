@@ -695,3 +695,120 @@ async def test_r2_writer_boot_retains_archive_selection_across_restart(
         0,
         source_release_batch_records,
     ]
+
+
+@pytest.mark.parametrize("history", ["current", "predecessor"])
+@pytest.mark.parametrize("failure", [None, "repair", "cancel"])
+async def test_writer_credit_repair_reuses_original_assembly_without_signing(
+    inputs, monkeypatch, history, failure
+):
+    from contextlib import contextmanager
+
+    i = inputs
+    selected = i.value if history == "current" else successor_boot(i)[0]
+    selected = selected.model_copy(update={"maximum_history_bytes": 64 * 1024**3})
+    providers, events = [], []
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy, self.started, self.closed = chain, policy, False, False
+            providers.append(self)
+
+        async def start(self):
+            self.started = True
+
+        async def aclose(self):
+            self.closed = True
+
+    async def seed(*args, **kwargs):
+        pass  # Normal boot creates the actual retained native journal namespaces.
+
+    runtime = SimpleNamespace(
+        config=i.anchor.config,
+        adapter=object.__new__(ProductionSuccessorRuntimeAdapter),
+        _require_lease=lambda: None,
+    )
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot, "run_standing_reward_service", seed)
+    stop = asyncio.Event()
+    await boot.run_installed_standing_rewards(runtime, selected, stop)
+    assert all(p.closed for p in providers)
+    providers.clear()
+    series = selected.series if history == "current" else selected.predecessor_series
+    root = Path(i.anchor.config.state_root) / "standing-rewards" / digest(series)
+    inodes = {
+        name: (root / name / "rounds.sqlite3").stat().st_ino for name in ("history", "coverage")
+    }
+
+    @contextmanager
+    def lease(anchor):
+        assert anchor is i.anchor
+        events.append("lease")
+        yield SimpleNamespace(config=i.anchor.config, recheck=lambda: events.append("recheck"))
+        events.append("released")
+
+    def load(path, anchor):
+        assert events == ["lease"]
+        assert path == i.path and anchor is i.anchor
+        return selected
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("credit repair started the writer or loaded a signer")
+
+    async def repair(self, key, *, reason, stop):
+        assert key == "ab" * 32 and reason == "restore original credit metadata"
+        assert self.provider is providers[0] and self.provider.started
+        assert self.preparation.reader.series == series
+        assert self.journal.journal.root == root / "coverage"
+        assert self.history.journal.root == root / "history"
+        assert self.history.shutdown_event is stop
+        events.append("repair")
+        if failure == "repair":
+            raise ValueError("original endpoint still needs repair")
+        if failure == "cancel":
+            raise asyncio.CancelledError
+        return dict(status="coverage_credit_repaired", original_interval_unchanged=True)
+
+    from umi import named_hotkey
+
+    monkeypatch.setattr(boot, "hold_successor_startup_lease", lease)
+    monkeypatch.setattr(boot, "load_standing_boot", load)
+    monkeypatch.setattr(boot, "run_standing_reward_service", forbidden)
+    monkeypatch.setattr(named_hotkey, "load_named_hotkey", forbidden)
+    monkeypatch.setattr(boot.StandingRewardCoverageService, "repair_credit", repair)
+    operation = boot.run_installed_credit_repair(
+        i.anchor,
+        i.path,
+        stop,
+        key="ab" * 32,
+        reason="restore original credit metadata",
+        history=history,
+    )
+    if failure:
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else ValueError):
+            await operation
+    else:
+        assert (await operation)["status"] == "coverage_credit_repaired"
+    assert len(providers) == 1 and providers[0].closed
+    assert events[:2] == ["lease", "recheck"] and "repair" in events
+    assert inodes == {name: (root / name / "rounds.sqlite3").stat().st_ino for name in inodes}
+
+
+async def test_writer_credit_repair_refuses_busy_owner_before_config_or_state(inputs, monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def busy(anchor):
+        raise BlockingIOError("owned supervisor is active")
+        yield  # pragma: no cover
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("credit repair inspected inputs before exclusive ownership")
+
+    monkeypatch.setattr(boot, "hold_successor_startup_lease", busy)
+    monkeypatch.setattr(boot, "load_standing_boot", forbidden)
+    monkeypatch.setattr(boot, "_run_owned_standing_inputs", forbidden)
+    with pytest.raises(BlockingIOError):
+        await boot.run_installed_credit_repair(
+            inputs.anchor, inputs.path, asyncio.Event(), key="ab" * 32, reason="original restored"
+        )

@@ -6765,3 +6765,145 @@ async def test_native_quality_publication_progress_counts_durable_actions(
     assert max(h.calls.values()) == 1  # Native signed votes were recovered, not signed twice.
     completed = [e for e in events if e["state"] == "completed"][-1]
     assert completed["completed"] == completed["total"] == count
+
+
+@pytest.mark.parametrize("complete_preparation_case", ["opportunity"], indirect=True)
+async def test_completed_native_interval_credit_restores_with_shared_dependency_refresh(
+    complete_preparation_case, tmp_path, monkeypatch
+):
+    from umi.competition_reward_coverage_credits import validate_native_credit
+    from umi.competition_reward_coverage_journal import RewardCoverageJournal
+    from umi.competition_reward_coverage_source import (
+        CoverageHistoryPending,
+        NativeRewardCoverageSource,
+    )
+    from umi.competition_reward_opportunity import opportunity_rule
+
+    h = complete_preparation_case
+    p, c = h.package_case, h.c
+    selected = opportunity_rule(p.manifest, c.series, c.reader.policy)
+    root = tmp_path / "native-interval-credit"
+    owner = StandingRewardPreparation(
+        c.reader, p.store, p.manifest, maximum_promotion_bytes=1_000_000
+    )
+
+    def source(journal):
+        return NativeRewardCoverageSource(
+            provider=h.item.provider,
+            journal=journal,
+            history=h.reader,
+            preparation=owner,
+            package=p.package,
+            decisions=c.source,
+            profile=h.item.profile,
+            maximum_history_blocks=4096,
+        )
+
+    journal = RewardCoverageJournal(root, selected, expected_rule_sha256=digest(selected))
+    native = source(journal)
+
+    async def capture(height):
+        for _ in range(100):
+            try:
+                return await native.capture(h.validator_hotkey, height)
+            except CoverageHistoryPending:
+                pass
+        pytest.fail("native fixture failed to converge")
+
+    left, right = await capture(h.end - 1), await capture(h.end)
+    await journal.retain_endpoint(left)
+    await journal.retain_endpoint(right)
+    # First adoption starts with original native endpoints and no interval
+    # credit ledger. It still refreshes the common model group once, while
+    # independently restoring exact history/runtime/source for each endpoint.
+    from umi import competition_reward_coverage_models as model_checks
+    from umi.competition_reward_coverage_intervals import coverage_point
+
+    adoption_journal = RewardCoverageJournal(root, selected, expected_rule_sha256=digest(selected))
+    adoption = source(adoption_journal)
+    model_restore = model_checks.restore_coverage_model_dependencies
+    history_restore = adoption._history
+    model_calls, history_calls = [], []
+
+    async def count_model(*args, **kwargs):
+        model_calls.append(1)
+        return await model_restore(*args, **kwargs)
+
+    async def count_history(height):
+        history_calls.append(height)
+        return await history_restore(height)
+
+    monkeypatch.setattr(model_checks, "restore_coverage_model_dependencies", count_model)
+    monkeypatch.setattr(adoption, "_history", count_history)
+    for native_endpoint in (left, right):
+        original_point = coverage_point(native_endpoint, selected)
+        restored_endpoint = await adoption.replay(original_point.key())
+        assert coverage_point(restored_endpoint, selected) == original_point
+    assert model_calls == [1]
+    assert history_calls == [h.end - 1, h.end]
+    interval = await journal.credit(left, right)
+    assert interval is not None
+    # Reopen the native owner. The complete current endpoint issuer/authority
+    # path is still used once for the identical group; raw interval hints cannot
+    # skip that independently owned refresh.
+    fresh = RewardCoverageJournal(root, selected, expected_rule_sha256=digest(selected))
+    restarted = source(fresh)
+    replay = restarted.replay
+    calls = []
+
+    async def counted(key):
+        calls.append(key)
+        return await replay(key)
+
+    monkeypatch.setattr(restarted, "replay", counted)
+    restored = await restarted.restore_credit(interval.key())
+    assert validate_native_credit(restored, fresh) == (interval, h.end)
+    assert len(calls) == 1
+    assert (
+        await fresh.verified_ms(
+            activation_sha256=interval.activation_sha256, validator_hotkey=h.validator_hotkey
+        )
+        == interval.credited_ms
+    )
+    assert await restarted.restore_credit(interval.key()) == restored
+    assert len(calls) == 1
+    # An explicit stopped-owner repair restores both original endpoint
+    # verdicts and interval arithmetic. It does not recreate any native proof.
+    with fresh.journal.transaction() as db:
+        db.execute("DELETE FROM coverage_credit_index WHERE id=?", (interval.key(),))
+    with pytest.raises(ValueError):
+        await restarted.restore_credit(interval.key())
+    repaired = await restarted.repair_credit(
+        interval.key(), reason="restore selected credit metadata"
+    )
+    assert repaired["original_interval_unchanged"]
+    repaired_native = await restarted.restore_credit(interval.key())
+    assert validate_native_credit(repaired_native, fresh) == (interval, h.end)
+    from umi.competition_reward_opportunity_review import (
+        prepare_opportunity_certificate,
+        review_opportunity_certificate,
+    )
+
+    terms = dict(
+        manifest=p.manifest,
+        series=c.series,
+        policy=h.item.policy,
+        activation=c.active.decision.activation,
+    )
+    certificate = await prepare_opportunity_certificate(fresh, **terms)
+
+    async def forbidden_replay(_):
+        pytest.fail("exact native interval credit must not replay both endpoints again")
+
+    checked = await review_opportunity_certificate(
+        canonical_json_bytes(certificate),
+        expected_sha256=digest(certificate),
+        journal=fresh,
+        witness_source=lambda sha: canonical_json_bytes(
+            fresh.journal.get("opportunity_witness", sha)
+        ),
+        review_endpoint=forbidden_replay,
+        review_interval=restarted.restore_credit,
+        **terms,
+    )
+    assert checked.certificate == certificate and not checked.chain_submission_authorized

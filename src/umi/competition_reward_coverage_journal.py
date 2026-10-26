@@ -48,7 +48,7 @@ from .competition_reward_coverage_intervals import (
 )
 from .competition_reward_coverage_models import (
     CoverageModelDependencyRepairRequired,
-    restore_coverage_model_dependencies,
+    restore_completed_model_dependencies,
 )
 from .competition_reward_coverage_prepared import (
     CoveragePackageReplayRequired,
@@ -147,6 +147,11 @@ class RewardCoverageJournal:
             repair_error=CoverageCheckpointRepairRequired,
         )
         self.checkpoints.externalized = self.externalized
+        from .competition_reward_coverage_credits import NativeCoverageCredits
+
+        self.native_credits = NativeCoverageCredits(self)
+        self.externalized.source_release_guard = self.native_credits.preserve_source_release
+        self._credit_history = None
         self._reading_sources = []
         self._pending_sources = {}
         self._pending_tokens = {}
@@ -345,18 +350,19 @@ class RewardCoverageJournal:
         value = self.checkpoints.load(point.key())
         if value is None or digest(value) != endpoint.receipt_sha256:
             raise CoverageCheckpointRepairRequired("restored coverage lost its native result")
+        return value
 
     def _remember_endpoint(self, endpoint):
         if type(endpoint) is OwnedRetainedCoverageEndpoint:
-            self._validate_retained(endpoint)
-            return
+            return self._validate_retained(endpoint)
         key = coverage_point(endpoint, self.rule).key()
         keys = self._pending_sources.pop(key, None)
         if keys is not None:
             tokens = self._pending_tokens.pop(key, None)
-            self.checkpoints.remember(
+            return self.checkpoints.remember(
                 endpoint, keys, expected_sources=tokens, repair_reason=self._repair_reason
             )
+        return self.checkpoints.load(key)
 
     def _commit_records(self, records):
         def capture(db):
@@ -507,12 +513,14 @@ class RewardCoverageJournal:
             return key
 
     async def credit(
-        self, left: CoverageEndpoint, right: CoverageEndpoint
+        self, left: CoverageEndpoint, right: CoverageEndpoint, *, credit_repair_reason=None
     ) -> RewardCoverageInterval | None:
         async with self._lock:
-            return await run_owned_thread(self._credit, left, right)
+            return await run_owned_thread(
+                lambda: self._credit(left, right, credit_repair_reason=credit_repair_reason)
+            )
 
-    def _credit(self, left, right):
+    def _credit(self, left, right, *, credit_repair_reason=None):
         with self.journal.locked():
             self._pending_sources.clear()
             self._pending_tokens.clear()
@@ -524,14 +532,28 @@ class RewardCoverageJournal:
             # Both endpoint frames, all proof objects and the interval commit
             # together. Update verified totals only after durable acknowledgement.
             self._commit_records(records)
-            for endpoint in (left, right):
-                self._remember_endpoint(endpoint)
+            endpoint_values = [self._remember_endpoint(endpoint) for endpoint in (left, right)]
             if self.export_archive is not None:
                 for endpoint in (left, right):
                     self._export(coverage_point(endpoint, self.rule).key(), self.export_archive)
                 if interval is not None:
                     self.export_archive.retain_interval(interval.key(), interval)
             if interval is not None:
+                if self._credit_history is not None:
+                    from .competition_reward_coverage_credits import CreditReuseUnavailable
+
+                    try:
+                        self.native_credits.remember(
+                            interval,
+                            endpoint_values,
+                            self._credit_history,
+                            repair_reason=credit_repair_reason,
+                        )
+                    except CreditReuseUnavailable:
+                        if credit_repair_reason is not None:
+                            raise
+                        with TransferProgress("coverage_credit_seed", 1, unit="intervals") as stage:
+                            stage.emit("waiting", reason="native_dependency_owner_upgrade_required")
                 self._verified[interval.key()] = interval
                 self._verified_through[interval.key()] = coverage_point(right, self.rule).block
             return interval
@@ -583,6 +605,27 @@ class RewardCoverageJournal:
                 for v in self._verified.values()
                 if v.activation_sha256 == activation_sha256 and v.validator_account_id == account
             )
+
+    async def diagnostic_counts(self):
+        """Read the native owner's existing charged counters, never scan records."""
+        async with self._lock:
+
+            def counts():
+                with self.journal.read_transaction() as db:
+                    rows = dict(
+                        db.execute(
+                            "SELECT kind,number FROM round_record_capacity_kinds "
+                            "WHERE kind IN ('coverage_interval','coverage_verified_done')"
+                        )
+                    )
+                return dict(
+                    retained_intervals=rows.get("coverage_interval", 0),
+                    retained_endpoint_verdicts=rows.get("coverage_verified_done", 0),
+                    revalidated_intervals=len(self._verified),
+                    retained_count_scope="all_activations_in_this_owner_not_native_credit",
+                )
+
+            return await run_owned_thread(counts)
 
     async def interval_keys(self, *, after: str | None = None, limit: int = 256) -> tuple[str, ...]:
         """Bounded discovery only. Each returned record still requires replay."""
@@ -738,6 +781,7 @@ class RewardCoverageJournal:
         history_source,
         profile,
         package=None,
+        completed_model_groups=None,
     ):
         value = await run_owned_thread(self.checkpoints.load, key)
         if value is None:
@@ -808,8 +852,8 @@ class RewardCoverageJournal:
                         cohort_sha256=value["cohort_sha256"],
                     )
                 )
-            model_dependencies_ready = await restore_coverage_model_dependencies(
-                preparation, value.get("model_dependencies")
+            model_dependencies_ready = await restore_completed_model_dependencies(
+                preparation, value.get("model_dependencies"), completed_model_groups
             )
         except (CoverageModelDependencyRepairRequired, PackageTransportRepairRequired) as error:
             raise CoverageCheckpointRepairRequired(str(error)) from error

@@ -8,10 +8,12 @@ import signal
 from contextlib import contextmanager
 from pathlib import Path
 
+from .competition_evidence_codec import checked_digest
 from .competition_reward_coordinator_boot import (
     load_reward_coordinator_config,
     run_reward_coordinator,
 )
+from .competition_reward_coverage_credits import CoverageCreditRepairRequired
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_history_repair import run_reward_history_repair
 from .competition_round_journal import RoundCapacityRepairRequired
@@ -56,13 +58,17 @@ def _logs():
         handler.close()
 
 
-async def _run(config, *, repair=None):
+async def _run(config, *, repair=None, credit_repair=None):
     loop, stop = asyncio.get_running_loop(), asyncio.Event()
     for value in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(value, stop.set)
     try:
         work = (
-            run_reward_coordinator(config, stop)
+            (
+                run_reward_coordinator(config, stop)
+                if credit_repair is None
+                else run_reward_coordinator(config, stop, credit_repair=credit_repair)
+            )
             if repair is None
             else run_reward_history_repair(config, stop, **repair)
         )
@@ -74,16 +80,37 @@ async def _run(config, *, repair=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check", "run", "repair-history"))
+    parser.add_argument("action", choices=("check", "run", "repair-history", "repair-credit"))
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--through-block", type=int, help="Inclusive bounded history repair target")
-    parser.add_argument("--reason", help="Required operator reason retained with repaired blocks")
+    parser.add_argument("--reason", help="Required operator reason retained with repaired work")
+    parser.add_argument(
+        "--interval", help="Exact native coverage interval digest for credit repair"
+    )
     parser.add_argument("--history", choices=("current", "predecessor"))
     args = parser.parse_args(argv)
-    if args.action == "repair-history":
+    if args.action == "repair-credit":
+        if (
+            not args.interval
+            or not args.reason
+            or not args.reason.strip()
+            or args.through_block is not None
+            or len(args.reason) > 1024
+        ):
+            parser.error("repair-credit requires --interval and --reason, without block targets")
+        try:
+            checked_digest(args.interval)
+        except (ValueError, TypeError):
+            parser.error("repair-credit requires an exact interval digest")
+    elif args.action == "repair-history":
+        if args.interval:
+            parser.error("repair-history does not take --interval")
         if args.through_block is None or not args.reason or not args.reason.strip():
             parser.error("repair-history requires --through-block and a nonempty --reason")
-    elif any(value is not None for value in (args.through_block, args.reason, args.history)):
+    elif any(
+        value is not None
+        for value in (args.through_block, args.reason, args.history, args.interval)
+    ):
         parser.error("history repair options require the repair-history action")
     try:
         config = load_reward_coordinator_config(args.config)
@@ -113,15 +140,32 @@ def main(argv=None):
                     )
                 )
                 print(json.dumps(result or {"status": "interrupted"}))
+            elif args.action == "repair-credit":
+                result = asyncio.run(
+                    _run(
+                        config,
+                        credit_repair=dict(
+                            key=args.interval, reason=args.reason, history=args.history or "current"
+                        ),
+                    )
+                )
+                print(json.dumps(result or {"status": "interrupted"}))
             else:
                 asyncio.run(_run(config))
     except Exception as error:
         # Parsing and SDK exceptions can contain paths, URLs and credentials.
         report = {"status": "failed", "error_type": type(error).__name__}
-        if args.action == "repair-history":
+        if args.action in {"repair-history", "repair-credit"}:
             if isinstance(error, PrivateStateBusyError):
                 report["status"] = "owner_busy"
-            elif isinstance(error, (HistoryCheckpointRepairRequired, RoundCapacityRepairRequired)):
+            elif isinstance(
+                error,
+                (
+                    HistoryCheckpointRepairRequired,
+                    RoundCapacityRepairRequired,
+                    CoverageCreditRepairRequired,
+                ),
+            ):
                 report.update(
                     status="repair_required",
                     recovery="restore_original_metadata_and_source_in_place_no_reset",

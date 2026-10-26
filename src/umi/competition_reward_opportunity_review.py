@@ -88,6 +88,7 @@ async def review_opportunity_certificate(
     journal: RewardCoverageJournal,
     witness_source: DecisionSource,
     review_endpoint: EndpointReview,
+    review_interval=None,
     manifest: RewardManifest,
     series: StandingRewardSeries,
     policy: CompetitionPolicy,
@@ -127,6 +128,22 @@ async def review_opportunity_certificate(
         total, through, previous = 0, 0, None
         for key in witness.interval_keys:
             hint = await journal.retained_interval(key)
+            restored = None if review_interval is None else await review_interval(key)
+            if restored is not None:
+                from .competition_reward_coverage_credits import validate_native_credit
+
+                interval, block = validate_native_credit(restored, journal)
+                if (
+                    interval != hint
+                    or interval.key() != key
+                    or interval.activation_sha256 != digest(activation)
+                    or interval.validator_account_id != contribution.validator_account_id
+                    or block <= through
+                ):
+                    raise ValueError("native credited interval changed its opportunity binding")
+                total += interval.credited_ms
+                through, previous = block, None
+                continue
             left = (
                 previous
                 if previous is not None and coverage_point(previous, rule).key() == hint.left

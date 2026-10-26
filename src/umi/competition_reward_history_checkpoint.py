@@ -332,6 +332,17 @@ class HistoryCheckpoints:
                 if missing
                 else {}
             )
+            rechecked = (
+                dict(
+                    zip(
+                        reused,
+                        self.remote_sources.recheck_snapshot_tokens(list(reused.values())),
+                        strict=True,
+                    )
+                )
+                if reused
+                else {}
+            )
             for identity in group:
                 if identity in fresh:
                     fact = fresh[identity]
@@ -340,7 +351,7 @@ class HistoryCheckpoints:
                     # Remote indexes can change independently of this SQL
                     # snapshot; every reused receipt still receives its check.
                     fact = reused[identity]
-                    token = self.remote_sources.recheck_snapshot_token(fact)
+                    token = rechecked[identity]
                 _remember_source_token(snapshot_tokens, identity, fact)
                 out.append(token)
         return out
@@ -627,13 +638,37 @@ class HistoryCheckpoints:
                 )
             }
             if self.remote_sources is not None:
-                for height in range(first, last + 1):
-                    if height in captured:
-                        continue
-                    alias = self.remote_sources._alias("control_history_block", str(height), db)
-                    if alias is not None:
-                        self.remote_sources.source_token("control_history_block", str(height), db)
-                        captured.add(height)
+                pending = [
+                    (str(height), digest(["control_history_block", str(height)]))
+                    for height in range(first, last + 1)
+                    if height not in captured
+                ]
+                for start in range(0, len(pending), 256):
+                    group = pending[start : start + 256]
+                    arguments = [alias for _, alias in group]
+                    markers = ",".join("?" for _ in arguments)
+                    aliases = {
+                        row[0]
+                        for row in db.execute(
+                            "SELECT id FROM records WHERE kind=? AND id IN (" + markers + ")",
+                            [self.remote_sources.alias_kind, *arguments],
+                        )
+                    }
+                    aliases.update(
+                        row[0]
+                        for row in db.execute(
+                            "SELECT id FROM holds WHERE id IN (" + markers + ")",
+                            arguments,
+                        )
+                    )
+                    keys = [
+                        ("control_history_block", height)
+                        for height, alias in group
+                        if alias in aliases
+                    ]
+                    if keys:
+                        self.remote_sources.snapshot_tokens(keys, db)
+                        captured.update(int(key) for _, key in keys)
             verified, exported = set(), set()
             for height, body in db.execute(
                 "SELECT i.height,r.body FROM history_checkpoint_index i LEFT JOIN records r "
