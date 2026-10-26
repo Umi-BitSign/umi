@@ -273,6 +273,29 @@ def test_reference_observer_failure_reports_redacted_cause(
     assert "private provider URL" not in output and "token" not in output
 
 
+def test_reference_observer_reports_stable_finality_reason_without_error_text(
+    installed, tmp_path, monkeypatch, capsys
+):
+    from umi import translation_reference_cli as cli
+    from umi.grandpa_finality import GrandpaFinalityObserverError
+
+    async def observer_stopped(_config):
+        cause = GrandpaFinalityObserverError("record_count_mismatch")
+        raise RuntimeError("owned_finality_observer_stopped") from cause
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", observer_stopped)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    record = json.loads(capsys.readouterr().out)
+    assert record["error_chain"][-1] == {
+        "error_type": "GrandpaFinalityObserverError",
+        "reason_code": "record_count_mismatch",
+    }
+
+
 def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):
     source = tmp_path / "signed.json"
     source.write_bytes(b"signed original")
