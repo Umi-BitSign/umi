@@ -179,8 +179,12 @@ def prepare_reward_adoption_boot_candidates(
         delivery = json.loads(package_delivery_config_raw)
         if (
             not isinstance(delivery, dict)
-            or set(delivery) != {
-                "schema", "native_source", "producer_config", "coordinator_config",
+            or set(delivery)
+            != {
+                "schema",
+                "native_source",
+                "producer_config",
+                "coordinator_config",
                 "state_directory",
             }
             or delivery["schema"] != "umi-native-reward-package-delivery/1"
