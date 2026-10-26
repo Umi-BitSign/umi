@@ -259,7 +259,6 @@ class CohortProgressSnapshots:
                 selected.get("stale")
                 or (
                     selected.get("stalled_or_retrying")
-                    and not selected.get("blocked_count")
                     and not selected.get("repair_required")
                 )
             ):
@@ -381,6 +380,14 @@ class CohortProgressSnapshots:
             components=parts,
         )
         result.update({key: value for key, value in selected.items() if key != "stage"})
+        if (
+            phase in (None, "intake")
+            and stage != "model_certification"
+            and "intake_certification" in parts
+        ):
+            # A failed acceptance item does not make unrelated current work
+            # idle. Keep its unresolved count visible beside the active stage.
+            result["blocked_count"] = parts["intake_certification"].get("blocked_count", 0)
         result["phase"] = phase
         result["stage"] = stage
         operation = parts.get("acceptance", {})

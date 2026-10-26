@@ -211,6 +211,40 @@ def test_active_verification_overrides_certificate_idle_stall():
     assert result["components"]["intake_certification"]["completed"] == 77
 
 
+def test_current_acceptance_remains_visible_with_another_submission_blocked():
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=57,
+            total=66,
+            blocked_count=1,
+            stalled_or_retrying=True,
+            eta_basis="blocked_acceptance_stage",
+        ),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=2,
+            stage="model_promotion_copy",
+            state="running",
+            completed=3,
+            total=10,
+            percent=30,
+            stalled_or_retrying=False,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_promotion_copy"
+    assert result["percent"] == 30
+    assert result["blocked_count"] == 1
+    assert result["components"]["intake_certification"]["completed"] == 57
+
+
 def test_stale_intake_count_uses_live_acceptance_only_until_work_refreshes(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
