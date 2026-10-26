@@ -623,6 +623,13 @@ def test_priority_uses_latest_sequence_and_keeps_superseded_recovery_scan(prepar
     assert digest(sub) in priority and digest(subs[0]) not in priority
     assert digest(subs[1]) in priority
     assert {digest(s) for _, s in owner.entries(cohort)} == priority | {digest(subs[0])}
+    ordered = owner.pending_latest_entries(cohort)
+    assert owner.pending_latest_entries(cohort, limit=1, offset=1) == ordered[1:2]
+    assert owner.pending_latest_entries(cohort, limit=1, offset=len(ordered)) == ()
+    with pytest.raises(ValueError, match="offset exceeds"):
+        owner.pending_latest_entries(
+            cohort, limit=1, offset=owner.intake.capacity.maximum_records + 1
+        )
 
 
 async def test_intake_certifies_replacement_before_closure_and_reuses_after_restart(

@@ -16,8 +16,10 @@ async def test_released_intake_backlog_bounds_held_batches_without_starving_them
         start = int(after) + 1 if after else 0
         return tuple((str(n), (cohort, n)) for n in range(start, start + limit))
 
-    def pending(cohort, *, limit):
-        return (("latest", (cohort, "latest")),) if urgent and cohort == released else ()
+    def pending(cohort, *, limit, offset):
+        if urgent and cohort == released:
+            return (("latest", (cohort, "latest")),)[offset : offset + limit]
+        return ()
 
     owner = SimpleNamespace(
         intake=SimpleNamespace(config=SimpleNamespace(cohorts=bindings)),

@@ -51,6 +51,8 @@ class ModelAcceptanceWorker:
         self.owner, self.capture = owner, capture
         self.inputs, self.output, self.batch_size = inputs, output, batch_size
         self.cursors = {}
+        self._fair_start = 0
+        self._priority_offsets = {}
         self.reviewers = tuple(reviewers)
         self.promote = promote
         self.prepare_review = prepare_review
@@ -319,6 +321,7 @@ class ModelAcceptanceWorker:
         }
 
     async def poll_once(self):
+        started = time.monotonic()
         ready = pending = 0
         error_type = ""
         # Discover pending successors before acceptance work. The independent
@@ -334,45 +337,77 @@ class ModelAcceptanceWorker:
             with suppress(OSError, ValueError, RuntimeError, sqlite3.Error):
                 priority_entries[cohort] = await run_owned_thread(
                     partial(
-                        self.owner.pending_latest_entries, cohort, limit=min(self.batch_size, 16)
+                        self.owner.pending_latest_entries,
+                        cohort,
+                        limit=min(self.batch_size, 16),
+                        offset=self._priority_offsets.get(cohort, 0),
                     )
                 )
+                if not priority_entries[cohort] and self._priority_offsets.get(cohort, 0):
+                    # The moving pending set reached its end. The empty page
+                    # verified the boundary without replaying a prior item.
+                    self._priority_offsets[cohort] = 0
+                    priority_entries[cohort] = await run_owned_thread(
+                        partial(
+                            self.owner.pending_latest_entries,
+                            cohort,
+                            limit=min(self.batch_size, 16),
+                            offset=0,
+                        )
+                    )
         urgent = any(priority_entries.values())
+        contended = sum(bool(entries) for entries in priority_entries.values()) > 1
+        # The intake bindings are sorted by hash, not by cohort date. A full
+        # pending batch from each earlier hash can otherwise delay a later
+        # cohort by many large model transfers. Give every pending cohort one
+        # attempt per pass and rotate the first cohort between passes.
+        rotated = (*bindings[self._fair_start :], *bindings[: self._fair_start])
+        self._fair_start = (self._fair_start + 1) % len(bindings)
         ordered = (
             sorted(
-                bindings,
-                key=lambda binding: not bool(priority_entries.get(binding.cohort_sha256)),
+                rotated,
+                key=lambda binding: (
+                    not bool(priority_entries.get(binding.cohort_sha256)),
+                    not contended
+                    and binding.cohort_sha256 not in self.priority_cohorts,
+                ),
             )
             if urgent
             else bindings
         )
         for binding in ordered:
             cohort = binding.cohort_sha256
-            # While released intake has unfinished latest models, still advance
-            # held cohorts, but do not make it wait behind their full batches.
-            # Once that backlog clears all cohorts regain the normal fair scan.
-            batch = self.batch_size if not urgent or priority_entries.get(cohort) else 1
+            priority = priority_entries.get(cohort)
+            batch = self.batch_size if not urgent or priority else 1
             try:
-                entries = await run_owned_thread(
-                    partial(
-                        self.owner.entries,
-                        cohort,
-                        after=self.cursors.get(cohort, ""),
-                        limit=batch,
-                    )
-                )
-                priority = priority_entries.get(cohort)
-                if priority is None:
-                    priority = await run_owned_thread(
+                if contended and priority:
+                    # Pending latest work already identifies the selected
+                    # submission. Avoid a second ledger scan and leave the
+                    # export cursor for the ordinary catch-up pass.
+                    work = dict(priority[:1])
+                    entries = ()
+                    scanned_entries = False
+                else:
+                    self._priority_offsets[cohort] = 0
+                    scanned_entries = True
+                    entries = await run_owned_thread(
                         partial(
-                            self.owner.pending_latest_entries,
+                            self.owner.entries,
                             cohort,
-                            limit=min(batch, 16),
+                            after=self.cursors.get(cohort, ""),
+                            limit=batch,
                         )
                     )
-                # Latest uncertified candidates run before old exports. Keep
-                # the original fair cursor independent of this bounded prefix.
-                work = dict((*priority, *entries))
+                    if priority is None:
+                        priority = await run_owned_thread(
+                            partial(
+                                self.owner.pending_latest_entries,
+                                cohort,
+                                limit=min(batch, 16),
+                                offset=0,
+                            )
+                        )
+                    work = dict((*priority, *entries))
                 for sub in work.values():
                     try:
                         with work_heartbeats():
@@ -381,7 +416,14 @@ class ModelAcceptanceWorker:
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
                         error_type = type(error).__name__
-                self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
+                        if contended and priority:
+                            # A failed latest entry remains pending. Advance
+                            # past it so later entries still get a turn.
+                            self._priority_offsets[cohort] = (
+                                self._priority_offsets.get(cohort, 0) + 1
+                            )
+                if scanned_entries:
+                    self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 pending += 1
                 error_type = type(error).__name__
@@ -390,5 +432,15 @@ class ModelAcceptanceWorker:
             "entries_exported": ready,
             "entries_pending": pending,
             "last_error_type": error_type,
+            "pending_latest_cohorts": [
+                binding.cohort_sha256
+                for binding in ordered
+                if priority_entries.get(binding.cohort_sha256)
+            ],
+            "fair_rotation_next": self._fair_start,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "eta_seconds": 0,
+            "eta_basis": "completed_current_poll_scope",
+            "stalled_or_retrying": bool(pending),
             "chain_submission_authorized": False,
         }

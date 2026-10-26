@@ -463,7 +463,7 @@ class CohortModelAcceptances:
             pending_submission_sha256s=tuple(row[2] for row in rows if not row[3]),
         )
 
-    def pending_latest_entries(self, cohort, *, limit=16):
+    def pending_latest_entries(self, cohort, *, limit=16, offset=0):
         """Prioritize likely seal blockers without granting roster authority.
 
         Current native sealing still verifies the complete inventory and live
@@ -472,6 +472,8 @@ class CohortModelAcceptances:
         self.intake._allowed(cohort)
         if type(limit) is not int or not 1 <= limit <= 16:
             raise ValueError("model acceptance priority scan exceeds its page bound")
+        if type(offset) is not int or not 0 <= offset <= self.intake.capacity.maximum_records:
+            raise ValueError("model acceptance priority offset exceeds intake capacity")
         with self.intake._connection() as (db, store):
             state, _ = store.status(cohort)
             if state.phase != "intake":
@@ -486,8 +488,8 @@ class CohortModelAcceptances:
                 "AND NOT EXISTS (SELECT 1 FROM cohort_model_acceptances a "
                 "WHERE a.cohort=c.cohort AND a.submission="
                 "json_extract(CAST(c.body AS TEXT),'$.request.consent.consent.submission_sha256')) "
-                "ORDER BY c.hotkey,c.consent LIMIT ?",
-                (cohort, limit),
+                "ORDER BY c.hotkey,c.consent LIMIT ? OFFSET ?",
+                (cohort, limit, offset),
             )
             result = []
             for key, hotkey, sequence, raw in rows:
