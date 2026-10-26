@@ -1857,6 +1857,15 @@ boots without opening the package or changing any service. Retain the returned w
 exact root-owned `0444` control and pin their raw SHA-256 in the native writer
 broker. The cooperative service handoff still has to select both candidate
 boots and verify their running readers before a reward offer is unblocked.
+When the reference publisher or native package delivery is configured, pass its
+current config and selected coordinator boot to the same candidate builder. It
+returns each config with only `coordinator_config` moved to the exact new boot
+path, and refuses a consumer on a different signed lineage. Install the
+candidate boot and consumer configs together, then restart those consumers and
+verify their selected bytes. Package delivery enumerates only cohorts present
+in that authenticated reward adoption selection; an unselected old package
+must remain outside the coordinator offer path. A candidate alone does not
+enable delivery or release a reward row.
 
 Reward adoption version 2 can carry `activation_age` with the rule
 `skip_activation_delay_if_older_than_three_days`. It binds native chain timestamps

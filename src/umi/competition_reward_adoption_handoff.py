@@ -5,6 +5,7 @@ caller must retain the exact candidate bytes, select them through the supported
 cooperative owner handoff, and verify each restarted consumer's selected bytes.
 The publisher config must be installed private at mode 0600 and its selected
 coordinator boot root-owned at mode 0444; the publisher must restart to reload it.
+Package delivery must select the same new boot before its next start or restart.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ class RewardAdoptionBootCandidates:
     writer_supplemental: bytes
     reviewers: tuple[bytes, ...] = ()
     reference_publisher_config: bytes | None = None
+    package_delivery_config: bytes | None = None
 
 
 def _candidate(original: bytes, selected: RewardAdoptionSelection, kind):
@@ -55,14 +57,17 @@ def prepare_reward_adoption_boot_candidates(
     reference_publisher_config_raw: bytes | None = None,
     reference_current_boot_raw: bytes | None = None,
     reference_current_boot_path: str | None = None,
+    package_delivery_config_raw: bytes | None = None,
+    package_delivery_current_boot_raw: bytes | None = None,
+    package_delivery_current_boot_path: str | None = None,
     coordinator_candidate_path: str | None = None,
 ) -> RewardAdoptionBootCandidates:
     """Extend native reward boots and optional publisher pointer with one adoption.
 
     Inputs are compact native boot metadata. No package object, model payload,
     journal, key, RPC endpoint or installed service is opened here. The caller
-    supplies publisher boot bytes from its configured current path, names that
-    exact path, and must install the candidate before restarting the publisher.
+    supplies each consumer's current boot bytes and configured path, then must
+    install the candidates before restarting the publisher or package delivery.
     """
     coordinator = RewardCoordinatorConfig.model_validate_json(coordinator_raw)
     writer = StandingRewardBootConfig.model_validate_json(writer_raw)
@@ -98,7 +103,6 @@ def prepare_reward_adoption_boot_candidates(
             reference_publisher_config_raw,
             reference_current_boot_raw,
             reference_current_boot_path,
-            coordinator_candidate_path,
         )
     ):
         if (
@@ -143,6 +147,50 @@ def prepare_reward_adoption_boot_candidates(
         parsed = ReferencePublisherConfig.model_validate_json(publisher_candidate)
         if parsed.coordinator_config != coordinator_candidate_path:
             raise ValueError("reference publisher candidate changed its boot path")
+    delivery_candidate = None
+    if any(
+        value is not None
+        for value in (
+            package_delivery_config_raw,
+            package_delivery_current_boot_raw,
+            package_delivery_current_boot_path,
+        )
+    ):
+        if (
+            package_delivery_config_raw is None
+            or package_delivery_current_boot_raw is None
+            or package_delivery_current_boot_path is None
+            or coordinator_candidate_path is None
+        ):
+            raise ValueError(
+                "package delivery handoff requires config, current boot and target path"
+            )
+        current_delivery = RewardCoordinatorConfig.model_validate_json(
+            package_delivery_current_boot_raw
+        )
+        if (
+            canonical_json_bytes(current_delivery) != package_delivery_current_boot_raw
+            or current_delivery.role != "coordinator"
+            or current_delivery.series != coordinator.series
+            or current_delivery.policy != coordinator.policy
+            or current_delivery.reward_adoptions != coordinator.reward_adoptions
+        ):
+            raise ValueError("package delivery disagrees on signed reward lineage")
+        delivery = json.loads(package_delivery_config_raw)
+        if (
+            not isinstance(delivery, dict)
+            or set(delivery) != {
+                "schema", "native_source", "producer_config", "coordinator_config",
+                "state_directory",
+            }
+            or delivery["schema"] != "umi-native-reward-package-delivery/1"
+            or delivery["coordinator_config"] != package_delivery_current_boot_path
+            or not Path(package_delivery_current_boot_path).is_absolute()
+            or not Path(coordinator_candidate_path).is_absolute()
+        ):
+            raise ValueError("package delivery current or target boot path differs")
+        delivery["coordinator_config"] = coordinator_candidate_path
+        delivery_candidate = canonical_json_bytes(delivery)
     return RewardAdoptionBootCandidates(
         selection=selected,
         coordinator=_candidate(coordinator_raw, selected, RewardCoordinatorConfig),
@@ -152,4 +200,5 @@ def prepare_reward_adoption_boot_candidates(
             _candidate(raw, selected, RewardCoordinatorConfig) for raw in reviewer_raws
         ),
         reference_publisher_config=publisher_candidate,
+        package_delivery_config=delivery_candidate,
     )

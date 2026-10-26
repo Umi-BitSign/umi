@@ -220,3 +220,65 @@ def test_reference_publisher_candidate_refuses_split_lineage(handoff, installed)
             reference_current_boot_path="/var/lib/unrelated.json",
             coordinator_candidate_path=target,
         )
+
+
+def test_package_delivery_candidate_follows_signed_selection_and_repeats(handoff):
+    coordinator, writer, signed = handoff
+    current = "/var/lib/umi-reward-handoff/current-coordinator.json"
+    target = "/var/lib/umi-reward-handoff/selected-coordinator.json"
+    delivery = canonical_json_bytes({
+        "schema": "umi-native-reward-package-delivery/1",
+        "native_source": "/opt/umi-native",
+        "producer_config": "/etc/umi/producer.json",
+        "coordinator_config": current,
+        "state_directory": "/var/lib/umi-delivery",
+    })
+    staged = prepare_reward_adoption_boot_candidates(
+        coordinator, writer, signed,
+        package_delivery_config_raw=delivery,
+        package_delivery_current_boot_raw=coordinator,
+        package_delivery_current_boot_path=current,
+        coordinator_candidate_path=target,
+    )
+    assert {
+        key for key, old in json.loads(delivery).items()
+        if old != json.loads(staged.package_delivery_config)[key]
+    } == {"coordinator_config"}
+    assert json.loads(staged.package_delivery_config)["coordinator_config"] == target
+    assert prepare_reward_adoption_boot_candidates(
+        staged.coordinator, staged.writer, signed,
+        package_delivery_config_raw=staged.package_delivery_config,
+        package_delivery_current_boot_raw=staged.coordinator,
+        package_delivery_current_boot_path=target,
+        coordinator_candidate_path=target,
+    ) == staged
+
+
+def test_package_delivery_candidate_refuses_split_lineage_and_wrong_path(handoff):
+    coordinator, writer, signed = handoff
+    current = "/var/lib/umi-reward-handoff/current-coordinator.json"
+    target = "/var/lib/umi-reward-handoff/selected-coordinator.json"
+    delivery = canonical_json_bytes({
+        "schema": "umi-native-reward-package-delivery/1",
+        "native_source": "/opt/umi-native",
+        "producer_config": "/etc/umi/producer.json",
+        "coordinator_config": current,
+        "state_directory": "/var/lib/umi-delivery",
+    })
+    staged = prepare_reward_adoption_boot_candidates(coordinator, writer, signed)
+    with pytest.raises(ValueError, match="disagrees on signed reward lineage"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator, writer, signed,
+            package_delivery_config_raw=delivery,
+            package_delivery_current_boot_raw=staged.coordinator,
+            package_delivery_current_boot_path=current,
+            coordinator_candidate_path=target,
+        )
+    with pytest.raises(ValueError, match="current or target boot path differs"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator, writer, signed,
+            package_delivery_config_raw=delivery,
+            package_delivery_current_boot_raw=coordinator,
+            package_delivery_current_boot_path="/var/lib/unrelated.json",
+            coordinator_candidate_path=target,
+        )
