@@ -853,3 +853,93 @@ def test_writer_repair_cli_passes_finite_scope_and_reports_completion(monkeypatc
         )
     ]
     assert json.loads(capsys.readouterr().out) == dict(status="history_repaired", percent=100)
+
+
+@pytest.mark.parametrize("history", ["current", "predecessor"])
+async def test_credit_repair_uses_authenticated_writer_route_without_starting_services(
+    host, monkeypatch, history
+):
+    from umi import competition_reward_boot as boot
+
+    def select(path, anchor, *, explicit_path):
+        host.events.append("standing-approval")
+        return object()
+
+    async def repair(anchor, path, stop, **kwargs):
+        assert anchor.config is host.inputs.config and stop is host.stop
+        assert path == Path("/etc/umi/standing-reward-boot.json")
+        assert kwargs == dict(key="ab" * 32, reason="original restored", history=history)
+        host.events.append("owned-credit-repair")
+        return dict(status="coverage_credit_repaired")
+
+    monkeypatch.setattr(boot, "select_standing_boot", select)
+    monkeypatch.setattr(boot, "run_installed_credit_repair", repair)
+    result = await cli.run_supervisor(
+        Path("/etc/umi/supervisor.json"),
+        stop_event=host.stop,
+        credit_repair=dict(key="ab" * 32, reason="original restored", history=history),
+    )
+    assert result == dict(status="coverage_credit_repaired")
+    assert host.events == [
+        "read-config",
+        "load-anchor",
+        "verify-anchor-host",
+        "standing-approval",
+        "owned-credit-repair",
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--interval", "bad"],
+        ["--interval", "ab" * 32, "--through-block", "200"],
+        ["--repair-history"],
+    ],
+)
+def test_writer_credit_repair_cli_refuses_incomplete_or_conflicting_scope(extra):
+    with pytest.raises(SystemExit) as error:
+        cli.run_cli(
+            [
+                "--config",
+                "/etc/umi/supervisor.json",
+                "--repair-credit",
+                "--reason",
+                "original restored",
+                *extra,
+            ]
+        )
+    assert error.value.code == 2
+
+
+def test_writer_credit_repair_cli_passes_predecessor_scope_and_reports_repair_required(
+    monkeypatch, capsys
+):
+    from umi.competition_reward_coverage_credits import CoverageCreditRepairRequired
+
+    async def repair(path, **kwargs):
+        assert path == Path("/etc/umi/supervisor.json")
+        assert kwargs == {
+            "credit_repair": dict(key="ab" * 32, reason="original restored", history="predecessor")
+        }
+        raise CoverageCreditRepairRequired("original receipt is missing")
+
+    monkeypatch.setattr(cli, "run_supervisor", repair)
+    result = cli.run_cli(
+        [
+            "--config",
+            "/etc/umi/supervisor.json",
+            "--repair-credit",
+            "--interval",
+            "ab" * 32,
+            "--reason",
+            "original restored",
+            "--history",
+            "predecessor",
+        ]
+    )
+    assert result == 1
+    output = json.loads(capsys.readouterr().err)
+    assert output["status"] == "repair_required"
+    assert output["recovery"] == "restore_original_metadata_and_source_in_place_no_reset"

@@ -6,13 +6,14 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
 
+from .chain_evidence import FinalizedSnapshotRef
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_evidence_codec import checked_digest, checked_size
 from .competition_reward_control import validate_owned_reward_control
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage import OwnedRewardCoverageEndpoint, review_reward_coverage
 from .competition_reward_coverage_capture import capture_reward_eligibility
-from .competition_reward_coverage_intervals import CoverageEndpoint, coverage_point
+from .competition_reward_coverage_intervals import CoverageEndpoint, CoveragePoint, coverage_point
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_prepared import (
     CoveragePackageReplayRequired,
@@ -20,7 +21,7 @@ from .competition_reward_coverage_prepared import (
 )
 from .competition_reward_decisions import DecisionSource
 from .competition_reward_eligibility import RewardEligibilityRuntime, validate_reward_runtime_code
-from .competition_reward_history import RewardControlHistoryReader
+from .competition_reward_history import RewardControlHistoryReader, validate_control_history
 from .competition_reward_opportunity import opportunity_rule
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_verification_snapshot import verified_package_digest
@@ -65,6 +66,9 @@ class NativeRewardCoverageSource:
         ):
             raise ValueError("coverage source differs from selected native context")
         self.provider, self.journal, self.history = provider, journal, history
+        self.journal._credit_history = history
+        self._native_credit_groups = {}
+        self._completed_model_groups = {}
         if (package is None) == (package_loader is None):
             raise ValueError(
                 "coverage source selects exactly one package or private package loader"
@@ -196,9 +200,109 @@ class NativeRewardCoverageSource:
             self._retained_package = RetainedCoveragePackage(endpoint.prepared)
         return endpoint
 
+    async def restore_credit(self, key):
+        """Restore this owner's credited interval, refreshing shared native dependencies."""
+        from .competition_reward_coverage_credits import (
+            CoverageCreditRepairRequired,
+            CreditReuseUnavailable,
+            dependency_metadata_seal,
+        )
+
+        try:
+            loaded = await run_owned_thread(self.journal.native_credits.load, key, self.history)
+        except CreditReuseUnavailable:
+            from .competition_transport_verification import TransferProgress
+
+            with TransferProgress("coverage_credit_restore", 1, unit="intervals") as stage:
+                stage.emit("waiting", reason="native_dependency_owner_upgrade_required")
+            return None
+        if loaded is None:
+            return None
+        fact, groups, snapshot = loaded
+        self.preparation._authority()
+        # Every skipped endpoint verdict is immutable under the captured source
+        # generation and is checked by exact result identity. Group refresh only
+        # amortizes the identical package/model/runtime dependencies.
+        for group in groups:
+            dependencies = group["dependencies"]
+            expected_package = self._package_sha256
+            if expected_package is None:
+                expected_package = await run_owned_thread(verified_package_digest, self.package)
+            if dependencies["package_sha256"] != expected_package:
+                raise CoverageCreditRepairRequired("native credit selected package changed")
+            group_key = digest(dependencies)
+            before = await run_owned_thread(
+                dependency_metadata_seal, self.preparation, dependencies
+            )
+            if self._native_credit_groups.get(group_key) != before:
+                endpoint = await self.replay(group["endpoint"])
+                if getattr(endpoint, "receipt_sha256", None) != group["verdict"]:
+                    raise CoverageCreditRepairRequired("native credit group endpoint changed")
+                after = await run_owned_thread(
+                    dependency_metadata_seal, self.preparation, dependencies
+                )
+                if before != after:
+                    raise CoverageCreditRepairRequired("native credit group changed during refresh")
+                self._native_credit_groups[group_key] = after
+        # The exact historical boundary still comes from the current native
+        # history owner; neither a receipt nor a shared model group supplies it.
+        for key, raw in fact["points"].items():
+            point = CoveragePoint.model_validate(raw)
+            if (
+                point.key() != key
+                or point.activation_sha256 != fact["interval"]["activation_sha256"]
+            ):
+                raise CoverageCreditRepairRequired("native credit point changed")
+            history = await self._history(point.block)
+            validate_control_history(
+                history,
+                first_block=self.preparation.reader.series.recovery.authority.issued_at_block,
+                tip=FinalizedSnapshotRef(
+                    point.block, point.block_hash, point.parent_hash, point.state_root
+                ),
+                control_hotkey=self.history.hotkey,
+                chain_config_sha256=point.chain_config_sha256,
+            )
+            self.journal._runtime_profile(point, self.profile)
+        await run_owned_thread(self.journal.native_credits.recheck, snapshot, self.history)
+        return await run_owned_thread(self.journal.native_credits.apply, fact)
+
     async def replay(self, key: str) -> CoverageEndpoint:
         async with self._package_guard:
             return await self._replay(key)
+
+    async def repair_credit(self, key, *, reason):
+        """Rebind one completed credit only after both exact endpoint verdicts restore."""
+        from .competition_reward_coverage_intervals import coverage_interval
+        from .competition_transport_verification import TransferProgress
+
+        if type(reason) is not str or not reason.strip() or len(reason) > 1024:
+            raise ValueError("native credit repair requires an explicit bounded reason")
+        hint = await self.journal.retained_interval(key)
+        async with self._package_guard:
+            self._native_credit_groups.clear()
+            self._completed_model_groups.clear()
+            # This does not repair or replace either endpoint automatically.
+            # Missing/changed original endpoint facts keep their own repair hold.
+            with TransferProgress(
+                "coverage_credit_metadata_repair",
+                1,
+                unit="intervals",
+                planning_unit_seconds=(1, 300),
+            ) as progress:
+                left, right = await self._replay(hint.left), await self._replay(hint.right)
+                if coverage_interval(left, right, self.journal.rule) != hint:
+                    raise ValueError("native credit repair changes its original interval")
+                repaired = await self.journal.credit(left, right, credit_repair_reason=reason)
+                if repaired != hint:
+                    raise ValueError("native credit repair acknowledgement changed")
+                progress.advance(1, restored=True)
+        return dict(
+            status="coverage_credit_repaired",
+            interval_sha256=key,
+            credited_ms=hint.credited_ms,
+            original_interval_unchanged=True,
+        )
 
     async def repair(self, key: str, *, reason: str):
         """Explicitly requalify one restored original after dependency damage."""
@@ -232,6 +336,7 @@ class NativeRewardCoverageSource:
             provider=self.provider,
             preparation=self.preparation,
             expected_package_sha256=expected,
+            completed_model_groups=self._completed_model_groups,
             history=None,
             history_source=self._history,
             profile=self.profile,

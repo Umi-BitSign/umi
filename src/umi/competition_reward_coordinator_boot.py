@@ -302,8 +302,24 @@ def load_reward_coordinator_config(path: Path) -> RewardCoordinatorConfig:
     return config
 
 
-async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.Event) -> None:
+async def run_reward_coordinator(
+    config: RewardCoordinatorConfig, stop: asyncio.Event, *, credit_repair=None
+):
     config = RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
+    if credit_repair is not None:
+        from .competition_evidence_codec import checked_digest
+
+        checked_digest(credit_repair["key"])
+        reason = credit_repair["reason"]
+        selected_history = credit_repair.get("history", "current")
+        if (
+            type(reason) is not str
+            or not reason.strip()
+            or len(reason) > 1024
+            or selected_history not in {"current", "predecessor"}
+            or (selected_history == "predecessor" and config.predecessor_series is None)
+        ):
+            raise ValueError("credit repair requires its configured owner and bounded reason")
     legacy_sources = await run_owned_thread(
         lambda: authenticate_legacy_model_sources(
             config.legacy_model_storage,
@@ -486,6 +502,16 @@ async def run_reward_coordinator(config: RewardCoordinatorConfig, stop: asyncio.
                 plan=config.handoff,
                 coverage=predecessor_coverage,
             )
+        if credit_repair is not None:
+            # Original state lease, native configuration and provider are owned;
+            # no signer, control publisher or autonomous collector is created.
+            selection = dict(credit_repair)
+            selected_history = selection.pop("history", "current")
+            selected_coverage = coverage if selected_history == "current" else predecessor_coverage
+            if selected_history not in {"current", "predecessor"} or selected_coverage is None:
+                raise ValueError("credit repair requires its configured history owner")
+            await provider.start()
+            return await selected_coverage.repair_credit(stop=stop, **selection)
         key = await run_owned_thread(
             load_named_hotkey, Path(config.signer_key_file), config.signer_hotkey
         )

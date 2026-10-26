@@ -529,3 +529,58 @@ async def test_interrupted_legacy_qualification_migration_resumes_without_rewrit
     ledger = model_ledger.QualificationLedger(case.verifier.receipts)
     assert ledger.load(context, item)
     assert path.read_bytes() == original
+
+
+async def test_completed_endpoint_groups_refresh_remote_once_and_detect_metadata_mutation(
+    dependency, monkeypatch
+):
+    case = dependency
+    cache = {}
+    calls = []
+    original = models._check_item
+
+    async def counted(*args, **kwargs):
+        calls.append(1)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_check_item", counted)
+    for _ in range(2):
+        assert await models.restore_completed_model_dependencies(
+            case.preparation, case.snapshot, cache
+        )
+    assert len(calls) == 1
+    path = (
+        case.verifier.receipts
+        / case.certificate.acceptance.cohort_sha256
+        / (case.certificate.acceptance.submission_sha256 + ".json")
+    )
+    path.unlink()
+    with pytest.raises(CoverageModelDependencyRepairRequired):
+        await models.restore_completed_model_dependencies(case.preparation, case.snapshot, cache)
+
+
+async def test_completed_metadata_checks_reuse_only_identical_private_file_generations(
+    dependency, monkeypatch
+):
+    value = models.CoverageModelDependencies.model_validate_json(
+        canonical_json_bytes(dependency.snapshot)
+    )
+    cache = {}
+    calls = []
+    read = models.read_private_model
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_private_model", counted)
+    models.check_coverage_model_metadata(value, checked_cache=cache)
+    before = len(calls)
+    models.check_coverage_model_metadata(value, checked_cache=cache)
+    assert len(calls) == before
+    item = value.items[0]
+    path = models._qualification_path(value.context, value.context, item)
+    original = path.read_bytes()
+    path.write_bytes(original)
+    models.check_coverage_model_metadata(value, checked_cache=cache)
+    assert len(calls) > before

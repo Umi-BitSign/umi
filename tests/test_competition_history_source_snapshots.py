@@ -133,9 +133,55 @@ async def test_cached_remote_token_rechecks_damage_outside_sql_snapshot(
         source = _CheckpointSourceSnapshot(checkpoints, db)
         assert checkpoints._load_snapshot(h.old.height, db, source)
 
-        def damaged(_reference):
-            raise ValueError("remote proof requires explicit original-generation repair")
+        # The receipt owner is independent of the source snapshot. A new real
+        # damage hold must be observed even when source tokens are reusable.
+        from umi.competition_remote_proof_store import RemoteProofReference
 
-        monkeypatch.setattr(h.reader.remote_store, "validate_reference", damaged)
+        fact = next(f for f in source.tokens.values() if f.remote_reference is not None)
+        h.reader.remote_store._hold(RemoteProofReference.model_validate(fact.remote_reference))
         with pytest.raises(HistoryCheckpointRepairRequired, match="receipt damaged"):
             checkpoints._load_snapshot(h.old.height, db, source)
+
+
+async def test_initial_remote_inventory_opens_one_receipt_snapshot_without_payload_reads(
+    history_case,
+    tmp_path,
+    monkeypatch,
+):
+    from contextlib import contextmanager
+
+    from .test_competition_history_source_externalization import reopen
+    from .test_competition_remote_proof_store import EvidenceServer, store
+
+    h = history_case
+    await h.reader.advance(h.item.provider, through_block=h.end)
+    server = EvidenceServer()
+    remote = store(tmp_path / "inventory-remote", server)
+    h.reader = reopen(h.reader, remote)
+    await h.reader.externalize_history_sources(maximum_records=4096)
+    original = remote.journal.read_transaction
+    snapshots = []
+
+    @contextmanager
+    def counted():
+        with original() as db:
+            snapshots.append(db)
+            yield db
+
+    monkeypatch.setattr(remote.journal, "read_transaction", counted)
+    read = h.reader.journal.get_raw
+
+    def metadata_only(kind, key, **kwargs):
+        if kind in {"control_history_block", "control_history_chunk", "control_history_object"}:
+            pytest.fail("diagnostic inventory read a history payload")
+        return read(kind, key, **kwargs)
+
+    monkeypatch.setattr(h.reader.journal, "get_raw", metadata_only)
+    server.calls.clear()
+    captured, verified, exported = h.reader.checkpoints.progress_rows(
+        h.reader.first_block, h.end, None
+    )
+    expected = set(range(h.reader.first_block, h.end + 1))
+    assert captured == verified == expected and exported == set()
+    assert len(snapshots) == 1
+    assert server.calls == []

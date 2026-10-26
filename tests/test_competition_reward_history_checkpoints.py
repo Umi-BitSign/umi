@@ -153,6 +153,7 @@ async def test_batched_restore_rechecks_changes_after_owned_finality(history_cas
     await h.reader.advance(h.item.provider, through_block=h.end)
     h.reader = await h.restart()
     prohibit_proof_replay(monkeypatch, h.reader)
+    monkeypatch.setattr(h.reader.folded_frontier, "load", lambda target: None)
     validate = h.reader._validate_checkpoint_tip
     affected = h.old.height + 1
 
@@ -327,8 +328,11 @@ async def test_legacy_raw_first_pass_is_checkpointed_without_rewriting_evidence(
             "('control_history_block','control_history_chunk','control_history_object') ORDER "
             "BY kind,id"
         ).fetchall()
-        for name in h.reader.checkpoints.triggers:
+        for name in (*h.reader.checkpoints.triggers, *h.reader.folded_frontier.triggers):
             db.execute("DROP TRIGGER " + name)
+        db.execute("DROP TABLE history_folded_state")
+        db.execute("DROP TABLE history_folded_anchors")
+        db.execute("DELETE FROM records WHERE kind LIKE 'control_history_folded_%'")
         for name in (
             "history_checkpoint_state",
             "history_checkpoint_index",

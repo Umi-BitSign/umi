@@ -155,8 +155,11 @@ async def admission_case(historical, monkeypatch, tmp_path):
     # history schema. Original native source bytes and signing records stay exact.
     journal = h.reader.journal
     with journal.transaction() as db:
-        for name in h.reader.checkpoints.triggers:
+        for name in (*h.reader.checkpoints.triggers, *h.reader.folded_frontier.triggers):
             db.execute("DROP TRIGGER " + name)
+        db.execute("DROP TABLE history_folded_state")
+        db.execute("DROP TABLE history_folded_anchors")
+        db.execute("DELETE FROM records WHERE kind LIKE 'control_history_folded_%'")
         for name in (
             "history_checkpoint_state",
             "history_checkpoint_index",
@@ -672,3 +675,57 @@ async def test_no_later_records_still_requires_finalized_economics_reconciliatio
     result = await admission_case.migrate_result()
     assert result.reconciliation["later_decisions_present"] is False
     assert result.reconciliation["publication_authorized"] is False
+
+
+async def test_aggregate_admission_archive_backfill_preserves_interval_without_per_block_verdicts(
+    admission_case,
+    tmp_path,
+):
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    from .test_competition_reward_history_archive_backfill import selected
+
+    c, h = admission_case, admission_case.h
+    archive = RewardProofArchive(tmp_path / "original-admission-archive")
+    h.reader = h.new_reader()
+    for height in range(h.reader.first_block, c.boundary + 1):
+        h.reader._export_fields(height, h.reader._load(height), archive)
+    await c.migrate()
+    h.reader = h.new_reader()
+    remote = selected(tmp_path / "archive-remote", EvidenceServer())
+    h.reader = reopen(
+        h.reader,
+        remote,
+        export_archive=RewardProofArchive(
+            archive.root,
+            remote=remote,
+            legacy_read_through=True,
+        ),
+    )
+    for _ in range(c.boundary - h.reader.first_block + 1):
+        assert (
+            await h.reader.advance(h.item.provider, through_block=c.boundary)
+        ).history == c.expected
+    assert h.reader.progress.archive_delivery["state"] == "completed"
+    assert h.reader.progress.native_completed == 0
+    for height in range(h.reader.first_block, c.boundary + 1):
+        assert h.reader.checkpoints.load(height) is None
+
+
+async def test_aggregate_boundary_then_later_full_frontier_avoids_tail_metadata_rebuild(
+    admission_case,
+    monkeypatch,
+):
+    c, h = admission_case, admission_case.h
+    await c.migrate()
+    h.reader = h.new_reader()
+    expected = (await h.reader.advance(h.item.provider, through_block=h.end)).history
+    h.reader = h.new_reader()
+    assert (await h.reader.advance(h.item.provider, through_block=c.boundary)).history == c.expected
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("later owned frontier was rebuilt after the aggregate admission scope")
+
+    monkeypatch.setattr(h.reader.checkpoints, "load_restore_batch", forbidden)
+    assert (await h.reader.advance(h.item.provider, through_block=h.end)).history == expected
+    assert h.reader.progress.native_completed == 0
