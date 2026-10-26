@@ -13,6 +13,7 @@ from contextlib import contextmanager, suppress
 from functools import partial
 from pathlib import Path
 
+from .competition_chain import RegistrationProviderTimeout
 from .competition_cohort_model_acceptance import (
     ModelAcceptancePublication,
     ModelArtifactReviewInputs,
@@ -31,6 +32,7 @@ from .private_files import publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
 
 _LOG = logging.getLogger("umi.competition.progress")
+_PROVIDER_RETRY_OTHER_ATTEMPTS = 3
 _ACCEPTANCE_STAGE_PLANNING_SECONDS = {
     "retained_lookup": (0, 15),
     "input_readiness": (0, 60),
@@ -66,6 +68,7 @@ class ModelAcceptanceWorker:
         self.cursors = {}
         self._fair_start = 0
         self._priority_offsets = {}
+        self._provider_retries = {}
         self._stage_durations = defaultdict(lambda: deque(maxlen=16))
         self.reviewers = tuple(reviewers)
         self.promote = promote
@@ -373,18 +376,33 @@ class ModelAcceptanceWorker:
             bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts
         )
         priority_entries = {}
+        provider_retry_due = {}
         for binding in probe_order:
             cohort = binding.cohort_sha256
             # A diagnostic scheduling hint never suppresses the native scan.
             with suppress(OSError, ValueError, RuntimeError, sqlite3.Error):
+                deferred = self._provider_retries.get(cohort)
+                due = bool(
+                    deferred and deferred[1] >= _PROVIDER_RETRY_OTHER_ATTEMPTS
+                )
                 priority_entries[cohort] = await run_owned_thread(
                     partial(
                         self.owner.pending_latest_entries,
                         cohort,
                         limit=min(self.batch_size, 16),
-                        offset=self._priority_offsets.get(cohort, 0),
+                        offset=0 if due else self._priority_offsets.get(cohort, 0),
                     )
                 )
+                if due and (
+                    not priority_entries[cohort]
+                    or priority_entries[cohort][0][0] != deferred[0]
+                ):
+                    # A replacement or completed retry changed the moving
+                    # pending set. Resume from its new head once.
+                    self._provider_retries.pop(cohort, None)
+                    self._priority_offsets[cohort] = 0
+                    deferred = None
+                    due = False
                 if not priority_entries[cohort] and self._priority_offsets.get(cohort, 0):
                     # The moving pending set reached its end. The empty page
                     # verified the boundary without replaying a prior item.
@@ -397,6 +415,14 @@ class ModelAcceptanceWorker:
                             offset=0,
                         )
                     )
+                    due = bool(
+                        deferred
+                        and priority_entries[cohort]
+                        and priority_entries[cohort][0][0] == deferred[0]
+                    )
+                    if deferred and not due:
+                        self._provider_retries.pop(cohort, None)
+                provider_retry_due[cohort] = due
         urgent = any(priority_entries.values())
         contended = sum(bool(entries) for entries in priority_entries.values()) > 1
         # The intake bindings are sorted by hash, not by cohort date. A full
@@ -450,20 +476,46 @@ class ModelAcceptanceWorker:
                             )
                         )
                     work = dict((*priority, *entries))
-                for sub in work.values():
+                for key, sub in work.items():
                     try:
                         with work_heartbeats():
                             await self._one(cohort, sub)
                         ready += 1
+                        deferred = self._provider_retries.get(cohort)
+                        if deferred and key == deferred[0]:
+                            if provider_retry_due.get(cohort):
+                                self._priority_offsets[cohort] = max(
+                                    0, self._priority_offsets.get(cohort, 0) - 1
+                                )
+                            self._provider_retries.pop(cohort, None)
+                        elif deferred and contended and priority:
+                            self._provider_retries[cohort] = (
+                                deferred[0], deferred[1] + 1
+                            )
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
                         error_type = type(error).__name__
                         if contended and priority:
-                            # A failed latest entry remains pending. Advance
-                            # past it so later entries still get a turn.
-                            self._priority_offsets[cohort] = (
-                                self._priority_offsets.get(cohort, 0) + 1
-                            )
+                            deferred = self._provider_retries.get(cohort)
+                            if (
+                                provider_retry_due.get(cohort)
+                                and deferred
+                                and key == deferred[0]
+                            ):
+                                # Retried provider failure keeps its saved
+                                # offset, so other submissions still advance.
+                                self._provider_retries[cohort] = (key, 0)
+                            else:
+                                # A failed latest entry remains pending.
+                                self._priority_offsets[cohort] = (
+                                    self._priority_offsets.get(cohort, 0) + 1
+                                )
+                                if deferred:
+                                    self._provider_retries[cohort] = (
+                                        deferred[0], deferred[1] + 1
+                                    )
+                                elif isinstance(error, RegistrationProviderTimeout):
+                                    self._provider_retries[cohort] = (key, 0)
                 if scanned_entries:
                     self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -480,6 +532,17 @@ class ModelAcceptanceWorker:
                 if priority_entries.get(binding.cohort_sha256)
             ],
             "fair_rotation_next": self._fair_start,
+            "registration_provider_retries": [
+                {
+                    "cohort_sha256": cohort,
+                    "submission_sha256": key,
+                    "other_attempts_completed": gap,
+                    "next_retry_after_other_attempts": max(
+                        0, _PROVIDER_RETRY_OTHER_ATTEMPTS - gap
+                    ),
+                }
+                for cohort, (key, gap) in sorted(self._provider_retries.items())
+            ],
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "eta_seconds": 0,
             "eta_basis": "completed_current_poll_scope",
