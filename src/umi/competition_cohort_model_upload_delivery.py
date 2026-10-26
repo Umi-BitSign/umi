@@ -198,7 +198,10 @@ class ModelUploadDelivery:
                     progress.emit("retrying", reason="remote_model_storage_repair_required")
             result = await run_owned_thread(
                 partial(
-                    self.uploads.poll_once, remote_payloads=self, remote_review=self._remote_review
+                    self.uploads.poll_once,
+                    remote_payloads=self,
+                    remote_review=self._remote_review,
+                    report=report,
                 )
             )
         if retired is not None:

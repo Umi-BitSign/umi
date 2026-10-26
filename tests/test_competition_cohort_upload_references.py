@@ -67,7 +67,13 @@ def test_poll_deduplicates_before_decoding_beyond_cache_and_restart(delivery, mo
     keys = duplicates(h)
     h.owner._retained_reuse = AssignmentVerificationReuse(maximum_entries=2)
     calls = decode_counter(monkeypatch)
-    assert h.owner.poll_once()["models_pending"] == 1
+    reports = []
+    assert h.owner.poll_once(report=reports.append)["models_pending"] == 1
+    native = [r for r in reports if r.get("stage") == "native_model_upload_poll"]
+    assert native[-1]["status"] == "completed"
+    assert native[-1]["completed_units"] == len(keys)
+    assert native[-1]["native_units"] == 1
+    assert native[-1]["restored_units"] == len(keys) - 1
     assert len(calls) <= len(keys) + 1  # first-pass validation, then one representative
     calls.clear()
     assert h.owner.poll_once()["models_pending"] == 1
