@@ -115,7 +115,8 @@ def test_hold_does_not_hide_intake_certification_and_active_operation_elapsed(mo
     assert result["overall_eta_seconds"] is None
 
 
-def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch):
+@pytest.mark.parametrize("stage", ["model_acceptance_review_quorum", "model_promotion_copy"])
+def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch, stage):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     state = CohortProgressSnapshots()
@@ -134,7 +135,7 @@ def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch):
         dict(
             cohort_sha256=C,
             work_id=1,
-            stage="model_acceptance_review_quorum",
+            stage=stage,
             state="running",
             completed=0,
             total=1,
@@ -142,7 +143,7 @@ def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch):
         ),
     )
     result = state.snapshot(C)
-    assert result["stage"] == "model_acceptance_review_quorum"
+    assert result["stage"] == stage
     assert result["completed"] == 0 and result["percent"] == 0
     assert not result["stalled_or_retrying"]
     assert result["components"]["intake_certification"]["stale"]

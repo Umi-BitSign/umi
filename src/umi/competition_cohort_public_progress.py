@@ -247,7 +247,7 @@ class CohortProgressSnapshots:
                     work is not None
                     and not work["stale"]
                     and work.get("state") in {"started", "running", "waiting"}
-                    and work.get("stage", "").startswith("model_acceptance_")
+                    and work.get("stage", "").startswith(("model_acceptance_", "model_promotion_"))
                     and entry["work"][0] >= entry.get("phase_started", 0)
                 ):
                     selected = work
