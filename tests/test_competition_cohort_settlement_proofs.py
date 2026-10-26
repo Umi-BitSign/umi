@@ -100,10 +100,10 @@ async def test_local_frame_lost_directory_ack_retries_without_payload_republicat
             stat.S_ISDIR(info.st_mode)
             and directory.exists()
             and (info.st_dev, info.st_ino) == (directory.stat().st_dev, directory.stat().st_ino)
+            and not failed
         ):
-            if not failed:
-                failed.append(True)
-                raise OSError("lost registration frame directory acknowledgement")
+            failed.append(True)
+            raise OSError("lost registration frame directory acknowledgement")
         return sync(fd)
 
     monkeypatch.setattr(private_files.os, "fsync", fsync)
