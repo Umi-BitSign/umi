@@ -8,7 +8,7 @@ before finality, source inputs or reviewers are contacted again.
 import logging
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import partial
 from pathlib import Path
 
@@ -294,28 +294,31 @@ class ModelAcceptanceWorker:
     async def poll_once(self):
         ready = pending = 0
         error_type = ""
-        # Restore the public counters for active successor intake before old
-        # cohort exports can occupy this owner after a restart. This is the
-        # ordinary inventory observation moved earlier, not another pass.
-        reported = set()
-        for cohort in self.priority_cohorts:
-            await self._report_inventory(cohort)
-            reported.add(cohort)
+        # Move the existing bounded pending lookup and inventory observation
+        # ahead of acceptance work for every configured cohort. This restores
+        # public counts after restart even when no priority was configured and
+        # discovers the current successor from retained owner state.
+        bindings = self.owner.intake.config.cohorts
+        probe_order = sorted(
+            bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts
+        )
         priority_entries = {}
-        for cohort in self.priority_cohorts:
-            try:
+        for binding in probe_order:
+            cohort = binding.cohort_sha256
+            # A diagnostic scheduling hint never suppresses the native scan.
+            with suppress(OSError, ValueError, RuntimeError, sqlite3.Error):
                 priority_entries[cohort] = await run_owned_thread(
                     partial(
                         self.owner.pending_latest_entries, cohort, limit=min(self.batch_size, 16)
                     )
                 )
-            except (OSError, ValueError, RuntimeError, sqlite3.Error):
-                # A diagnostic scheduling hint never suppresses the native scan.
-                continue
+            await self._report_inventory(cohort)
         urgent = any(priority_entries.values())
-        bindings = self.owner.intake.config.cohorts
         ordered = (
-            sorted(bindings, key=lambda binding: binding.cohort_sha256 not in self.priority_cohorts)
+            sorted(
+                bindings,
+                key=lambda binding: not bool(priority_entries.get(binding.cohort_sha256)),
+            )
             if urgent
             else bindings
         )
@@ -324,10 +327,8 @@ class ModelAcceptanceWorker:
             # While released intake has unfinished latest models, still advance
             # held cohorts, but do not make it wait behind their full batches.
             # Once that backlog clears all cohorts regain the normal fair scan.
-            batch = self.batch_size if not urgent or cohort in self.priority_cohorts else 1
+            batch = self.batch_size if not urgent or priority_entries.get(cohort) else 1
             try:
-                if cohort not in reported:
-                    await self._report_inventory(cohort)
                 entries = await run_owned_thread(
                     partial(
                         self.owner.entries,
