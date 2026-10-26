@@ -169,10 +169,18 @@ class ModelUploadDelivery:
         with TransferProgress(
             "legacy_model_remote_reconciliation", len(keys), report, unit="requests"
         ) as progress:
+            reconciled_models = set()
             for key in keys:
                 try:
+                    model = models.get(key)
+                    if model is not None and model in reconciled_models:
+                        # The native poll below handles one representative per
+                        # model too. HTTP retries still verify their exact
+                        # request at the request boundary.
+                        progress.advance(1, restored=True)
+                        continue
                     request = await run_owned_thread(
-                        partial(self._remote_request, key, model=models.get(key))
+                        partial(self._remote_request, key, model=model)
                     )
                     if request is not None:
                         owner = self._payload_owner(request)
@@ -180,6 +188,8 @@ class ModelUploadDelivery:
                             await run_owned_thread(owner.require_owned_payload, request)
                         else:
                             await owner.ensure_owned(request)
+                    if model is not None:
+                        reconciled_models.add(model)
                     progress.advance(1)
                 except (OSError, ValueError, sqlite3.Error):
                     # Missing/damaged storage retains a pending model in the
