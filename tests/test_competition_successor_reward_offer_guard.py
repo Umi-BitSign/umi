@@ -61,4 +61,5 @@ def test_missing_c6_adoption_stops_offer_before_package_io(monkeypatch, caplog):
     offers._reported_missing_successor_adoptions = set()
     for _ in range(2):
         assert offers(cohort, prefix) is None
+        assert offers.pending_reason == "reward_adoption_pending"
     assert caplog.text.count("reward_offer_waiting_for_c5_style_economics") == 1

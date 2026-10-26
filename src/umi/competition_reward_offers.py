@@ -88,8 +88,10 @@ class StandingRewardOffers:
         self.settlements = Path(private_path(str(settlements)))
         self.packages = files.package_store
         self._reported_missing_successor_adoptions: set[str] = set()
+        self.pending_reason: str | None = None
 
     def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
+        self.pending_reason = None
         prefix = verify_reward_decisions(
             self.series, self.policy, prefix, reward_adoptions=self.reward_adoptions
         )
@@ -104,6 +106,7 @@ class StandingRewardOffers:
         if not successor_reward_rule_ready(
             self.series.cohorts[index], self.series.recovery.authority, adoption
         ):
+            self.pending_reason = "reward_adoption_pending"
             if cohort not in self._reported_missing_successor_adoptions:
                 logger.warning(
                     "reward_offer_waiting_for_c5_style_economics cohort_sha256=%s",
