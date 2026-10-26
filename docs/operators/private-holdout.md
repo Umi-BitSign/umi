@@ -138,15 +138,16 @@ For C7 and later, adoption also requires at least two fingerspelling sources,
 with no more than 75% of fingerspelling cases from one source. This requirement
 must be met together with the four fingerspelling categories; a missing source
 holds adoption until real labeled media is available.
-At least half of the cases in each task must carry documented evidence that the
+Every scored case in each task must carry documented evidence that the
 recordings were excluded from model training. Set
 `minimum_training_excluded_fingerspelling` and
-`minimum_training_excluded_continuous` in the counts input to those case counts
-or higher. Selection checks the quota while choosing cases, and adoption refuses
+`minimum_training_excluded_continuous` in the counts input to the full case count
+for each task. Selection checks the quota while choosing cases, and adoption refuses
 a C7+ candidate that declares a lower quota. A digest alone is only an evidence
 identity; operators must establish the underlying source access and training
 exclusion before declaring a candidate `documented_training_excluded`. Public or
-unknown-exposure recordings cannot fill this quota. Existing signed cohort
+unknown-exposure recordings can still support diagnostics, but cannot fill this
+scored-suite quota. Existing signed cohort
 clocks and suites remain unchanged until a separately authenticated adoption.
 
 Native suite adoption also requires explicit fingerspelling coverage of sentences,
