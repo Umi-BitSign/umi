@@ -72,15 +72,15 @@ def test_successor_adoption_requires_broad_continuous_sources(selection_case):
             "minimum_continuous_topics": 4,
         }
     )
-    require_successor_suite_diversity(7, capped)
     with pytest.raises(ValueError, match="fingerspelling sources"):
-        require_successor_suite_diversity(8, capped)
+        require_successor_suite_diversity(7, capped)
     broader = capped.model_copy(
         update={
             "minimum_fingerspelling_datasets": 2,
             "maximum_fingerspelling_dataset_share_bps": 7500,
         }
     )
+    require_successor_suite_diversity(7, broader)
     require_successor_suite_diversity(8, broader)
     with pytest.raises(ValueError, match="source cap"):
         require_successor_suite_diversity(

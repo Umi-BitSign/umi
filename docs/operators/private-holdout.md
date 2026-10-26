@@ -134,7 +134,7 @@ source cap of at most 50% and at least four continuous topics. Historical
 selection inputs retain their original bytes and interpretation. Source balance
 does not prove that public clips were excluded from model training, so exposure
 claims must remain explicit in the private report.
-For C8 and later, adoption also requires at least two fingerspelling sources,
+For C7 and later, adoption also requires at least two fingerspelling sources,
 with no more than 75% of fingerspelling cases from one source. This requirement
 must be met together with the four fingerspelling categories; a missing source
 holds adoption until real labeled media is available.

@@ -121,13 +121,13 @@ def require_successor_suite_diversity(sequence: int, counts: SuiteSelectionCount
             "C7+ suite adoption requires a continuous source cap of 50% "
             "and at least four distinct topics"
         )
-    if sequence >= 8 and (
+    if sequence >= 7 and (
         counts.minimum_fingerspelling_datasets < 2
         or counts.maximum_fingerspelling_dataset_share_bps is None
         or counts.maximum_fingerspelling_dataset_share_bps > 7500
     ):
         raise ValueError(
-            "C8+ suite adoption requires at least two fingerspelling sources "
+            "C7+ suite adoption requires at least two fingerspelling sources "
             "and a maximum 75% share from one source"
         )
 
