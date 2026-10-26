@@ -177,6 +177,16 @@ reports bytes and promotion copies report parts within their cohort's work.
 The owner copies up to four independent R2 parts at once, bounded by the signed
 delivery profile. It completes parts in their original order and verifies the
 new preserved object before recording promotion.
+Each single-model acceptance substage also exposes `planning_eta_seconds` and
+`eta_basis` under `components.acceptance` and the live nested work component.
+The first planning range uses observed acceptance-stage bounds; after five
+successful current-process examples of the same stage it uses their completed
+durations with a twofold upper allowance. The range counts down from elapsed
+time, and an overrun withdraws it with `planning_range_exceeded_retrying`.
+These are current-substage planning ranges, not cohort completion forecasts;
+provider retries and different model sizes can exceed them. Restart begins with
+the initial range while retained certification and artifact checks still reuse
+their own durable results.
 Native R2 readers may select the [authenticated metadata batch transport](../../deploy/public-model-artifacts/README.md#private-metadata-transport)
 without changing signed submissions, model identities, clocks or byte checkpoints.
 Individual R2 HEAD/GET requests retry transient connection failures and temporary

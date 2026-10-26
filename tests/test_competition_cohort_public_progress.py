@@ -36,6 +36,32 @@ def test_progress_is_bounded_redacted_and_returns_independent_snapshots():
     assert state.snapshot(C)["percent"] is None
 
 
+def test_acceptance_planning_range_counts_down_without_external_work(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "acceptance",
+        dict(
+            cohort_sha256=C,
+            stage="promotion",
+            status="running",
+            planning_eta_seconds=[30, 120],
+            eta_basis="planning_previous_stage_durations",
+            eta_samples=5,
+        ),
+    )
+    now[0] = 60.0
+    current = state.snapshot(C)["components"]["acceptance"]
+    assert current["planning_eta_seconds"] == [0, 70]
+    assert current["eta_samples"] == 5
+    now[0] = 131.0
+    overdue = state.snapshot(C)["components"]["acceptance"]
+    assert overdue["planning_eta_seconds"] is None
+    assert overdue["eta_basis"] == "planning_range_exceeded_retrying"
+    assert overdue["stalled_or_retrying"] is True
+
+
 def test_restart_is_unknown_and_stale_or_overdue_measurements_withdraw_eta(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])

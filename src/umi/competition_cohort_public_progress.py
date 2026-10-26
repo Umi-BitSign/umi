@@ -27,6 +27,7 @@ _FIELDS = (
     "eta_basis",
     "eta_scope",
     "eta_assumptions",
+    "eta_samples",
     "estimated_finish_unix_ms",
     "stalled_or_retrying",
     "stalled",
@@ -220,6 +221,21 @@ class CohortProgressSnapshots:
                         worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
                 if kind == "acceptance" and value.get("status") == "running":
                     value["elapsed_seconds"] = round(age, 3)
+                    planning = value.get("planning_eta_seconds")
+                    if (
+                        isinstance(planning, list)
+                        and len(planning) == 2
+                        and all(type(v) in (int, float) for v in planning)
+                    ):
+                        if age > planning[1]:
+                            value["planning_eta_seconds"] = None
+                            value["eta_basis"] = "planning_range_exceeded_retrying"
+                            value["stalled_or_retrying"] = True
+                        else:
+                            value["planning_eta_seconds"] = [
+                                round(max(0.0, planning[0] - age), 1),
+                                round(max(0.0, planning[1] - age), 1),
+                            ]
                 parts[kind] = value
         phase = parts.get("lifecycle", {}).get("phase")
         selected = parts.get("lifecycle", {})

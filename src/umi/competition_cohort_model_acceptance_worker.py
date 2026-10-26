@@ -8,6 +8,7 @@ before finality, source inputs or reviewers are contacted again.
 import logging
 import sqlite3
 import time
+from collections import defaultdict, deque
 from contextlib import contextmanager, suppress
 from functools import partial
 from pathlib import Path
@@ -30,6 +31,18 @@ from .private_files import publish_private_model, read_private_model
 from .protocol import canonical_json_bytes
 
 _LOG = logging.getLogger("umi.competition.progress")
+_ACCEPTANCE_STAGE_PLANNING_SECONDS = {
+    "retained_lookup": (0, 15),
+    "input_readiness": (0, 60),
+    "payload": (0, 60),
+    "intent_lookup": (0, 30),
+    "intent_preparation": (0, 180),
+    "proposal_publication": (0, 30),
+    "review_quorum": (0, 600),
+    "promotion": (0, 1200),
+    "publication": (0, 60),
+    "export": (0, 60),
+}
 
 
 class ModelAcceptanceWorker:
@@ -53,6 +66,7 @@ class ModelAcceptanceWorker:
         self.cursors = {}
         self._fair_start = 0
         self._priority_offsets = {}
+        self._stage_durations = defaultdict(lambda: deque(maxlen=16))
         self.reviewers = tuple(reviewers)
         self.promote = promote
         self.prepare_review = prepare_review
@@ -80,6 +94,15 @@ class ModelAcceptanceWorker:
         # Stage identity is public digest metadata; exception text can contain
         # private review documents and must never enter these diagnostics.
         started = time.monotonic()
+        samples = tuple(self._stage_durations[stage])
+        initial_low, initial_high = _ACCEPTANCE_STAGE_PLANNING_SECONDS[stage]
+        if len(samples) >= 5:
+            planning = (max(0.0, min(samples) / 2),
+                        max(initial_high / 2, 2 * max(samples)))
+            basis = "planning_current_process_completed_stage_range_with_2x_upper_allowance"
+        else:
+            planning = (initial_low, initial_high)
+            basis = "planning_initial_stage_range_from_20261026_observed_acceptance_durations"
         body = {
             "schema": "umi-model-acceptance-stage/1",
             "cohort_sha256": cohort,
@@ -87,7 +110,12 @@ class ModelAcceptanceWorker:
             "stage": stage,
             "total": 1,
             "eta_seconds": None,
-            "eta_basis": "awaiting_owned_operation",
+            "planning_eta_seconds": list(planning),
+            "eta_basis": basis,
+            "eta_samples": len(samples),
+            "eta_assumptions": (
+                "similar model size and provider response; retries extend this range"
+            ),
             "eta_scope": "current_acceptance_substage",
             "certification_authority": False,
         }
@@ -106,7 +134,13 @@ class ModelAcceptanceWorker:
         )
         try:
             with WorkProgress(
-                "model_acceptance_" + stage, 1, unit="submissions", cohort=cohort, estimate=False
+                "model_acceptance_" + stage,
+                1,
+                unit="submissions",
+                cohort=cohort,
+                estimate=False,
+                planning_range_seconds=planning,
+                planning_basis=basis,
             ) as progress:
                 yield
                 progress.advance()
@@ -116,6 +150,8 @@ class ModelAcceptanceWorker:
                 {
                     **body,
                     "status": "pending",
+                    "planning_eta_seconds": None,
+                    "eta_basis": "retrying_after_stage_failure",
                     "error_type": type(error).__name__,
                     "stalled_or_retrying": True,
                 },
@@ -140,7 +176,13 @@ class ModelAcceptanceWorker:
             )
             raise
         else:
-            PUBLIC_COHORT_PROGRESS.record("acceptance", {**body, "status": "completed"})
+            elapsed = time.monotonic() - started
+            self._stage_durations[stage].append(elapsed)
+            PUBLIC_COHORT_PROGRESS.record("acceptance", {
+                **body, "status": "completed", "completed": 1,
+                "planning_eta_seconds": [0, 0], "eta_seconds": 0,
+                "eta_basis": "completed_scope",
+            })
             self.owner.intake.model_certification_progress.operation(cohort, key, stage)
             _LOG.info(
                 "model_acceptance_stage %s",
@@ -151,7 +193,7 @@ class ModelAcceptanceWorker:
                         "completed": 1,
                         "eta_seconds": 0,
                         "eta_basis": "completed_scope",
-                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "elapsed_seconds": round(elapsed, 3),
                         "stalled_or_retrying": False,
                     }
                 ).decode(),
