@@ -194,6 +194,56 @@ def test_unknown_exposure_cannot_be_promoted_to_documented_holdout(case):
     assert report["unknown_or_public_exposure_is_not_verified_holdout"]
 
 
+def test_training_excluded_quota_selects_real_candidates_and_refuses_shortage(case):
+    private_ids = {1, 2, 4, 5}
+    values = tuple(
+        entry.model_copy(
+            update={
+                "training_exposure": "documented_training_excluded",
+                "training_exclusion_evidence_sha256": f"{5000 + index:064x}",
+            }
+        )
+        if index in private_ids
+        else entry
+        for index, entry in enumerate(case.inventory.cases, start=1)
+    )
+    decoys = (
+        candidate(7, "A different street", task="fingerspelling", dataset="OtherFS", signer=7),
+        candidate(8, "A new topic about farms", dataset="OtherContinuous", signer=8, topic="Farms"),
+    )
+    inventory = case.inventory.model_copy(update={"cases": (*values, *decoys)})
+    counts = case.counts.model_copy(
+        update={
+            "minimum_training_excluded_fingerspelling": 2,
+            "minimum_training_excluded_continuous": 2,
+        }
+    )
+    _, report = select(case, inventory=inventory, counts=counts)
+    assert report["selected_training_exposure"]["documented_training_excluded"] >= 4
+    assert {
+        task: sum(
+            row["training_exposure"] == "documented_training_excluded"
+            for row in report["selected_provenance"]
+            if row["case_id"]
+            in {
+                candidate.case.case_id
+                for candidate in inventory.cases
+                if candidate.case.stratum == task
+            }
+        )
+        for task in ("fingerspelling", "continuous")
+    } == {"fingerspelling": 2, "continuous": 2}
+    shortage = inventory.model_copy(
+        update={
+            "cases": tuple(
+                entry for entry in inventory.cases if entry.case.case_id != values[1].case.case_id
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, inventory=shortage, counts=counts)
+
+
 def test_cli_reuses_completed_preparation_and_restores_interrupted_output(
     case, tmp_path, monkeypatch
 ):
