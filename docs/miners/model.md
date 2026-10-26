@@ -3,6 +3,7 @@
 # Connect and expose a miner model
 
 - [Miner model integration](#miner-model-integration)
+- [Download a certified public model](#download-a-certified-public-model)
 - [Miner endpoint IPs and hostnames](#miner-endpoint-hostnames)
 
 <a id="miner-model-integration"></a>
@@ -14,6 +15,46 @@ For current deployment requirements, first read
 checks endpoint health without replaying pilot evidence; it does not run fresh
 translation challenges. The integration below is for a miner that serves actual
 translation requests under the corresponding release and policy.
+
+## Download a certified public model
+
+The public catalog lists admitted model submissions, including revisions with
+zero reward. For C6, read both pages to see all 103 listed models (the API allows
+at most 100 per page):
+
+```text
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=0&limit=100
+https://api.umi.vision/v1/competition/cohorts/06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af/models?offset=100&limit=100
+```
+
+For later cohorts, substitute their full cohort digest and follow `next_offset`
+until it is null. Choose an item with `download_available: true` and copy its
+`model_sha256` (the model identity, not the UID or submission digest). Use a
+current UMI Python environment that can run the downloader; check it with
+`python -m umi.competition_cohort_public_download_cli --help`. From a source
+checkout with its dependencies installed, `PYTHONPATH=src python -m ...` also
+runs the same module.
+
+For example, the C6 UID 5 model has SHA-256
+`77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa`:
+
+```sh
+python -m umi.competition_cohort_public_download_cli \
+  --api https://api.umi.vision \
+  --cohort 06b8074172f29bcbead0ae5e88e25ca94af2fe5c7bca71b6821df7c1139a83af \
+  --model 77d075ac84aaa51f241806bfed239b94885a8fa158d20267e2e69067d3c335aa \
+  --output /absolute/path/to/new-output-directory
+```
+
+Allow space for the complete model. The command creates `manifest.json`,
+`model/` and a private `.umi-download/` journal in the output directory. Wait
+for a successful exit before using the files. To resume after interruption, run
+the **same command with the same output directory**; keep `.umi-download/`.
+The client renews expired download URLs and verifies the native files. C6's
+download metadata provides a concatenated payload and file ranges, not a
+ready-made tar archive. Use the downloader rather than treating the payload URL
+as a tarball. [API format and repair details](../reference/competition-results-api.md#download-with-restart-support)
+are in the reference guide.
 
 ### Model files for recoverable cohorts
 

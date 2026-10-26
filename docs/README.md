@@ -18,6 +18,7 @@ and policy details.
 | Configure or update an endpoint | [Current connection guide](miners/connection.md) |
 | Submit a public model for C6 | [Upload and check admission](miners/model.md#model-files-for-recoverable-cohorts) |
 | Connect my translation model | [Model integration and HTTPS endpoints](miners/model.md) |
+| Download a certified public model | [Public model download instructions](miners/model.md#download-a-certified-public-model) |
 | Run a miner on Apple Silicon | [Mac miner setup](miners/macos.md) |
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |
 | Upgrade an existing validator host | [State-preserving upgrade](validators/successor-upgrade.md) |
