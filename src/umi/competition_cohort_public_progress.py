@@ -251,7 +251,15 @@ class CohortProgressSnapshots:
                         type(certification.get("total")) is int
                         and certification.get("completed") == certification["total"]
                     )
-                    if not (complete and stage in {"progress_review", "decision_certification"}):
+                    if not (
+                        complete
+                        and stage
+                        in {
+                            "automatic_progression_held",
+                            "progress_review",
+                            "decision_certification",
+                        }
+                    ):
                         selected = certification
                         stage = "model_certification"
                     break

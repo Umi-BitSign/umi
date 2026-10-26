@@ -141,6 +141,52 @@ def test_hold_does_not_hide_intake_certification_and_active_operation_elapsed(mo
     assert result["overall_eta_seconds"] is None
 
 
+def test_completed_intake_certification_yields_to_progression_hold_and_new_work():
+    state = CohortProgressSnapshots()
+    state.record(
+        "lifecycle",
+        dict(
+            cohort_sha256=C,
+            stage="automatic_progression_held",
+            status="automatic_progression_held",
+            completed=0,
+            total=1,
+            percent=0,
+            eta_seconds=None,
+            eta_basis="awaiting_qualified_release_and_explicit_hold_removal",
+        ),
+    )
+    state.record(
+        "intake_certification",
+        dict(cohort_sha256=C, completed=82, total=82, percent=100, eta_seconds=0),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "automatic_progression_held"
+    assert result["completed"] == 0 and result["total"] == 1
+    assert result["eta_seconds"] is None
+    assert result["components"]["intake_certification"]["completed"] == 82
+
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="model_acceptance_export",
+            state="running",
+            completed=1,
+            total=2,
+            percent=50,
+        ),
+    )
+    assert state.snapshot(C)["stage"] == "model_acceptance_export"
+
+    state.record(
+        "intake_certification",
+        dict(cohort_sha256=C, completed=82, total=83, percent=100 * 82 / 83),
+    )
+    assert state.snapshot(C)["stage"] == "model_certification"
+
+
 @pytest.mark.parametrize("stage", ["model_acceptance_review_quorum", "model_promotion_copy"])
 def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch, stage):
     now = [10]

@@ -153,7 +153,7 @@
     "competition_cohort_producer_epoch.py": "cbac84b78d4ce209cf69a273c778aad05a9361e6243f065eeb7380d54950b08c",
     "competition_cohort_progress_signer.py": "2edcb4cbe89620541a24d0e771badffd5aeb3287258b30585627a8ed84a02e90",
     "competition_cohort_public_history.py": "a165f0a9aea2901cd2c497b0be2d543cc0f85171e096fc4196421c505f571280",
-    "competition_cohort_public_progress.py": "66386448d48f984f24055a72d220c33bab6ffaaeaf056f5a13224826809e903a",
+    "competition_cohort_public_progress.py": "1aa303df40671063adf6f30cb43d4c040a4c76dc292398016055da07cdf22b30",
     "competition_cohort_publication_objects.py": "15bcba170491efae595a448b4f03240f119ce3d1df0174d5add74752ddfc526a",
     "competition_cohort_publication_progress.py": "36b0dd4f6f4819c0254fa1f0a2d80dd77eeb3fef4e73c52fb4cb5c7288cb3f8b",
     "competition_cohort_quality.py": "86f9dbcec221aa75d014f6413ea00800415f5112b1b9675fb843dfe934be0425",

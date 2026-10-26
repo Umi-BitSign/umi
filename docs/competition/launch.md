@@ -263,6 +263,11 @@ identifies payload, intent preparation, proposal publication and reviewer steps,
 with redacted failure frames. Missing samples and unresolved holds have no
 measured finish time. Certification ETA excludes preparation, challenges,
 scoring and reward activation; report those stages separately.
+When all selected submissions are certified and progression remains held, the
+cached public `/progress` route shows that hold as the current stage and retains
+the completed certificate count in `components.intake_certification`. Fresh
+acceptance work can take precedence; a replacement submission makes
+certification current again until its new roster completes.
 
 ## Timing and recovery
 
