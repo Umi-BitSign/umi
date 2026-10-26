@@ -3372,6 +3372,9 @@ batch when contention clears. Native signatures, indexes and current intake
 history are checked; sealing still verifies the complete inventory and current
 registration. Restart gives current candidates a turn immediately while retained
 admission blocks, completion ordinals and signed records remain intact.
+Direct R2 promotion copies independent parts in bounded waves of at most four,
+also capped by the signed delivery profile. The owner drains a failed wave before
+aborting the multipart upload and still verifies the new preserved object.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
