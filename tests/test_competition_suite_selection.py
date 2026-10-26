@@ -305,6 +305,56 @@ def test_explicit_fingerspelling_quotas_preserve_all_four_categories_in_a_larger
         )
 
 
+def test_four_fingerspelling_categories_respect_two_source_75_percent_cap(case):
+    inventory, counts = categorized(case)
+    categories = ("sentence", "name", "address", "number")
+    primary = tuple(
+        candidate(
+            200 + index,
+            f"Distinct finger spelling example {index}",
+            task="fingerspelling",
+            dataset="PrimaryFS",
+            signer=200 + index,
+        ).model_copy(update={"fingerspelling_category": category})
+        for index, category in enumerate(categories)
+    )
+    secondary = candidate(
+        210,
+        "An independent signed sentence",
+        task="fingerspelling",
+        dataset="SecondaryFS",
+        signer=210,
+    ).model_copy(update={"fingerspelling_category": "sentence"})
+    inventory = inventory.model_copy(
+        update={"cases": (*primary, secondary, *case.inventory.cases[3:])}
+    )
+    counts = counts.model_copy(
+        update={
+            "minimum_fingerspelling_datasets": 2,
+            "maximum_fingerspelling_dataset_share_bps": 7500,
+        }
+    )
+    for seed in (0, 1, 7, 31):
+        _, report = select_future_suite(
+            inventory,
+            case.exclusions,
+            counts,
+            case.policy,
+            selection_key=bytes([seed]) * 32,
+        )
+        assert report["selected_fingerspelling_categories"] == dict.fromkeys(categories, 1)
+        assert report["selected_by_task_and_dataset"]["fingerspelling"] == {
+            "PrimaryFS": 3,
+            "SecondaryFS": 1,
+        }
+
+    primary_only = inventory.model_copy(update={"cases": (*primary, *case.inventory.cases[3:])})
+    with pytest.raises(ValueError, match="diversity"):
+        select_future_suite(
+            primary_only, case.exclusions, counts, case.policy, selection_key=case.key
+        )
+
+
 @pytest.mark.parametrize("category", ["sentence", "name", "address", "number"])
 def test_category_shortage_refuses_instead_of_reclassifying_or_reducing_quotas(case, category):
     inventory, counts = categorized(case)
