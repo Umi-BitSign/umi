@@ -261,7 +261,6 @@ class FoldedHistoryFrontier:
             paths.add(owner.path)
             info = owner.path.stat()
             with owner.read_transaction() as db:
-                owner._version(db)
                 count = db.execute(
                     "SELECT number FROM round_record_capacity_kinds "
                     "WHERE kind='remote_proof_damage'"
