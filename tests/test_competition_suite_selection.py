@@ -92,6 +92,43 @@ def test_diverse_selection_preserves_publisher_references_and_is_order_independe
     )
 
 
+def test_declared_dataset_share_cap_refuses_concentrated_public_source(case):
+    counts = case.counts.model_copy(update={"maximum_continuous_dataset_share_bps": 5000})
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, counts=counts)
+    third = candidate(
+        7,
+        "A new sentence about the weather in town",
+        dataset="IndependentContinuous",
+        signer=7,
+        topic="Weather",
+    )
+    inventory = case.inventory.model_copy(update={"cases": (*case.inventory.cases, third)})
+    suite, report = select(case, inventory=inventory, counts=counts)
+    assert len(suite.cases) == 6
+    assert report["selected_by_task_and_dataset"]["continuous"] == {
+        "ASL-STEM": 1,
+        "How2Sign": 1,
+        "IndependentContinuous": 1,
+    }
+
+
+def test_declared_fingerspelling_share_cap_requires_another_source(case):
+    counts = case.counts.model_copy(update={"maximum_fingerspelling_dataset_share_bps": 5000})
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, counts=counts)
+    third = candidate(
+        8,
+        "Oak Lane",
+        task="fingerspelling",
+        dataset="IndependentFingerspelling",
+        signer=8,
+    )
+    inventory = case.inventory.model_copy(update={"cases": (*case.inventory.cases, third)})
+    _, report = select(case, inventory=inventory, counts=counts)
+    assert max(report["selected_by_task_and_dataset"]["fingerspelling"].values()) == 1
+
+
 @pytest.mark.parametrize("damage", ["sentence", "source", "signer", "near_sentence"])
 def test_known_training_or_exposed_text_and_group_overlap_is_excluded(case, damage):
     c = case
@@ -265,6 +302,56 @@ def test_explicit_fingerspelling_quotas_preserve_all_four_categories_in_a_larger
         assert all(
             case.references in {entry.case.references for entry in inventory.cases}
             for case in suite.cases
+        )
+
+
+def test_four_fingerspelling_categories_respect_two_source_75_percent_cap(case):
+    inventory, counts = categorized(case)
+    categories = ("sentence", "name", "address", "number")
+    primary = tuple(
+        candidate(
+            200 + index,
+            f"Distinct finger spelling example {index}",
+            task="fingerspelling",
+            dataset="PrimaryFS",
+            signer=200 + index,
+        ).model_copy(update={"fingerspelling_category": category})
+        for index, category in enumerate(categories)
+    )
+    secondary = candidate(
+        210,
+        "An independent signed sentence",
+        task="fingerspelling",
+        dataset="SecondaryFS",
+        signer=210,
+    ).model_copy(update={"fingerspelling_category": "sentence"})
+    inventory = inventory.model_copy(
+        update={"cases": (*primary, secondary, *case.inventory.cases[3:])}
+    )
+    counts = counts.model_copy(
+        update={
+            "minimum_fingerspelling_datasets": 2,
+            "maximum_fingerspelling_dataset_share_bps": 7500,
+        }
+    )
+    for seed in (0, 1, 7, 31):
+        _, report = select_future_suite(
+            inventory,
+            case.exclusions,
+            counts,
+            case.policy,
+            selection_key=bytes([seed]) * 32,
+        )
+        assert report["selected_fingerspelling_categories"] == dict.fromkeys(categories, 1)
+        assert report["selected_by_task_and_dataset"]["fingerspelling"] == {
+            "PrimaryFS": 3,
+            "SecondaryFS": 1,
+        }
+
+    primary_only = inventory.model_copy(update={"cases": (*primary, *case.inventory.cases[3:])})
+    with pytest.raises(ValueError, match="diversity"):
+        select_future_suite(
+            primary_only, case.exclusions, counts, case.policy, selection_key=case.key
         )
 
 

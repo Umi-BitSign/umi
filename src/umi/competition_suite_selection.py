@@ -95,6 +95,12 @@ class SuiteSelectionCounts(StrictProtocolModel):
     minimum_fingerspelling_signers: Annotated[int, Field(ge=0, le=1024)] = 2
     minimum_continuous_signers: Annotated[int, Field(ge=0, le=1024)] = 2
     minimum_continuous_topics: Annotated[int, Field(ge=0, le=1024)] = 2
+    maximum_fingerspelling_dataset_share_bps: (
+        Annotated[int, Field(strict=True, ge=1, le=10000)] | None
+    ) = None
+    maximum_continuous_dataset_share_bps: (
+        Annotated[int, Field(strict=True, ge=1, le=10000)] | None
+    ) = None
     near_sentence_token_jaccard_bps: Annotated[int, Field(ge=5000, le=10000)] = 8000
     require_qualified_cases: bool = True
     distinct_signer_per_case: bool = True
@@ -105,6 +111,10 @@ class SuiteSelectionCounts(StrictProtocolModel):
         value = handler(self)
         if self.fingerspelling_category_minimums is None:
             value.pop("fingerspelling_category_minimums", None)
+        if self.maximum_fingerspelling_dataset_share_bps is None:
+            value.pop("maximum_fingerspelling_dataset_share_bps", None)
+        if self.maximum_continuous_dataset_share_bps is None:
+            value.pop("maximum_continuous_dataset_share_bps", None)
         return value
 
     @model_validator(mode="after")
@@ -116,6 +126,13 @@ class SuiteSelectionCounts(StrictProtocolModel):
             or self.minimum_fingerspelling_signers > self.fingerspelling
             or self.minimum_continuous_signers > self.continuous
             or self.minimum_continuous_topics > self.continuous
+            or any(
+                share is not None and count * share < 10000
+                for count, share in (
+                    (self.fingerspelling, self.maximum_fingerspelling_dataset_share_bps),
+                    (self.continuous, self.maximum_continuous_dataset_share_bps),
+                )
+            )
             or (
                 self.fingerspelling_category_minimums is not None
                 and sum(self.fingerspelling_category_minimums.model_dump().values())
@@ -247,11 +264,16 @@ def select_future_suite(
             if task == "fingerspelling" and counts.fingerspelling_category_minimums
             else {}
         )
+        maximum_share_bps = getattr(counts, "maximum_" + task + "_dataset_share_bps")
+        maximum_per_dataset = (
+            wanted * maximum_share_bps // 10000 if maximum_share_bps is not None else wanted
+        )
         for index in range(wanted):
             eligible = [
                 (c, text, tokens)
                 for c, text, tokens in pool
                 if c.case.stratum == task
+                and dataset_counts[c.dataset] < maximum_per_dataset
                 and c.source_group_sha256 not in used_groups
                 and (
                     not counts.distinct_signer_per_case
