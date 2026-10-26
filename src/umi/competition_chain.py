@@ -582,6 +582,7 @@ class FinalizedRegistrationProvider:
                 startup_timeout_seconds=segment_startup_timeout,
                 limits=self._finality_storage_limits(),
                 storage_limits=self._finality_operational_limits(),
+                accepted_predecessor_capacity_limits=self._predecessor_finality_storage_limits(),
             )
             head = finality.persisted_head()
             self._startup_floor = (
@@ -762,6 +763,9 @@ class FinalizedRegistrationProvider:
         return frozenset(accepted)
 
     def _finality_storage_limits(self):
+        return None
+
+    def _predecessor_finality_storage_limits(self):
         return None
 
     def _finality_operational_limits(self):

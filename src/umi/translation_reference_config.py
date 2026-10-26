@@ -61,6 +61,9 @@ class ReferencePublisherConfig(StrictProtocolModel):
     state_directory: Directory
     resources: CompetitionChainResources
     maximum_cache_bytes: Annotated[int, Field(ge=64 * 1024**2, le=16 * 1024**3)]
+    previous_maximum_cache_bytes: Annotated[
+        int, Field(ge=64 * 1024**2, le=16 * 1024**3)
+    ] | None = None
     maximum_journal_bytes: Annotated[int, Field(ge=1024**2, le=1024**3)]
     credentials_file: Directory
     endpoint: str
@@ -81,6 +84,8 @@ class ReferencePublisherConfig(StrictProtocolModel):
         value = handler(self)
         if self.gateway_origin is None:
             value.pop("gateway_origin", None)
+        if self.previous_maximum_cache_bytes is None:
+            value.pop("previous_maximum_cache_bytes", None)
         if self.directive_renewal is None:
             value.pop("directive_renewal", None)
         if self.schema_ == "umi-reference-publisher-config/3" and not self.horizons:
@@ -191,6 +196,7 @@ def selected_inputs(config: ReferencePublisherConfig):
         update={
             "state_directory": config.resources.state_directory,
             "maximum_cache_bytes": config.maximum_cache_bytes,
+            "previous_maximum_cache_bytes": config.previous_maximum_cache_bytes,
         }
     )
     config.resources.check(chain)

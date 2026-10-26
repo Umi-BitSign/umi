@@ -141,6 +141,21 @@ async def test_executable_owner_wires_isolated_native_resources_and_lazy_signer(
     await service.provider.aclose()
 
 
+async def test_reference_publisher_carries_declared_cache_predecessor(installed):
+    config = installed.config.model_copy(
+        update={
+            "maximum_cache_bytes": 512 * 1024**2,
+            "previous_maximum_cache_bytes": 256 * 1024**2,
+        }
+    )
+    service = wiring.build_reference_service(config)
+    try:
+        assert service.provider.config.maximum_cache_bytes == 512 * 1024**2
+        assert service.provider.config.previous_maximum_cache_bytes == 256 * 1024**2
+    finally:
+        await service.provider.aclose()
+
+
 @pytest.mark.parametrize("protected", ["state_directory", "files_directory"])
 def test_installed_state_overlap_refuses_before_owner_creation(installed, protected):
     item = installed

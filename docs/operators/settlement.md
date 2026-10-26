@@ -906,6 +906,18 @@ When adopting an existing cache with a changed allowance, set
 reader migrates only that matching configuration in place; other chain/proof
 bindings must still match. The predecessor field can be removed afterward.
 
+The reference publisher has a separate top-level `maximum_cache_bytes`
+override for its owned proof directory. To grow an existing publisher cache,
+stop and drain that service, set its top-level `previous_maximum_cache_bytes`
+to the exact old allowance, and raise its top-level `maximum_cache_bytes` within
+the host reserve. On startup, the owner moves its existing namespace, rebinds
+the retained registration and finality stores, and audits the finality store
+under the new limit. The namespace and registration steps report counted
+progress and planning ETAs. An interrupted start resumes the same files; it
+does not create a fresh proof history. Confirm a sustained advancing finalized
+head before removing the predecessor field from the publisher config. A
+capacity increase reserves a ceiling; it does not preallocate that disk space.
+
 Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
 `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable
 or replicated stores and separate from direct-model credentials. Provision
