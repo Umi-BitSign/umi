@@ -191,6 +191,10 @@ Overall ETA stays null until an end-to-end forecast is established. Responses
 include observation age, disable caching, and never trigger verification or RPC.
 After restart an unknown observation is null, not zero or complete. This separate
 endpoint leaves signed history, readiness and existing client schemas unchanged.
+For active successor intake, the owner restores its retained certification count
+before reconciling older cohort exports. Pending successor submissions run first
+in that poll. The HTTP read uses the cached observation without opening the
+owner journal.
 
 During model evaluation, `components.execution` reports completed selected models
 with every evaluator terminal exported, the selected-model denominator, saved
