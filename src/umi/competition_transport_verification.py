@@ -269,6 +269,7 @@ class TransferProgress:
                         "total_units",
                         "unit",
                         "eta_seconds",
+                        "planning_eta_seconds",
                         "eta_basis",
                     )
                 }
@@ -366,6 +367,7 @@ class TransferProgress:
                 and state != "completed"
             ):
                 child_eta = self.child.get("eta_seconds")
+                child_planning = self.child.get("planning_eta_seconds")
                 if (
                     not stalled
                     and state not in {"retrying", "refused", "repair_required", "waiting"}
@@ -383,7 +385,48 @@ class TransferProgress:
                     else:
                         planning, basis = None, "waiting_for_parent_and_required_child_samples"
                 else:
-                    eta, planning, basis = None, None, "required_child_scope_incomplete"
+                    if (
+                        not stalled
+                        and state not in {"retrying", "refused", "repair_required", "waiting"}
+                        and isinstance(child_planning, (list, tuple))
+                        and len(child_planning) == 2
+                        and all(
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                            and value >= 0
+                            for value in child_planning
+                        )
+                        and child_planning[0] <= child_planning[1]
+                    ):
+                        parent_planning = (
+                            [eta, eta] if eta is not None else planning
+                        )
+                        if parent_planning is not None:
+                            # The child runs inside the parent operation, so the
+                            # remaining wall time is bounded by the slower scope.
+                            planning = [
+                                max(parent_planning[0], child_planning[0]),
+                                max(parent_planning[1], child_planning[1]),
+                            ]
+                            eta, basis = None, "planning_parent_and_required_child_work"
+                        elif not remaining and (
+                            self.total_operations is None
+                            or self.completed_operations == self.total_operations
+                        ):
+                            eta, planning, basis = (
+                                None,
+                                list(child_planning),
+                                "planning_required_child_remaining_work",
+                            )
+                        else:
+                            eta, planning, basis = (
+                                None,
+                                None,
+                                "waiting_for_parent_and_required_child_samples",
+                            )
+                    else:
+                        eta, planning, basis = None, None, "required_child_scope_incomplete"
             event = {
                 "schema": "umi-transport-work-progress/1",
                 "pid": os.getpid(),

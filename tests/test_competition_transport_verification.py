@@ -383,6 +383,50 @@ def test_child_forecast_cannot_replace_unmeasured_parent_work():
     assert events[-1]["eta_basis"] == "waiting_for_parent_and_required_child_samples"
 
 
+def test_child_planning_range_keeps_parent_forecast_as_planning(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
+    events = []
+    parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
+    now[0] += 10
+    parent.advance(10)
+    child = parent.child_report()
+    child(
+        {
+            "stage": "r2_read",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 10,
+            "unit": "objects",
+            "planning_eta_seconds": [20, 300],
+        }
+    )
+    event = events[-1]
+    assert event["eta_seconds"] is None
+    assert event["planning_eta_seconds"] == [90, 300]
+    assert event["eta_basis"] == "planning_parent_and_required_child_work"
+    assert event["active_child"]["planning_eta_seconds"] == [20, 300]
+
+
+def test_child_planning_range_cannot_replace_unknown_parent_work():
+    events = []
+    parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
+    child = parent.child_report()
+    child(
+        {
+            "stage": "r2_read",
+            "status": "running",
+            "completed_units": 1,
+            "total_units": 10,
+            "unit": "objects",
+            "planning_eta_seconds": [20, 300],
+        }
+    )
+    assert events[-1]["eta_seconds"] is None
+    assert events[-1]["planning_eta_seconds"] is not None
+    assert events[-1]["eta_basis"] == "planning_parent_and_required_child_work"
+
+
 def test_operation_tail_prevents_zero_eta_after_last_large_payload(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(transport.time, "monotonic", lambda: now[0])
