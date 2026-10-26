@@ -61,6 +61,7 @@ class CoverageCompletion(StrictProtocolModel):
 class _CollectionOutcome:
     immediate: bool
     retrying: bool
+    retained_page: bool = False
 
 
 def coverage_work_key(activation: RewardActivation) -> str:
@@ -181,12 +182,16 @@ class StandingRewardCoverageService:
             self._content, "opportunity_certificate", sha, self.files.certificate
         )
         reader = self.preparation.reader
+        if hasattr(source, "_native_credit_groups"):
+            source._native_credit_groups.clear()  # Independent certificate review refreshes once.
+            source._completed_model_groups.clear()
         return await review_opportunity_certificate(
             raw,
             expected_sha256=sha,
             journal=self.journal,
             witness_source=self._witness,
             review_endpoint=source.replay,
+            review_interval=getattr(source, "restore_credit", None),
             manifest=self.preparation.manifest,
             series=reader.series,
             policy=reader.policy,
@@ -259,6 +264,7 @@ class StandingRewardCoverageService:
                 return _CollectionOutcome(
                     bool(getattr(progress, "immediate", False)),
                     any(reason != "history_pending" for _, reason in progress.errors),
+                    bool(getattr(progress, "retained_page", False)),
                 )
             completion = CoverageCompletion(
                 schema="umi-reward-coverage-completion/1",
@@ -292,6 +298,11 @@ class StandingRewardCoverageService:
                     if type(outcome) is _CollectionOutcome:
                         progressed = outcome.immediate or progressed
                         failed = outcome.retrying or failed
+                        if outcome.retained_page and progressed and not failed:
+                            # A successful bounded retained page must not select
+                            # another moving discovery head between pages. The
+                            # run loop yields cooperatively before continuing.
+                            return True
                 except HistoricalHeaderRecoveryProgress:
                     progressed = True
                     logger.info("coverage_header_progress phase=%s", name)
@@ -306,6 +317,41 @@ class StandingRewardCoverageService:
             # A successful ancestry page must not turn a failure in the other
             # phase into a tight retry loop. Capacity and RPC holds keep backoff.
             return progressed and not failed
+
+    async def repair_credit(self, key, *, reason, stop):
+        """Run a scoped stopped-owner repair without discovery, signing or publication."""
+        from .competition_evidence_codec import checked_digest
+
+        checked_digest(key)
+        hint = await self.journal.retained_interval(key)
+        keys = await run_owned_thread(self.journal.journal.keys, "coverage_work")
+        if len(keys) > 4096:
+            raise ValueError("credit repair work index exceeds bounded configured capacity")
+        selected = []
+        for work_key in keys:
+            work = CoverageWork.model_validate(
+                await run_owned_thread(self.journal.journal.get, "coverage_work", work_key)
+            )
+            if digest(work.activation) == hint.activation_sha256:
+                selected.append(work)
+        if len(selected) != 1:
+            raise ValueError("credit repair requires one retained native activation")
+        work = selected[0]
+        source = await self._source(work.activation)
+        while not stop.is_set():
+            try:
+                selection = await self._selection(work.observed_block)
+                if selection is None or selection.activation != work.activation:
+                    raise ValueError("credit repair activation differs from native control")
+                return await source.repair_credit(key, reason=reason)
+            except CoverageHistoryPending:
+                await asyncio.sleep(0)
+        return dict(
+            status="interrupted",
+            interval_sha256=key,
+            eta_seconds=None,
+            eta_basis="withdrawn_interrupted_native_credit_repair",
+        )
 
     async def opportunity(self, activation: RewardActivation) -> VerifiedRewardOpportunity:
         async with self._lock:

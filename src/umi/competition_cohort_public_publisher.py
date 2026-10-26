@@ -15,9 +15,11 @@ from .competition_cohort_intake import CohortIntake, CohortIntakeConfig
 from .competition_cohort_public_api import CohortPublicApiConfig, publish_cohort
 from .competition_cohort_public_downloads import PublicArchive, PublicModelDownload, legacy_download
 from .competition_cohort_public_inventory import export_public_model_inventory
-from .competition_cohort_public_promotion import PublicPromotionJournal
+from .competition_cohort_public_promotion import NativePublicPromotionSource, PublicPromotionJournal
 from .competition_cohort_public_results import (
+    PublicModelCatalog,
     PublicModelInventory,
+    PublicPaidResults,
     project_models,
     project_paid_results,
 )
@@ -98,12 +100,15 @@ class CohortPublicPublisherConfig(StrictProtocolModel):
     inventory: PinnedPublicMetadata | None = None
     native_intake: NativePublicIntakeSource | None = None
     direct_promotion_journal: PublicPromotionJournal | None = None
+    direct_promotion_source: NativePublicPromotionSource | None = None
     snapshot: PinnedPublicMetadata | None = None
     service_quality_receipt: PinnedPublicMetadata | None = None
     legacy_models: Annotated[tuple[LegacyPublicModelSource, ...], Field(max_length=65536)] = ()
 
     @model_validator(mode="after")
     def paired_paid_sources(self):
+        if self.direct_promotion_journal is not None and self.direct_promotion_source is not None:
+            raise ValueError("select one native preservation receipt namespace")
         if (self.inventory is None) == (self.native_intake is None):
             raise ValueError("select one pinned inventory or native read-only intake source")
         if (self.snapshot is None) != (self.service_quality_receipt is None):
@@ -147,23 +152,34 @@ def read_paid_projection(config, policy):
     return project_paid_results(quality, terms, certificate, roster, policy)
 
 
-def publish_native_cohort(config: CohortPublicPublisherConfig):
-    """Call under a single exporter lease; no native writes or evidence replay."""
+class NativePublicProjection(StrictProtocolModel):
+    catalog: PublicModelCatalog
+    paid: PublicPaidResults | None
+    downloads: tuple[PublicModelDownload, ...]
+
+
+def prepare_native_cohort(config: CohortPublicPublisherConfig, *, submission_sha256s=None):
+    """Read and authenticate each selected native metadata input once."""
     with WorkProgress(
         "public_cohort_publication", 4 + len(config.legacy_models), unit="metadata_items"
     ) as progress:
         policy = CompetitionPolicy.model_validate_json(config.policy.read())
         if config.inventory is not None:
             inventory = PublicModelInventory.model_validate_json(config.inventory.read())
+            catalog, bundles = project_models(inventory)
         else:
             source = config.native_intake
             intake = CohortIntake(
                 source.config, policy, eligible_tracks=source.eligible_tracks, read_only=True
             )
-            inventory = export_public_model_inventory(intake, source.cohort_sha256)
+            inventory, catalog, bundles = export_public_model_inventory(
+                intake,
+                source.cohort_sha256,
+                with_projection=True,
+                submission_sha256s=submission_sha256s,
+            )
         if inventory.policy != policy:
             raise ValueError("public inventory uses another pinned policy")
-        catalog, bundles = project_models(inventory)
         progress.advance()
         paid = read_paid_projection(config, policy)
         progress.advance()
@@ -183,11 +199,10 @@ def publish_native_cohort(config: CohortPublicPublisherConfig):
                 )
             downloads[source.model_sha256] = item
             progress.advance()
-        promoted = (
-            set()
-            if config.direct_promotion_journal is None
-            else config.direct_promotion_journal.completed(inventory.acceptances)
-        )
+        promotion = config.direct_promotion_journal
+        if config.direct_promotion_source is not None:
+            promotion = config.direct_promotion_source.for_history(inventory.history)
+        promoted = set() if promotion is None else promotion.completed(inventory.acceptances)
         for c in inventory.acceptances:
             a = c.acceptance
             if (
@@ -205,13 +220,20 @@ def publish_native_cohort(config: CohortPublicPublisherConfig):
                 payload=a.direct_artifact.reservation.payload,
             )
         progress.advance()
-        descriptor = publish_cohort(config.api, catalog, paid, tuple(downloads.values()))
         progress.advance()
+    return NativePublicProjection(catalog=catalog, paid=paid, downloads=tuple(downloads.values()))
+
+
+def publish_native_cohort(config: CohortPublicPublisherConfig, *, projection=None):
+    """Call under a single exporter lease; no native writes or evidence replay."""
+    selected = prepare_native_cohort(config) if projection is None else projection
+    catalog, paid = selected.catalog, selected.paid
+    descriptor = publish_cohort(config.api, catalog, paid, selected.downloads)
     return {
         "status": "published",
         "cohort_sha256": catalog.cohort_sha256,
         "public_model_entries": len(catalog.items),
-        "downloadable_models": len(downloads),
+        "downloadable_models": len(selected.downloads),
         "paid_miners": None if paid is None else len(paid.items),
         "descriptor": descriptor.model_dump(mode="json"),
         "chain_submission_authorized": False,

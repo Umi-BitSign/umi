@@ -109,6 +109,15 @@ projection and live chain rewards are separate; this endpoint does not assess
 reward activation. Publication happens automatically after a certified native
 allocation is available. A 404 means that the score artifact has not been published.
 
+The certified cohort's public model catalog and renewable download metadata are
+published automatically as well. Read
+`GET /v1/competition/cohorts/<cohort_sha256>/models`, then use each model's
+`download_url` with the [supported resumable download client](../reference/competition-results-api.md#download-with-restart-support).
+The `/download` response includes the native bundle manifest. A C6+ concatenated
+payload is not a tar archive: use the client to split its file ranges in manifest
+order and verify the original file hashes. Download availability and score rank
+remain separate, and neither establishes live chain payments.
+
 The equivalent public read is
 `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
 Both digests appear under `proposed_admission` in the original receipt. Use the

@@ -416,6 +416,7 @@ def _standing_logs():
         "umi.competition_reward_coverage_collector",
         "umi.competition_reward_history_progress",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_checkpoint_progress",
         "umi.competition_reward_history_repair",
         "umi.competition_round_journal",
     ):
@@ -441,7 +442,10 @@ async def run_supervisor(
     stop_event=None,
     standing_config: Path | None = None,
     history_repair: dict | None = None,
+    credit_repair: dict | None = None,
 ):
+    if history_repair is not None and credit_repair is not None:
+        raise ValueError("select one explicit repair operation")
     if sys.platform != "linux" or os.geteuid() == 0:
         raise ValueError("successor supervisor requires the installed non-root Linux service")
     config_bytes = _root_control(config_path, MAX_SUPERVISOR_DOCUMENT_BYTES)
@@ -454,12 +458,18 @@ async def run_supervisor(
     from .competition_reward_boot import select_standing_boot
 
     standing = select_standing_boot(config_path, anchor, explicit_path=standing_config)
-    if history_repair is not None:
-        from .competition_reward_boot import BOOT_FILENAME
+    if history_repair is not None or credit_repair is not None:
+        from .competition_reward_boot import BOOT_FILENAME, run_installed_credit_repair
         from .competition_reward_history_repair import run_installed_history_repair
 
         if standing is None:
-            raise ValueError("history repair requires the approved standing reward configuration")
+            raise ValueError("repair requires the approved standing reward configuration")
+        repair = (
+            run_installed_history_repair
+            if history_repair is not None
+            else run_installed_credit_repair
+        )
+        options = history_repair if history_repair is not None else credit_repair
         stop = stop_event if stop_event is not None else asyncio.Event()
         loop, handlers = asyncio.get_running_loop(), []
         try:
@@ -469,11 +479,11 @@ async def run_supervisor(
                     handlers.append(signum)
             with _standing_logs():
                 return await run_until_stopped(
-                    run_installed_history_repair(
+                    repair(
                         anchor,
                         standing_config or config_path.with_name(BOOT_FILENAME),
                         stop,
-                        **history_repair,
+                        **options,
                     ),
                     stop,
                 )
@@ -539,20 +549,41 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         help="root-owned standing reward configuration (default: standing-reward-boot.json "
         "beside the supervisor config, when present)",
     )
-    parser.add_argument(
+    repairs = parser.add_mutually_exclusive_group()
+    repairs.add_argument(
         "--repair-history",
         action="store_true",
         help="Repair existing standing history under the original supervisor lease",
     )
+    repairs.add_argument(
+        "--repair-credit", action="store_true", help="Repair one retained native coverage credit"
+    )
+    parser.add_argument("--interval", help="Exact retained coverage interval digest")
     parser.add_argument("--through-block", type=int, help="Inclusive history repair target")
     parser.add_argument("--reason", help="Explicit operator repair reason")
     parser.add_argument("--history", choices=("current", "predecessor"))
     args = parser.parse_args(argv)
-    if args.repair_history:
+    if args.repair_credit:
+        from .competition_evidence_codec import checked_digest
+
+        if args.through_block is not None or not args.reason or not args.reason.strip():
+            parser.error(
+                "--repair-credit requires --interval and --reason, without --through-block"
+            )
+        try:
+            checked_digest(args.interval)
+        except (TypeError, ValueError):
+            parser.error("--repair-credit requires an exact interval digest")
+    elif args.repair_history:
+        if args.interval is not None:
+            parser.error("--repair-history does not take --interval")
         if args.through_block is None or not args.reason or not args.reason.strip():
             parser.error("--repair-history requires --through-block and a nonempty --reason")
-    elif any(value is not None for value in (args.through_block, args.reason, args.history)):
-        parser.error("history repair options require --repair-history")
+    elif any(
+        value is not None
+        for value in (args.through_block, args.reason, args.history, args.interval)
+    ):
+        parser.error("repair options require --repair-history or --repair-credit")
     configure_progress_logging()
     try:
         options = {} if args.standing_config is None else {"standing_config": args.standing_config}
@@ -562,18 +593,30 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
                 reason=args.reason,
                 history=args.history or "current",
             )
+        elif args.repair_credit:
+            options["credit_repair"] = dict(
+                key=args.interval, reason=args.reason, history=args.history or "current"
+            )
         result = asyncio.run(run_supervisor(args.config, **options))
-        if args.repair_history:
+        if args.repair_history or args.repair_credit:
             print(json.dumps(result or {"status": "interrupted"}), flush=True)
     except KeyboardInterrupt:
         return 130
     except Exception as error:
-        if args.repair_history:
+        if args.repair_history or args.repair_credit:
+            from .competition_reward_coverage_checkpoint import CoverageCheckpointRepairRequired
             from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
             from .competition_round_journal import RoundCapacityRepairRequired
 
             report = {"status": "failed", "error_type": type(error).__name__}
-            if isinstance(error, (HistoryCheckpointRepairRequired, RoundCapacityRepairRequired)):
+            if isinstance(
+                error,
+                (
+                    HistoryCheckpointRepairRequired,
+                    CoverageCheckpointRepairRequired,
+                    RoundCapacityRepairRequired,
+                ),
+            ):
                 report.update(
                     status="repair_required",
                     recovery="restore_original_metadata_and_source_in_place_no_reset",

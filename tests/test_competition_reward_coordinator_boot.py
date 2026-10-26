@@ -439,7 +439,7 @@ def test_real_module_entrypoint_keeps_configuration_check_separate_from_run():
     )
     assert (
         result.returncode == 0
-        and "{check,run,repair-history}" in result.stdout
+        and "{check,run,repair-history,repair-credit}" in result.stdout
         and "--config" in result.stdout
         and "--through-block" in result.stdout
     )
@@ -472,3 +472,102 @@ async def test_r2_reward_owner_boot_retains_selection_on_restart(
         0,
         source_release_batch_records,
     ]
+
+
+@pytest.mark.parametrize("extra", [[], ["--through-block", "0"]])
+def test_credit_repair_validates_scope_before_loading_mutable_owner(monkeypatch, extra):
+    def forbidden(_):
+        pytest.fail("invalid repair must not load or open an owner")
+
+    monkeypatch.setattr(cli, "load_reward_coordinator_config", forbidden)
+    interval = "not-a-digest" if not extra else "a" * 64
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "repair-credit",
+                "--config",
+                "/unused",
+                "--interval",
+                interval,
+                "--reason",
+                "restore original metadata",
+                *extra,
+            ]
+        )
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("kind", ["owner_busy", "repair_required"])
+def test_credit_repair_cli_reports_owned_failure_without_secrets(monkeypatch, capsys, kind):
+    from umi.competition_reward_coverage_credits import CoverageCreditRepairRequired
+
+    monkeypatch.setattr(cli, "load_reward_coordinator_config", lambda _: object())
+
+    async def repair(*args, **kwargs):
+        if kind == "owner_busy":
+            raise PrivateStateBusyError("repair-credit", "b" * 64, 11)
+        raise CoverageCreditRepairRequired("private endpoint and credentials must not leak")
+
+    monkeypatch.setattr(cli, "_run", repair)
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "repair-credit",
+                "--config",
+                "/unused",
+                "--interval",
+                "a" * 64,
+                "--reason",
+                "original endpoint requalified",
+            ]
+        )
+    assert error.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == kind
+    assert "private endpoint" not in str(report)
+
+
+@pytest.mark.parametrize("history", ["current", "predecessor"])
+async def test_credit_repair_boot_owns_original_state_without_signing_or_collecting(
+    config_case, monkeypatch, history
+):
+    config = (
+        config_case.config if history == "current" else successor_configuration(config_case.config)
+    )
+    events = []
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy = chain, policy
+
+        async def start(self):
+            events.append("provider_started")
+
+        async def aclose(self):
+            events.append("provider_closed")
+
+    async def repair(self, *, key, reason, stop):
+        assert events == ["provider_started"]
+        assert key == "a" * 64 and reason == "original endpoint restored"
+        assert self.preparation.reader.series == (
+            config.series if history == "current" else config.predecessor_series
+        )
+        with pytest.raises(PrivateStateBusyError), boot.owned_reward_state(config):
+            pass
+        events.append("repair")
+        return {"status": "coverage_credit_repaired"}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("credit metadata repair must not load a key or start normal work")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot.StandingRewardCoverageService, "repair_credit", repair)
+    for name in ("load_named_hotkey", "StandingControlPublisher", "StandingRewardCoordinator"):
+        monkeypatch.setattr(boot, name, forbidden)
+    result = await boot.run_reward_coordinator(
+        config,
+        asyncio.Event(),
+        credit_repair=dict(key="a" * 64, reason="original endpoint restored", history=history),
+    )
+    assert result == {"status": "coverage_credit_repaired"}
+    assert events == ["provider_started", "repair", "provider_closed"]

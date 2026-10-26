@@ -184,6 +184,7 @@ def _logs():
         __name__,
         "umi.competition_reward_admission_migration",
         "umi.competition_reward_history_checkpoint",
+        "umi.competition_reward_checkpoint_progress",
         "umi.competition_round_journal",
     ):
         current = logging.getLogger(name)

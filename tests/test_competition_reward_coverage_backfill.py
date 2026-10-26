@@ -175,10 +175,13 @@ async def test_restart_replays_intervals_and_recovers_the_missing_lane_boundary(
     assert retained
     restarted, fresh = h.owner()
     assert not any(v for _, v in await restarted._totals())
-    for _ in range(8):
+    expected = {k: 21 * 12_000 for k in h.validators}
+    for _ in range(32):
         await restarted.step()
+        if dict(await restarted._totals()) == expected:
+            break
     # All adjacent intervals in 99..120, including 116->117 between lanes.
-    assert dict(await restarted._totals()) == {k: 21 * 12_000 for k in h.validators}
+    assert dict(await restarted._totals()) == expected
     assert len(await fresh.interval_keys()) == 21 * len(h.validators)
     before = await restarted._totals()
     for _ in range(3):
@@ -317,3 +320,59 @@ async def test_collection_failure_keeps_backoff_despite_discovery_progress(retry
 
     service._collect, service._discover = collection, discovery
     assert await service.step() is (not retrying)
+
+
+async def test_first_adoption_drains_successful_retained_page_before_moving_head(lanes):
+    h = lanes
+    original, _ = h.owner()
+    await original.step()
+    # These intervals have real journal credit but predate native credit facts:
+    # the fixture's private endpoint boundary supplies no checkpoint body.
+    restarted, fresh = h.owner(maximum_replay_intervals=2)
+    h.state.calls.clear()
+    result = await restarted.step()
+    assert result.immediate and not result.errors
+    assert len(h.state.replays) == 4
+    assert not h.state.calls  # No fresh moving-head/history work between pages.
+    assert sum(dict(result.credited_ms).values()) == 24_000
+    assert len(await fresh.interval_keys()) > 2
+    await restarted.step()
+    assert len(h.state.replays) == 8
+    assert not h.state.calls
+
+
+async def test_retained_page_drain_does_not_discover_new_moving_head():
+    from umi.competition_reward_coverage_service import (
+        StandingRewardCoverageService,
+        _CollectionOutcome,
+    )
+
+    service = object.__new__(StandingRewardCoverageService)
+    service._lock = asyncio.Lock()
+
+    async def collection():
+        return _CollectionOutcome(immediate=True, retrying=False, retained_page=True)
+
+    async def discovery():
+        pytest.fail("bounded retained drain must not start fresh discovery")
+
+    service._collect, service._discover = collection, discovery
+    assert await service.step()
+
+
+async def test_mixed_activation_full_inventory_page_still_drains_before_fresh_capture(lanes):
+    h = lanes
+    original, journal = h.owner()
+    await original.step()
+    keys = await journal.interval_keys()
+    first = await journal.retained_interval(keys[0])
+    foreign = first.model_copy(
+        update={"activation_sha256": "f" * 64, "left": "d" * 64, "right": "e" * 64}
+    )
+    journal.journal.put("coverage_interval", foreign.key(), foreign)
+    restarted, _ = h.owner(maximum_replay_intervals=len(keys) + 1)
+    h.state.calls.clear()
+    result = await restarted.step()
+    assert result.retained_page and result.immediate and not result.errors
+    assert not h.state.calls
+    assert len(h.state.replays) == 2 * len(keys)

@@ -239,6 +239,37 @@ class CohortProgressSnapshots:
                         selected = certification
                         stage = "model_certification"
                     break
+            if stage == "model_certification" and selected.get("stale"):
+                # An old roster meter must not hide a live acceptance attempt.
+                # Keep its last count in components until its owner refreshes it.
+                work = parts.get("work")
+                live_work = (
+                    work is not None
+                    and not work["stale"]
+                    and work.get("state") in {"started", "running", "waiting"}
+                    and isinstance(work.get("stage"), str)
+                    and entry["work"][0] >= entry.get("phase_started", 0)
+                )
+                acceptance = parts.get("acceptance")
+                live_acceptance = (
+                    acceptance is not None
+                    and not acceptance["stale"]
+                    and acceptance.get("status") == "running"
+                    and isinstance(acceptance.get("stage"), str)
+                )
+                if live_work and work["stage"].startswith(
+                    ("model_acceptance_", "model_promotion_")
+                ):
+                    selected = work
+                    stage = work["stage"]
+                elif live_acceptance:
+                    selected = acceptance
+                    stage = "model_acceptance_" + acceptance["stage"]
+                elif live_work:
+                    # Nested transfer stages can outlive their enclosing
+                    # acceptance heartbeat while still reporting live bytes.
+                    selected = work
+                    stage = work["stage"]
         quorum_stage = {
             "progress_review": f"{phase}_progress_quorum",
             "decision_certification": f"{phase}_decision_quorum",
@@ -255,7 +286,11 @@ class CohortProgressSnapshots:
                     age = max(0, now - observed)
                     parts["work"] = dict(work, age_seconds=round(age, 3), stale=age > 120)
                     break
-        if stage not in {"model_certification", "waiting_request_rest"} and "work" in parts:
+        if (
+            stage not in {"model_certification", "waiting_request_rest"}
+            and selected is not parts.get("acceptance")
+            and "work" in parts
+        ):
             observed, work = entry["work"]
             earlier_phase = (
                 phase == "requests"
@@ -276,6 +311,7 @@ class CohortProgressSnapshots:
             # Do not call the previous phase's last 100% substage current work.
             if (
                 not earlier_phase
+                and not parts["work"]["stale"]
                 and observed >= entry.get("phase_started", 0)
                 and work.get("state")
                 in {

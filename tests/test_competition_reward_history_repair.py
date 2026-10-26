@@ -113,8 +113,11 @@ async def test_operator_repair_migrates_legacy_raw_journal_in_place(history_case
     journal = h.reader.journal
     original, inode = raw_records(journal), journal.path.stat().st_ino
     with journal.transaction() as db:
-        for trigger in h.reader.checkpoints.triggers:
+        for trigger in (*h.reader.checkpoints.triggers, *h.reader.folded_frontier.triggers):
             db.execute("DROP TRIGGER " + trigger)
+        db.execute("DROP TABLE history_folded_state")
+        db.execute("DROP TABLE history_folded_anchors")
+        db.execute("DELETE FROM records WHERE kind LIKE 'control_history_folded_%'")
         for table in (
             "history_checkpoint_state",
             "history_checkpoint_index",

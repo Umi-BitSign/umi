@@ -52,6 +52,8 @@ class HistoryProgress:
         self.latest = {}
         self.remote_export_selected = False
         self.local_release = None
+        self.archive_delivery = None
+        self.frontier_reuse = None
         self.preparation = None
         self.restoration = None
         self.ancestry_progress = None
@@ -133,6 +135,32 @@ class HistoryProgress:
                 self.durable[stage].remove(height)
                 if self.target is not None and height <= self.target:
                     self.counts[stage] -= 1
+
+    def restore_folded_inventory(self, reader, through, export_ranges):
+        """Reuse owner-produced counted facts, never query old per-block aliases."""
+        identity = None if reader.export_archive is None else reader._export_identity()
+        if identity != self.export_identity:
+            self.export_identity = identity
+            self.durable["exported"].clear()
+            self.retained_local_exports.clear()
+        self.durable["captured"].update(range(self.first_block, through + 1))
+        self.durable["verified"].update(
+            range(max(self.first_block, self.completed_admission_through + 1), through + 1)
+        )
+        for low, high in export_ranges.get(identity, []):
+            self.durable["exported"].update(range(low, min(high, through) + 1))
+        if reader.export_archive is not None and reader.export_archive.remote is not None:
+            for low, high in export_ranges.get(reader._export_identity(local_only=True), []):
+                self.retained_local_exports.update(range(low, min(high, through) + 1))
+        self.retained_local_exports.difference_update(self.durable["exported"])
+        self.counts = {
+            stage: sum(height <= self.target for height in heights)
+            for stage, heights in self.durable.items()
+        }
+        self.retained_local_export_count = sum(
+            height <= self.target for height in self.retained_local_exports
+        )
+        self.inventory_through = max(self.inventory_through, through)
 
     async def inventory(self, reader):
         identity = None if reader.export_archive is None else reader._export_identity()
@@ -387,6 +415,13 @@ class HistoryProgress:
                 basis = "waiting_for_retained_history_preparation"
             elif self.ancestry_progress is not None:
                 basis = "waiting_for_owned_historical_ancestry"
+            elif (
+                self.counts["verified"]
+                + max(0, min(self.target, self.completed_admission_through) - self.first_block + 1)
+                - len(self._new_native)
+                > done
+            ):
+                basis = "waiting_for_retained_history_metadata_application"
             elif sampled >= 3 and native_wall_elapsed >= 1.0:
                 rate = sampled / native_wall_elapsed
                 eta, basis = (
@@ -448,6 +483,8 @@ class HistoryProgress:
                 if self.remote_export_selected
                 else "remote_delivery_receipts_not_available_to_history_owner",
                 "local_release": self.local_release,
+                "archive_delivery": self.archive_delivery,
+                "frontier_reuse": self.frontier_reuse,
                 "applied_blocks": done,
                 "restored_completed": self.restored_completed,
                 "completed_tip_finality_refreshes": self.completed_tip_refreshes,

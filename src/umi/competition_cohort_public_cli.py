@@ -7,6 +7,7 @@ import fcntl
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from .competition_cohort_public_api import CohortPublicApiConfig, create_cohort_public_app
@@ -16,8 +17,9 @@ from .competition_public_results_directory import owned_directory, read_owned_fi
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("publish", "serve"))
+    parser.add_argument("operation", choices=("publish", "publish-certified", "serve"))
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--watch", action="store_true")
     parser.add_argument("--port", type=int, default=8108)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -35,6 +37,32 @@ def main():
                 limit_concurrency=config.maximum_concurrent_reads + 8,
             )
             return 0
+        if args.operation == "publish-certified":
+            from .competition_cohort_public_catalog_watch import (
+                NativePublicCatalogWatchConfig,
+                NativePublicCatalogWatcher,
+            )
+
+            config = NativePublicCatalogWatchConfig.model_validate_json(raw)
+            watcher = NativePublicCatalogWatcher(config)
+            from .competition_cohort_model_scores import _stamp
+
+            selected_stamp = tuple(_stamp(args.config))
+            while True:
+                current_stamp = tuple(_stamp(args.config))
+                if current_stamp != selected_stamp:
+                    config = NativePublicCatalogWatchConfig.model_validate_json(
+                        read_owned_file(args.config, 16 * 1024**2)
+                    )
+                    watcher = NativePublicCatalogWatcher(config)
+                    selected_stamp = current_stamp
+                report = watcher.poll_once()
+                print(json.dumps(report, sort_keys=True), flush=True)
+                if not args.watch:
+                    return 1 if report["held"] else 0
+                time.sleep(config.poll_seconds)
+        if args.watch:
+            raise ValueError("watch requires publish-certified")
         config = CohortPublicPublisherConfig.model_validate_json(raw)
         root = Path(config.api.results.directory)
         owned_directory(root, create=True)

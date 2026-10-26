@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from umi import competition_reward_admission_runner as admission_runner
 from umi import competition_reward_checkpoint_progress as module
+from umi import competition_reward_coordinator_cli as coordinator_cli
+from umi import competition_reward_cutover_cli as cutover_cli
+from umi import competition_supervisor_cli as supervisor_cli
 from umi.competition_reward_checkpoint_progress import CheckpointMetadataProgress
 
 
@@ -15,6 +19,28 @@ def observations(caplog):
         for row in caplog.records
         if row.msg == "reward_history_checkpoint_metadata_progress %s"
     ]
+
+
+@pytest.mark.parametrize(
+    "log_context",
+    [
+        coordinator_cli._logs,
+        supervisor_cli._standing_logs,
+        admission_runner._logs,
+        cutover_cli._logs,
+    ],
+)
+def test_owner_entrypoints_emit_metadata_progress(log_context, capsys):
+    with (
+        log_context(),
+        CheckpointMetadataProgress("checkpoint_metadata_loading", 1000, 1099) as progress,
+    ):
+        progress.checked()
+    output = capsys.readouterr().err
+    assert output.count("reward_history_checkpoint_metadata_progress") == 2
+    assert "'completed_block_checks': 1" in output
+    assert "'eta_scope': 'current_bounded_metadata_batch_only'" in output
+    assert "'native_verification_or_application_credit': False" in output
 
 
 def test_counted_metadata_eta_has_explicit_batch_scope_and_no_native_credit(caplog, monkeypatch):

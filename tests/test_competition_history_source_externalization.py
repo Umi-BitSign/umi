@@ -794,6 +794,8 @@ async def test_advance_reclaims_full_owner_before_capturing_next_native_block(
 
     monkeypatch.setattr(h.reader, "_save_fields", assert_reclaimed)
     result = await h.reader.advance(h.item.provider, through_block=h.end, maximum_blocks=2)
+    # A newly selected remote input dependency receives its first metadata
+    # adoption; later unchanged restarts use the guarded constant-size fold.
     assert result.next_block == h.reader.first_block + 2
     assert captures == [h.reader.first_block + 1]
     assert h.reader.checkpoints.load(h.reader.first_block) == original
