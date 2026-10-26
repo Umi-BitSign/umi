@@ -77,6 +77,18 @@ selection changes no signed format, native proof semantics or historical clocks.
 
 ## Work progress and ETA logs
 
+The coordinator retains advisory package-publication observations under its native
+settlement root's `publication-progress/` directory. After restart it binds the
+selected native authenticated certification closure to the configured owner-private
+output's filesystem identity, without reading its payload or repeating proofs.
+Preserve these small receipts and their completion markers. In the public settlement
+component, completed publication stays at 100% while `refresh` reports the current
+auxiliary work, including its retries and scoped ETA. `publication` records the
+original observation time; legacy adoption is explicitly metadata-only. A missing,
+damaged or changed receipt/output reports its specific repair reason rather than
+silently restarting publication. These observations confer no native verification,
+certification, reward activation or permission to skip current checks.
+
 For model-only paired-baseline awards, a signed failed candidate case contributes
 zero quality. It does not become an incumbent failure or stop the roster's
 settlement. Candidate and frozen baseline use the same content metric; the
@@ -4137,6 +4149,45 @@ the same cohort concurrently. Input and output aggregate digests run in owned
 workers under the native reservation; they do not block the event loop.
 An authenticated terminal-history extension keeps its original certification
 prefix and does not reload the full input inventory.
+
+Run the independent public model-score publisher with
+`python -m umi.competition_cohort_model_scores --config <config.json> --watch`
+under the native output owner's unprivileged account. Its configuration selects
+`source_directory` (atomic native reward packages), `history_directory` (the
+matching exported certified histories), separate `output_directory` and
+`state_directory`, `policy_path`, `policy_sha256`, `maximum_package_bytes`,
+`maximum_metadata_bytes` and `poll_seconds`. Use the selected native package
+capacity; the metadata read has its own explicit bound. All four directories must
+be private, owned and disjoint. The publisher has no network or signing need.
+
+The publisher reads only aggregate metadata preceding the private object
+inventory. It authenticates the historical native history/decision packet and
+checks the allocation digest against its signed certification closure, then binds
+the award's roster and policy. It does not repeat model execution, object/proof
+replay or chain reads, and does not assert complete private-payload availability.
+The public artifact contains whitelisted model aggregates, admission identities,
+quality ranks and reward dispositions; it contains no challenge text, video URLs,
+references, hypotheses or private evidence objects.
+
+An owner-private checksummed completion record is durable before public output
+publication. Restart, a lost publication acknowledgement and removal of local
+native bytes reuse that record; missing public output is restored byte-for-byte.
+Changed native source identity, damaged completion metadata or conflicting public
+bytes require explicit repair. Completion state/output can be transferred to their
+supported durable locations without changing the selected native source/history
+namespace or redoing completed certification. Preserve these records in R2 with
+their recovery controls. Publication never gates settlement or reward activation.
+
+Deliver only `<cohort_sha256>.json` score artifacts to the public account's
+`<results.directory>/model-results/`, through the immutable artifact delivery path.
+Do not copy private completion state or native packages into that directory.
+Select the score reader on the existing public API service and route
+`/v1/competition/cohorts/<cohort>/model-results` to it. Existing catalog, download,
+paid-result and legacy round-result paths keep their formats. The API samples
+bounded metadata in the background, reuses unchanged successful parses and
+serves score GETs from memory. Missing/damaged published artifacts report repair;
+they do not silently serve old rows. Select these independent publisher, delivery,
+API source and ingress paths together; a source merge does not establish rollout.
 
 If a completed coordinator's generated reward package disappears, its scheduler
 releases the later cohort's graph and reservation after owned work drains, then

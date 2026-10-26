@@ -59,6 +59,8 @@ _KEYS = {
     "stalled_or_retrying",
     "unit",
     "reason_code",
+    "publication",
+    "refresh",
 }
 
 
@@ -151,6 +153,46 @@ def checked(body, *, series, cohort, evaluator, role=None):
         observed_unix_ms=observed,
         certification_authority=False,
     )
+    publication = body.get("publication")
+    if publication is not None:
+        if (
+            type(publication) is not dict
+            or set(publication)
+            - {
+                "state",
+                "observed_unix_ms",
+                "certification_prefix_sha256",
+                "basis",
+                "output_current",
+                "reason_code",
+            }
+            or publication.get("state") not in {"completed", "repair_required"}
+            or type(publication.get("output_current")) is not bool
+        ):
+            raise ValueError("invalid native publication diagnostics")
+        for key in ("basis", "reason_code"):
+            value = publication.get(key)
+            if value is not None and (
+                type(value) is not str or re.fullmatch(r"[a-z][a-z0-9_]{0,191}", value) is None
+            ):
+                raise ValueError("invalid native publication diagnostic label")
+        if "observed_unix_ms" in publication and (
+            type(publication["observed_unix_ms"]) is not int
+            or not 0 <= publication["observed_unix_ms"] <= observed + 30_000
+        ):
+            raise ValueError("invalid native publication observation clock")
+        if "certification_prefix_sha256" in publication:
+            _hex(publication["certification_prefix_sha256"])
+        result["publication"] = deepcopy(publication)
+    refresh = body.get("refresh")
+    if refresh is not None:
+        if type(refresh) is not dict or {"publication", "refresh"} & refresh.keys():
+            raise ValueError("invalid recursive settlement refresh diagnostics")
+        result["refresh"] = checked(
+            refresh, series=series, cohort=cohort, evaluator=evaluator, role=role
+        )
+        if result["refresh"]["producer_epoch_sha256"] != producer:
+            raise ValueError("settlement refresh changed its producer epoch")
     return result
 
 
@@ -185,7 +227,7 @@ def _path(root, series, cohort, role):
 
 
 class SettlementProgressProducer:
-    def __init__(self, roots, *, series, cohort, evaluator, role):
+    def __init__(self, roots, *, series, cohort, evaluator, role, publication=None):
         self.roots = tuple(dict.fromkeys(Path(p) for p in roots))
         self.series, self.cohort, self.evaluator, self.role = series, cohort, evaluator, role
         self.epoch = token_hex(32)
@@ -197,6 +239,13 @@ class SettlementProgressProducer:
         self.reason = None
         self.last = None
         self.observation = None
+        self.publication = publication
+        self.publication_prefix = None
+        self.publication_observation = None
+
+    def bind_publication(self, certification_prefix):
+        with self.lock:
+            self.publication_prefix = _hex(certification_prefix)
 
     def update(self, stage, *, phase=None, state="running", reason=None):
         with self.lock:
@@ -254,11 +303,47 @@ class SettlementProgressProducer:
                     planning_eta_seconds=None,
                     eta_basis="retry_requires_new_native_progress_sample",
                 )
+            publication = self.publication_observation
+            if publication is not None:
+                body["publication"] = deepcopy(publication)
+                if self.phase in {"first_admission", "complete"}:
+                    body["refresh"] = {k: v for k, v in body.items() if k != "publication"}
+                    body.update(stage="settlement_package_published", unit="publications")
+                    if publication["state"] == "completed":
+                        body.pop("reason_code", None)
+                        body.pop("status", None)
+                        body.update(
+                            state="completed",
+                            elapsed_seconds=None,
+                            stalled_or_retrying=False,
+                            planning_eta_seconds=None,
+                            completed=1,
+                            total=1,
+                            percent=100,
+                            eta_seconds=0,
+                            eta_basis="native_package_publication_completed",
+                        )
+                    else:
+                        body.update(
+                            state="repair_required",
+                            completed=None,
+                            total=None,
+                            percent=None,
+                            eta_seconds=None,
+                            eta_basis="native_publication_repair_required",
+                            stalled_or_retrying=True,
+                            reason_code=publication["reason_code"],
+                        )
         return checked(
             body, series=self.series, cohort=self.cohort, evaluator=self.evaluator, role=self.role
         )
 
     def publish(self):
+        # This runs in the existing owned background publisher, never on GET.
+        if self.publication is not None and self.publication_prefix is not None:
+            observed = self.publication.observe(self.publication_prefix)
+            with self.lock:
+                self.publication_observation = observed
         body = self.snapshot()
         raw = canonical_json_bytes(body)
         if len(raw) > MAX_BYTES:

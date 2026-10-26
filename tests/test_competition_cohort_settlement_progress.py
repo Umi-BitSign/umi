@@ -311,3 +311,83 @@ async def test_observation_cancellation_remains_owned(tmp_path):
         )
         with pytest.raises(asyncio.CancelledError):
             await reader.sample(C, {EVALUATOR_ID: "f" * 64}, series=SERIES)
+
+
+def test_durable_publication_survives_restart_with_auxiliary_retry_visible(tmp_path, monkeypatch):
+    from .test_competition_cohort_publication_progress import (
+        PREFIX,
+        forbid_package_reads,
+        output,
+        publication,
+    )
+
+    path = output(tmp_path)
+    progress = publication(tmp_path)
+    forbid_package_reads(monkeypatch, path)
+    p = producer(tmp_path, publication=progress)
+    p.bind_publication(PREFIX)
+    p.update("verification_dependencies", phase="first_admission")
+    p.publish()
+    original = p.observation["publication"]
+    restarted = producer(tmp_path, publication=publication(tmp_path))
+    restarted.bind_publication(PREFIX)
+    restarted.update(
+        "verification_dependencies", phase="first_admission", state="retrying", reason="sqlite_busy"
+    )
+    restarted.publish()
+    result = restarted.observation
+    assert result["stage"] == "settlement_package_published" and result["state"] == "completed"
+    assert result["completed"] == result["total"] == 1 and result["percent"] == 100
+    assert result["eta_seconds"] == 0 and not result["stalled_or_retrying"]
+    assert result["elapsed_seconds"] is None  # Publication duration was not observed.
+    assert "reason_code" not in result
+    assert result["publication"] == original and result["certification_authority"] is False
+    refresh = result["refresh"]
+    assert refresh["stage"] == "verification_dependencies" and refresh["state"] == "retrying"
+    assert refresh["reason_code"] == "sqlite_busy" and refresh["stalled_or_retrying"]
+    assert refresh["eta_seconds"] is None
+    r = relay(tmp_path)
+    r.sample()
+    relayed = r.snapshot(C)[0]
+    assert relayed["publication"] == original and relayed["refresh"] == refresh
+    state = public.CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, phase="first_admission"))
+    state.record("settlement", relayed)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("public snapshot performed I/O")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(progress, "observe", forbidden)
+        guard.setattr(module, "checked", forbidden)
+        guard.setattr(module, "_read_private_bytes", forbidden)
+        guard.setattr(sqlite3, "connect", forbidden)
+        public_result = state.snapshot(C)
+    assert public_result["percent"] == 100
+    assert public_result["publication"] == original and public_result["refresh"] == refresh
+    # A missing completed output is shown separately from auxiliary retry.
+    path.unlink()
+    restarted.publish()
+    repaired = restarted.observation
+    assert repaired["state"] == "repair_required" and repaired["percent"] is None
+    assert repaired["reason_code"] == "publication_output_missing"
+    assert repaired["refresh"]["reason_code"] == "sqlite_busy"
+
+
+@pytest.mark.parametrize("fault", ["nested", "epoch", "scope", "publication_clock", "private"])
+def test_publication_refresh_rejects_unbounded_or_mixed_diagnostics(tmp_path, fault):
+    body = producer(tmp_path).snapshot()
+    body["refresh"] = dict(body)
+    if fault == "nested":
+        body["refresh"]["refresh"] = {}
+    elif fault == "epoch":
+        body["refresh"]["producer_epoch_sha256"] = "f" * 64
+    elif fault == "scope":
+        body["refresh"]["cohort_sha256"] = C7
+    else:
+        body["publication"] = dict(state="completed", output_current=True)
+        body["publication"][
+            "observed_unix_ms" if fault == "publication_clock" else "private_path"
+        ] = -1 if fault == "publication_clock" else "/secret"
+    with pytest.raises(ValueError):
+        module.checked(body, series=SERIES, cohort=C, evaluator=EVALUATOR_ID)
