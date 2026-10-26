@@ -17,7 +17,7 @@ from .competition_cohort_reward_allocation import derive_effective_reward_alloca
 from .competition_geometric_rewards import GeometricRewardParameters
 from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_timing import RewardActivationAge
-from .competition_verification_snapshot import verified_package_digest
+from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -198,6 +198,63 @@ def initial_reward_boundary(series, selection):
         prior = series.predecessor
         return prior.decision_sha256, prior.decision_committed_at_block, None
     return None, 0, None
+
+
+def prepare_initial_reward_adoption(
+    package: VerifiedPackageSnapshot,
+    *,
+    series,
+    policy: CompetitionPolicy,
+    parameters: GeometricRewardParameters,
+    issued_at_block: Block,
+    previous: RewardAdoptionSelection | None,
+) -> RewardModelAdoption:
+    """Derive one unsigned forward proposal from an owner-imported package.
+
+    The caller must supply an independently verified finalized issuance block.
+    This method reads only the compact package envelope. The snapshot proves
+    retained byte identity, not semantic certification. Independent native
+    review remains required before signing and again before activation. This
+    method neither signs nor selects the adoption and grants no transaction
+    authority.
+    """
+    if type(package) is not VerifiedPackageSnapshot:
+        raise TypeError("reward adoption proposal requires a native verified package snapshot")
+    if type(parameters) is not GeometricRewardParameters:
+        raise TypeError("reward adoption proposal requires explicit geometric parameters")
+    if type(issued_at_block) is not int:
+        raise TypeError("reward adoption issuance requires a finalized block number")
+    package_sha = verified_package_digest(package)
+    verified = verify_adoption_selection(previous, series, policy)
+    cohort = digest(package.inputs.history.plan)
+    if (
+        package.inputs.history.plan not in series.cohorts
+        or package.policy_sha256 != digest(policy)
+        or series.policy_sha256 != digest(policy)
+        or digest(package.inputs.history.authority.authority)
+        != digest(series.recovery.authority)
+        or issued_at_block < series.recovery.authority.issued_at_block
+        or (verified is not None and verified.latest(cohort) is not None)
+    ):
+        raise ValueError("reward adoption package, lineage or initial revision differs")
+    effective = derive_effective_reward_allocation(package, parameters)
+    return RewardModelAdoption(
+        schema="umi-standing-model-reward-adoption/1",
+        series_sha256=digest(series),
+        policy_sha256=digest(policy),
+        cohort_sha256=cohort,
+        authority_sha256=digest(series.recovery.authority),
+        package_sha256=package_sha,
+        allocation_sha256=digest(package.allocation),
+        service_certificate_sha256=digest(package.service),
+        quality_manifest_sha256=digest(package.benchmark),
+        effective_allocation_sha256=digest(effective),
+        parameters=parameters,
+        revision=1,
+        predecessor_adoption_sha256=None,
+        issued_at_block=issued_at_block,
+        lifetime="until_first_verified_live_reward_then_locked",
+    )
 
 
 def verify_reward_adoption(
