@@ -138,6 +138,17 @@ two continuous corpora, two known signers in each task and two continuous topics
 It prefers balanced datasets and less represented known signers/topics, and
 refuses unmet quotas instead of duplicating cases or relaxing exclusions.
 
+Native suite adoption also requires explicit fingerspelling coverage of sentences,
+names, addresses and numbers. Tag each candidate with `fingerspelling_category`
+and bind that same category in its reference-QA record. Set
+`fingerspelling_category_minimums` in the counts input, for example
+`{"sentence":1,"name":1,"address":1,"number":1}`; each minimum must be positive
+and their sum must fit the requested fingerspelling count. Selection reserves
+enough remaining slots to meet every category even in a larger pool. It refuses
+a shortage instead of relabeling examples. Older standalone preparation inputs
+may omit category quotas and retain their original bytes; they cannot authorize
+native adoption until the explicit four-category requirements are supplied.
+
 Adoptable cases also require a known signer and a retained reference/interval QA
 record identified by `reference_qa_sha256`. Strict selection defaults to
 `require_qualified_cases: true` and `distinct_signer_per_case: true`, keeping

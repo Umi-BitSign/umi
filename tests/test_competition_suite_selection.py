@@ -213,3 +213,100 @@ def test_strict_selection_keeps_signers_separate_across_selected_cases(case):
     inventory = c.inventory.model_copy(update={"cases": (*c.inventory.cases[:-1], repeated)})
     with pytest.raises(ValueError, match="disjoint diversity"):
         select(c, inventory=inventory)
+
+
+def categorized(c, *, fingerspelling=4):
+    from umi.competition_suite_selection import FingerspellingCategoryMinimums
+
+    values = tuple(
+        entry.model_copy(update={"fingerspelling_category": category})
+        for entry, category in zip(
+            c.inventory.cases[:3], ("name", "address", "number"), strict=True
+        )
+    )
+    sentence = candidate(
+        100, "want to join us for lunch", task="fingerspelling", dataset="FSboard", signer=100
+    ).model_copy(update={"fingerspelling_category": "sentence"})
+    inventory = c.inventory.model_copy(
+        update={"cases": (*values, *c.inventory.cases[3:], sentence)}
+    )
+    counts = c.counts.model_copy(
+        update={
+            "fingerspelling": fingerspelling,
+            "fingerspelling_category_minimums": FingerspellingCategoryMinimums(
+                sentence=1, name=1, address=1, number=1
+            ),
+        }
+    )
+    return inventory, counts
+
+
+def test_explicit_fingerspelling_quotas_preserve_all_four_categories_in_a_larger_pool(case):
+    c = case
+    inventory, counts = categorized(c, fingerspelling=6)
+    extras = tuple(
+        candidate(
+            i, "DifferentName" + str(i), task="fingerspelling", dataset="FSboard", signer=i
+        ).model_copy(update={"fingerspelling_category": "name"})
+        for i in range(101, 109)
+    )
+    inventory = inventory.model_copy(update={"cases": (*inventory.cases, *extras)})
+    for seed in (0, 1, 7, 31):
+        suite, report = select_future_suite(
+            inventory, c.exclusions, counts, c.policy, selection_key=bytes([seed]) * 32
+        )
+        assert len(suite.cases) == 9
+        assert report["selected_fingerspelling_categories"] == {
+            "sentence": 1,
+            "name": 3,
+            "address": 1,
+            "number": 1,
+        }
+        assert all(
+            case.references in {entry.case.references for entry in inventory.cases}
+            for case in suite.cases
+        )
+
+
+@pytest.mark.parametrize("category", ["sentence", "name", "address", "number"])
+def test_category_shortage_refuses_instead_of_reclassifying_or_reducing_quotas(case, category):
+    inventory, counts = categorized(case)
+    inventory = inventory.model_copy(
+        update={
+            "cases": tuple(
+                entry for entry in inventory.cases if entry.fingerspelling_category != category
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="diversity"):
+        select(case, inventory=inventory, counts=counts)
+
+
+def test_legacy_standalone_selection_keeps_exact_uncategorized_bytes(case):
+    entry = case.inventory.cases[0]
+    assert b"fingerspelling_category" not in canonical_json_bytes(entry)
+    assert b"fingerspelling_category_minimums" not in canonical_json_bytes(case.counts)
+    raw = canonical_json_bytes(case.counts)
+    assert canonical_json_bytes(SuiteSelectionCounts.model_validate_json(raw)) == raw
+    _, report = select(case)
+    assert "selected_fingerspelling_categories" not in report
+    assert all("fingerspelling_category" not in row for row in report["selected_provenance"])
+
+
+def test_four_category_quota_minimums_must_fit_and_cannot_be_zero_or_missing(case):
+    from umi.competition_suite_selection import FingerspellingCategoryMinimums
+
+    for changes in ({"sentence": 0}, {"number": False}):
+        with pytest.raises(ValueError):
+            FingerspellingCategoryMinimums.model_validate(
+                {"sentence": 1, "name": 1, "address": 1, "number": 1} | changes
+            )
+    with pytest.raises(ValueError):
+        FingerspellingCategoryMinimums.model_validate({"name": 1, "address": 1, "number": 1})
+    _, counts = categorized(case)
+    with pytest.raises(ValueError, match="fit"):
+        SuiteSelectionCounts.model_validate(counts.model_dump() | {"fingerspelling": 3})
+    with pytest.raises(ValueError, match="only a fingerspelling"):
+        SuiteCandidate.model_validate(
+            case.inventory.cases[-1].model_dump() | {"fingerspelling_category": "sentence"}
+        )

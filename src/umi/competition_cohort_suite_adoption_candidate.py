@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -209,10 +210,32 @@ class EvaluationSuiteAdoptionCandidate:
         counts = SuiteSelectionCounts.model_validate(manifest["counts"])
         if not counts.require_qualified_cases or not counts.distinct_signer_per_case:
             raise ValueError("suite adoption requires qualified cases and distinct known signers")
+        if counts.fingerspelling_category_minimums is None:
+            raise ValueError(
+                "suite adoption requires explicit four-category fingerspelling minimums"
+            )
         rows = manifest["selected_provenance"]
         by_case = {r["case_id"]: r for r in rows}
         if len(by_case) != len(rows) or set(by_case) != {c.case_id for c in suite.cases}:
             raise ValueError("suite qualification inventory changes selected cases")
+        categories = Counter(
+            by_case[c.case_id].get("fingerspelling_category")
+            for c in suite.cases
+            if c.stratum == "fingerspelling"
+        )
+        if (
+            None in categories
+            or any(
+                categories[key] < minimum
+                for key, minimum in counts.fingerspelling_category_minimums.model_dump().items()
+            )
+            or any(
+                by_case[c.case_id].get("fingerspelling_category") is not None
+                for c in suite.cases
+                if c.stratum != "fingerspelling"
+            )
+        ):
+            raise ValueError("suite adoption fingerspelling categories do not meet exact minimums")
         signers = tuple(r.get("signer_group_sha256") for r in rows)
         if (
             None in signers
@@ -322,6 +345,8 @@ class EvaluationSuiteAdoptionCandidate:
             provenance_sha256=row["provenance_sha256"],
             reference_sha256=digest(case.references),
         )
+        if row.get("fingerspelling_category") is not None:
+            expected["fingerspelling_category"] = row["fingerspelling_category"]
         key = row["reference_qa_sha256"]
         path = Path(self.config.reference_qa_directory) / (key + ".json")
         stamp = self._identity(path)
@@ -329,8 +354,10 @@ class EvaluationSuiteAdoptionCandidate:
         completed = self._completed(saved, key, bound_identity)
         if completed is None:
             qualified = self._document(path, SuiteReferenceQA)
-            if digest(qualified) != key or any(
-                getattr(qualified, k) != v for k, v in expected.items()
+            if (
+                digest(qualified) != key
+                or qualified.fingerspelling_category != row.get("fingerspelling_category")
+                or any(getattr(qualified, k) != v for k, v in expected.items())
             ):
                 raise ValueError(
                     "retained reference QA changes case, reference, signer or provenance"

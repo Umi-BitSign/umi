@@ -2,12 +2,13 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .protocol import Hex32, StrictProtocolModel
 
 Index = Annotated[int, Field(strict=True, ge=0, le=2**53 - 1)]
 Positive = Annotated[int, Field(strict=True, ge=1, le=2**53 - 1)]
+FingerspellingCategory = Literal["sentence", "name", "address", "number"]
 
 
 class SuiteReferenceInterval(StrictProtocolModel):
@@ -54,6 +55,14 @@ class SuiteReferenceQA(StrictProtocolModel):
     annotation_source: Annotated[str, Field(min_length=1, max_length=4096)]
     interval: SuiteReferenceInterval
     reference_and_interval_checked: Literal[True]
+    fingerspelling_category: FingerspellingCategory | None = None
     limitations: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=1024)], ...], Field(max_length=64)
     ] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_uncategorized_evidence(self, handler):
+        value = handler(self)
+        if self.fingerspelling_category is None:
+            value.pop("fingerspelling_category", None)
+        return value

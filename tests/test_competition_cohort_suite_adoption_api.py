@@ -41,7 +41,7 @@ from .test_competition_cohort_request_rule_adoption import original as original
 from .test_competition_cohort_request_rule_api import api as api
 from .test_competition_cohort_request_rule_api import post
 from .test_competition_suite_selection import case as selector_case_fixture
-from .test_competition_suite_selection import select
+from .test_competition_suite_selection import categorized, select
 from .test_competition_two_task_profile import launch_policy
 from .test_open_competition import policy as base_policy
 from .test_open_competition import wallet
@@ -54,7 +54,9 @@ def policy():
 
 @pytest.fixture
 def selection_case(policy):
-    return selector_case_fixture.__wrapped__(policy)
+    c = selector_case_fixture.__wrapped__(policy)
+    c.inventory, c.counts = categorized(c)
+    return c
 
 
 @pytest.fixture
@@ -78,6 +80,7 @@ def candidate(original, selection_case, tmp_path, monkeypatch):
             annotation_source="synthetic publisher evidence",
             interval=SuiteReferenceInterval(kind="publisher_labeled_clip"),
             reference_and_interval_checked=True,
+            fingerspelling_category=entry.fingerspelling_category,
         )
         publish_private_model(root / "reference-qa" / (digest(qualified) + ".json"), qualified)
         values.append(entry.model_copy(update={"reference_qa_sha256": digest(qualified)}))
@@ -141,7 +144,7 @@ async def test_candidate_reuses_each_native_selection_and_media_result_after_res
     c = candidate
     proposal = c.value._proposal(c.history, 220, *c.value.selection())
     first = await c.value.verify(c.history, proposal)
-    assert len(c.calls) == 6
+    assert len(c.calls) == len(c.suite.cases)
 
     def forbidden(*args, **kwargs):
         pytest.fail("unchanged completed verification cannot repeat selection or media I/O")
@@ -172,14 +175,14 @@ async def test_candidate_resumes_individual_completed_videos_and_requires_explic
         await c.value.verify(c.history, proposal)
     monkeypatch.setattr(candidate_module, "inspect_media_pinned", original_inspect)
     await EvaluationSuiteAdoptionCandidate(c.config, c.value.policy).verify(c.history, proposal)
-    assert len(c.calls) == 6 and len(set(c.calls)) == 6
+    assert len(c.calls) == len(c.suite.cases) and len(set(c.calls)) == len(c.suite.cases)
     path = c.root / "videos" / (c.suite.cases[0].video_sha256 + ".mp4")
     path.write_bytes(b"changed identity")
     with pytest.raises(ValueError, match="explicit repair"):
         await c.value.verify(c.history, proposal)
     repaired = c.config.model_copy(update={"verification_repair_reason": "restore verified source"})
     await EvaluationSuiteAdoptionCandidate(repaired, c.value.policy).verify(c.history, proposal)
-    assert len(c.calls) == 7
+    assert len(c.calls) == len(c.suite.cases) + 1
 
 
 async def test_candidate_refuses_changed_selection_and_false_content_identity(
@@ -318,7 +321,7 @@ async def test_native_owner_routes_review_quorum_commit_preserve_clock_and_reuse
         assert h.intake.pending_policy_adoption(h.cohort) is None
         assert h.state.phase == "intake" and h.state.targets == proposal.transition.targets
         assert canonical_json_bytes(h.intake.history(h.cohort).plan) == plan_bytes
-        assert len(h.candidate.calls) == 18
+        assert len(h.candidate.calls) == 3 * len(h.candidate.suite.cases)
 
 
 async def test_intake_first_reservation_recovers_exact_bytes_after_control_crash(
@@ -512,10 +515,56 @@ async def test_first_qualification_keeps_owner_locks_free_and_rechecks_only_boun
         release.set()
     if changed == "none":
         result = EvaluationSuiteAdoptionProposal.model_validate_json(await task)
-        assert result.transition == transition and len(c.calls) == 6
+        assert result.transition == transition and len(c.calls) == len(c.suite.cases)
     else:
         with pytest.raises(
             ValueError, match=r"predecessor|control tip|qualified suite inputs changed"
         ):
             await task
         assert h.intake.pending_policy_adoption(h.cohort) is None
+
+
+async def test_native_adoption_refuses_missing_four_category_minimums(candidate):
+    import json
+
+    path = candidate.root / "manifest.json"
+    report = json.loads(path.read_bytes())
+    report["counts"].pop("fingerspelling_category_minimums")
+    path.write_bytes(canonical_json_bytes(report))
+    with pytest.raises(ValueError, match="explicit four-category"):
+        candidate.value.prepare(candidate.history, 220)
+    assert candidate.calls == []
+
+
+async def test_native_qa_requires_the_declared_fingerspelling_category_not_only_valid_hash(
+    candidate,
+):
+    from umi.competition_suite_selection import (
+        SuiteCandidateInventory,
+        SuiteSelectionCounts,
+        select_future_suite,
+    )
+
+    c = candidate
+    inventory = c.value._document(c.config.inventory_file, SuiteCandidateInventory)
+    target = inventory.cases[0]
+    qa_path = c.root / "reference-qa" / (target.reference_qa_sha256 + ".json")
+    qa = c.value._document(qa_path, SuiteReferenceQA).model_copy(
+        update={"fingerspelling_category": "sentence"}
+    )
+    publish_private_model(c.root / "reference-qa" / (digest(qa) + ".json"), qa)
+    replacement = target.model_copy(update={"reference_qa_sha256": digest(qa)})
+    inventory = inventory.model_copy(update={"cases": (replacement, *inventory.cases[1:])})
+    (c.root / "inventory.json").write_bytes(canonical_json_bytes(inventory))
+    manifest = c.value._document(c.config.selection_manifest_file)
+    counts = SuiteSelectionCounts.model_validate(manifest["counts"])
+    from umi.competition_suite_selection import SuiteExclusions
+
+    exclusions = c.value._document(c.config.exclusions_file, SuiteExclusions)
+    _, report = select_future_suite(
+        inventory, exclusions, counts, c.value.policy, selection_key=(c.root / "key").read_bytes()
+    )
+    (c.root / "manifest.json").write_bytes(canonical_json_bytes(report))
+    with pytest.raises(ValueError, match="retained reference QA changes"):
+        c.value.prepare(c.history, 220)
+    assert c.calls == []

@@ -14,8 +14,9 @@ from collections import Counter
 from collections.abc import Callable
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
+from .competition_suite_reference_qa import FingerspellingCategory
 from .open_competition import (
     CompetitionPolicy,
     EvaluationSuite,
@@ -44,9 +45,19 @@ class SuiteCandidate(StrictProtocolModel):
     signer_group_sha256: Hex32 | None = None
     topic: Name | None = None
     reference_qa_sha256: Hex32 | None = None
+    fingerspelling_category: FingerspellingCategory | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_uncategorized_candidate(self, handler):
+        value = handler(self)
+        if self.fingerspelling_category is None:
+            value.pop("fingerspelling_category", None)
+        return value
 
     @model_validator(mode="after")
     def documented_exclusion(self):
+        if self.case.stratum != "fingerspelling" and self.fingerspelling_category is not None:
+            raise ValueError("only a fingerspelling case can declare a fingerspelling category")
         if (self.training_exposure == "documented_training_excluded") != (
             self.training_exclusion_evidence_sha256 is not None
         ):
@@ -69,6 +80,13 @@ class SuiteExclusions(StrictProtocolModel):
     signer_group_sha256s: Annotated[tuple[Hex32, ...], Field(max_length=100_000)] = ()
 
 
+class FingerspellingCategoryMinimums(StrictProtocolModel):
+    sentence: Annotated[int, Field(strict=True, ge=1, le=1024)]
+    name: Annotated[int, Field(strict=True, ge=1, le=1024)]
+    address: Annotated[int, Field(strict=True, ge=1, le=1024)]
+    number: Annotated[int, Field(strict=True, ge=1, le=1024)]
+
+
 class SuiteSelectionCounts(StrictProtocolModel):
     fingerspelling: Annotated[int, Field(ge=1, le=1024)]
     continuous: Annotated[int, Field(ge=1, le=1024)]
@@ -80,6 +98,14 @@ class SuiteSelectionCounts(StrictProtocolModel):
     near_sentence_token_jaccard_bps: Annotated[int, Field(ge=5000, le=10000)] = 8000
     require_qualified_cases: bool = True
     distinct_signer_per_case: bool = True
+    fingerspelling_category_minimums: FingerspellingCategoryMinimums | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_counts(self, handler):
+        value = handler(self)
+        if self.fingerspelling_category_minimums is None:
+            value.pop("fingerspelling_category_minimums", None)
+        return value
 
     @model_validator(mode="after")
     def diversity_fits(self):
@@ -90,6 +116,11 @@ class SuiteSelectionCounts(StrictProtocolModel):
             or self.minimum_fingerspelling_signers > self.fingerspelling
             or self.minimum_continuous_signers > self.continuous
             or self.minimum_continuous_topics > self.continuous
+            or (
+                self.fingerspelling_category_minimums is not None
+                and sum(self.fingerspelling_category_minimums.model_dump().values())
+                > self.fingerspelling
+            )
         ):
             raise ValueError("requested diversity must fit the suite case counts")
         return self
@@ -210,7 +241,13 @@ def select_future_suite(
         minimum = getattr(counts, "minimum_" + task + "_datasets")
         dataset_counts = Counter()
         signer_counts, topic_counts = Counter(), Counter()
-        for _ in range(wanted):
+        category_counts = Counter()
+        category_minimums = (
+            counts.fingerspelling_category_minimums.model_dump()
+            if task == "fingerspelling" and counts.fingerspelling_category_minimums
+            else {}
+        )
+        for index in range(wanted):
             eligible = [
                 (c, text, tokens)
                 for c, text, tokens in pool
@@ -223,7 +260,19 @@ def select_future_suite(
                 )
                 and not text & text_exclusions.exact
                 and not text_exclusions.near(tokens)
+                and (not category_minimums or c.fingerspelling_category in category_minimums)
             ]
+            if category_minimums:
+                deficits = {
+                    key: max(0, minimum - category_counts[key])
+                    for key, minimum in category_minimums.items()
+                }
+                if sum(deficits.values()) == wanted - index:
+                    eligible = [
+                        (c, text, tokens)
+                        for c, text, tokens in eligible
+                        if deficits[c.fingerspelling_category]
+                    ]
             available = Counter(c.dataset for c, _, _ in eligible)
             need_new_dataset = len(dataset_counts) < minimum
             if need_new_dataset:
@@ -247,6 +296,8 @@ def select_future_suite(
                 ),
             )
             selected.append(candidate)
+            if candidate.fingerspelling_category is not None:
+                category_counts[candidate.fingerspelling_category] += 1
             dataset_counts[candidate.dataset] += 1
             if candidate.signer_group_sha256 is not None:
                 signer_counts[candidate.signer_group_sha256] += 1
@@ -259,6 +310,8 @@ def select_future_suite(
             task == "continuous" and len(topic_counts) < counts.minimum_continuous_topics
         ):
             raise ValueError("future suite known signer/topic diversity is not satisfied")
+        if any(category_counts[key] < minimum for key, minimum in category_minimums.items()):
+            raise ValueError("future suite fingerspelling category minimums are not satisfied")
     suite = EvaluationSuite(
         schema="umi-competition-suite/2",
         policy_sha256=digest(policy),
@@ -321,6 +374,11 @@ def select_future_suite(
                 signer_group_sha256=c.signer_group_sha256,
                 topic=c.topic,
                 reference_qa_sha256=c.reference_qa_sha256,
+                **(
+                    {"fingerspelling_category": c.fingerspelling_category}
+                    if c.fingerspelling_category is not None
+                    else {}
+                ),
             )
             for c in sorted(selected, key=lambda item: item.case.case_id)
         ),
@@ -328,4 +386,14 @@ def select_future_suite(
         original_references_changed=False,
         signed_inputs_changed=False,
     )
+    if counts.fingerspelling_category_minimums is not None:
+        report["selected_fingerspelling_categories"] = dict(
+            sorted(
+                Counter(
+                    c.fingerspelling_category
+                    for c in selected
+                    if c.case.stratum == "fingerspelling"
+                ).items()
+            )
+        )
     return suite, report
