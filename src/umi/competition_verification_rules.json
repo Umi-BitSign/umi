@@ -526,7 +526,7 @@
     "competition_supervisor_runtime.py": "9cb7326f98d6cb44222c5b5b113c0ad7a1762c5e8e005b0c8a8bc5a130db9515",
     "competition_switch_recovery.py": "f01531a3b9b72c2a513095411ddf466bde4fa87b65249b6bebcd559d43b1e2ff",
     "competition_transport_finality.py": "ee27d14c787a64e2752747c5b45b02f89e4cdb999c22573a68e498afc392bc5e",
-    "competition_transport_verification.py": "d597d5d178e5a37f20b38a6261007894c89dd8e676a24e3b74ff6c366b0e3200",
+    "competition_transport_verification.py": "8c3ade122d14c9605082a91d76c2bb3698b5466b28c995cb8120cc374bbe0809",
     "competition_upgrade.py": "f41fc4953d0a728276164d48a0554052d7995b10a70298e1b60db30279cc86cf",
     "competition_upgrade_namespace.py": "2bc4d4bd79ebcf679154e600235c553b62208a6a27254af91bde2e8d2e74775d",
     "competition_upload_record_versions.py": "c3692fd6110e13b67ea946ac2b2d3f54336af4bdf3b209a97975fb235529d8de",
