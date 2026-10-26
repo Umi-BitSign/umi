@@ -249,9 +249,7 @@ def test_stale_intake_count_uses_live_acceptance_only_until_work_refreshes(monke
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     state = CohortProgressSnapshots()
-    state.record(
-        "intake_certification", dict(cohort_sha256=C, completed=54, total=79, percent=68)
-    )
+    state.record("intake_certification", dict(cohort_sha256=C, completed=54, total=79, percent=68))
     state.record(
         "work",
         dict(cohort_sha256=C, stage="model_acceptance_review_quorum", state="running"),
@@ -284,9 +282,7 @@ def test_nested_transfer_remains_current_after_acceptance_heartbeat_ages(monkeyp
     state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
     state.record("intake_certification", dict(cohort_sha256=C, completed=54, total=79))
     now[0] = 140
-    state.record(
-        "acceptance", dict(cohort_sha256=C, stage="promotion", status="running", total=1)
-    )
+    state.record("acceptance", dict(cohort_sha256=C, stage="promotion", status="running", total=1))
     now[0] = 270
     state.record(
         "work",

@@ -164,9 +164,7 @@ def test_reference_publisher_candidate_follows_the_same_signed_selection(handoff
         coordinator_candidate_path=target,
     )
     assert REFERENCE_PUBLISHER_CONFIG_MODE == 0o600
-    candidate = ReferencePublisherConfig.model_validate_json(
-        staged.reference_publisher_config
-    )
+    candidate = ReferencePublisherConfig.model_validate_json(staged.reference_publisher_config)
     assert candidate.coordinator_config == target
     assert {
         k

@@ -147,7 +147,9 @@ class CohortPreparationPublisher:
             )
         await run_owned_thread(
             partial(
-                self.files.publish, cohort, prepared,
+                self.files.publish,
+                cohort,
+                prepared,
             )
         )
 

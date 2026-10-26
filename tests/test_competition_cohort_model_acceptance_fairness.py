@@ -178,10 +178,20 @@ async def test_registration_provider_timeout_gets_bounded_retry_without_starving
     reports = [await worker.poll_once() for _ in range(6)]
 
     assert [key for cohort, key in attempts if cohort == first] == [
-        "a0", "a1", "a2", "a3", "a0", "a4"
+        "a0",
+        "a1",
+        "a2",
+        "a3",
+        "a0",
+        "a4",
     ]
     assert [key for cohort, key in attempts if cohort == other] == [
-        "b0", "b1", "b2", "b3", "b4", "b5"
+        "b0",
+        "b1",
+        "b2",
+        "b3",
+        "b4",
+        "b5",
     ]
     assert reports[0]["registration_provider_retries"][0]["next_retry_after_other_attempts"] == 3
     assert reports[3]["registration_provider_retries"][0]["next_retry_after_other_attempts"] == 0
@@ -266,9 +276,7 @@ async def test_changed_failure_does_not_keep_provider_retry(tmp_path):
 
     worker._one = accept
     reports = [await worker.poll_once() for _ in range(5)]
-    assert [key for cohort, key in attempted if cohort == first] == [
-        "a0", "a1", "a2", "a3", "a0"
-    ]
+    assert [key for cohort, key in attempted if cohort == first] == ["a0", "a1", "a2", "a3", "a0"]
     assert reports[4]["registration_provider_retries"] == []
     await worker.poll_once()
     assert set(attempted[-2:]) == {(first, "a4"), (other, "b5")}

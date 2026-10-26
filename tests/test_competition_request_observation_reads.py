@@ -45,8 +45,10 @@ def test_terminal_reads_are_exact_order_and_evaluator_scoped_without_serializati
         return result
 
     terminal = _observation_terminal_reader(read)
-    a, b, c = terminal(first, evaluators[0]), terminal(first, evaluators[1]), terminal(
-        other, evaluators[0]
+    a, b, c = (
+        terminal(first, evaluators[0]),
+        terminal(first, evaluators[1]),
+        terminal(other, evaluators[0]),
     )
     assert len({id(a), id(b), id(c)}) == 3
     assert terminal(first, evaluators[0]) is a

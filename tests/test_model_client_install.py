@@ -78,9 +78,7 @@ def test_model_client_supported_python_skips_discovery(monkeypatch):
 def test_model_client_without_supported_interpreter_gives_actionable_error(monkeypatch):
     monkeypatch.setattr(upgrade.shutil, "which", lambda *_: None)
     with pytest.raises(ValueError, match="UMI_MODEL_CLIENT_PYTHON"):
-        upgrade.ensure_model_client_python(
-            running_version=(3, 9), candidate_paths=("python3.12",)
-        )
+        upgrade.ensure_model_client_python(running_version=(3, 9), candidate_paths=("python3.12",))
 
 
 def test_model_client_python_handoff_precedes_manifest_read(monkeypatch):

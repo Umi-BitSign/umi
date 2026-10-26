@@ -231,8 +231,7 @@ def prepare_initial_reward_adoption(
         package.inputs.history.plan not in series.cohorts
         or package.policy_sha256 != digest(policy)
         or series.policy_sha256 != digest(policy)
-        or digest(package.inputs.history.authority.authority)
-        != digest(series.recovery.authority)
+        or digest(package.inputs.history.authority.authority) != digest(series.recovery.authority)
         or issued_at_block < series.recovery.authority.issued_at_block
         or (verified is not None and verified.latest(cohort) is not None)
     ):

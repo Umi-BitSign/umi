@@ -158,15 +158,16 @@ def test_signed_initial_selection_is_idempotent_and_refuses_replacement(series_c
         None, signed, series=c.series, policy=c.control.policy
     )
     assert chosen == source
-    assert select_signed_initial_reward_adoption(
-        chosen, signed, series=c.series, policy=c.control.policy
-    ) == chosen
+    assert (
+        select_signed_initial_reward_adoption(
+            chosen, signed, series=c.series, policy=c.control.policy
+        )
+        == chosen
+    )
     changed = signed.adoption.model_copy(
         update={"parameters": GeometricRewardParameters(band_width_bps=250)}
     )
-    replacement = SignedRewardModelAdoption(
-        adoption=changed, signatures=signatures(changed)
-    )
+    replacement = SignedRewardModelAdoption(adoption=changed, signatures=signatures(changed))
     with pytest.raises(ValueError, match="different signed bytes"):
         select_signed_initial_reward_adoption(
             chosen, replacement, series=c.series, policy=c.control.policy

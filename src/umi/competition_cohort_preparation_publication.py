@@ -55,8 +55,10 @@ def _stamp(path):
     ensure_private_directory(path.parent)
     info = path.lstat()
     if (
-        not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-        or info.st_nlink != 1 or info.st_mode & 0o077
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o077
     ):
         raise ValueError("prepared output must be an owned private regular file")
     return tuple(str(v) for v in delivery_file_identity(info))
@@ -129,7 +131,8 @@ class PreparedRoundFiles:
             _sync(path.parent)
             completion = _Completion(
                 schema="umi-private-prepared-publication/1",
-                prepared_sha256=snapshot.sha256, stamp=_stamp(path),
+                prepared_sha256=snapshot.sha256,
+                stamp=_stamp(path),
             )
             atomic_write(record, canonical_json_bytes(completion), immutable=False)
             self._progress(cohort, started, reason, True)
@@ -146,7 +149,12 @@ class PreparedRoundFiles:
             "elapsed_seconds=%.3f eta_seconds=%s eta_basis=%s "
             "stalled_or_retrying=%s reason=%s planning_eta_seconds=%s "
             "eta_scope=one_prepared_output_delivery certification_authority=false",
-            cohort, int(completed), time.monotonic() - started,
-            0 if completed else "null", "completed" if completed else "bounded_metadata_delivery",
-            not completed, reason, "[0,0]" if completed else "[0,30]",
+            cohort,
+            int(completed),
+            time.monotonic() - started,
+            0 if completed else "null",
+            "completed" if completed else "bounded_metadata_delivery",
+            not completed,
+            reason,
+            "[0,0]" if completed else "[0,30]",
         )

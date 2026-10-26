@@ -59,7 +59,8 @@ async def test_lifecycle_republishes_without_model_copy_parse_serialization_or_p
 ):
     h = publication
     provider = SimpleNamespace(
-        policy=h.intake.policy, current_finalized_block=AsyncMock(return_value=340),
+        policy=h.intake.policy,
+        current_finalized_block=AsyncMock(return_value=340),
         ensure_observer_running=lambda: None,
     )
     publisher = CohortPreparationPublisher(h.owner, provider, h.output)
@@ -85,8 +86,16 @@ async def test_lifecycle_republishes_without_model_copy_parse_serialization_or_p
     assert h.path.stat().st_ino == inode
 
 
-@pytest.mark.parametrize("damage", ["missing_receipt", "corrupt_receipt", "missing_output",
-                                    "same_bytes_new_inode", "same_inode_changed_mtime"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_receipt",
+        "corrupt_receipt",
+        "missing_output",
+        "same_bytes_new_inode",
+        "same_inode_changed_mtime",
+    ],
+)
 def test_delivery_repairs_do_not_repeat_preparation_or_change_original_bytes(
     publication, monkeypatch, caplog, damage
 ):
@@ -190,7 +199,8 @@ async def test_publication_receipt_never_bypasses_revocation(publication):
     h.history = transition(h.history, h.intake.policy, "revoke", 350)
     h.intake.publish(h.history, capture_at(350), decision_inputs=(h.closing,))
     provider = SimpleNamespace(
-        policy=h.intake.policy, current_finalized_block=AsyncMock(return_value=360),
+        policy=h.intake.policy,
+        current_finalized_block=AsyncMock(return_value=360),
         ensure_observer_running=lambda: None,
     )
     with pytest.raises(ValueError, match="active prepared authority"):

@@ -159,9 +159,7 @@ async def test_unselected_partial_model_waits_without_decoding_original_requests
     assert (f.uploads.archive / f.model / "model").exists()
 
 
-async def test_remote_reconciliation_uses_one_representative_per_model(
-    retirement, monkeypatch
-):
+async def test_remote_reconciliation_uses_one_representative_per_model(retirement, monkeypatch):
     f = retirement
     key = digest(f.request)
     async with AsyncExitStack() as stack:

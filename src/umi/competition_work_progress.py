@@ -115,8 +115,10 @@ class WorkProgress:
     ):
         if planning_range_seconds is not None and (
             len(planning_range_seconds) != 2
-            or any(type(value) not in (int, float) or not math.isfinite(value)
-                   for value in planning_range_seconds)
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in planning_range_seconds
+            )
             or not 0 <= planning_range_seconds[0] <= planning_range_seconds[1]
             or not planning_basis
         ):
@@ -191,9 +193,11 @@ class WorkProgress:
             ):
                 eta = max(0.0, mean * (self.total - self.completed))
             planning = None
-            if self.planning_range_seconds is not None and eta is None and state not in {
-                "interrupted", "accounting_mismatch"
-            }:
+            if (
+                self.planning_range_seconds is not None
+                and eta is None
+                and state not in {"interrupted", "accounting_mismatch"}
+            ):
                 low, high = self.planning_range_seconds
                 if elapsed > high:
                     stalled = True
@@ -241,9 +245,14 @@ class WorkProgress:
                 "eta_assumption": (
                     "remaining_units_match_recent_active_cost" if self.estimate else None
                 ),
-                **({"forecast_classification": "planning_scenario",
-                    "forecast_finish_range_seconds": planning}
-                   if planning is not None else {}),
+                **(
+                    {
+                        "forecast_classification": "planning_scenario",
+                        "forecast_finish_range_seconds": planning,
+                    }
+                    if planning is not None
+                    else {}
+                ),
                 "stalled": stalled,
                 "scope": "current_attempt_substage",
                 "certification_authority": False,

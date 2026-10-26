@@ -34,7 +34,10 @@ def retained(tmp_path, monkeypatch):
     node.verified_packages = VerificationPackageStore(tmp_path / "snapshots")
     previous = node.verified_packages.load(source, Package, maximum_bytes=1024**2)
     return SimpleNamespace(
-        node=node, source=source, raw=source.read_bytes(), prior={"sha256": previous.sha256},
+        node=node,
+        source=source,
+        raw=source.read_bytes(),
+        prior={"sha256": previous.sha256},
         package=package,
     )
 
@@ -60,6 +63,7 @@ async def test_unchanged_input_and_derived_metadata_repair_do_not_reread_package
     retained, monkeypatch
 ):
     h = retained
+
     def forbidden(*args, **kwargs):
         raise AssertionError("unchanged original must reuse retained native preparation")
 

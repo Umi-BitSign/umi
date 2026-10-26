@@ -111,8 +111,10 @@ async def test_initial_adoption_proposal_uses_verified_package_without_replaying
     files.retain_package(p.package)
     snapshot = files.verified_package(digest(p.package))
     parameters = GeometricRewardParameters(
-        band_width_bps=250, band_decay_bps=7500,
-        within_band_decay_bps=7500, score_duplicate_tolerance_bps=1,
+        band_width_bps=250,
+        band_decay_bps=7500,
+        within_band_decay_bps=7500,
+        score_duplicate_tolerance_bps=1,
     )
     original, _, _ = _adoption(p, parameters)
 
@@ -121,21 +123,30 @@ async def test_initial_adoption_proposal_uses_verified_package_without_replaying
 
     monkeypatch.setattr(type(snapshot), "read", no_object_read)
     proposed = prepare_initial_reward_adoption(
-        snapshot, series=p.reader.series, policy=p.reader.policy,
-        parameters=parameters, issued_at_block=p.active.decision.observed_at_block,
+        snapshot,
+        series=p.reader.series,
+        policy=p.reader.policy,
+        parameters=parameters,
+        issued_at_block=p.active.decision.observed_at_block,
         previous=None,
     )
     assert proposed == original.adoption
     with pytest.raises(TypeError, match="verified package snapshot"):
         prepare_initial_reward_adoption(
-            p.package, series=p.reader.series, policy=p.reader.policy,
-            parameters=parameters, issued_at_block=p.active.decision.observed_at_block,
+            p.package,
+            series=p.reader.series,
+            policy=p.reader.policy,
+            parameters=parameters,
+            issued_at_block=p.active.decision.observed_at_block,
             previous=None,
         )
     with pytest.raises(ValueError, match="initial revision"):
         prepare_initial_reward_adoption(
-            snapshot, series=p.reader.series, policy=p.reader.policy,
-            parameters=parameters, issued_at_block=p.active.decision.observed_at_block,
+            snapshot,
+            series=p.reader.series,
+            policy=p.reader.policy,
+            parameters=parameters,
+            issued_at_block=p.active.decision.observed_at_block,
             previous=RewardAdoptionSelection(
                 schema="umi-standing-reward-adoption-selection/1",
                 adoptions=(original,),

@@ -399,9 +399,7 @@ class TransferProgress:
                         )
                         and child_planning[0] <= child_planning[1]
                     ):
-                        parent_planning = (
-                            [eta, eta] if eta is not None else planning
-                        )
+                        parent_planning = [eta, eta] if eta is not None else planning
                         if parent_planning is not None:
                             # The child runs inside the parent operation, so the
                             # remaining wall time is bounded by the slower scope.

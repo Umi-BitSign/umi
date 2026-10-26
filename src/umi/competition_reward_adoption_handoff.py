@@ -112,9 +112,7 @@ def prepare_reward_adoption_boot_candidates(
             )
         from .translation_reference_config import ReferencePublisherConfig
 
-        current_reference = RewardCoordinatorConfig.model_validate_json(
-            reference_current_boot_raw
-        )
+        current_reference = RewardCoordinatorConfig.model_validate_json(reference_current_boot_raw)
         reference_config = ReferencePublisherConfig.model_validate_json(
             reference_publisher_config_raw
         )

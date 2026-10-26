@@ -252,9 +252,7 @@ class ModelUploadRetirement:
         # remain available for its retry/expiry path. Check the already
         # authenticated metadata before decoding any original requests.
         remote_models = {
-            item.model_sha256
-            for source in cohorts.values()
-            for item in source.preservation.models
+            item.model_sha256 for source in cohorts.values() for item in source.preservation.models
         }
         attempted = 0
         for offset in range(len(models)):
@@ -263,8 +261,12 @@ class ModelUploadRetirement:
                 continue
             if model not in remote_models:
                 self._report(
-                    cohorts, completed=completed, total=len(models), state="waiting",
-                    reason="preserved_model_selection_pending", model=model,
+                    cohorts,
+                    completed=completed,
+                    total=len(models),
+                    state="waiting",
+                    reason="preserved_model_selection_pending",
+                    model=model,
                     operation="remote_selection",
                 )
                 attempted += 1

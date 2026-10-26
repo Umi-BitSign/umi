@@ -53,9 +53,7 @@ def test_missing_c6_adoption_stops_offer_before_package_io(monkeypatch, caplog):
     monkeypatch.setattr(offers_module, "verify_reward_decisions", lambda *a, **k: prefix)
     monkeypatch.setattr(offers_module, "digest", lambda _: cohort)
     offers = object.__new__(StandingRewardOffers)
-    offers.series = SimpleNamespace(
-        cohorts=(plan,), recovery=SimpleNamespace(authority=object())
-    )
+    offers.series = SimpleNamespace(cohorts=(plan,), recovery=SimpleNamespace(authority=object()))
     offers.policy = object()
     offers.reward_adoptions = None
     offers._reported_missing_successor_adoptions = set()

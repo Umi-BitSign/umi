@@ -257,10 +257,7 @@ class CohortProgressSnapshots:
                     break
             if stage == "model_certification" and (
                 selected.get("stale")
-                or (
-                    selected.get("stalled_or_retrying")
-                    and not selected.get("repair_required")
-                )
+                or (selected.get("stalled_or_retrying") and not selected.get("repair_required"))
             ):
                 # A roster meter can lack new certificates while the owner is
                 # actively verifying the next model. Show that live work and
