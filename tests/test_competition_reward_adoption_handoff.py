@@ -7,6 +7,7 @@ import pytest
 from umi.competition_geometric_rewards import GeometricRewardParameters
 from umi.competition_reward_adoption import RewardModelAdoption, SignedRewardModelAdoption
 from umi.competition_reward_adoption_handoff import (
+    REFERENCE_PUBLISHER_CONFIG_MODE,
     WRITER_SUPPLEMENTAL_MODE,
     prepare_reward_adoption_boot_candidates,
 )
@@ -14,6 +15,7 @@ from umi.competition_reward_boot import StandingRewardBootConfig
 from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
+from umi.translation_reference_config import ReferencePublisherConfig
 
 from .test_competition_reward_boot import inputs as inputs
 from .test_competition_reward_coordinator_boot import config_case as config_case
@@ -24,6 +26,9 @@ from .test_competition_reward_decisions import policy as policy
 from .test_competition_reward_decisions import series_case as series_case
 from .test_competition_reward_decisions import signatures
 from .test_open_competition import wallet
+from .test_translation_reference_channel import channel_case as channel_case
+from .test_translation_reference_channel import publication_case as publication_case
+from .test_translation_reference_config import installed as installed
 
 
 @pytest.fixture
@@ -142,4 +147,64 @@ def test_candidate_handoff_selects_matching_reviewer_and_refuses_split_lineage(h
     with pytest.raises(ValueError, match="canonical installed boot"):
         prepare_reward_adoption_boot_candidates(
             coordinator, writer, signed, reviewer_raws=(b" " + reviewer_raw,)
+        )
+
+
+def test_reference_publisher_candidate_follows_the_same_signed_selection(handoff, installed):
+    coordinator, writer, signed = handoff
+    reference = canonical_json_bytes(installed.config)
+    target = "/var/lib/umi-reward-handoff/coordinator.json"
+    staged = prepare_reward_adoption_boot_candidates(
+        coordinator,
+        writer,
+        signed,
+        reference_publisher_config_raw=reference,
+        reference_current_boot_raw=coordinator,
+        coordinator_candidate_path=target,
+    )
+    assert REFERENCE_PUBLISHER_CONFIG_MODE == 0o600
+    candidate = ReferencePublisherConfig.model_validate_json(
+        staged.reference_publisher_config
+    )
+    assert candidate.coordinator_config == target
+    assert {
+        k
+        for k, old in json.loads(reference).items()
+        if old != json.loads(staged.reference_publisher_config)[k]
+    } == {"coordinator_config"}
+    assert (
+        prepare_reward_adoption_boot_candidates(
+            staged.coordinator,
+            staged.writer,
+            signed,
+            reference_publisher_config_raw=staged.reference_publisher_config,
+            reference_current_boot_raw=staged.coordinator,
+            coordinator_candidate_path=target,
+        )
+        == staged
+    )
+
+
+def test_reference_publisher_candidate_refuses_split_lineage(handoff, installed):
+    coordinator, writer, signed = handoff
+    reference = canonical_json_bytes(installed.config)
+    target = "/var/lib/umi-reward-handoff/coordinator.json"
+    staged = prepare_reward_adoption_boot_candidates(coordinator, writer, signed)
+    with pytest.raises(ValueError, match="disagrees on signed reward lineage"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator,
+            writer,
+            signed,
+            reference_publisher_config_raw=reference,
+            reference_current_boot_raw=staged.coordinator,
+            coordinator_candidate_path=target,
+        )
+    with pytest.raises(ValueError, match="absolute boot path"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator,
+            writer,
+            signed,
+            reference_publisher_config_raw=reference,
+            reference_current_boot_raw=coordinator,
+            coordinator_candidate_path="relative.json",
         )

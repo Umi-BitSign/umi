@@ -1,14 +1,17 @@
-"""Prepare matching native reward boot candidates from one signed selection.
+"""Prepare matching native reward boot and publisher inputs from one signed selection.
 
 This pure step changes neither installed configuration nor a reward hold. The
 caller must retain the exact candidate bytes, select them through the supported
 cooperative owner handoff, and verify each restarted consumer's selected bytes.
+The publisher config must be installed private at mode 0600 and its selected
+coordinator boot root-owned at mode 0444; the publisher must restart to reload it.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from .competition_reward_adoption import (
     RewardAdoptionSelection,
@@ -20,6 +23,7 @@ from .competition_reward_coordinator_boot import RewardCoordinatorConfig
 from .protocol import canonical_json_bytes
 
 WRITER_SUPPLEMENTAL_MODE = 0o444
+REFERENCE_PUBLISHER_CONFIG_MODE = 0o600
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class RewardAdoptionBootCandidates:
     writer: bytes
     writer_supplemental: bytes
     reviewers: tuple[bytes, ...] = ()
+    reference_publisher_config: bytes | None = None
 
 
 def _candidate(original: bytes, selected: RewardAdoptionSelection, kind):
@@ -47,11 +52,16 @@ def prepare_reward_adoption_boot_candidates(
     signed: SignedRewardModelAdoption,
     *,
     reviewer_raws: tuple[bytes, ...] = (),
+    reference_publisher_config_raw: bytes | None = None,
+    reference_current_boot_raw: bytes | None = None,
+    coordinator_candidate_path: str | None = None,
 ) -> RewardAdoptionBootCandidates:
-    """Extend all native reward boots with one authenticated initial adoption.
+    """Extend native reward boots and optional publisher pointer with one adoption.
 
     Inputs are compact native boot metadata. No package object, model payload,
-    journal, key, RPC endpoint or installed service is opened here.
+    journal, key, RPC endpoint or installed service is opened here. The caller
+    supplies publisher boot bytes from its configured current path and must
+    install the candidate before restarting the publisher.
     """
     coordinator = RewardCoordinatorConfig.model_validate_json(coordinator_raw)
     writer = StandingRewardBootConfig.model_validate_json(writer_raw)
@@ -80,12 +90,56 @@ def prepare_reward_adoption_boot_candidates(
         for reviewer in reviewers
     ):
         raise ValueError("reviewer disagrees on signed reward lineage")
+    reference_config = None
+    if any(
+        value is not None
+        for value in (
+            reference_publisher_config_raw,
+            reference_current_boot_raw,
+            coordinator_candidate_path,
+        )
+    ):
+        if (
+            reference_publisher_config_raw is None
+            or reference_current_boot_raw is None
+            or coordinator_candidate_path is None
+        ):
+            raise ValueError(
+                "reference publisher handoff requires config, current boot and target path"
+            )
+        from .translation_reference_config import ReferencePublisherConfig
+
+        current_reference = RewardCoordinatorConfig.model_validate_json(
+            reference_current_boot_raw
+        )
+        reference_config = ReferencePublisherConfig.model_validate_json(
+            reference_publisher_config_raw
+        )
+        if (
+            canonical_json_bytes(current_reference) != reference_current_boot_raw
+            or canonical_json_bytes(reference_config) != reference_publisher_config_raw
+            or current_reference.role != "coordinator"
+            or current_reference.series != coordinator.series
+            or current_reference.policy != coordinator.policy
+            or current_reference.reward_adoptions != coordinator.reward_adoptions
+        ):
+            raise ValueError("reference publisher disagrees on signed reward lineage")
+        if not Path(coordinator_candidate_path).is_absolute():
+            raise ValueError("reference publisher target must be an absolute boot path")
     selected = select_signed_initial_reward_adoption(
         coordinator.reward_adoptions,
         signed,
         series=coordinator.series,
         policy=coordinator.policy,
     )
+    publisher_candidate = None
+    if reference_config is not None:
+        value = json.loads(reference_publisher_config_raw)
+        value["coordinator_config"] = coordinator_candidate_path
+        publisher_candidate = canonical_json_bytes(value)
+        parsed = ReferencePublisherConfig.model_validate_json(publisher_candidate)
+        if parsed.coordinator_config != coordinator_candidate_path:
+            raise ValueError("reference publisher candidate changed its boot path")
     return RewardAdoptionBootCandidates(
         selection=selected,
         coordinator=_candidate(coordinator_raw, selected, RewardCoordinatorConfig),
@@ -94,4 +148,5 @@ def prepare_reward_adoption_boot_candidates(
         reviewers=tuple(
             _candidate(raw, selected, RewardCoordinatorConfig) for raw in reviewer_raws
         ),
+        reference_publisher_config=publisher_candidate,
     )
