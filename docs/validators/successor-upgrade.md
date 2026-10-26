@@ -1024,6 +1024,53 @@ recent capture and historical-gap capture as `coverage_credit_progress`.
 Restored credit is not a sustainable fresh-capture rate. Do not extrapolate its
 combined delta as an overall opportunity or successor activation ETA.
 
+The existing coverage owner also reports retained interval/endpoint counts from
+its maintained counters before replay starts. These inventory counts include all
+activations in that owner and grant no credit. Each progress report separates
+remaining milliseconds and minimum full adjacent intervals needed for the signed
+opportunity from the potentially much larger historical endpoint gap. The scoped
+opportunity forecast uses this collector's measured credited progress including
+waits, assumes a comparable remaining work mix, and withdraws on retries, stalls
+or insufficient samples. It excludes successor activation and host rollout.
+
+Initial adoption restores every exact retained endpoint verdict, source identity,
+native historical boundary and runtime selection. Identical completed model
+dependency groups refresh once while their private metadata identities remain
+unchanged. Unrelated receipt-directory or qualification-ledger writes currently
+invalidate that conservative shared check and cause another native dependency
+refresh; this is not a permanent check-once guarantee across unrelated appends.
+Successful full retained pages drain cooperatively before selecting a new moving
+head, including mixed-activation inventory pages. Collection stops at the signed
+minimum; it does not require filling the whole historical gap first.
+
+Successful native interval credits persist under the original owner, exact
+endpoint verdicts and mutation-fenced history/proof generations. Restarts and
+independent certificate review can reuse them after current authority, shared
+dependencies and each original historical boundary restore. Imported interval
+hints cannot seed these facts. Ordinary appends and qualified exact source
+externalization preserve completed credit; changed/lost generations, verdicts or
+completion records require explicit repair rather than silent rechecking.
+
+After restoring affected original endpoint/transport metadata, stop the selected
+coordinator/reviewer owner and use its existing config for one scoped repair:
+`python -m umi.competition_reward_coordinator_cli repair-credit --config CONFIG
+--history predecessor --interval INTERVAL_SHA256 --reason REASON`.
+Use `--history current` for that config's current series. The command takes the
+original exclusive owner lease, restores both exact native endpoints and their
+interval arithmetic, records the repair reason and preserves the original
+interval/proofs. It loads no signer and performs no autonomous collection or
+publication. A missing permanent completion owner must be recovered in place;
+this command cannot invent one. Repeat repair is idempotent.
+
+For an installed writer, stop its supervisor and use the existing root-approved
+supervisor configuration with `python -m umi.competition_supervisor_cli --config
+SUPERVISOR_CONFIG --repair-credit --history predecessor --interval
+INTERVAL_SHA256 --reason REASON`. The route authenticates the installed anchor
+and original standing configuration and holds the startup lease throughout the
+same native repair. It does not construct or start a writer, executor or signer.
+Both repair commands refuse an active owner; never bypass its lease or change
+the configured state path to make repair proceed.
+
 A native weight rate-limit refusal emits `standing_weight_rate_limit` progress
 with remaining blocks, elapsed time and an explicitly assumed block-time range.
 The writer uses a bounded retry pause, up to60seconds at the standard poll

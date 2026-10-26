@@ -77,6 +77,7 @@ class CoverageCheckpoints:
         )
         self.semantics = digest([ABI, runtime_identity()])
         self.externalized = None
+        self._checked_model_metadata = {}
         self.triggers = _triggers()
         self.ledger_triggers = _ledger_triggers()
         self.ledger_marker = {"schema": LEDGER_SCHEMA, "owner": self.owner}
@@ -343,7 +344,8 @@ class CoverageCheckpoints:
             check_coverage_model_metadata(
                 CoverageModelDependencies.model_validate_json(
                     canonical_json_bytes(value["model_dependencies"])
-                )
+                ),
+                checked_cache=self._checked_model_metadata,
             )
         if (
             point.key() != key
@@ -408,12 +410,12 @@ class CoverageCheckpoints:
             dependencies = CoverageModelDependencies.model_validate_json(
                 canonical_json_bytes(dependencies)
             )
-            check_coverage_model_metadata(dependencies)
+            check_coverage_model_metadata(dependencies, checked_cache=self._checked_model_metadata)
             value["model_dependencies"] = dependencies.model_dump(mode="json", by_alias=True)
         migration = False
         if prior is not None:
             if {**prior, "repair": None} == value:
-                return
+                return prior
             additions = {"model_dependencies", "row_state"} & (set(value) - set(prior))
             if additions and {**prior, "repair": None} == {
                 k: v for k, v in value.items() if k not in additions
@@ -486,3 +488,4 @@ class CoverageCheckpoints:
                 index=recheck,
             )
             progress.advance(1)
+        return value
