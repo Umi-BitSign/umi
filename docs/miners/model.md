@@ -92,6 +92,23 @@ preserved through the reviewer relay, so repeated API polling cannot make a
 stopped producer look current. Older reviewers without this diagnostic route
 report settlement diagnostics unavailable. The public GET reads memory only.
 
+Certified public-model scores are published at
+`GET /v1/competition/cohorts/<cohort_sha256>/model-results?limit=100`.
+Follow `next_offset` until it is null to read the complete table. Each submission
+has its retained admission UID/hotkey, exact aggregate quality, frozen-baseline
+quality, quality rank and separate model-reward disposition. Exact ties share a
+rank. Decimal quality uses a 0–1 scale; multiply by 100 for a points display.
+This metric is not prediction accuracy or a share of rewards.
+
+Models below the baseline still have their quality score and rank. An above-floor
+model can remain unselected under the certified reward rule, including duplicate
+handling. Unperformed submissions have `not_scored`, with no invented zero or
+rank. `certified_raw_weight_for_hotkey` is the original complete-cohort allocation
+for that hotkey, including service work in older mixed-track cohorts. Registration
+projection and live chain rewards are separate; this endpoint does not assess
+reward activation. Publication happens automatically after a certified native
+allocation is available. A 404 means that the score artifact has not been published.
+
 The equivalent public read is
 `GET /v1/competition/cohorts/{cohort_sha256}/admissions/{consent_sha256}`.
 Both digests appear under `proposed_admission` in the original receipt. Use the
