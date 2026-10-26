@@ -516,6 +516,11 @@ async def certify_requests(
             if admission_probe is None
             else await admission_probe.request_reviewer(o, name, config, source, root / name)
         )
+        # The external reviewer fixture can precreate this signer directory.
+        # A real signer requires its state directory to remain private.
+        signer_directory = Path(config.directory)
+        signer_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        signer_directory.chmod(0o700)
         signer = CohortProgressSigner(config, reviewer, sign)
         o.apps[name.lower() + ".example"].include_router(
             phase_vote_routes(signer, phase="requests", token="v" * 32)

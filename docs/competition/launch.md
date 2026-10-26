@@ -82,7 +82,10 @@ local bookkeeping grants no proof, closure or certification authority.
 
 Model artifact acceptance runs continuously during intake, including while an
 operator holds automatic progression. Latest replacement submissions take
-priority over the ordinary export scan. Keep the upload, acceptance and reviewer
+priority over the ordinary export scan. When several cohorts have pending latest
+models, the owner gives each cohort one model per pass and rotates which cohort
+goes first. A large model in an earlier hash-sorted cohort therefore cannot hold
+every later cohort behind its full batch. Keep the upload, acceptance and reviewer
 owners running during intake; do not defer this work until roster closure.
 Completed certificates and votes survive restart and are reused. Closure still
 uses the native finalized-registration filter and exact certificates; a last-minute
@@ -193,8 +196,9 @@ After restart an unknown observation is null, not zero or complete. This separat
 endpoint leaves signed history, readiness and existing client schemas unchanged.
 For active successor intake, the owner restores its retained certification count
 before reconciling older cohort exports. Pending successor submissions run first
-in that poll. The owner discovers pending cohorts from its retained intake
-metadata without a per-cohort priority setting. The HTTP read uses the cached
+in that poll, with one turn per pending cohort while multiple cohorts compete.
+The owner discovers pending cohorts from its retained intake metadata without a
+per-cohort priority setting. The HTTP read uses the cached
 observation without opening the owner journal.
 
 During model evaluation, `components.execution` reports completed selected models

@@ -3363,12 +3363,15 @@ old zero-byte lower bound are reconsidered while their original records remain
 preserved. Oversize, encoding and substantive-document holds continue to apply.
 Successful reviews retain their original bytes across this upgrade.
 
-Each acceptance sweep gives up to 16 latest uncertified model entries a priority
-pass before its ordinary page. Native signatures, indexes and current intake
+Each acceptance sweep checks up to 16 latest uncertified model entries per cohort.
+When more than one cohort has pending latest models, it processes one model from
+each and rotates the first cohort on the next sweep. This prevents hash ordering
+and large model batches from delaying all later cohorts. The ordinary cursor
+continues processing prior versions and export recovery, and resumes its normal
+batch when contention clears. Native signatures, indexes and current intake
 history are checked; sealing still verifies the complete inventory and current
-registration. The ordinary cursor continues processing prior versions and export
-recovery. Restart therefore gives current candidates a turn immediately, while
-retained admission blocks, completion ordinals and signed records remain intact.
+registration. Restart gives current candidates a turn immediately while retained
+admission blocks, completion ordinals and signed records remain intact.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
