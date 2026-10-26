@@ -408,7 +408,7 @@ def test_child_planning_range_keeps_parent_forecast_as_planning(monkeypatch):
     assert event["active_child"]["planning_eta_seconds"] == [20, 300]
 
 
-def test_child_planning_range_cannot_replace_unknown_parent_work():
+def test_child_planning_range_retains_unmeasured_parent_work():
     events = []
     parent = transport.TransferProgress("parent", 100, events.append, unit="blocks")
     child = parent.child_report()
@@ -423,7 +423,7 @@ def test_child_planning_range_cannot_replace_unknown_parent_work():
         }
     )
     assert events[-1]["eta_seconds"] is None
-    assert events[-1]["planning_eta_seconds"] is not None
+    assert events[-1]["planning_eta_seconds"] == [100, 30000]
     assert events[-1]["eta_basis"] == "planning_parent_and_required_child_work"
 
 
