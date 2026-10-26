@@ -8,8 +8,9 @@ from umi.competition_cohort_model_acceptance_worker import ModelAcceptanceWorker
 
 
 @pytest.mark.parametrize("successor_pending", [False, True])
+@pytest.mark.parametrize("configured_priority", [False, True])
 async def test_successor_inventory_reported_first_without_duplicate_pass(
-    tmp_path, monkeypatch, successor_pending
+    tmp_path, monkeypatch, successor_pending, configured_priority
 ):
     old, successor = "a" * 64, "b" * 64
     events = []
@@ -33,7 +34,11 @@ async def test_successor_inventory_reported_first_without_duplicate_pass(
             return [("old", object())] if cohort == old else []
 
     worker = ModelAcceptanceWorker(
-        Owner(), None, tmp_path / "inputs", tmp_path / "output", priority_cohorts=(successor,)
+        Owner(),
+        None,
+        tmp_path / "inputs",
+        tmp_path / "output",
+        priority_cohorts=(successor,) if configured_priority else (),
     )
 
     async def report(cohort):
@@ -46,11 +51,13 @@ async def test_successor_inventory_reported_first_without_duplicate_pass(
     monkeypatch.setattr(worker, "_one", one)
     await worker.poll_once()
 
-    assert events[0] == ("report", successor)
+    assert events.index(("report", successor)) < events.index(("work", old))
+    assert events.index(("report", old)) < events.index(("work", old))
     assert events.count(("report", successor)) == 2
     assert events.count(("report", old)) == 2
+    assert events.count(("pending", successor)) == 1
+    assert events.count(("pending", old)) == 1
     if successor_pending:
         assert events.index(("work", successor)) < events.index(("work", old))
     else:
         assert ("work", successor) not in events
-        assert events.index(("work", old)) < events.index(("entries", successor))

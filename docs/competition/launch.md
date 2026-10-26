@@ -193,8 +193,9 @@ After restart an unknown observation is null, not zero or complete. This separat
 endpoint leaves signed history, readiness and existing client schemas unchanged.
 For active successor intake, the owner restores its retained certification count
 before reconciling older cohort exports. Pending successor submissions run first
-in that poll. The HTTP read uses the cached observation without opening the
-owner journal.
+in that poll. The owner discovers pending cohorts from its retained intake
+metadata without a per-cohort priority setting. The HTTP read uses the cached
+observation without opening the owner journal.
 
 During model evaluation, `components.execution` reports completed selected models
 with every evaluator terminal exported, the selected-model denominator, saved
