@@ -293,24 +293,28 @@ class ModelAcceptanceWorker:
             )
             return False
 
-    async def report_inventory_once(self):
-        """Observe each retained roster independently of long model reviews."""
+    async def report_inventory_once(self, cohorts=None):
+        """Observe one bounded cohort group independently of other groups."""
         started = time.monotonic()
-        bindings = self.owner.intake.config.cohorts
+        cohorts = (
+            tuple(binding.cohort_sha256 for binding in self.owner.intake.config.cohorts)
+            if cohorts is None
+            else tuple(cohorts)
+        )
         observed = 0
-        for binding in bindings:
-            observed += bool(await self._report_inventory(binding.cohort_sha256))
+        for cohort in cohorts:
+            observed += bool(await self._report_inventory(cohort))
         return {
             "stage": "model_certification_inventory",
-            "status": "completed" if observed == len(bindings) else "retrying",
+            "status": "completed" if observed == len(cohorts) else "retrying",
             "completed": observed,
-            "total": len(bindings),
-            "percent": 100 * observed / len(bindings) if bindings else 100,
+            "total": len(cohorts),
+            "percent": 100 * observed / len(cohorts) if cohorts else 100,
             "elapsed_seconds": round(time.monotonic() - started, 3),
-            "eta_seconds": 0 if observed == len(bindings) else None,
-            "eta_basis": "completed" if observed == len(bindings) else "retry_next_poll",
-            "stalled_or_retrying": observed != len(bindings),
-            "reason_code": None if observed == len(bindings) else "native_inventory_unavailable",
+            "eta_seconds": 0 if observed == len(cohorts) else None,
+            "eta_basis": "completed" if observed == len(cohorts) else "retry_next_poll",
+            "stalled_or_retrying": observed != len(cohorts),
+            "reason_code": None if observed == len(cohorts) else "native_inventory_unavailable",
             "chain_submission_authorized": False,
         }
 
