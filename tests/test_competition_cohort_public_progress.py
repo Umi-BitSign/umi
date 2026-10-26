@@ -115,6 +115,72 @@ def test_hold_does_not_hide_intake_certification_and_active_operation_elapsed(mo
     assert result["overall_eta_seconds"] is None
 
 
+def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(cohort_sha256=C, completed=54, total=79, percent=100 * 54 / 79),
+    )
+    now[0] = 140
+    state.record(
+        "acceptance",
+        dict(cohort_sha256=C, stage="review_quorum", status="running", total=1),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="model_acceptance_review_quorum",
+            state="running",
+            completed=0,
+            total=1,
+            percent=0,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_acceptance_review_quorum"
+    assert result["completed"] == 0 and result["percent"] == 0
+    assert not result["stalled_or_retrying"]
+    assert result["components"]["intake_certification"]["stale"]
+    assert result["components"]["intake_certification"]["completed"] == 54
+
+
+def test_stale_intake_count_uses_live_acceptance_only_until_work_refreshes(monkeypatch):
+    now = [10]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "intake_certification", dict(cohort_sha256=C, completed=54, total=79, percent=68)
+    )
+    state.record(
+        "work",
+        dict(cohort_sha256=C, stage="model_acceptance_review_quorum", state="running"),
+    )
+    now[0] = 140
+    state.record(
+        "acceptance", dict(cohort_sha256=C, stage="review_quorum", status="running", total=1)
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_acceptance_review_quorum"
+    assert result["components"]["work"]["stale"]
+    state.record(
+        "work", dict(cohort_sha256=C, stage="local_model_retirement", state="running", work_id=2)
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_acceptance_review_quorum"
+    assert result["components"]["work"]["stage"] == "local_model_retirement"
+    assert not result["stale"]
+    now[0] = 270
+    result = state.snapshot(C)
+    assert result["stage"] == "model_certification"
+    assert result["eta_basis"] == "stale_observation"
+    assert result["stalled_or_retrying"]
+
+
 async def test_progress_api_is_available_without_capture_or_database(monkeypatch):
     snapshots = CohortProgressSnapshots()
     monkeypatch.setattr(api, "PUBLIC_COHORT_PROGRESS", snapshots)
