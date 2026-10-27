@@ -9,9 +9,51 @@
 - [Per-round successor signing](#open-competition-round-publisher)
 - [Work progress and ETA logs](#work-progress-and-eta-logs)
 - [Reward-history checkpoints and repair](#reward-history-checkpoints-and-repair)
+- [Operator early reward release](#operator-early-reward-release)
 - [Existing-owner repair and independent preparation](#existing-owner-repair-and-independent-preparation)
 
 Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
+
+## Operator early reward release
+
+The normal standing reward path waits for the predecessor's signed minimum
+validator opportunity. An operator can release a certified successor earlier
+by adding `umi-reward-early-release/1` to a quorum-signed model reward adoption
+`/5`. It names the exact effective predecessor decision and activation, signed
+manifest, successor cohort and certified package, plus a retained reason. This
+decision waives only the predecessor opportunity minimum; it does not claim
+coverage, change certified scores or grant transaction authority.
+
+For a successor that has no adoption yet, build the first adoption with
+`prepare_initial_early_release_adoption` so the release needs one quorum vote.
+For an already selected adoption, use `prepare_early_release_revision`, sign
+its exact bytes with the configured recovery quorum and append them with
+`select_signed_early_release_revision`. Reuse a previously authenticated
+finalized issuance anchor where its binding still applies. Both builders leave
+the certified package untouched and require the exact signed predecessor.
+
+If an already selected early release omitted the cohort age attestation, obtain
+the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
+finalized control observation through the native proof owner. Convert those
+owned facts with `activation_age_from_owned_control`, then use
+`prepare_activation_age_revision` to prepare a later adoption. Have the same
+recovery quorum sign that exact proposal and append it with
+`select_signed_activation_age_revision`. The new revision retains the prior
+score correction and early-release terms. It cannot accelerate an existing
+control decision: the coordinator must commit a separate revision decision
+that names the new adoption. An adoption alone does not waive the activation
+delay, and the original signed decision and its historical effective block
+remain unchanged.
+
+Distribute one resulting selection through
+`prepare_reward_adoption_boot_candidates` with `early_release_predecessor` to
+the coordinator, independent reviewers, validator writer, reference publisher
+and package delivery service. Install the matching immutable source and boot
+files with the supported guard-aware cooperative handoff. Check each selected
+service after restart. The coordinator and validator still replay the package,
+current finalized control, registration and weight transaction. Confirm the
+finalized successor weight row before announcing rewards live. A signed
+adoption or a prepared boot candidate alone is not a live reward row.
 
 Before starting or upgrading Linux cohort owners, apply the
 [controlled package-restart policy](../validators/successor-upgrade.md#package-triggered-service-restarts).
@@ -1919,9 +1961,14 @@ native signed admission exists; a failed admission is not such a checkpoint.
 
 Changing the desired adoption stops stale preparations before reservation,
 signing and sending. An activation already reserved keeps its exact signed
-bytes. The coordinator suspends that activation, waits for finalized proof-lag
-and transaction-mortality drainage, then checks every designated writer over
-the interval in which those rewards could have become live. Completed native
+bytes. The coordinator suspends that activation. When the original activation's
+signed START boundary is still in the future at the finalized suspension
+target, no old row could have been submitted, so the revision clears with zero
+endpoints and no transaction drain. The native review verifies the exact
+historical write and START boundary before accepting that case. Otherwise it
+waits for finalized proof-lag and transaction-mortality drainage, then checks
+every designated writer over the interval in which those rewards could have
+become live. Completed native
 coverage and revision results are retained across restart. If the old allocation
 became live, the coordinator resumes that exact activation and keeps its
 economics locked. Otherwise it can publish the selected revision. A current

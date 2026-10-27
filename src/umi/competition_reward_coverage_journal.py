@@ -853,7 +853,10 @@ class RewardCoverageJournal:
                     )
                 )
             model_dependencies_ready = await restore_completed_model_dependencies(
-                preparation, value.get("model_dependencies"), completed_model_groups
+                preparation,
+                value.get("model_dependencies"),
+                completed_model_groups,
+                cohort_sha256=value["cohort_sha256"],
             )
         except (CoverageModelDependencyRepairRequired, PackageTransportRepairRequired) as error:
             raise CoverageCheckpointRepairRequired(str(error)) from error

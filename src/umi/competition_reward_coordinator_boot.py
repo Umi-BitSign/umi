@@ -406,6 +406,7 @@ async def run_reward_coordinator(
             maximum_promotion_bytes=config.maximum_promotion_bytes,
             maximum_package_bytes=config.maximum_package_bytes,
             model_artifacts=model_artifacts,
+            model_delivery_adoptions=config.model_delivery_adoptions,
             allocation_sink=files.retain_allocation,
         )
         provider = HistoricalRewardControlProvider(

@@ -632,7 +632,18 @@ async def capture_coverage_model_dependencies(
     return value.model_dump(mode="json", by_alias=True)
 
 
-async def restore_coverage_model_dependencies(preparation, raw):
+def _historical_non_direct_delivery(preparation, cohort_sha256):
+    if cohort_sha256 is None:
+        return False
+    if cohort_sha256 not in preparation.cohort_sha256s:
+        raise CoverageModelDependencyRepairRequired(
+            "coverage cohort is outside the authenticated reward series"
+        )
+    delivery = preparation.model_deliveries.get(cohort_sha256)
+    return delivery is None or delivery.mechanism != "direct_r2_multipart_v1"
+
+
+async def restore_coverage_model_dependencies(preparation, raw, *, cohort_sha256=None):
     """Return False only for an explicit supported native migration/fallback."""
     verifier = preparation.model_artifacts
     if raw is None:
@@ -647,7 +658,12 @@ async def restore_coverage_model_dependencies(preparation, raw):
         return False
     value = CoverageModelDependencies.model_validate_json(canonical_json_bytes(raw))
     if value.mode == "not_selected":
-        if verifier is not None:
+        historical = _historical_non_direct_delivery(preparation, cohort_sha256)
+        if cohort_sha256 is not None and not historical:
+            raise CoverageModelDependencyRepairRequired(
+                "direct model cohort cannot reuse a non-selected dependency"
+            )
+        if verifier is not None and not historical:
             raise CoverageModelDependencyRepairRequired("coverage model verifier selection changed")
         return True
     context = await run_owned_thread(_context, verifier)
@@ -679,24 +695,35 @@ async def restore_coverage_model_dependencies(preparation, raw):
     return True
 
 
-async def restore_completed_model_dependencies(preparation, raw, checked_cache):
+async def restore_completed_model_dependencies(
+    preparation, raw, checked_cache, *, cohort_sha256=None
+):
     """Refresh identical completed endpoint dependencies once per selected owner."""
-    if checked_cache is None:
-        return await restore_coverage_model_dependencies(preparation, raw)
     if raw is None:
-        return await restore_coverage_model_dependencies(preparation, raw)
+        return await restore_coverage_model_dependencies(
+            preparation, raw, cohort_sha256=cohort_sha256
+        )
     value = CoverageModelDependencies.model_validate_json(canonical_json_bytes(raw))
+    historical = value.mode == "not_selected" and _historical_non_direct_delivery(
+        preparation, cohort_sha256
+    )
+    if checked_cache is None:
+        return await restore_coverage_model_dependencies(
+            preparation, raw, cohort_sha256=cohort_sha256
+        )
     key = digest(value)
     before = await run_owned_thread(model_metadata_seal, value)
     verifier = preparation.model_artifacts
-    context = None if verifier is None else await run_owned_thread(_context, verifier)
+    context = None if verifier is None or historical else await run_owned_thread(_context, verifier)
     if context != value.context or (
         context is not None and context.policy_sha256 != preparation.policy_sha256
     ):
         raise CoverageModelDependencyRepairRequired("coverage dependency verifier context changed")
     if checked_cache.get(key) == before:
         return True
-    result = await restore_coverage_model_dependencies(preparation, raw)
+    result = await restore_coverage_model_dependencies(
+        preparation, raw, cohort_sha256=cohort_sha256
+    )
     after = await run_owned_thread(model_metadata_seal, value)
     if after != before:
         raise CoverageModelDependencyRepairRequired("coverage dependencies changed during refresh")

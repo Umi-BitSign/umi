@@ -17,10 +17,16 @@ from pathlib import Path
 from .competition_reward_adoption import (
     RewardAdoptionSelection,
     SignedRewardModelAdoption,
+    select_signed_activation_age_revision,
     select_signed_initial_reward_adoption,
 )
 from .competition_reward_boot import StandingRewardBootConfig
 from .competition_reward_coordinator_boot import RewardCoordinatorConfig
+from .competition_reward_decisions import RewardControlDecision
+from .competition_reward_opportunity import (
+    check_early_release_boundary,
+    select_signed_early_release_revision,
+)
 from .protocol import canonical_json_bytes
 
 WRITER_SUPPLEMENTAL_MODE = 0o444
@@ -61,6 +67,7 @@ def prepare_reward_adoption_boot_candidates(
     package_delivery_current_boot_raw: bytes | None = None,
     package_delivery_current_boot_path: str | None = None,
     coordinator_candidate_path: str | None = None,
+    early_release_predecessor: RewardControlDecision | None = None,
 ) -> RewardAdoptionBootCandidates:
     """Extend native reward boots and optional publisher pointer with one adoption.
 
@@ -133,12 +140,68 @@ def prepare_reward_adoption_boot_candidates(
             raise ValueError("reference publisher current boot path differs from config")
         if not Path(coordinator_candidate_path).is_absolute():
             raise ValueError("reference publisher target must be an absolute boot path")
-    selected = select_signed_initial_reward_adoption(
-        coordinator.reward_adoptions,
-        signed,
-        series=coordinator.series,
-        policy=coordinator.policy,
+    latest = (
+        None if coordinator.reward_adoptions is None
+        else coordinator.reward_adoptions.latest(signed.adoption.cohort_sha256)
     )
+    age_revision = (
+        latest is not None
+        and signed.adoption.revision > 1
+        and signed.adoption.activation_age is not None
+        and latest.adoption.activation_age is None
+        and signed.adoption.early_release == latest.adoption.early_release
+    ) or (
+        latest == signed and signed.adoption.activation_age is not None
+    )
+    if signed.adoption.early_release is None:
+        if early_release_predecessor is not None:
+            raise ValueError("ordinary adoption cannot supply an early release predecessor")
+        selector = (
+            select_signed_activation_age_revision
+            if age_revision
+            else select_signed_initial_reward_adoption
+        )
+        selected = selector(
+            coordinator.reward_adoptions, signed,
+            series=coordinator.series, policy=coordinator.policy,
+        )
+    else:
+        if early_release_predecessor is None:
+            raise ValueError("early release handoff requires its signed predecessor")
+        if signed.adoption.revision == 1:
+            selected = select_signed_initial_reward_adoption(
+                coordinator.reward_adoptions,
+                signed,
+                series=coordinator.series,
+                policy=coordinator.policy,
+            )
+            check_early_release_boundary(
+                signed.adoption,
+                series=coordinator.series,
+                manifest=coordinator.manifest,
+                predecessor=early_release_predecessor,
+            )
+        else:
+            if age_revision:
+                check_early_release_boundary(
+                    signed.adoption,
+                    series=coordinator.series,
+                    manifest=coordinator.manifest,
+                    predecessor=early_release_predecessor,
+                )
+                selected = select_signed_activation_age_revision(
+                    coordinator.reward_adoptions, signed,
+                    series=coordinator.series, policy=coordinator.policy,
+                )
+            else:
+                selected = select_signed_early_release_revision(
+                    coordinator.reward_adoptions,
+                    signed,
+                    series=coordinator.series,
+                    policy=coordinator.policy,
+                    manifest=coordinator.manifest,
+                    predecessor=early_release_predecessor,
+                )
     publisher_candidate = None
     if reference_config is not None:
         value = json.loads(reference_publisher_config_raw)

@@ -14,7 +14,11 @@ from pathlib import Path
 
 from .competition_chain_state import _cache_usage
 from .competition_reward_control import validate_owned_reward_control
-from .competition_reward_control_archive import HistoricalRewardControlProvider
+from .competition_reward_control_archive import (
+    HistoricalRewardControlProvider,
+    OwnedHistoricalRewardControl,
+    validate_historical_reward_control,
+)
 from .competition_reward_control_evidence import _Archive
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
@@ -24,6 +28,55 @@ from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, metadata_completion
 from .concurrency import run_owned_thread
 from .open_competition import digest
+
+
+def activation_age_from_owned_control(
+    provider: HistoricalRewardControlProvider,
+    *,
+    series,
+    plan,
+    observation,
+    start: OwnedHistoricalRewardControl,
+) -> RewardActivationAge:
+    """Use an already proved native start observation without replaying its proof.
+
+    ``capture_control_at`` and ``review_control`` issue the owned timestamp
+    with the storage proof. This pure conversion retains those exact facts for
+    the quorum-signed adoption; it grants no signing or publication authority.
+    """
+    if not isinstance(provider, HistoricalRewardControlProvider):
+        raise ValueError("activation age requires an owned historical provider")
+    config_sha = digest(provider.config)
+    validate_owned_reward_control(
+        observation,
+        expected_control_hotkey=series.control_hotkey,
+        expected_chain_config_sha256=config_sha,
+    )
+    validate_historical_reward_control(
+        start,
+        expected_control_hotkey=series.control_hotkey,
+        expected_chain_config_sha256=config_sha,
+    )
+    if (
+        digest(plan) not in {digest(item) for item in series.cohorts}
+        or start._runtime_context is None
+        or start._runtime_context.owner is not provider
+        or start.snapshot.block_number != plan.not_before_block
+        or observation.snapshot.block_number < start.snapshot.block_number
+    ):
+        raise ValueError("activation age start differs from the selected native owner")
+    return RewardActivationAge(
+        schema="umi-reward-activation-age/1",
+        rule="skip_activation_delay_if_older_than_three_days",
+        cohort_start_block=start.snapshot.block_number,
+        cohort_start_hash=start.snapshot.block_hash.removeprefix("0x"),
+        cohort_start_timestamp_ms=start.timestamp_ms,
+        start_evidence_sha256=start.evidence_sha256,
+        observed_at_block=observation.snapshot.block_number,
+        observed_block_hash=observation.snapshot.block_hash.removeprefix("0x"),
+        observed_timestamp_ms=observation.timestamp_ms,
+        observation_evidence_sha256=observation.evidence_sha256,
+    )
 
 
 async def review_activation_age(

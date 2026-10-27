@@ -27,6 +27,7 @@ from .competition_reward_decisions import (
     SignedRewardControlDecision,
     StandingRewardControlReader,
     effective_activation_decision,
+    original_activation_decision,
     verify_reward_decision_proposal,
 )
 from .competition_reward_files import StandingRewardFiles
@@ -37,7 +38,10 @@ from .competition_reward_handoff_models import (
 )
 from .competition_reward_history import RewardControlHistoryReader
 from .competition_reward_manifest import StandingRewardOpportunityManifest, verify_reward_manifest
-from .competition_reward_opportunity import VerifiedRewardOpportunity
+from .competition_reward_opportunity import (
+    VerifiedRewardOpportunity,
+    verify_signed_early_release,
+)
 from .competition_reward_revision import (
     NativeRewardRevisionReviewer,
     RewardEconomicsLocked,
@@ -197,7 +201,22 @@ class StandingRewardDecisionReviewer:
                 )
                 if selected.selection.decision_sha256 != body.predecessor_sha256:
                     raise ValueError("reward opportunity does not extend the proved predecessor")
-                opportunity = await self.opportunity(body.activation)
+                original = original_activation_decision(prefix, body.activation.cohort_sha256)
+                prior = effective_activation_decision(
+                    prefix,
+                    digest(p.reader.series.cohorts[index - 1]),
+                    through_sequence=None if original is None else original.sequence - 1,
+                )
+                if prior is None or not verify_signed_early_release(
+                    p.reader.reward_adoptions,
+                    series=p.reader.series,
+                    policy=p.reader.policy,
+                    manifest=p.manifest,
+                    predecessor=prior,
+                    successor=body.activation,
+                    current_block=height,
+                ):
+                    opportunity = await self.opportunity(body.activation)
         return await self._review_package(
             body, prefix, control, history, opportunity, revision_clearance, live_lock
         )
@@ -356,7 +375,10 @@ class StandingRewardCoordinator:
             raise ValueError("suspended revision lost its selected successor adoption")
         if self._revision_target is None:
             control = await self.reviewer.provider.collect_control(reader.series.control_hotkey)
-            self._revision_target = await owner.target(prefix[-1].decision, control)
+            original = original_activation_decision(prefix, old.activation.cohort_sha256)
+            self._revision_target = await owner.target(
+                prefix[-1].decision, control, original=original
+            )
         height = self._revision_target
         try:
             history = await self.reviewer.history.verified_prefix(height)

@@ -1571,6 +1571,73 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     assert offer.package_sha256 == digest(package)
     assert offer.prior_opportunity_sha256 == (digest(certificate) if successor else digest(handoff))
     assert files.package(offer.package_sha256) == package
+    if predecessor_revision == 1:
+        from umi.competition_reward_adoption import RewardEarlyRelease
+
+        release = RewardEarlyRelease(
+            schema="umi-reward-early-release/1",
+            predecessor_decision_sha256=digest(prefix[-1].decision),
+            predecessor_activation_sha256=digest(prior),
+            successor_cohort_sha256=cohort,
+            successor_package_sha256=digest(package),
+            manifest_sha256=digest(manifest),
+            reason="Operator authorizes this certified package before opportunity completion",
+        )
+        parameters = GeometricRewardParameters(
+            band_width_bps=250,
+            band_decay_bps=7500,
+            within_band_decay_bps=7500,
+            score_duplicate_tolerance_bps=1,
+        )
+        successor_adoption = RewardModelAdoption(
+            schema="umi-standing-model-reward-adoption/5",
+            series_sha256=digest(series),
+            policy_sha256=digest(policy),
+            cohort_sha256=cohort,
+            authority_sha256=digest(body),
+            package_sha256=digest(package),
+            allocation_sha256=digest(package.allocation),
+            service_certificate_sha256=digest(package.service),
+            quality_manifest_sha256=digest(package.benchmark),
+            effective_allocation_sha256="a5" * 32,
+            parameters=parameters,
+            revision=1,
+            predecessor_adoption_sha256=None,
+            issued_at_block=body.issued_at_block + 6,
+            lifetime="until_first_verified_live_reward_then_locked",
+            early_release=release,
+        )
+        early_selection = RewardAdoptionSelection(
+            schema="umi-standing-reward-adoption-selection/1",
+            adoptions=tuple(
+                sorted(
+                    (
+                        *reward_adoptions.adoptions,
+                        SignedRewardModelAdoption(
+                            adoption=successor_adoption,
+                            signatures=signatures(successor_adoption),
+                        ),
+                    ),
+                    key=lambda item: (item.adoption.cohort_sha256, item.adoption.revision),
+                )
+            ),
+        )
+        empty_coverage = RewardCoverageJournal(
+            tmp_path / "early-offer-empty-coverage", rule, expected_rule_sha256=digest(rule)
+        )
+        early_offers = StandingRewardOffers(
+            series=series,
+            policy=policy,
+            manifest=manifest,
+            handoff=handoff,
+            settlements=settlements,
+            files=files,
+            coverage=empty_coverage,
+            reward_adoptions=early_selection,
+        )
+        early_offer = early_offers(cohort, prefix)
+        assert early_offer.prior_opportunity_sha256 == digest(release)
+        assert early_offer.package_sha256 == digest(package)
     # Restarted discovery and first downstream preparation reuse the verified
     # source/replica binding; neither parses the package nor transfers it again.
     with monkeypatch.context() as warm:
