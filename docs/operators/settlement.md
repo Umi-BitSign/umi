@@ -1140,23 +1140,25 @@ sources, counters and fences. Its newly captured tail can use direct R2 aliases
 without deleting or resetting any protected prefix state. Qualify actual retained
 artifacts, restart, repair and every consuming runtime before selecting this path.
 
-Selected R2 proof publication sends independent codec objects through at most four
+Selected R2 proof publication sends independent codec objects through at most eight
 owned HTTP workers. Aggregate active publication bytes stay within the existing
 maximum proof-object budget; a maximum supported object waits for admission and
 remains supported. Receipt mutations and same-key publication are serialized.
 Recipes and frames are published only after every child object has a durable
 receipt. A failed graph drains its workers and keeps successful receipts for the
 unchanged retry. Existing frame bytes, signed transport selections and timeout
-budgets are preserved. Qualify sustained native export throughput and the complete
-consumer upgrade/adoption path before selecting this transport for live capture.
+budgets are preserved. Proof graph progress reports both transferred bytes and
+completed objects, with a scoped ETA. Measure sustained export throughput on the
+selected owner before claiming that additional upload lanes improve production.
 
 New R2 source captures and fresh archive frames use one bounded byte object per
 ordinary evidence chunk. This uses the existing `/1` literal recipe; original
 expanded hashes and decoder limits stay unchanged. Local captures keep their
 deduplicated encoding. Existing chunks and frames retain their exact prior
 recipes, including interrupted captures and decoder-valid legacy encodings.
-Compact copying batches missing objects through the same bounded workers and
-reuses intact durable object receipts without fetching unchanged source payloads.
+Compact copying batches missing objects within the same proof-object byte bound
+through those workers. It reuses intact durable object receipts without fetching
+unchanged source payloads.
 
 Freshly published bytes may stay in the configured in-memory cache for the next
 consumer. Active pins and the existing aggregate cache budget still apply; cache

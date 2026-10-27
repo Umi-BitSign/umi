@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from .protocol import canonical_json_bytes
 
 MAX_EVIDENCE_BYTES = 32 * 1024**2
+MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
 MAX_METADATA_BYTES = 16 * 1024**2
 MAX_RECIPE_BYTES = 4 * 1024**2
 MAX_SEGMENTS = 32768

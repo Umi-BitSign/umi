@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
-from .competition_evidence_codec import MAX_EVIDENCE_BYTES, checked_digest
+from .competition_evidence_codec import MAX_PROOF_OBJECT_BYTES, checked_digest
 from .competition_remote_proof_generation import install_generation, validate_generation
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
@@ -28,7 +28,6 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
-MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
 PROOF_PUBLICATION_WORKERS = 8
 
 
@@ -619,12 +618,15 @@ class RemoteProofStore:
                                 "encoded proof object differs from its content identity"
                             )
                         progress.advance(len(raw), restored=restored)
+                        progress.advance_operations(1, restored=restored)
             except BaseException:
                 stop.set()
                 raise
 
         with TransferProgress(
-            "proof_graph_replication", sum(len(raw) for raw in objects.values())
+            "proof_graph_replication",
+            sum(len(raw) for raw in objects.values()),
+            total_operations=len(objects),
         ) as progress:
             if len(lanes) == 1:
                 publish_lane(lanes[0])
