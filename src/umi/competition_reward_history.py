@@ -76,6 +76,7 @@ from .competition_reward_history_workers import HistoryVerificationProfile
 from .competition_reward_proof_archive import RewardProofArchive, history_archive_key
 from .competition_reward_write_archive import review_control_writes
 from .competition_round_journal import RoundJournal
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .historical_header_recovery import HistoricalHeaderRecoveryProgress
 from .open_competition import digest
@@ -623,11 +624,18 @@ class RewardControlHistoryReader:
             else:
                 if context != self._archive_context(height):
                     raise ValueError("imported history changes its requested domain")
-        observation = (
-            await capture_control_writes(provider, self.hotkey, height)
-            if saved is None
-            else await review_control_writes(provider, **saved)
-        )
+        # Separate native await wall time from field restoration, source
+        # persistence and export. The pipeline's existing progress clock still
+        # measures its complete throughput, including these other stages.
+        with TransferProgress(
+            "history_native_verification", 1, unit="blocks", planning_unit_seconds=(0.01, 300)
+        ) as progress:
+            observation = (
+                await capture_control_writes(provider, self.hotkey, height)
+                if saved is None
+                else await review_control_writes(provider, **saved)
+            )
+            progress.advance(1)
         return observation, retained
 
     def _start_preparation(self, provider, height):

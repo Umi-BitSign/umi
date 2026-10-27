@@ -975,6 +975,23 @@ owns its checkpoint through persistence. Application remains in block order, and
 failure or cancellation drains started work before releasing the history owner.
 The overlap does not change proof formats, signed clocks or completed receipts.
 
+Proof export batches independent objects and their original recipes across fields,
+within the existing byte bound and a 256-object batch limit. The immutable frame
+is published only after every dependency has a durable receipt. Unchanged restored
+graphs check their receipt and damage records in bounded fresh snapshots without
+creating upload workers or contacting R2. Missing or damaged completed records
+still require explicit repair; transport completion never substitutes for native
+proof acceptance.
+
+Use `proof_archive_export` progress for complete per-frame export wall time and
+`history_native_verification` for serial native verification wall time. Parallel
+owners report `history_native_worker_wait`, which includes worker queue/wait time
+and excludes subsequent source/checkpoint persistence. Restoring a completed
+native checkpoint emits no native verification scope. `proof_graph_receipt_lookup`
+separately identifies retained-receipt work. Concurrent scopes overlap: do not sum
+their elapsed times or interpret replication scope time as pure network latency.
+The existing history pipeline rate remains the basis for measured catch-up ETA.
+
 The parent authenticates each child header against its owned finalized chain.
 Each bounded retained-proof window obtains one verified finalized head and reuses
 it only for the historical headers in that window. Every header still requires

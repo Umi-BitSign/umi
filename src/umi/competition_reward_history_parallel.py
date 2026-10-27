@@ -16,6 +16,7 @@ from .competition_reward_history_workers import (
     HistoryWorkerSelection,
 )
 from .competition_reward_proof_archive import history_archive_key
+from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .host_memory_runtime import compact_memory_error, history_memory_window
 
@@ -58,8 +59,14 @@ async def _persist(reader, pool, future, fields, retained):
     # This owned task is never cancelled by a caller. It spans the independent
     # native check and durable result, including successful later heights when
     # a predecessor fails, export fails or shutdown is requested.
-    await asyncio.wait((future,))
-    result = pool.result(future)
+    # This is the owner's native worker wait, including worker queue time,
+    # not a CPU-time measurement. Source/checkpoint persistence follows it.
+    with TransferProgress(
+        "history_native_worker_wait", 1, unit="blocks", planning_unit_seconds=(0.01, 300)
+    ) as progress:
+        await asyncio.wait((future,))
+        result = pool.result(future)
+        progress.advance(1)
     height = result.snapshot.block_number
     save_error = None
     if not retained:

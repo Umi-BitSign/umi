@@ -419,6 +419,15 @@ class RemoteProofStore:
         with self.reference_snapshot() as validate:
             return validate(value)
 
+    def _require_undamaged(self, reference, db, damage_db):
+        owner = self.receipt_source or self.journal
+        key = self._damage_key(reference)
+        if owner.get("remote_proof_damage", key, db=db) is not None or (
+            self.receipt_source is not None
+            and self.journal.get("remote_proof_damage", key, db=damage_db) is not None
+        ):
+            raise ValueError("remote proof requires explicit original-generation repair")
+
     @contextmanager
     def reference_snapshot(self):
         """Check at most 256 references in fresh, bounded receipt snapshots.
@@ -453,12 +462,7 @@ class RemoteProofStore:
                     )
                 if self._retained_snapshot(reference.key, db) != reference:
                     raise ValueError("remote proof replication receipt is missing or damaged")
-                key = self._damage_key(reference)
-                if owner.get("remote_proof_damage", key, db=db) is not None or (
-                    self.receipt_source is not None
-                    and self.journal.get("remote_proof_damage", key, db=damage_db) is not None
-                ):
-                    raise ValueError("remote proof requires explicit original-generation repair")
+                self._require_undamaged(reference, db, damage_db)
                 return reference
 
             try:
@@ -603,12 +607,12 @@ class RemoteProofStore:
         """
         if not objects:
             return
-        lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(objects)))]
-        for number, (sha, raw) in enumerate(objects.items()):
+        if self.config.read_only:
+            raise ValueError("selected proof archive is read-only")
+        for sha, raw in objects.items():
             checked_digest(sha)
             if type(raw) is not bytes or not 0 < len(raw) <= MAX_PROOF_OBJECT_BYTES:
                 raise ValueError("remote proof object exceeds its original byte bound")
-            lanes[number % len(lanes)].append((sha, raw))
         stop = Event()
 
         def publish_lane(lane):
@@ -633,6 +637,16 @@ class RemoteProofStore:
             sum(len(raw) for raw in objects.values()),
             total_operations=len(objects),
         ) as progress:
+            # A warm graph must not create a thread and two fresh journal
+            # transactions for every already completed object. Check immutable
+            # receipts and damage holds once in bounded fresh snapshots, then
+            # send only unfinished objects to the ordinary publication workers.
+            pending = self._pending_publications(objects, progress)
+            if not pending:
+                return
+            lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(pending)))]
+            for number, item in enumerate(pending):
+                lanes[number % len(lanes)].append(item)
             if len(lanes) == 1:
                 publish_lane(lanes[0])
                 return
@@ -642,6 +656,54 @@ class RemoteProofStore:
                 futures = [pool.submit(publish_lane, lane) for lane in lanes]
                 for future in futures:
                     future.result()
+
+    def _pending_publications(self, objects, progress):
+        owner = self.receipt_source or self.journal
+        pending, batch = [], []
+
+        def inspect_batch():
+            restored_bytes = restored_count = 0
+            with (
+                self._lock,
+                owner.read_transaction() as db,
+                (
+                    self.journal.read_transaction()
+                    if self.receipt_source is not None
+                    else nullcontext(db)
+                ) as damage_db,
+            ):
+                for sha, raw in batch:
+                    reference = self._retained_snapshot(self._key("objects/" + sha), db)
+                    if reference is None:
+                        pending.append((sha, raw))
+                        continue
+                    self._require_undamaged(reference, db, damage_db)
+                    if (reference.content_sha256, reference.size_bytes) != (sha, len(raw)) or (
+                        hashlib.sha256(raw).hexdigest() != sha
+                    ):
+                        raise ValueError("encoded proof object differs from its content identity")
+                    restored_bytes += len(raw)
+                    restored_count += 1
+            if restored_count:
+                progress.advance(restored_bytes, restored=True)
+                progress.advance_operations(restored_count, restored=True)
+
+        with TransferProgress(
+            "proof_graph_receipt_lookup",
+            len(objects),
+            unit="objects",
+            planning_unit_seconds=(0.00001, 0.01),
+        ) as lookup:
+            for item in objects.items():
+                batch.append(item)
+                if len(batch) == 256:
+                    inspect_batch()
+                    lookup.advance(len(batch))
+                    batch.clear()
+            if batch:
+                inspect_batch()
+                lookup.advance(len(batch))
+        return pending
 
     def _space(self, required: int) -> None:
         for sha in tuple(self._cache):
