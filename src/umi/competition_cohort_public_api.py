@@ -34,6 +34,7 @@ _ID = r"^[0-9a-f]{64}$"
 
 class CohortPublicApiConfig(StrictProtocolModel):
     results: PublicResultsDirectory
+    model_score_corrections: dict[Hex32, Hex32] = Field(default_factory=dict)
     r2_credential_path: str | None = None
     r2_bucket: str = "umi-model-artifacts"
     url_expiry_seconds: Annotated[int, Field(ge=60, le=604800)] = 3600
@@ -191,7 +192,9 @@ def cohort_public_routes(
     root, router = Path(config.results.directory), APIRouter()
     slots = asyncio.Semaphore(config.maximum_concurrent_reads)
     model_scores = model_scores or PublicModelScoreCache(
-        root, maximum_bytes=config.maximum_artifact_bytes
+        root,
+        maximum_bytes=config.maximum_artifact_bytes,
+        corrections=config.model_score_corrections,
     )
 
     def load(cohort):
@@ -423,7 +426,9 @@ def cohort_public_routes(
 
 def create_cohort_public_app(config: CohortPublicApiConfig, *, signer: R2SigV4 | None = None):
     scores = PublicModelScoreCache(
-        config.results.directory, maximum_bytes=config.maximum_artifact_bytes
+        config.results.directory,
+        maximum_bytes=config.maximum_artifact_bytes,
+        corrections=config.model_score_corrections,
     )
 
     @asynccontextmanager

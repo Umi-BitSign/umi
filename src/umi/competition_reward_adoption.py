@@ -14,6 +14,11 @@ from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_recovery import Block, verify_recovery_quorum
 from .competition_cohort_reward_allocation import derive_effective_reward_allocation
+from .competition_cohort_score_correction import (
+    ModelScoreCorrectionEvidence,
+    SignedModelScoreCorrection,
+    verify_signed_score_correction,
+)
 from .competition_geometric_rewards import GeometricRewardParameters
 from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_timing import RewardActivationAge
@@ -30,6 +35,7 @@ class RewardModelAdoption(StrictProtocolModel):
         "umi-standing-model-reward-adoption/1",
         "umi-standing-model-reward-adoption/2",
         "umi-standing-model-reward-adoption/3",
+        "umi-standing-model-reward-adoption/4",
     ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
@@ -49,6 +55,8 @@ class RewardModelAdoption(StrictProtocolModel):
 
     activation_age: RewardActivationAge | None = None
     bootstrap_predecessor: BootstrapRewardPredecessor | None = None
+    score_correction_evidence: ModelScoreCorrectionEvidence | None = None
+    signed_score_correction: SignedModelScoreCorrection | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_adoption(self, handler):
@@ -57,17 +65,39 @@ class RewardModelAdoption(StrictProtocolModel):
             value.pop("activation_age", None)
         if self.bootstrap_predecessor is None:
             value.pop("bootstrap_predecessor", None)
+        if self.score_correction_evidence is None:
+            value.pop("score_correction_evidence", None)
+        if self.signed_score_correction is None:
+            value.pop("signed_score_correction", None)
         return value
 
     @model_validator(mode="after")
     def lineage(self):
         bootstrap = self.schema_ == "umi-standing-model-reward-adoption/3"
+        correction = self.schema_ == "umi-standing-model-reward-adoption/4"
         if bootstrap != (self.bootstrap_predecessor is not None):
             raise ValueError("bootstrap admission requires an explicit versioned adoption")
-        if not bootstrap and (self.schema_ == "umi-standing-model-reward-adoption/2") != (
-            self.activation_age is not None
+        if correction != (
+            self.score_correction_evidence is not None
+            and self.signed_score_correction is not None
+        ) or (self.score_correction_evidence is None) != (
+            self.signed_score_correction is None
         ):
+            raise ValueError("score correction requires complete versioned evidence")
+        if not bootstrap and not correction and (
+            self.schema_ == "umi-standing-model-reward-adoption/2"
+        ) != (self.activation_age is not None):
             raise ValueError("reward timing requires an explicit versioned adoption")
+        if correction and (
+            self.score_correction_evidence.cohort_sha256 != self.cohort_sha256
+            or self.score_correction_evidence.original_package_sha256 != self.package_sha256
+            or self.score_correction_evidence.original_allocation_sha256 != self.allocation_sha256
+            or self.score_correction_evidence.original_quality_manifest_sha256
+            != self.quality_manifest_sha256
+            or self.score_correction_evidence.parameters != self.parameters
+            or self.signed_score_correction.statement.issued_at_block > self.issued_at_block
+        ):
+            raise ValueError("score correction differs from adopted original evidence")
         if self.activation_age is not None and (
             self.activation_age.observed_at_block > self.issued_at_block
         ):
@@ -106,6 +136,8 @@ class RewardAdoptionSelection(StrictProtocolModel):
             "allocation_sha256",
             "service_certificate_sha256",
             "quality_manifest_sha256",
+            "score_correction_evidence",
+            "signed_score_correction",
         )
         for signed in self.adoptions:
             value = signed.adoption
@@ -161,6 +193,22 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
         # The original policy selects the independent quorum, not new economics.
         # This distinct forward contract is selected explicitly by every host.
         verify_recovery_quorum(body, signed.signatures, policy)
+        if body.signed_score_correction is not None:
+            statement = body.signed_score_correction.statement
+            evidence = body.score_correction_evidence
+            if (
+                statement.cohort_sha256 != body.cohort_sha256
+                or statement.policy_sha256 != body.policy_sha256
+                or statement.authority_sha256 != body.authority_sha256
+                or statement.original_package_sha256 != body.package_sha256
+                or statement.original_allocation_sha256 != body.allocation_sha256
+                or statement.original_package_bytes_sha256
+                != evidence.original_package_bytes_sha256
+                or statement.evidence_sha256 != digest(evidence)
+                or statement.corrected_allocation_sha256 != body.effective_allocation_sha256
+            ):
+                raise ValueError("adopted score correction differs from signed evidence")
+            verify_recovery_quorum(statement, body.signed_score_correction.signatures, policy)
     bootstrap_admission(value)
     return value
 
@@ -201,7 +249,15 @@ def initial_reward_boundary(series, selection):
 
 
 def verify_reward_adoption(
-    selection, sha, *, series, policy, activation=None, package=None, current_block=None
+    selection,
+    sha,
+    *,
+    series,
+    policy,
+    activation=None,
+    package=None,
+    current_block=None,
+    include_effective_allocation=False,
 ) -> RewardModelAdoption:
     selected = verify_adoption_selection(selection, series, policy)
     if selected is None:
@@ -227,13 +283,34 @@ def verify_reward_adoption(
         or package.policy_sha256 != body.policy_sha256
     ):
         raise ValueError("reward adoption changes the original certified package inputs")
-    if (
-        package is not None
-        and digest(derive_effective_reward_allocation(package, body.parameters))
-        != body.effective_allocation_sha256
-    ):
+    effective = (
+        None if package is None else derive_adopted_reward_allocation(package, body, policy)
+    )
+    if effective is not None and digest(effective) != body.effective_allocation_sha256:
         raise ValueError("reward adoption differs from deterministic effective allocation")
+    if include_effective_allocation:
+        if effective is None:
+            raise ValueError("effective reward allocation requires the original package")
+        return body, effective
     return body
+
+
+def derive_adopted_reward_allocation(package, adoption, policy):
+    """One allocation derivation for reviewer, coordinator and publisher."""
+    if adoption.signed_score_correction is None:
+        return derive_effective_reward_allocation(package, adoption.parameters)
+    evidence = adoption.score_correction_evidence
+    return verify_signed_score_correction(
+        adoption.signed_score_correction,
+        evidence=evidence,
+        original=package.allocation,
+        service=package.service,
+        original_package_bytes_sha256=evidence.original_package_bytes_sha256,
+        original_package_sha256=verified_package_digest(package),
+        authority_sha256=adoption.authority_sha256,
+        policy=policy,
+        current_block=adoption.issued_at_block,
+    )
 
 
 def effective_adoption_binding(activation) -> str:

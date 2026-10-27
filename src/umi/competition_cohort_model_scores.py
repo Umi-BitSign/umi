@@ -26,7 +26,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_coordinator import replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
@@ -37,6 +37,7 @@ from .competition_cohort_roster import RecoverableRosterEvidence
 from .competition_public_results import PublicQuality
 from .competition_public_results_directory import atomic_write, owned_directory, read_owned_file
 from .competition_public_results_publisher import publisher_lease, read_config_file
+from .competition_reward_adoption import RewardModelAdoption
 from .competition_verification_snapshot import _Checksummed
 from .competition_work_progress import WorkProgress
 from .concurrency import run_owned_thread
@@ -78,14 +79,21 @@ class PublicModelScore(StrictProtocolModel):
 
 
 class PublicModelScores(StrictProtocolModel):
-    schema_: Literal["umi-public-cohort-model-results/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-public-cohort-model-results/1", "umi-public-cohort-model-results/2"
+    ] = Field(alias="schema")
     cohort_sha256: Hex32
     round_sha256: Hex32
     policy_sha256: Hex32
     allocation_sha256: Hex32
     certified_history_tip_sha256: Hex32
     source_metadata_sha256: Hex32
-    certification: Literal["quorum_certified_native_allocation"]
+    certification: Literal[
+        "quorum_certified_native_allocation", "quorum_certified_score_correction"
+    ]
+    original_allocation_sha256: Hex32 | None = None
+    score_correction_statement_sha256: Hex32 | None = None
+    reward_adoption_sha256: Hex32 | None = None
     reward_activation: Literal["not_assessed_by_this_endpoint"] = "not_assessed_by_this_endpoint"
     raw_weight_scope: Literal["certified_cohort_all_tracks_per_hotkey"] = (
         "certified_cohort_all_tracks_per_hotkey"
@@ -96,8 +104,30 @@ class PublicModelScores(StrictProtocolModel):
     chain_submission_authorized: Literal[False] = False
     items: Annotated[tuple[PublicModelScore, ...], Field(max_length=512)]
 
+    @model_serializer(mode="wrap")
+    def preserve_original_publication(self, handler):
+        value = handler(self)
+        for key in (
+            "original_allocation_sha256",
+            "score_correction_statement_sha256",
+            "reward_adoption_sha256",
+        ):
+            if getattr(self, key) is None:
+                value.pop(key, None)
+        return value
+
     @model_validator(mode="after")
     def ranks(self):
+        corrected = self.schema_ == "umi-public-cohort-model-results/2"
+        if corrected != (self.certification == "quorum_certified_score_correction") or any(
+            (getattr(self, key) is not None) != corrected
+            for key in (
+                "original_allocation_sha256",
+                "score_correction_statement_sha256",
+                "reward_adoption_sha256",
+            )
+        ):
+            raise ValueError("public score correction needs an explicit signed source")
         keys = [r.submission_sha256 for r in self.items]
         if len(keys) != len(set(keys)):
             raise ValueError("public model scores repeat a submission")
@@ -132,6 +162,97 @@ class PublicModelScores(StrictProtocolModel):
                 ) != (f < baseline):
                     raise ValueError("public model reward status differs from baseline eligibility")
         return self
+
+
+def project_corrected_model_scores(original, adoption, corrected):
+    """Project one signed correction from retained public rows and allocation."""
+    original = PublicModelScores.model_validate_json(canonical_json_bytes(original))
+    adoption = RewardModelAdoption.model_validate_json(canonical_json_bytes(adoption))
+    corrected = CohortRewardAllocation.model_validate_json(canonical_json_bytes(corrected))
+    evidence = adoption.score_correction_evidence
+    statement = adoption.signed_score_correction.statement
+    if (
+        original.schema_ != "umi-public-cohort-model-results/1"
+        or adoption.schema_ != "umi-standing-model-reward-adoption/4"
+        or original.cohort_sha256 != adoption.cohort_sha256
+        or original.policy_sha256 != adoption.policy_sha256
+        or original.allocation_sha256 != adoption.allocation_sha256
+        or digest(corrected) != adoption.effective_allocation_sha256
+        or digest(corrected.model_award) != statement.corrected_model_award_sha256
+        or digest(evidence) != statement.evidence_sha256
+        or len(original.items) != len(evidence.rows)
+    ):
+        raise ValueError("public correction differs from signed native allocation")
+    rows = {row.submission_sha256: row for row in evidence.rows}
+    credits = {credit.submission_sha256 for credit in corrected.model_award.credits}
+    weights = {identity(row.hotkey): row.raw_weight for row in corrected.recipients}
+    changed = []
+    for item in original.items:
+        row = rows.pop(item.submission_sha256, None)
+        if row is None or (row.uid, row.model_sha256) != (item.uid, item.model_sha256):
+            raise ValueError("public correction changed a certified model identity")
+        aggregate = Fraction(int(row.aggregate.numerator), int(row.aggregate.denominator))
+        baseline = Fraction(
+            int(evidence.baseline_aggregate.numerator),
+            int(evidence.baseline_aggregate.denominator),
+        )
+        eligible = aggregate >= baseline
+        changed.append(
+            item.model_copy(
+                update={
+                    "aggregate": ModelScore.make(row.aggregate),
+                    "baseline_aggregate": ModelScore.make(evidence.baseline_aggregate),
+                    "baseline_eligible": eligible,
+                    "score_rank": None,
+                    "model_reward_status": "below_baseline"
+                    if not eligible
+                    else "selected_by_certified_rule"
+                    if item.submission_sha256 in credits
+                    else "not_selected_by_certified_rule",
+                    "certified_raw_weight_for_hotkey": weights.get(identity(item.hotkey), 0),
+                }
+            )
+        )
+    if rows:
+        raise ValueError("public correction has a model outside certified public roster")
+    scores = sorted(
+        (
+            Fraction(int(item.aggregate.numerator), int(item.aggregate.denominator))
+            for item in changed
+        ),
+        reverse=True,
+    )
+    changed = [
+        item.model_copy(
+            update={
+                "score_rank": scores.index(
+                    Fraction(int(item.aggregate.numerator), int(item.aggregate.denominator))
+                ) + 1
+            }
+        )
+        for item in changed
+    ]
+    changed.sort(key=lambda item: (item.score_rank, item.uid, item.submission_sha256))
+    return PublicModelScores(
+        schema="umi-public-cohort-model-results/2",
+        cohort_sha256=original.cohort_sha256,
+        round_sha256=original.round_sha256,
+        policy_sha256=original.policy_sha256,
+        allocation_sha256=digest(corrected),
+        original_allocation_sha256=original.allocation_sha256,
+        score_correction_statement_sha256=digest(statement),
+        reward_adoption_sha256=digest(adoption),
+        certified_history_tip_sha256=original.certified_history_tip_sha256,
+        source_metadata_sha256=digest(
+            {
+                "original_publication": digest(original),
+                "signed_statement": digest(statement),
+                "corrected_allocation": digest(corrected),
+            }
+        ),
+        certification="quorum_certified_score_correction",
+        items=tuple(changed),
+    )
 
 
 def _stamp(path):
@@ -529,9 +650,10 @@ class NativeModelScoresPublisher:
 class PublicModelScoreCache:
     """Background-only metadata reads; HTTP copies already checked public rows."""
 
-    def __init__(self, root, *, maximum_bytes=64 * 1024**2):
+    def __init__(self, root, *, maximum_bytes=64 * 1024**2, corrections=None):
         self.root, self.lock, self.cache = Path(root), RLock(), OrderedDict()
         self.maximum_bytes, self.failed = maximum_bytes, False
+        self.corrections = dict(corrections or {})
 
     def sample(self):
         owned_directory(self.root)
@@ -541,6 +663,9 @@ class PublicModelScoreCache:
                 self.failed = bool(self.cache)
             return
         owned_directory(directory)
+        corrected_directory = self.root / "model-results-corrections"
+        if self.corrections:
+            owned_directory(corrected_directory)
         paths = sorted(
             p for p in directory.iterdir() if p.suffix == ".json" and _ID.fullmatch(p.stem)
         )
@@ -549,6 +674,9 @@ class PublicModelScoreCache:
         current, size = {}, 0
         for path in paths:
             cohort = path.stem
+            expected_statement = self.corrections.get(cohort)
+            if expected_statement is not None:
+                path = corrected_directory / path.name
             stamp = None
             try:
                 stamp = tuple(_stamp(path))
@@ -563,7 +691,11 @@ class PublicModelScoreCache:
                 value = PublicModelScores.model_validate_json(
                     read_owned_file(path, MAX_PUBLIC_BYTES)
                 )
-                if value.cohort_sha256 != cohort or tuple(_stamp(path)) != stamp:
+                if (
+                    value.cohort_sha256 != cohort
+                    or value.score_correction_statement_sha256 != expected_statement
+                    or tuple(_stamp(path)) != stamp
+                ):
                     raise ValueError("public model score publication binding changed")
                 current[cohort] = (stamp, value.model_dump(mode="json", by_alias=True))
             except (OSError, ValueError):

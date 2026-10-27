@@ -13,7 +13,6 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_cohort_model_award import ModelArtifactVerifier
-from .competition_cohort_reward_allocation import derive_effective_reward_allocation
 from .competition_cohort_reward_package import (
     DEFAULT_PACKAGE_BYTES,
     CohortRewardPackage,
@@ -237,7 +236,7 @@ def review_reward_decision(
         if digest(allocation) != activation.allocation_sha256:
             raise ValueError("reward proposal allocation differs from native package replay")
         if activation.reward_adoption_sha256 is not None:
-            adoption = verify_reward_adoption(
+            verify_reward_adoption(
                 reader.reward_adoptions,
                 activation.reward_adoption_sha256,
                 series=series,
@@ -246,9 +245,6 @@ def review_reward_decision(
                 package=package,
                 current_block=decision.observed_at_block,
             )
-            effective = derive_effective_reward_allocation(package, adoption.parameters)
-            if digest(effective) != activation.effective_allocation_sha256:
-                raise ValueError("reward proposal differs from native effective allocation")
     intent = RewardDecisionIntent(
         schema="umi-reward-decision-intent/1",
         decision=decision,
