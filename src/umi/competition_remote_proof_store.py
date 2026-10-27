@@ -29,6 +29,7 @@ from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_conne
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 PROOF_PUBLICATION_WORKERS = 8
+MAX_ACTIVE_PROOF_PUBLICATION_BYTES = 2 * MAX_PROOF_OBJECT_BYTES
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
@@ -565,16 +566,20 @@ class RemoteProofStore:
 
     @contextmanager
     def _publication_slot(self, key, size, progress):
-        # The existing maximum object size also bounds aggregate active bytes.
-        # One maximum supported object always fits; admission waits, never drops it.
+        # Two maximum supported objects or eight ordinary smaller objects can
+        # share the bounded active-byte window. Admission waits, never drops.
         waited = False
         with self._publication_condition:
-            while (
-                key in self._publishing_keys
-                or len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS
-                or self._publishing_bytes + size > MAX_PROOF_OBJECT_BYTES
-            ):
-                progress.emit("waiting", reason="bounded_proof_publication_admission")
+            while True:
+                if key in self._publishing_keys:
+                    reason = "proof_publication_same_key_wait"
+                elif len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS:
+                    reason = "proof_publication_worker_limit_wait"
+                elif self._publishing_bytes + size > MAX_ACTIVE_PROOF_PUBLICATION_BYTES:
+                    reason = "proof_publication_byte_budget_wait"
+                else:
+                    break
+                progress.emit("waiting", reason=reason)
                 waited = True
                 self._publication_condition.wait(timeout=1)
             self._publishing_keys.add(key)

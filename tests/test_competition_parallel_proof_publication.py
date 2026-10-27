@@ -49,6 +49,24 @@ def test_independent_uploads_overlap_outside_the_receipt_lock(tmp_path):
     assert selected._publishing_keys == set() and selected._publishing_bytes == 0
 
 
+def test_two_maximum_objects_share_the_active_byte_window(tmp_path, monkeypatch):
+    class Server(EvidenceServer):
+        def __init__(self):
+            super().__init__()
+            self.barrier = Barrier(2)
+
+        def send(self, request):
+            if request.method == "PUT":
+                self.barrier.wait(timeout=3)
+            return super().send(request)
+
+    selected = store(tmp_path / "owner", Server())
+    monkeypatch.setattr(transport, "MAX_PROOF_OBJECT_BYTES", 10)
+    monkeypatch.setattr(transport, "MAX_ACTIVE_PROOF_PUBLICATION_BYTES", 20)
+    selected.put_many(objects(b"1234567890", b"abcdefghij"))
+    assert selected._publishing_keys == set() and selected._publishing_bytes == 0
+
+
 def test_each_lane_reuses_and_closes_its_own_http_client(tmp_path, monkeypatch, caplog):
     selected = store(tmp_path / "owner", EvidenceServer())
     original = selected.client._new_client
@@ -128,10 +146,11 @@ def test_aggregate_byte_admission_waits_and_still_admits_a_maximum_object(tmp_pa
 
     selected = store(tmp_path / "owner", Server())
     monkeypatch.setattr(transport, "MAX_PROOF_OBJECT_BYTES", 10)
+    monkeypatch.setattr(transport, "MAX_ACTIVE_PROOF_PUBLICATION_BYTES", 10)
     original = transport.TransferProgress.emit
 
     def observed(progress, state, *, reason=None):
-        if reason == "bounded_proof_publication_admission":
+        if reason == "proof_publication_byte_budget_wait":
             waiting.set()
         return original(progress, state, reason=reason)
 

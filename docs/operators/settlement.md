@@ -1141,9 +1141,11 @@ without deleting or resetting any protected prefix state. Qualify actual retaine
 artifacts, restart, repair and every consuming runtime before selecting this path.
 
 Selected R2 proof publication sends independent codec objects through at most eight
-owned HTTP workers. Aggregate active publication bytes stay within the existing
-maximum proof-object budget; a maximum supported object waits for admission and
-remains supported. Receipt mutations and same-key publication are serialized.
+owned HTTP workers. Aggregate active publication bytes are bounded at twice the
+maximum proof-object size, so two maximum objects or more ordinary chunks can
+use the lanes together. Admission reports whether it waits for the byte budget,
+the worker limit or the same key. Receipt mutations and same-key publication are
+serialized.
 Recipes and frames are published only after every child object has a durable
 receipt. A failed graph drains its workers and keeps successful receipts for the
 unchanged retry. Existing frame bytes, signed transport selections and timeout
