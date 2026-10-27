@@ -79,9 +79,9 @@ class PublicModelScore(StrictProtocolModel):
 
 
 class PublicModelScores(StrictProtocolModel):
-    schema_: Literal[
-        "umi-public-cohort-model-results/1", "umi-public-cohort-model-results/2"
-    ] = Field(alias="schema")
+    schema_: Literal["umi-public-cohort-model-results/1", "umi-public-cohort-model-results/2"] = (
+        Field(alias="schema")
+    )
     cohort_sha256: Hex32
     round_sha256: Hex32
     policy_sha256: Hex32
@@ -227,7 +227,8 @@ def project_corrected_model_scores(original, adoption, corrected):
             update={
                 "score_rank": scores.index(
                     Fraction(int(item.aggregate.numerator), int(item.aggregate.denominator))
-                ) + 1
+                )
+                + 1
             }
         )
         for item in changed

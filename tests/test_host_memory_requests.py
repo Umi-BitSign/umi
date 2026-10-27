@@ -604,10 +604,16 @@ async def test_cached_public_progress_remains_visible_during_request_stage(stage
     assert runtime.selected_memory() is None
 
 
-@pytest.mark.parametrize("method,suffix", [
-    ("POST", "/progress"), ("HEAD", "/progress"), ("GET", "/progress/"),
-    ("GET", "/history"), ("GET", "/progress/extra"),
-])
+@pytest.mark.parametrize(
+    "method,suffix",
+    [
+        ("POST", "/progress"),
+        ("HEAD", "/progress"),
+        ("GET", "/progress/"),
+        ("GET", "/history"),
+        ("GET", "/progress/extra"),
+    ],
+)
 async def test_request_stage_progress_exception_cannot_admit_other_work(stage, method, suffix):
     messages = []
 

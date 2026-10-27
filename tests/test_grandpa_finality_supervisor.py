@@ -272,12 +272,14 @@ def _port(
     storage_limits: GrandpaFinalitySupervisorLimits | None = None,
     scoring_digest: str = _POLICY_DIGEST,
     predecessor_digests: tuple[str, ...] = (),
+    predecessor_capacity: GrandpaFinalitySupervisorLimits | None = None,
 ) -> DurableGrandpaFinalityPort:
     return DurableGrandpaFinalityPort(
         observer=observer,
         state_path=tmp_path / state_name,
         scoring_policy_digest=scoring_digest,
         accepted_predecessor_policy_digests=predecessor_digests,
+        accepted_predecessor_capacity_limits=predecessor_capacity,
         chain_observation=chain_observation,
         finality_verifier_sha256=observer.expected_binary_sha256,
         initial_minimum_finalized_block=10,
@@ -782,6 +784,100 @@ def test_operational_storage_budget_preserves_retained_binding_and_limits_new_wo
         .accept_attestation(binding, second)
         .height
         == 11
+    )
+
+
+def test_explicit_capacity_growth_preserves_retained_finality_evidence(
+    tmp_path, observer, chain_observation
+):
+    old = GrandpaFinalitySupervisorLimits(
+        maximum_evidence_bytes=100_000,
+        maximum_total_evidence_bytes=1_000_000,
+        maximum_database_bytes=4_000_000,
+        maximum_records_per_process=2,
+    )
+    current = _port(tmp_path, observer, chain_observation, limits=old)
+    binding = current.next_run_binding()
+    first = _attestation(
+        observer,
+        binding,
+        block=_header(10, parent_hash="0x" + "11" * 32, seed=20),
+        sequence=0,
+        previous=None,
+    )
+    current.accept_attestation(binding, first)
+    before = current.persisted_head()
+    larger = replace(
+        old,
+        maximum_evidence_bytes=200_000,
+        maximum_total_evidence_bytes=2_000_000,
+        maximum_database_bytes=8_000_000,
+    )
+    with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
+        _port(tmp_path, observer, chain_observation, limits=larger)
+    adopted = _port(tmp_path, observer, chain_observation, limits=larger, predecessor_capacity=old)
+    assert adopted.persisted_head() == before
+    assert adopted._config_bytes() != current._config_bytes()
+    adopted.audit()
+    assert _port(tmp_path, observer, chain_observation, limits=larger).persisted_head() == before
+    with pytest.raises(GrandpaFinalityStoreConflict, match="store_binding_mismatch"):
+        _port(tmp_path, observer, chain_observation, limits=old)
+
+
+def test_capacity_rebind_rejects_unrelated_or_smaller_limits(tmp_path, observer, chain_observation):
+    old = GrandpaFinalitySupervisorLimits(maximum_records_per_process=2)
+    current = _port(tmp_path, observer, chain_observation, limits=old)
+    larger = replace(old, maximum_total_evidence_bytes=5 * 1024**3)
+    with pytest.raises(ValueError, match="only increase byte ceilings"):
+        _port(tmp_path, observer, chain_observation, limits=old, predecessor_capacity=larger)
+    unrelated = replace(old, maximum_records_per_process=1)
+    with pytest.raises(ValueError, match="only increase byte ceilings"):
+        _port(tmp_path, observer, chain_observation, limits=old, predecessor_capacity=unrelated)
+    assert current.persisted_head() is None
+
+
+def test_capacity_and_policy_successors_preserve_one_retained_store(
+    tmp_path, observer, chain_observation
+):
+    old = GrandpaFinalitySupervisorLimits(
+        maximum_evidence_bytes=100_000,
+        maximum_total_evidence_bytes=1_000_000,
+        maximum_database_bytes=4_000_000,
+        maximum_records_per_process=2,
+    )
+    first = _port(tmp_path, observer, chain_observation, limits=old)
+    binding = first.next_run_binding()
+    first.accept_attestation(
+        binding,
+        _attestation(
+            observer,
+            binding,
+            block=_header(10, parent_hash="0x" + "11" * 32, seed=20),
+            sequence=0,
+            previous=None,
+        ),
+    )
+    head = first.persisted_head()
+    larger = replace(old, maximum_total_evidence_bytes=2_000_000, maximum_database_bytes=8_000_000)
+    adopted = _port(
+        tmp_path,
+        observer,
+        chain_observation,
+        limits=larger,
+        predecessor_capacity=old,
+        scoring_digest="99" * 32,
+        predecessor_digests=(_POLICY_DIGEST,),
+    )
+    assert adopted.persisted_head() == head
+    assert (
+        _port(
+            tmp_path,
+            observer,
+            chain_observation,
+            limits=larger,
+            scoring_digest="99" * 32,
+        ).persisted_head()
+        == head
     )
 
 

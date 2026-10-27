@@ -29,8 +29,11 @@ endpoint or using its environment. See the connection guide for its commands,
 repeat-install behavior and retained release directories. Model-only track intent
 keeps its existing no-service-change behavior and does not install this client.
 
-`current.json` is the canonical profile for policy, transport, track and authority
-bindings. A matching live deployment can supply a newer compatible source
+`current.json` is the canonical endpoint-upgrade profile for its selected cohort;
+it currently names C5 for retained endpoint work. C7+ public-model participation
+uses the separate model client and each cohort's signed history. The catalog's
+effective profile fields follow signed cohort amendments automatically; the
+original mixed plan is retained for recovery. A matching live deployment can supply a newer compatible source
 revision. An explicit `runtime.deployment_revision` instead binds the exact
 maintenance `runtime.revision` to the existing live deployment. Policy or track
 changes require matching public records; future cohort rules are selected by the

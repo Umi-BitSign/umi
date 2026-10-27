@@ -69,6 +69,7 @@ from .competition_reward_history_frontier import (
     folded_checkpoint,
     remember_export_range,
 )
+from .competition_reward_history_local_delivery import HistoryLocalArchiveDelivery
 from .competition_reward_history_parallel import advance_parallel_locked
 from .competition_reward_history_progress import HistoryProgress
 from .competition_reward_history_workers import HistoryVerificationProfile
@@ -317,6 +318,7 @@ class RewardControlHistoryReader:
         self._folded_export_identity = None
         self._folded_export_ranges = {}
         self._archive_backfill = None
+        self._local_archive_delivery = None
         self._archive_export_progress_next = first_block
 
     @contextmanager
@@ -1291,6 +1293,46 @@ class RewardControlHistoryReader:
     async def _maintain_archive_backfill(self):
         archive = self.export_archive
         remote = None if archive is None else archive.remote
+        if (
+            archive is not None
+            and remote is None
+            and not self.journal.read_only
+            and self.progress.archive_delivery is not None
+        ):
+            delivery = self.progress.archive_delivery
+            if (
+                delivery.get("state") == "completed"
+                and delivery.get("through_block", -1) >= self._next - 1
+            ):
+                return
+            try:
+                async with self._lock:
+                    with self.journal.locked():
+                        archive._ensure_root()
+                        identity = self._export_identity()
+                        if (
+                            self._local_archive_delivery is None
+                            or self._local_archive_delivery.identity != identity
+                        ):
+                            self._local_archive_delivery = HistoryLocalArchiveDelivery(self)
+                        self.progress.archive_delivery = await self._local_archive_delivery.run(64)
+            except Exception as error:
+                self.progress.archive_delivery = dict(
+                    self.progress.archive_delivery or {},
+                    stage="history_archive_delivery_migration",
+                    state="repair_required"
+                    if isinstance(error, HistoryCheckpointRepairRequired)
+                    else "retrying",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    eta_seconds=None,
+                    planning_eta_seconds=None,
+                    eta_basis="withdrawn_archive_delivery_retry_or_repair",
+                    stalled=False,
+                    retrying=True,
+                )
+                self.progress.report(self, "running", force=True)
+            return
         if remote is None or remote.config.read_only or not archive.legacy_read_through:
             return
         config = remote.config

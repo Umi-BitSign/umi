@@ -80,6 +80,22 @@ def test_successor_adoption_requires_broad_continuous_sources(selection_case):
             "maximum_fingerspelling_dataset_share_bps": 7500,
         }
     )
+    with pytest.raises(ValueError, match="training-exclusion evidence"):
+        require_successor_suite_diversity(7, broader)
+    broader = broader.model_copy(
+        update={
+            "minimum_training_excluded_fingerspelling": 2,
+            "minimum_training_excluded_continuous": 2,
+        }
+    )
+    with pytest.raises(ValueError, match="training-exclusion evidence"):
+        require_successor_suite_diversity(7, broader)
+    broader = broader.model_copy(
+        update={
+            "minimum_training_excluded_fingerspelling": broader.fingerspelling,
+            "minimum_training_excluded_continuous": broader.continuous,
+        }
+    )
     require_successor_suite_diversity(7, broader)
     require_successor_suite_diversity(8, broader)
     with pytest.raises(ValueError, match="source cap"):

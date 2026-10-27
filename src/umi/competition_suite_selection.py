@@ -90,6 +90,8 @@ class FingerspellingCategoryMinimums(StrictProtocolModel):
 class SuiteSelectionCounts(StrictProtocolModel):
     fingerspelling: Annotated[int, Field(ge=1, le=1024)]
     continuous: Annotated[int, Field(ge=1, le=1024)]
+    minimum_training_excluded_fingerspelling: Annotated[int, Field(strict=True, ge=0, le=1024)] = 0
+    minimum_training_excluded_continuous: Annotated[int, Field(strict=True, ge=0, le=1024)] = 0
     minimum_fingerspelling_datasets: Annotated[int, Field(ge=1, le=1024)] = 1
     minimum_continuous_datasets: Annotated[int, Field(ge=1, le=1024)] = 2
     minimum_fingerspelling_signers: Annotated[int, Field(ge=0, le=1024)] = 2
@@ -109,6 +111,10 @@ class SuiteSelectionCounts(StrictProtocolModel):
     @model_serializer(mode="wrap")
     def preserve_legacy_counts(self, handler):
         value = handler(self)
+        if self.minimum_training_excluded_fingerspelling == 0:
+            value.pop("minimum_training_excluded_fingerspelling", None)
+        if self.minimum_training_excluded_continuous == 0:
+            value.pop("minimum_training_excluded_continuous", None)
         if self.fingerspelling_category_minimums is None:
             value.pop("fingerspelling_category_minimums", None)
         if self.maximum_fingerspelling_dataset_share_bps is None:
@@ -122,6 +128,8 @@ class SuiteSelectionCounts(StrictProtocolModel):
         if (
             self.minimum_fingerspelling_datasets > self.fingerspelling
             or self.minimum_continuous_datasets > self.continuous
+            or self.minimum_training_excluded_fingerspelling > self.fingerspelling
+            or self.minimum_training_excluded_continuous > self.continuous
             or self.fingerspelling + self.continuous > 2048
             or self.minimum_fingerspelling_signers > self.fingerspelling
             or self.minimum_continuous_signers > self.continuous
@@ -256,6 +264,8 @@ def select_future_suite(
     for task in ("fingerspelling", "continuous"):
         wanted = getattr(counts, task)
         minimum = getattr(counts, "minimum_" + task + "_datasets")
+        private_minimum = getattr(counts, "minimum_training_excluded_" + task)
+        private_selected = 0
         dataset_counts = Counter()
         signer_counts, topic_counts = Counter(), Counter()
         category_counts = Counter()
@@ -303,11 +313,20 @@ def select_future_suite(
                     for c, text, tokens in eligible
                     if not dataset_counts[c.dataset]
                 ]
+            private_deficit = max(0, private_minimum - private_selected)
+            if private_deficit and wanted - index == private_deficit:
+                eligible = [
+                    item
+                    for item in eligible
+                    if item[0].training_exposure == "documented_training_excluded"
+                ]
             if not eligible:
                 raise ValueError("future suite disjoint diversity constraints are not satisfied")
             candidate, texts, tokens = min(
                 eligible,
                 key=lambda item: (
+                    private_deficit > 0
+                    and item[0].training_exposure != "documented_training_excluded",
                     dataset_counts[item[0].dataset],
                     item[0].signer_group_sha256 is None,
                     signer_counts[item[0].signer_group_sha256],
@@ -318,6 +337,8 @@ def select_future_suite(
                 ),
             )
             selected.append(candidate)
+            if candidate.training_exposure == "documented_training_excluded":
+                private_selected += 1
             if candidate.fingerspelling_category is not None:
                 category_counts[candidate.fingerspelling_category] += 1
             dataset_counts[candidate.dataset] += 1
@@ -328,6 +349,8 @@ def select_future_suite(
                 topic_counts[candidate.topic] += 1
             used_groups.add(candidate.source_group_sha256)
             text_exclusions.add_metadata(texts, tokens)
+        if private_selected < private_minimum:
+            raise ValueError("future suite training-excluded diversity is not satisfied")
         if len(signer_counts) < getattr(counts, "minimum_" + task + "_signers") or (
             task == "continuous" and len(topic_counts) < counts.minimum_continuous_topics
         ):

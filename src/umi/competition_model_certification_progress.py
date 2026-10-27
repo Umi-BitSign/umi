@@ -51,10 +51,25 @@ class ModelCertificationProgress:
             regressed = done < prior["high"]
             remaining = total - done
             rate = delta / elapsed if delta > 0 and elapsed > 0 else None
+            idle = remaining > 0 and now - prior["last_progress"] > 300
             eta = (
                 0
                 if not remaining
-                else (remaining / rate if rate and not holds and not regressed else None)
+                else (
+                    remaining / rate if rate and not holds and not regressed and not idle else None
+                )
+            )
+            # A replacement roster has no comparable completion rate yet. Show
+            # an explicitly labeled planning range, then withdraw it if work
+            # stops advancing. The range uses prior completed acceptance-stage
+            # durations and never borrows a rate from the superseded roster.
+            planning = (
+                [
+                    max(0, 30 * remaining - elapsed),
+                    max(0, 1200 * remaining - elapsed),
+                ]
+                if remaining and eta is None and not holds and not regressed and not idle
+                else None
             )
             basis = (
                 "complete"
@@ -63,8 +78,12 @@ class ModelCertificationProgress:
                 if regressed
                 else "blocked_acceptance_stage"
                 if holds
+                else "certificate_completion_idle"
+                if idle
                 else "measured_current_roster_certificate_throughput"
                 if eta is not None
+                else "planning_30_to_1200_seconds_per_remaining_certificate"
+                if planning is not None
                 else "awaiting_current_roster_completion_samples"
             )
             result = dict(
@@ -76,6 +95,7 @@ class ModelCertificationProgress:
                 sample_certificates=max(0, delta),
                 certificates_per_second=rate,
                 eta_seconds=eta,
+                planning_eta_seconds=planning,
                 eta_basis=basis,
                 eta_scope=(
                     (
@@ -87,15 +107,13 @@ class ModelCertificationProgress:
                 ),
                 eta_assumptions=(
                     "remaining models have comparable cost; "
-                    "no unresolved holds or new roster replacements"
+                    "no unresolved holds, new roster replacements or cross-cohort queue wait"
                 ),
                 estimated_finish_unix_ms=None if eta is None else int((time.time() + eta) * 1000),
                 blocked_count=len(holds),
                 blocked=holds,
                 repair_required=regressed,
-                stalled_or_retrying=bool(holds)
-                or regressed
-                or (remaining > 0 and now - prior["last_progress"] > 300),
+                stalled_or_retrying=bool(holds) or regressed or idle,
                 rate_scope="this observer process and unchanged selected roster",
                 certification_authority=False,
             )

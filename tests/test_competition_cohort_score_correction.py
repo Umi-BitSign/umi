@@ -86,9 +86,7 @@ def case(policy):
 
 
 def signed(package, evidence, authority, policy):
-    corrected = derive_corrected_allocation(
-        package.allocation, package.service, evidence
-    )
+    corrected = derive_corrected_allocation(package.allocation, package.service, evidence)
     body = propose_score_correction(
         evidence=evidence,
         original=package.allocation,
@@ -143,9 +141,7 @@ def test_correction_rejects_changed_identity_and_wrong_quorum(policy):
         }
     )
     with pytest.raises(ValueError, match="certified model identity"):
-        derive_corrected_allocation(
-            package.allocation, package.service, wrong
-        )
+        derive_corrected_allocation(package.allocation, package.service, wrong)
     with pytest.raises(ValueError, match="original evidence"):
         verify_signed_score_correction(
             body,

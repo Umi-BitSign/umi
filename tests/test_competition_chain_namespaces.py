@@ -61,6 +61,128 @@ async def test_same_config_reuses_namespace_without_rebinding_public_config(chai
         await second.aclose()
 
 
+async def test_capacity_growth_moves_namespace_and_reuses_registration_cache(chain):
+    old = provider(chain)
+    old_path = old._path
+    await old.aclose()
+    config = chain.config.model_copy(
+        update={
+            "maximum_cache_bytes": chain.config.maximum_cache_bytes * 2,
+            "previous_maximum_cache_bytes": chain.config.maximum_cache_bytes,
+        }
+    )
+    expected = old_path.parent.parent / digest(
+        config.model_copy(update={"previous_maximum_cache_bytes": None})
+    )
+    grown = provider(chain, config=config)
+    try:
+        assert grown._path.parent == expected
+        assert not old_path.parent.exists()
+        assert grown._namespace_budget > chain.config.maximum_cache_bytes
+        assert (
+            json.loads((expected / "namespace-budget.json").read_bytes())["configuration_sha256"]
+            == expected.name
+        )
+    finally:
+        await grown.aclose()
+    repeated = provider(chain, config=config)
+    await repeated.aclose()
+    no_predecessor = provider(
+        chain, config=config.model_copy(update={"previous_maximum_cache_bytes": None})
+    )
+    try:
+        assert no_predecessor._path.parent == expected
+    finally:
+        await no_predecessor.aclose()
+
+
+async def test_fresh_successor_namespace_reopens_with_predecessor_declaration(chain):
+    config = chain.config.model_copy(
+        update={
+            "maximum_cache_bytes": chain.config.maximum_cache_bytes * 2,
+            "previous_maximum_cache_bytes": chain.config.maximum_cache_bytes,
+        }
+    )
+    first = provider(chain, config=config)
+    path = first._path
+    await first.aclose()
+    repeated = provider(chain, config=config)
+    try:
+        assert repeated._path == path
+    finally:
+        await repeated.aclose()
+
+
+@pytest.mark.parametrize("failed_step", ["rename", "replace"])
+async def test_capacity_growth_resumes_after_interrupted_namespace_step(
+    chain, monkeypatch, failed_step
+):
+    import umi.competition_chain_state as cache
+
+    old = provider(chain)
+    original = old._path.parent
+    await old.aclose()
+    config = chain.config.model_copy(
+        update={
+            "maximum_cache_bytes": chain.config.maximum_cache_bytes * 2,
+            "previous_maximum_cache_bytes": chain.config.maximum_cache_bytes,
+        }
+    )
+    operation = getattr(cache.os, failed_step)
+    calls = 0
+
+    def interrupt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated interrupted capacity migration")
+        return operation(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache.os, failed_step, interrupt)
+        with pytest.raises(OSError, match="simulated interrupted"):
+            provider(chain, config=config)
+    grown = provider(chain, config=config)
+    try:
+        assert grown._path.parent.exists()
+        assert not original.exists()
+        assert not (grown._path.parent / "namespace-budget.json.pending").exists()
+    finally:
+        await grown.aclose()
+
+
+async def test_capacity_growth_resumes_partial_owned_budget_write(chain, monkeypatch):
+    import umi.competition_chain_state as cache
+
+    old = provider(chain)
+    old_directory = old._path.parent
+    await old.aclose()
+    config = chain.config.model_copy(
+        update={
+            "maximum_cache_bytes": chain.config.maximum_cache_bytes * 2,
+            "previous_maximum_cache_bytes": chain.config.maximum_cache_bytes,
+        }
+    )
+
+    def interrupt(*args, **kwargs):
+        raise OSError("simulated stop after pending budget")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache.os, "rename", interrupt)
+        with pytest.raises(OSError, match="simulated stop"):
+            provider(chain, config=config)
+    pending = old_directory / "namespace-budget.json.pending"
+    raw = pending.read_bytes()
+    pending.chmod(0o600)
+    pending.write_bytes(raw[:25])
+    resumed = provider(chain, config=config)
+    try:
+        assert resumed._path.parent.exists()
+        assert not pending.exists()
+    finally:
+        await resumed.aclose()
+
+
 async def test_new_policy_uses_new_namespace_and_preserves_all_old_files(chain):
     first = provider(chain)
     path = first._path

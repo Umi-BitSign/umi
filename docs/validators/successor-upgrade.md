@@ -3305,6 +3305,11 @@ and resumes interrupted deletion after restart. It credits reservation capacity
 only after both payload directories are absent. Manifests, original signed
 requests, review evidence and journals remain. Missing or damaged completion
 records report repair; retirement does not initiate another model-byte pass.
+An upload absent from every authenticated remote preservation inventory waits
+with `preserved_model_selection_pending` before the owner decodes its original
+request or asks consumers for release. This includes incomplete legacy uploads;
+their original retry and expiry path remains responsible for them. Do not add a
+model to an inventory or remove its local bytes just to clear this status.
 Cached public progress exposes `storage_retirement`, with counted completion,
 retired allocated bytes, elapsed time, ETA basis and waiting status. The current
 model identity, operation and stable reason code identify consumer binding, remote

@@ -20,6 +20,7 @@ from .competition_cohort_participation import CohortAdmissionStatus, CohortParti
 from .competition_cohort_participation_status import participation_status
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import intake_readiness
+from .competition_cohort_recovery import cohort_service_pool, cohort_tracks
 from .competition_execution import ExecutionBoundary
 from .competition_store import AdmissionCapacityError
 from .concurrency import run_owned_thread
@@ -65,6 +66,27 @@ def cohort_routes(
                 history = await run_owned_thread(intake.history, cohort)
             except (ValueError, OSError, sqlite3.Error) as error:
                 raise HTTPException(503, "cohort history unavailable; retry later") from error
+            adoption = next(
+                (
+                    item.transition.model_delivery_adoption
+                    for item in reversed(history.transitions)
+                    if item.transition.model_delivery_adoption is not None
+                ),
+                None,
+            )
+            try:
+                effective_tracks = cohort_tracks(
+                    history.plan, ("endpoint", "model"), adoption=adoption
+                )
+                effective_service_pool = cohort_service_pool(
+                    history.plan,
+                    history.plan.service_pool_bps
+                    if history.plan.service_pool_bps is not None
+                    else intake.policy.endpoint_reward_bps,
+                    adoption=adoption,
+                )
+            except ValueError as error:
+                raise HTTPException(503, "cohort participation profile unavailable") from error
             model_route = {}
             if models is not None:
                 route = getattr(models, "delivery_route", None)
@@ -91,6 +113,11 @@ def cohort_routes(
                     "cohort_sha256": cohort,
                     "sequence": history.plan.sequence,
                     "recovery_tip_sha256": history_tip(history),
+                    "effective_eligible_tracks": effective_tracks,
+                    "effective_service_pool_bps": effective_service_pool,
+                    "profile_source": "signed_model_delivery_adoption"
+                    if adoption is not None
+                    else "signed_original_plan",
                     "history_url": f"/v1/competition/cohorts/{cohort}/history",
                     "participation_url": f"/v1/competition/cohorts/{cohort}/participation",
                     "admissions_url": f"/v1/competition/cohorts/{cohort}/admissions",

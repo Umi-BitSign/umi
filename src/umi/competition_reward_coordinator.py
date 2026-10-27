@@ -438,7 +438,10 @@ class StandingRewardCoordinator:
                 cohort = digest(p.series.cohorts[activated])
                 activation = await run_memory_thread(self.offers, cohort, prefix)
                 if activation is None:
-                    return RewardCoordinationProgress("allocation_pending", sequence)
+                    return RewardCoordinationProgress(
+                        getattr(self.offers, "pending_reason", None) or "allocation_pending",
+                        sequence,
+                    )
                 activation = RewardActivation.model_validate_json(canonical_json_bytes(activation))
                 if activation.cohort_sha256 != cohort:
                     raise ValueError("reward offer skips the next admitted cohort")

@@ -164,14 +164,9 @@ def derive_corrected_model_award(
     )
     evidence = ModelScoreCorrectionEvidence.model_validate_json(canonical_json_bytes(evidence))
     candidates = {item.submission_sha256: item for item in original.candidates}
-    receipts = {
-        item.acceptance.submission_sha256: item for item in original.acceptances
-    }
+    receipts = {item.acceptance.submission_sha256: item for item in original.acceptances}
     rows = {item.submission_sha256: item for item in evidence.rows}
-    if (
-        len(candidates) != len(original.candidates)
-        or len(receipts) != len(original.acceptances)
-    ):
+    if len(candidates) != len(original.candidates) or len(receipts) != len(original.acceptances):
         raise ValueError("correction roster differs from original certified acceptances")
     if set(candidates) != set(receipts) or set(candidates) != set(rows):
         raise ValueError("correction roster omits or adds an original model")

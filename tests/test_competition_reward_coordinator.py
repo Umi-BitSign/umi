@@ -140,6 +140,16 @@ async def test_restart_preserves_reviewed_intent_and_waits_for_delivery_before_c
         assert len(h.sends) == 1
         assert all(body == original for body in h.reviews[1:])
 
+        class WaitingForAdoption:
+            pending_reason = "reward_adoption_pending"
+
+            def __call__(self, _cohort, _prefix):
+                return None
+
+        h.coordinator.offers = WaitingForAdoption()
+        assert (await h.coordinator.step()).status == "reward_adoption_pending"
+        assert h.owner.journal.load(1) is None
+
 
 async def test_changed_offer_cannot_replace_reserved_original_or_skip_cohort(coordinator_case):
     h = coordinator_case

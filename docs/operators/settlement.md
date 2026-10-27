@@ -906,6 +906,20 @@ When adopting an existing cache with a changed allowance, set
 reader migrates only that matching configuration in place; other chain/proof
 bindings must still match. The predecessor field can be removed afterward.
 
+The reference publisher has a separate top-level `maximum_cache_bytes`
+override for its owned proof directory. To grow an existing publisher cache,
+stop and drain that service, set its top-level `previous_maximum_cache_bytes`
+to the exact old allowance, and raise its top-level `maximum_cache_bytes` within
+the host reserve. On startup, the owner moves its existing namespace, rebinds
+the retained registration and finality stores, and audits the finality store
+under the new limit. The namespace and registration steps report counted
+progress and planning ETAs. An interrupted start resumes the same files; it
+does not create a fresh proof history. Confirm a sustained advancing finalized
+head after selection. Retain the publisher's predecessor field while historical
+admission evidence still names its old chain configuration; removing it needs a
+separate qualified reader transition. A capacity increase reserves a ceiling;
+it does not preallocate that disk space.
+
 Each credential file uses the existing private R2 export format (`TOKEN_VALUE`,
 `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `DEFAULT_ENDPOINT`). Keep it outside mutable
 or replicated stores and separate from direct-model credentials. Provision
@@ -1817,6 +1831,18 @@ revision lineage, pending transactions and the finalized activation lock must
 be qualified across coordinator, reviewer, coverage and writer before cutover.
 Public status must identify the selected authority, cohort and adoption.
 
+The standing offer path holds C6 and later cohorts until they select the C5-style
+2.5-point band width, 0.75 decay between occupied bands and within each band,
+and one basis point duplicate tolerance. A matching native signed authority or
+a matching separately signed reward adoption satisfies this guard. The guard
+logs `reward_offer_waiting_for_c5_style_economics` once per cohort per process
+while an adoption is absent or has different parameters; it never constructs
+an original-rule activation for that cohort. Prepare and sign an adoption only
+after the original certified package exists, then select its complete lineage
+on the coordinator, reviewer and writer through their supported update paths.
+The guard itself grants no signing authority and does not change the original
+signed cohort history or scoring results.
+
 Select the complete signed adoption lineage in `reward_adoptions` on the
 coordinator, reviewers and standing writer. A successor consuming an adopted
 predecessor also selects that predecessor's lineage in
@@ -1824,6 +1850,22 @@ predecessor also selects that predecessor's lineage in
 predecessor's. Omitted fields preserve the original canonical startup bytes.
 Keep the original host approval, state directories and journal identities;
 the separately signed adoption is selected by the root-owned startup configuration.
+`prepare_reward_adoption_boot_candidates` takes the canonical coordinator and
+writer boot bytes, all current reviewer boot bytes, and one quorum-signed initial
+adoption. It rejects divergent signed lineages and returns matching candidate
+boots without opening the package or changing any service. Retain the returned writer supplemental bytes as an
+exact root-owned `0444` control and pin their raw SHA-256 in the native writer
+broker. The cooperative service handoff still has to select both candidate
+boots and verify their running readers before a reward offer is unblocked.
+When the reference publisher or native package delivery is configured, pass its
+current config and selected coordinator boot to the same candidate builder. It
+returns each config with only `coordinator_config` moved to the exact new boot
+path, and refuses a consumer on a different signed lineage. Install the
+candidate boot and consumer configs together, then restart those consumers and
+verify their selected bytes. Package delivery enumerates only cohorts present
+in that authenticated reward adoption selection; an unselected old package
+must remain outside the coordinator offer path. A candidate alone does not
+enable delivery or release a reward row.
 
 Reward adoption version 2 can carry `activation_age` with the rule
 `skip_activation_delay_if_older_than_three_days`. It binds native chain timestamps

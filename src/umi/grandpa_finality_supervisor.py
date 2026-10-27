@@ -315,6 +315,7 @@ class DurableGrandpaFinalityPort:
         initial_minimum_finalized_block: int,
         startup_timeout_seconds: int = 600,
         accepted_predecessor_policy_digests: tuple[str, ...] = (),
+        accepted_predecessor_capacity_limits: GrandpaFinalitySupervisorLimits | None = None,
         limits: GrandpaFinalitySupervisorLimits | None = None,
         storage_limits: GrandpaFinalitySupervisorLimits | None = None,
         busy_timeout_ms: int = 5_000,
@@ -323,6 +324,19 @@ class DurableGrandpaFinalityPort:
             raise TypeError("observer must be a GrandpaFinalityObserver")
         self._observer = observer
         self._limits = limits or GrandpaFinalitySupervisorLimits()
+        if accepted_predecessor_capacity_limits is not None:
+            if not isinstance(
+                accepted_predecessor_capacity_limits, GrandpaFinalitySupervisorLimits
+            ):
+                raise TypeError("predecessor capacity limits must be finality limits")
+            for name in self._limits.__dataclass_fields__:
+                previous, current = (
+                    getattr(accepted_predecessor_capacity_limits, name),
+                    getattr(self._limits, name),
+                )
+                if previous > current or (not name.endswith("_bytes") and previous != current):
+                    raise ValueError("predecessor capacity must only increase byte ceilings")
+        self._accepted_predecessor_capacity_limits = accepted_predecessor_capacity_limits
         # A shared cache's available space can shrink between opens without
         # changing this store's immutable verification/transcript binding.
         # Operational byte ceilings may only tighten the original limits.
@@ -943,6 +957,7 @@ class DurableGrandpaFinalityPort:
                     raise GrandpaFinalityStoreConflict("store_schema_mismatch")
                 else:
                     repair_started = self._repair_empty_retained_observer_binding(connection)
+                    self._rebind_predecessor_capacity(connection)
                     self._rebind_predecessor_policy(connection)
                 if user_version == 2:
                     # Audit and backfill under the same write lock. Old opened
@@ -1313,6 +1328,11 @@ class DurableGrandpaFinalityPort:
         stored = connection.execute("SELECT value FROM store_meta WHERE key = 'config'").fetchone()
         if stored is None or stored[0] == self._config_bytes():
             return
+        stored_hash = connection.execute(
+            "SELECT value FROM store_meta WHERE key = 'config_sha256'"
+        ).fetchone()
+        if stored_hash is None or stored_hash[0] != hashlib.sha256(stored[0]).digest():
+            raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
         for predecessor in self._accepted_predecessor_policy_digests:
             if stored[0] == self._config_bytes(predecessor):
                 config = self._config_bytes()
@@ -1324,6 +1344,35 @@ class DurableGrandpaFinalityPort:
                     (hashlib.sha256(config).digest(),),
                 )
                 return
+
+    def _rebind_predecessor_capacity(self, connection: sqlite3.Connection) -> None:
+        """Adopt an explicitly selected larger storage ceiling, preserving evidence.
+
+        The predecessor must match the entire current binding except its byte
+        ceilings. The regular post-transaction audit checks retained evidence
+        under the new binding before the constructor returns.
+        """
+        previous = self._accepted_predecessor_capacity_limits
+        if previous is None:
+            return
+        stored = connection.execute("SELECT value FROM store_meta WHERE key = 'config'").fetchone()
+        if stored is None or stored[0] == self._config_bytes():
+            return
+        stored_hash = connection.execute(
+            "SELECT value FROM store_meta WHERE key = 'config_sha256'"
+        ).fetchone()
+        if stored_hash is None or stored_hash[0] != hashlib.sha256(stored[0]).digest():
+            raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
+        for policy in (None, *self._accepted_predecessor_policy_digests):
+            if stored[0] != self._config_bytes(policy, limits=previous):
+                continue
+            config = self._config_bytes(policy)
+            connection.execute("UPDATE store_meta SET value = ? WHERE key = 'config'", (config,))
+            connection.execute(
+                "UPDATE store_meta SET value = ? WHERE key = 'config_sha256'",
+                (hashlib.sha256(config).digest(),),
+            )
+            return
 
     def _repair_empty_retained_observer_binding(self, connection) -> float | None:
         """Repair only the exact empty constructor-only compatibility layout.
@@ -1339,67 +1388,78 @@ class DurableGrandpaFinalityPort:
         stored = connection.execute("SELECT value FROM store_meta WHERE key='config'").fetchone()
         if stored is None or stored[0] == self._config_bytes():
             return
+        limits_to_check = (None,)
+        if self._accepted_predecessor_capacity_limits is not None:
+            limits_to_check += (self._accepted_predecessor_capacity_limits,)
         for policy in (None, *self._accepted_predecessor_policy_digests):
-            expected = self._config_bytes(policy)
-            previous = json.loads(expected)
-            previous["observer"].update(
-                source_revision=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_revision,
-                source_tree_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_tree_sha256,
-                cargo_lock_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.cargo_lock_sha256,
-                fixture_set_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.fixture_set_sha256,
-            )
-            previous_raw = canonical_json_bytes(previous)
-            if stored[0] != previous_raw:
-                continue
-            before = time.monotonic()
-            _LOGGER.info(
-                "empty_finality_binding_repair state=started completed=0 total=1 "
-                "percent=0 elapsed_seconds=0 planning_eta_seconds=0.01..5 "
-                "eta_basis=bounded_empty_store_metadata_transaction"
-            )
-            head = connection.execute(
-                "SELECT value FROM store_meta WHERE key='head_acceptance_digest'"
-            ).fetchone()
-            digest = connection.execute(
-                "SELECT value FROM store_meta WHERE key='config_sha256'"
-            ).fetchone()
-            if head is None or digest is None:
-                raise GrandpaFinalityStoreCorruption("store_meta_missing")
-            if (
-                connection.execute("SELECT 1 FROM finalized_headers LIMIT 1").fetchone()
-                or connection.execute("SELECT 1 FROM observer_segments LIMIT 1").fetchone()
-                or head[0] != _ZERO_DIGEST
-            ):
-                raise GrandpaFinalityStoreConflict(
-                    "retained_observer_build_repair_requires_empty_store"
+            for limits in limits_to_check:
+                expected = self._config_bytes(policy, limits=limits)
+                previous = json.loads(expected)
+                previous["observer"].update(
+                    source_revision=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_revision,
+                    source_tree_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.source_tree_sha256,
+                    cargo_lock_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.cargo_lock_sha256,
+                    fixture_set_sha256=_CONSTRUCTOR_ONLY_OBSERVER_BUILD.fixture_set_sha256,
                 )
-            if digest[0] != hashlib.sha256(previous_raw).digest():
-                raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
-            connection.execute(
-                "INSERT INTO store_meta(key,value) VALUES (?,?)",
-                ("observer_build_binding_repair_original", previous_raw),
-            )
-            # Retain an accepted predecessor policy until its own ordinary
-            # rebind below; the observer repair changes only build metadata.
-            connection.execute("UPDATE store_meta SET value=? WHERE key='config'", (expected,))
-            connection.execute(
-                "UPDATE store_meta SET value=? WHERE key='config_sha256'",
-                (hashlib.sha256(expected).digest(),),
-            )
-            self._rebind_predecessor_policy(connection)
-            self._audit_snapshot(
-                connection,
-                legacy_accounting=connection.execute("PRAGMA user_version").fetchone()[0] == 2,
-            )
-            _LOGGER.info(
-                "empty_finality_binding_repair state=verified_pending_commit completed=1 total=1 "
-                "percent=99.9 elapsed_seconds=%.3f eta_seconds=0 "
-                "eta_basis=empty_store_audit_completed",
-                time.monotonic() - before,
-            )
-            return before
+                previous_raw = canonical_json_bytes(previous)
+                if stored[0] != previous_raw:
+                    continue
+                before = time.monotonic()
+                _LOGGER.info(
+                    "empty_finality_binding_repair state=started completed=0 total=1 "
+                    "percent=0 elapsed_seconds=0 planning_eta_seconds=0.01..5 "
+                    "eta_basis=bounded_empty_store_metadata_transaction"
+                )
+                head = connection.execute(
+                    "SELECT value FROM store_meta WHERE key='head_acceptance_digest'"
+                ).fetchone()
+                digest = connection.execute(
+                    "SELECT value FROM store_meta WHERE key='config_sha256'"
+                ).fetchone()
+                if head is None or digest is None:
+                    raise GrandpaFinalityStoreCorruption("store_meta_missing")
+                if (
+                    connection.execute("SELECT 1 FROM finalized_headers LIMIT 1").fetchone()
+                    or connection.execute("SELECT 1 FROM observer_segments LIMIT 1").fetchone()
+                    or head[0] != _ZERO_DIGEST
+                ):
+                    raise GrandpaFinalityStoreConflict(
+                        "retained_observer_build_repair_requires_empty_store"
+                    )
+                if digest[0] != hashlib.sha256(previous_raw).digest():
+                    raise GrandpaFinalityStoreCorruption("config_digest_mismatch")
+                connection.execute(
+                    "INSERT INTO store_meta(key,value) VALUES (?,?)",
+                    ("observer_build_binding_repair_original", previous_raw),
+                )
+                # Retain accepted predecessor capacity and policy until their
+                # ordinary rebinds below; only observer metadata changes here.
+                connection.execute("UPDATE store_meta SET value=? WHERE key='config'", (expected,))
+                connection.execute(
+                    "UPDATE store_meta SET value=? WHERE key='config_sha256'",
+                    (hashlib.sha256(expected).digest(),),
+                )
+                self._rebind_predecessor_capacity(connection)
+                self._rebind_predecessor_policy(connection)
+                self._audit_snapshot(
+                    connection,
+                    legacy_accounting=connection.execute("PRAGMA user_version").fetchone()[0] == 2,
+                )
+                _LOGGER.info(
+                    "empty_finality_binding_repair state=verified_pending_commit "
+                    "completed=1 total=1 "
+                    "percent=99.9 elapsed_seconds=%.3f eta_seconds=0 "
+                    "eta_basis=empty_store_audit_completed",
+                    time.monotonic() - before,
+                )
+                return before
 
-    def _config_bytes(self, scoring_policy_digest: str | None = None) -> bytes:
+    def _config_bytes(
+        self,
+        scoring_policy_digest: str | None = None,
+        *,
+        limits: GrandpaFinalitySupervisorLimits | None = None,
+    ) -> bytes:
         return canonical_json_bytes(
             {
                 "schema": STORE_SCHEMA,
@@ -1422,7 +1482,8 @@ class DurableGrandpaFinalityPort:
                 "initial_minimum_finalized_block": self._initial_minimum,
                 "startup_timeout_seconds": self._startup_timeout_seconds,
                 "limits": {
-                    name: getattr(self._limits, name) for name in self._limits.__dataclass_fields__
+                    name: getattr(limits or self._limits, name)
+                    for name in self._limits.__dataclass_fields__
                 },
             }
         )

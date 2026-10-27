@@ -9,6 +9,7 @@ from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
     RewardModelAdoption,
     SignedRewardModelAdoption,
+    select_signed_initial_reward_adoption,
     verify_adoption_selection,
     verify_reward_adoption,
 )
@@ -146,6 +147,30 @@ def test_independent_parameters_are_authenticated_and_original_evidence_is_fixed
             series=c.series,
             policy=c.control.policy,
             current_block=180,
+        )
+
+
+def test_signed_initial_selection_is_idempotent_and_refuses_replacement(series_case):
+    c = series_case
+    _, source = adoption_case(c, revisions=1)
+    signed = source.adoptions[0]
+    chosen = select_signed_initial_reward_adoption(
+        None, signed, series=c.series, policy=c.control.policy
+    )
+    assert chosen == source
+    assert (
+        select_signed_initial_reward_adoption(
+            chosen, signed, series=c.series, policy=c.control.policy
+        )
+        == chosen
+    )
+    changed = signed.adoption.model_copy(
+        update={"parameters": GeometricRewardParameters(band_width_bps=250)}
+    )
+    replacement = SignedRewardModelAdoption(adoption=changed, signatures=signatures(changed))
+    with pytest.raises(ValueError, match="different signed bytes"):
+        select_signed_initial_reward_adoption(
+            chosen, replacement, series=c.series, policy=c.control.policy
         )
 
 

@@ -36,6 +36,58 @@ def test_progress_is_bounded_redacted_and_returns_independent_snapshots():
     assert state.snapshot(C)["percent"] is None
 
 
+def test_acceptance_planning_range_counts_down_without_external_work(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "acceptance",
+        dict(
+            cohort_sha256=C,
+            stage="promotion",
+            status="running",
+            planning_eta_seconds=[30, 120],
+            eta_basis="planning_previous_stage_durations",
+            eta_samples=5,
+        ),
+    )
+    now[0] = 60.0
+    current = state.snapshot(C)["components"]["acceptance"]
+    assert current["planning_eta_seconds"] == [0, 70]
+    assert current["eta_samples"] == 5
+    now[0] = 131.0
+    overdue = state.snapshot(C)["components"]["acceptance"]
+    assert overdue["planning_eta_seconds"] is None
+    assert overdue["eta_basis"] == "planning_range_exceeded_retrying"
+    assert overdue["stalled_or_retrying"] is True
+
+
+def test_certification_planning_range_counts_down_on_public_reads(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=82,
+            total=83,
+            percent=100 * 82 / 83,
+            elapsed_seconds=20,
+            planning_eta_seconds=[30, 1200],
+            eta_basis="planning_30_to_1200_seconds_per_remaining_certificate",
+        ),
+    )
+    now[0] = 30.0
+    current = state.snapshot(C)
+    assert current["planning_eta_seconds"] == [10, 1180]
+    assert current["components"]["intake_certification"]["elapsed_seconds"] == 20
+    now[0] = 1211.0
+    overdue = state.snapshot(C)
+    assert overdue["planning_eta_seconds"] is None
+    assert overdue["stalled_or_retrying"] is True
+
+
 def test_restart_is_unknown_and_stale_or_overdue_measurements_withdraw_eta(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
@@ -115,6 +167,52 @@ def test_hold_does_not_hide_intake_certification_and_active_operation_elapsed(mo
     assert result["overall_eta_seconds"] is None
 
 
+def test_completed_intake_certification_yields_to_progression_hold_and_new_work():
+    state = CohortProgressSnapshots()
+    state.record(
+        "lifecycle",
+        dict(
+            cohort_sha256=C,
+            stage="automatic_progression_held",
+            status="automatic_progression_held",
+            completed=0,
+            total=1,
+            percent=0,
+            eta_seconds=None,
+            eta_basis="awaiting_qualified_release_and_explicit_hold_removal",
+        ),
+    )
+    state.record(
+        "intake_certification",
+        dict(cohort_sha256=C, completed=82, total=82, percent=100, eta_seconds=0),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "automatic_progression_held"
+    assert result["completed"] == 0 and result["total"] == 1
+    assert result["eta_seconds"] is None
+    assert result["components"]["intake_certification"]["completed"] == 82
+
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="model_acceptance_export",
+            state="running",
+            completed=1,
+            total=2,
+            percent=50,
+        ),
+    )
+    assert state.snapshot(C)["stage"] == "model_acceptance_export"
+
+    state.record(
+        "intake_certification",
+        dict(cohort_sha256=C, completed=82, total=83, percent=100 * 82 / 83),
+    )
+    assert state.snapshot(C)["stage"] == "model_certification"
+
+
 @pytest.mark.parametrize("stage", ["model_acceptance_review_quorum", "model_promotion_copy"])
 def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch, stage):
     now = [10]
@@ -150,13 +248,80 @@ def test_stale_intake_count_yields_to_current_acceptance_work(monkeypatch, stage
     assert result["components"]["intake_certification"]["completed"] == 54
 
 
+def test_active_verification_overrides_certificate_idle_stall():
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=77,
+            total=82,
+            blocked_count=0,
+            repair_required=False,
+            stalled_or_retrying=True,
+            eta_basis="certificate_completion_idle",
+        ),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=1,
+            stage="remote_model_verification",
+            state="running",
+            completed=3,
+            total=4,
+            percent=75,
+            stalled_or_retrying=False,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "remote_model_verification"
+    assert result["percent"] == 75
+    assert result["stalled_or_retrying"] is False
+    assert result["components"]["intake_certification"]["completed"] == 77
+
+
+def test_current_acceptance_remains_visible_with_another_submission_blocked():
+    state = CohortProgressSnapshots()
+    state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
+    state.record(
+        "intake_certification",
+        dict(
+            cohort_sha256=C,
+            completed=57,
+            total=66,
+            blocked_count=1,
+            stalled_or_retrying=True,
+            eta_basis="blocked_acceptance_stage",
+        ),
+    )
+    state.record(
+        "work",
+        dict(
+            cohort_sha256=C,
+            work_id=2,
+            stage="model_promotion_copy",
+            state="running",
+            completed=3,
+            total=10,
+            percent=30,
+            stalled_or_retrying=False,
+        ),
+    )
+    result = state.snapshot(C)
+    assert result["stage"] == "model_promotion_copy"
+    assert result["percent"] == 30
+    assert result["blocked_count"] == 1
+    assert result["components"]["intake_certification"]["completed"] == 57
+
+
 def test_stale_intake_count_uses_live_acceptance_only_until_work_refreshes(monkeypatch):
     now = [10]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     state = CohortProgressSnapshots()
-    state.record(
-        "intake_certification", dict(cohort_sha256=C, completed=54, total=79, percent=68)
-    )
+    state.record("intake_certification", dict(cohort_sha256=C, completed=54, total=79, percent=68))
     state.record(
         "work",
         dict(cohort_sha256=C, stage="model_acceptance_review_quorum", state="running"),
@@ -189,9 +354,7 @@ def test_nested_transfer_remains_current_after_acceptance_heartbeat_ages(monkeyp
     state.record("lifecycle", dict(cohort_sha256=C, stage="automatic_progression_held"))
     state.record("intake_certification", dict(cohort_sha256=C, completed=54, total=79))
     now[0] = 140
-    state.record(
-        "acceptance", dict(cohort_sha256=C, stage="promotion", status="running", total=1)
-    )
+    state.record("acceptance", dict(cohort_sha256=C, stage="promotion", status="running", total=1))
     now[0] = 270
     state.record(
         "work",

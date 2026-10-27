@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -102,11 +103,31 @@ class WorkProgress:
     """
 
     def __init__(
-        self, stage: str, total: int, *, unit: str, cohort: str | None = None, estimate: bool = True
+        self,
+        stage: str,
+        total: int,
+        *,
+        unit: str,
+        cohort: str | None = None,
+        estimate: bool = True,
+        planning_range_seconds: tuple[float, float] | None = None,
+        planning_basis: str | None = None,
     ):
+        if planning_range_seconds is not None and (
+            len(planning_range_seconds) != 2
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in planning_range_seconds
+            )
+            or not 0 <= planning_range_seconds[0] <= planning_range_seconds[1]
+            or not planning_basis
+        ):
+            raise ValueError("work planning range requires finite ordered bounds and basis")
         self.enabled = _name(stage, 79) and _name(unit, 39) and type(total) is int and total >= 0
         self.stage, self.total, self.unit, self.cohort = stage, total, unit, _cohort(cohort)
         self.estimate = estimate is True
+        self.planning_range_seconds = planning_range_seconds
+        self.planning_basis = planning_basis
         self.identity = next(_IDS)
         self.job_sha256 = EXECUTION_JOB_SCOPE.get()
         self.completed = 0
@@ -171,6 +192,20 @@ class WorkProgress:
                 and not stalled
             ):
                 eta = max(0.0, mean * (self.total - self.completed))
+            planning = None
+            if (
+                self.planning_range_seconds is not None
+                and eta is None
+                and state not in {"interrupted", "accounting_mismatch"}
+            ):
+                low, high = self.planning_range_seconds
+                if elapsed > high:
+                    stalled = True
+                else:
+                    planning = [
+                        round(max(0.0, low - elapsed), 1),
+                        round(max(0.0, high - elapsed), 1),
+                    ]
             body = {
                 "schema": "umi-competition-work-progress/1",
                 "pid": os.getpid(),
@@ -187,9 +222,14 @@ class WorkProgress:
                 "percent": round(percent, 2),
                 "elapsed_seconds": round(elapsed, 3),
                 "eta_seconds": None if eta is None else round(eta, 1),
+                **({"planning_eta_seconds": planning} if planning is not None else {}),
                 "eta_basis": (
                     "completed"
                     if state == "completed"
+                    else "planning_range_exceeded_retrying"
+                    if self.planning_range_seconds is not None and stalled
+                    else self.planning_basis
+                    if planning is not None
                     else "unestimated_scope"
                     if not self.estimate
                     else "recent_active_item_rate"
@@ -204,6 +244,14 @@ class WorkProgress:
                 "eta_raw_sample_seconds": list(self.durations),
                 "eta_assumption": (
                     "remaining_units_match_recent_active_cost" if self.estimate else None
+                ),
+                **(
+                    {
+                        "forecast_classification": "planning_scenario",
+                        "forecast_finish_range_seconds": planning,
+                    }
+                    if planning is not None
+                    else {}
                 ),
                 "stalled": stalled,
                 "scope": "current_attempt_substage",
