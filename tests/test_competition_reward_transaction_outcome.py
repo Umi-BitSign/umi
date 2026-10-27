@@ -117,6 +117,36 @@ async def test_unsigned_live_attempt_cannot_be_replaced(original):
     assert t.journal.pending().intent == t.intent
 
 
+async def test_unsigned_live_attempt_reports_native_wait_without_extra_chain_reads(
+    original, caplog
+):
+    t = original
+    t.journal = t.make_journal(
+        t.intent, t.chain.evidence, t.control.evidence, signed=False, path="unsigned"
+    )
+    at(t, 127)
+    with caplog.at_level("INFO", logger="umi.competition_reward_transaction_outcome"):
+        assert await resolve_standing_transaction(
+            t.provider, t.journal, control_hotkey=t.hotkey
+        ) is None
+    reports = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "umi.competition_reward_transaction_outcome"
+        and record.message.startswith("{")
+    ]
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["stage"] == "standing_transaction_resolution"
+    assert report["reason_code"] == "unsigned_attempt_waiting_for_expiry"
+    assert report["status"] == "waiting" and report["signed"] is False
+    assert report["completed_blocks"] == 127 and report["remaining_blocks"] == 1
+    assert report["planning_eta_seconds"] == [6, 24]
+    assert report["eta_scope"] == "current_attempt_mortality_only_not_reward_activation"
+    assert report["elapsed_seconds"] >= 0
+    assert not any(method in {"chain_getBlock", "state_getStorageAt"} for method, _ in t.calls)
+
+
 @pytest.mark.parametrize("successful", [None, False, True])
 async def test_live_receipt_branch_and_consumed_nonce(original, monkeypatch, successful):
     t = original
