@@ -375,7 +375,10 @@ class StandingRewardCoordinator:
             raise ValueError("suspended revision lost its selected successor adoption")
         if self._revision_target is None:
             control = await self.reviewer.provider.collect_control(reader.series.control_hotkey)
-            self._revision_target = await owner.target(prefix[-1].decision, control)
+            original = original_activation_decision(prefix, old.activation.cohort_sha256)
+            self._revision_target = await owner.target(
+                prefix[-1].decision, control, original=original
+            )
         height = self._revision_target
         try:
             history = await self.reviewer.history.verified_prefix(height)

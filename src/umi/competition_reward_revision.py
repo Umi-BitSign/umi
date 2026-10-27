@@ -4,8 +4,10 @@ Every designated writer is checked at every finalized block where this cohort
 could have been live. Retained native coverage endpoints survive interruptions;
 their compact completed verdicts are restored by their original owner. A signed
 adoption, current row, or remote success flag cannot establish absence of an
-earlier live row. Suspension drains all old proof/transaction lifetimes before
-clearance; a live row winning that race permanently locks the original economics.
+earlier live row. Suspension drains old proof/transaction lifetimes when the
+old activation could have been effective. A signed, still-future START boundary
+proves no old row could have been submitted. A live row winning a real race
+permanently locks the original economics.
 """
 
 from __future__ import annotations
@@ -144,7 +146,11 @@ def validate_revision_clearance(
         != activation_effective_block(
             series, original, writes.get(digest(original), -delay), reward_adoptions
         )
-        or facts.drained_at_block != facts.suspension_committed_at_block + delay
+        or facts.drained_at_block != (
+            facts.through_block
+            if facts.first_block > facts.through_block
+            else facts.suspension_committed_at_block + delay
+        )
         or facts.through_block != decision.observed_at_block
         or facts.drained_at_block > facts.through_block
         or facts.validator_accounts != tuple(identity(k) for k in series.validators)
@@ -178,13 +184,28 @@ class NativeRewardRevisionReviewer:
             self._source_activation = key
         return self._source_owner
 
-    async def target(self, suspension, control):
+    async def target(self, suspension, control, *, original=None):
         """Retain the first drained finalized audit target across bounded restarts."""
         series = self.coverage.preparation.reader.series
         if suspension.kind != "suspend_activation" or control.control_sha256 != digest(suspension):
             raise ValueError("reward revision target lacks its exact committed suspension")
         committed, through = control.committed_at_block, control.snapshot.block_number
-        self._drain(committed, through)
+        first = None
+        if original is not None:
+            if (
+                original.kind != "activate"
+                or original.activation.cohort_sha256 != suspension.activation.cohort_sha256
+                or original.sequence >= suspension.sequence
+            ):
+                raise ValueError("reward revision original activation differs from suspension")
+            # Its actual committed block cannot precede the signed observed
+            # block. This lower bound is enough to prove the old selection has
+            # never been effective at the target, without waiting for mortality.
+            first = activation_effective_block(
+                series, original, original.observed_at_block,
+                self.coverage.preparation.reader.reward_adoptions,
+            )
+        self._drain(committed, through, first=first)
         record = await run_owned_thread(
             self.journal.retain_first,
             "reward_revision_target",
@@ -197,10 +218,12 @@ class NativeRewardRevisionReviewer:
             or record["committed_at_block"] != committed
         ):
             raise ValueError("reward revision target changes its original finalized boundary")
-        self._drain(record["committed_at_block"], record["through_block"])
+        self._drain(record["committed_at_block"], record["through_block"], first=first)
         return record["through_block"]
 
-    def _drain(self, committed, through):
+    def _drain(self, committed, through, *, first=None):
+        if first is not None and first > through:
+            return through
         series = self.coverage.preparation.reader.series
         delay = series.maximum_proof_lag_blocks + series.maximum_transaction_lifetime_blocks
         drained = committed + delay
@@ -281,7 +304,6 @@ class NativeRewardRevisionReviewer:
             raise ValueError("reward revision suspension is not the current finalized control")
         committed = selected.selection.committed_at_block
         through = control.snapshot.block_number
-        drained = self._drain(committed, through)
         old = effective_activation_decision(prefix)
         original = original_activation_decision(prefix, old.activation.cohort_sha256)
         if await self.locked(old.activation):
@@ -300,6 +322,7 @@ class NativeRewardRevisionReviewer:
         first = activation_effective_block(
             series, original, original_write, reader.reward_adoptions
         )
+        drained = self._drain(committed, through, first=first)
         accounts = tuple(identity(k) for k in series.validators)
         binding = digest([digest(suspension), first, through, accounts])
         done, fresh = 0, 0

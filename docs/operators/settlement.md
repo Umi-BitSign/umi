@@ -1961,9 +1961,14 @@ native signed admission exists; a failed admission is not such a checkpoint.
 
 Changing the desired adoption stops stale preparations before reservation,
 signing and sending. An activation already reserved keeps its exact signed
-bytes. The coordinator suspends that activation, waits for finalized proof-lag
-and transaction-mortality drainage, then checks every designated writer over
-the interval in which those rewards could have become live. Completed native
+bytes. The coordinator suspends that activation. When the original activation's
+signed START boundary is still in the future at the finalized suspension
+target, no old row could have been submitted, so the revision clears with zero
+endpoints and no transaction drain. The native review verifies the exact
+historical write and START boundary before accepting that case. Otherwise it
+waits for finalized proof-lag and transaction-mortality drainage, then checks
+every designated writer over the interval in which those rewards could have
+become live. Completed native
 coverage and revision results are retained across restart. If the old allocation
 became live, the coordinator resumes that exact activation and keeps its
 economics locked. Otherwise it can publish the selected revision. A current
