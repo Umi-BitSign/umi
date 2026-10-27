@@ -377,8 +377,13 @@ async def test_lost_completion_acknowledgement_has_explicit_metadata_only_repair
     with pytest.raises(LegacyModelStorageRepairRequired):
         await c.legacy.ensure(c.participant, c.certificate, c.verifier.receipts)
     # The actual native worker selects the qualified metadata-only repair.
+    heads = len(c.remote.heads)
     await c.verifier.ensure(c.participant, c.certificate)
     assert path.read_bytes() == expected and tuple(c.remote.reads) == before
+    # Repair consumes one generation assessment; publishing the exact small
+    # receipt does not change its already checked remote-object dependencies.
+    checked = c.remote.heads[heads:]
+    assert len(checked) == len(set(checked)) == len(c.remote.objects)
 
 
 async def test_interrupted_first_byte_pass_resumes_only_unfinished_files(remote_case):

@@ -264,6 +264,55 @@ async def test_export_failure_retains_native_success_then_resume(
     assert h.reader.progress.latest["replicated_blocks"] is None
 
 
+async def test_later_export_success_survives_failed_predecessor_and_restart(
+    parallel_case, tmp_path, monkeypatch
+):
+    h = parallel_case
+    first = h.reader.first_block
+    destination = tmp_path / "export"
+    h.reader.export_archive = RewardProofArchive(destination)
+    export = h.reader._export_fields
+    second_exported = threading.Event()
+
+    def interrupted(height, fields, archive):
+        if height == first:
+            assert second_exported.wait(5)
+            raise OSError("predecessor export interrupted")
+        export(height, fields, archive)
+        if height == first + 1:
+            second_exported.set()
+
+    monkeypatch.setattr(h.reader, "_export_fields", interrupted)
+    with pytest.raises(OSError, match="predecessor export interrupted"):
+        await h.reader.advance(h.item.provider, through_block=h.end)
+    assert h.reader._next == first
+    assert h.reader.checkpoints.load(first)["exports"] == []
+    assert h.reader.checkpoints.load(first + 1)["exports"] == [h.reader._export_identity()]
+    second_key = history_archive_key(h.reader.config_sha256, h.reader.hotkey, first + 1)
+    assert (
+        h.reader.export_archive.read("history", second_key, bounds=h.reader._field_bounds)[1]
+        == (h.frames[first + 1])
+    )
+
+    h.reader = h.open_parallel()
+    h.reader.export_archive = RewardProofArchive(destination)
+    load, copy = h.reader._load, h.reader.export_archive.copy_encoded_transport
+
+    def unchanged_source(height):
+        assert height != first + 1, "completed later export must not reload its proof fields"
+        return load(height)
+
+    def unchanged_export(kind, key, **kwargs):
+        assert key != second_key, "completed later export must not repeat transport"
+        return copy(kind, key, **kwargs)
+
+    monkeypatch.setattr(h.reader, "_load", unchanged_source)
+    monkeypatch.setattr(h.reader.export_archive, "copy_encoded_transport", unchanged_export)
+    assert await h.reader.advance(h.item.provider, through_block=h.end) == h.expected
+    assert h.reader.progress.native_completed == len(h.frames) - 2
+    assert h.reader.progress.latest["exported_blocks"] == len(h.frames)
+
+
 @pytest.mark.parametrize("signal", ["cancel", "shutdown"])
 async def test_repeated_cancellation_drains_workers_and_provider_before_close(
     parallel_case, monkeypatch, signal

@@ -3863,6 +3863,12 @@ generation still requires explicit repair. Carry this reader through both the
 private settlement services and signed reward coordinator/writer hosts; a local
 settlement-source update alone does not update every consuming host.
 
+Repairing a missing small legacy completion receipt confirms its original remote
+generations once, publishes the exact retained receipt, and reuses that result
+when authenticating the restored receipt. If the authenticated receipt differs,
+its dependencies still require their own check. This removes a duplicate check
+within that repair; ordinary settlement and coverage generation checks remain.
+
 Provision a separate mode0700 root owned by each actual service UID. Candidate,
 reviewer and owner may reuse one root only when they run as that same UID; another
 reviewer account independently verifies its bytes or imports its own prior

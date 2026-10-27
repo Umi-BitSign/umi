@@ -792,6 +792,17 @@ interval forecast during shutdown and report drainage separately; a drained
 reader does not imply a completed history interval. Signing and submission keep
 their existing ownership shield.
 
+Parallel history readers publish the frames in an already admitted window
+concurrently, while the owner applies their effects strictly by block height.
+Each successful export records its own durable checkpoint, so a failed earlier
+export does not discard completed later delivery. Cancellation drains every
+started export before releasing frame or source ownership. This introduces no
+additional frame prefetch: configured window capacity and the shared transport's
+object and byte limits still apply. Existing proof formats, native verification
+semantics and checkpoint compatibility are unchanged. Adopt the qualified host
+through the same maintenance path; this internal scheduling change requires no
+miner configuration or follower-image change.
+
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
 This supported transition is retained while deployed preparation directories
