@@ -1,6 +1,7 @@
 """Native suite owner/reviewer/signing integration; synthetic media/finality ports."""
 
 import asyncio
+from functools import partial
 from types import SimpleNamespace
 
 import httpx
@@ -38,9 +39,12 @@ from umi.private_files import ensure_private_directory, publish_private_model
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_recovery import recovery as recovery
+from .test_competition_cohort_recovery import signatures
 from .test_competition_cohort_request_rule_adoption import original as original
 from .test_competition_cohort_request_rule_api import api as api
 from .test_competition_cohort_request_rule_api import post
+from .test_competition_cohort_standing_phases import standing
+from .test_competition_suite_selection import candidate as metadata_candidate
 from .test_competition_suite_selection import case as selector_case_fixture
 from .test_competition_suite_selection import categorized, select
 from .test_competition_two_task_profile import launch_policy
@@ -54,13 +58,42 @@ def policy():
 
 
 @pytest.fixture
-def selection_case(policy):
+def selection_case(policy, request):
     c = selector_case_fixture.__wrapped__(policy)
     c.inventory, c.counts = categorized(c)
+    if getattr(request, "param", None) == "wide":
+        values = tuple(
+            entry.model_copy(update={"topic": "Cooking"})
+            if entry.case.stratum == "continuous" and entry.topic is None
+            else entry
+            for entry in c.inventory.cases
+        )
+        extra = metadata_candidate(
+            111,
+            "Rain falls slowly across the western plains",
+            dataset="AnotherCorpus",
+            signer=111,
+            topic="Weather",
+        )
+        c.inventory = c.inventory.model_copy(update={"cases": (*values, extra)})
+        c.counts = c.counts.model_copy(
+            update={
+                "continuous": 4,
+                "maximum_continuous_dataset_share_bps": 5000,
+                "minimum_continuous_topics": 4,
+                "minimum_fingerspelling_datasets": 2,
+                "maximum_fingerspelling_dataset_share_bps": 7500,
+                "maximum_cases_per_dataset": 2,
+            }
+        )
     return c
 
 
-def test_successor_adoption_requires_broad_continuous_sources(selection_case):
+def test_historical_candidate_retains_original_source_and_training_exclusion_rules(selection_case):
+    require_successor_suite_diversity = partial(
+        candidate_module.require_successor_suite_diversity,
+        candidate_schema="umi-evaluation-suite-adoption-candidate/1",
+    )
     counts = selection_case.counts
     require_successor_suite_diversity(6, counts)
     with pytest.raises(ValueError, match="source cap"):
@@ -101,6 +134,59 @@ def test_successor_adoption_requires_broad_continuous_sources(selection_case):
     with pytest.raises(ValueError, match="source cap"):
         require_successor_suite_diversity(
             8, capped.model_copy(update={"maximum_continuous_dataset_share_bps": 5001})
+        )
+
+
+def test_current_candidate_accepts_public_sources_with_global_two_case_cap(selection_case):
+    counts = selection_case.counts.model_copy(
+        update={
+            "continuous": 4,
+            "maximum_continuous_dataset_share_bps": 5000,
+            "minimum_continuous_topics": 4,
+            "minimum_fingerspelling_datasets": 2,
+            "maximum_fingerspelling_dataset_share_bps": 7500,
+            "maximum_cases_per_dataset": 2,
+        }
+    )
+    assert counts.minimum_training_excluded_fingerspelling == 0
+    assert counts.minimum_training_excluded_continuous == 0
+    for sequence in (7, 8, 9, 10, 11):
+        require_successor_suite_diversity(sequence, counts)
+    for cap in (None, 3):
+        with pytest.raises(ValueError, match="maximum_cases_per_dataset of 1 or 2"):
+            require_successor_suite_diversity(
+                7,
+                counts.model_copy(
+                    update={
+                        "maximum_cases_per_dataset": cap,
+                    }
+                ),
+            )
+    require_successor_suite_diversity(
+        7,
+        counts.model_copy(
+            update={
+                "maximum_cases_per_dataset": 1,
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="source cap"):
+        require_successor_suite_diversity(
+            7,
+            counts.model_copy(
+                update={
+                    "maximum_continuous_dataset_share_bps": 5001,
+                }
+            ),
+        )
+    with pytest.raises(ValueError, match="fingerspelling sources"):
+        require_successor_suite_diversity(
+            7,
+            counts.model_copy(
+                update={
+                    "minimum_fingerspelling_datasets": 1,
+                }
+            ),
         )
 
 
@@ -181,6 +267,66 @@ def candidate(original, selection_case, tmp_path, monkeypatch):
         calls=calls,
         root=root,
     )
+
+
+def test_candidate_schema_defaults_to_current_and_preserves_explicit_historical_bytes(candidate):
+    old = canonical_json_bytes(candidate.config)
+    assert candidate.config.schema_ == "umi-evaluation-suite-adoption-candidate/1"
+    restored = EvaluationSuiteAdoptionCandidateConfig.model_validate_json(old)
+    assert canonical_json_bytes(restored) == old
+    body = candidate.config.model_dump(by_alias=True)
+    body.pop("schema")
+    current = EvaluationSuiteAdoptionCandidateConfig.model_validate(body)
+    assert current.schema_ == "umi-evaluation-suite-adoption-candidate/2"
+    assert current.model_dump(by_alias=True) == body | {
+        "schema": "umi-evaluation-suite-adoption-candidate/2"
+    }
+
+
+@pytest.mark.parametrize("selection_case", ["wide"], indirect=True)
+async def test_current_c7_public_suite_native_review_reuses_qa_media_and_preserves_history(
+    candidate, monkeypatch
+):
+    c = candidate
+    plan = c.history.plan.model_copy(update={"sequence": 7})
+    authority, genesis, _ = standing(plan, c.value.policy, model_rewards=True)
+    history = c.history.model_copy(
+        update={
+            "plan": plan,
+            "authority": authority,
+            "genesis": genesis,
+            "genesis_signatures": signatures(genesis),
+        }
+    )
+    original_history = canonical_json_bytes(history)
+    config = c.config.model_copy(
+        update={
+            "schema_": "umi-evaluation-suite-adoption-candidate/2",
+            "cohort_sha256": digest(plan),
+        }
+    )
+    owner = EvaluationSuiteAdoptionCandidate(config, c.value.policy)
+    suite, manifest = owner.selection()
+    assert manifest["selected_training_exposure"] == {"known_public": 8}
+    assert max(manifest["selected_dataset_totals"].values()) <= 2
+    proposal = owner._proposal(history, 220, suite, manifest)
+    first = await owner.verify(history, proposal)
+    assert first["cases"] == 8 and first["private_source_exposure_not_proven_unseen"]
+    assert len(c.calls) == 8
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("completed current-suite selection and media must be reused")
+
+    monkeypatch.setattr(candidate_module, "select_future_suite", forbidden)
+    monkeypatch.setattr(candidate_module, "inspect_media_pinned", forbidden)
+    assert (
+        await EvaluationSuiteAdoptionCandidate(config, c.value.policy).verify(history, proposal)
+        == first
+    )
+    historical = config.model_copy(update={"schema_": "umi-evaluation-suite-adoption-candidate/1"})
+    with pytest.raises(ValueError, match="training-exclusion evidence"):
+        await EvaluationSuiteAdoptionCandidate(historical, c.value.policy).verify(history, proposal)
+    assert canonical_json_bytes(history) == original_history
 
 
 async def test_candidate_reuses_each_native_selection_and_media_result_after_restart(

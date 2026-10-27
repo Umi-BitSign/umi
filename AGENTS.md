@@ -1,5 +1,16 @@
 # Maintenance
 
+- New C7+ evaluation suites use one or two cases per canonical dataset across
+  both tasks, with broad source, topic and signer variety. Splits, versions,
+  camera views and local directory aliases do not count as separate sources.
+  Public sources are allowed: private recording delivery and our miner's
+  training/development exposure are not mandatory launch prerequisites. Retain
+  truthful provenance and exposure labels, reference/media QA and prior-case
+  overlap controls; never label public material as verified unseen data. Apply
+  prospective suite rules through an authenticated successor, preserving old
+  signed suites and their historical verification semantics. Intake closure and
+  challenge start still require Sam's explicit instruction.
+
 - C7 and subsequent cohorts use 2.5-point reward bands, 0.85 multipliers between
   and within occupied bands, and 1% relative baseline grace (score >= baseline
   * 0.99, with exact fractions). Keep content and one-basis-point score duplicate
