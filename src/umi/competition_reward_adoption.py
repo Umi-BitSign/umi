@@ -248,6 +248,96 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
     return value
 
 
+def prepare_activation_age_revision(
+    selection: RewardAdoptionSelection,
+    *,
+    series,
+    policy: CompetitionPolicy,
+    cohort_sha256: str,
+    activation_age: RewardActivationAge,
+    issued_at_block: int,
+) -> RewardModelAdoption:
+    """Propose a later timing attestation without changing signed reward terms.
+
+    The caller obtains ``activation_age`` from native finalized timestamp proofs.
+    An existing adoption and control decision retain their original bytes; the
+    coordinator must sign a separate revision decision before this takes effect.
+    """
+    selected = verify_adoption_selection(selection, series, policy)
+    if selected is None or type(activation_age) is not RewardActivationAge:
+        raise ValueError("activation age revision requires selected native facts")
+    latest = selected.latest(cohort_sha256)
+    plan = next((p for p in series.cohorts if digest(p) == cohort_sha256), None)
+    if (
+        latest is None
+        or plan is None
+        or latest.adoption.activation_age is not None
+        or not activation_age.skips_activation_delay
+        or type(issued_at_block) is not int
+        or issued_at_block < max(latest.adoption.issued_at_block, activation_age.observed_at_block)
+    ):
+        raise ValueError("activation age revision lacks an eligible signed predecessor")
+    activation_age.check_plan(plan)
+    prior = latest.adoption
+    schema = (
+        "umi-standing-model-reward-adoption/2"
+        if prior.schema_ == "umi-standing-model-reward-adoption/1"
+        else prior.schema_
+    )
+    return RewardModelAdoption.model_validate_json(
+        canonical_json_bytes(
+            prior.model_copy(
+                update={
+                    "schema_": schema,
+                    "revision": prior.revision + 1,
+                    "predecessor_adoption_sha256": digest(prior),
+                    "issued_at_block": issued_at_block,
+                    "activation_age": activation_age,
+                }
+            )
+        )
+    )
+
+
+def select_signed_activation_age_revision(
+    selection: RewardAdoptionSelection,
+    signed: SignedRewardModelAdoption,
+    *,
+    series,
+    policy: CompetitionPolicy,
+) -> RewardAdoptionSelection:
+    """Append the exact quorum-signed age revision, or reuse its exact bytes."""
+    selected = verify_adoption_selection(selection, series, policy)
+    signed = SignedRewardModelAdoption.model_validate_json(canonical_json_bytes(signed))
+    age = signed.adoption.activation_age
+    if selected is None or age is None:
+        raise ValueError("signed revision lacks an activation age")
+    current = selected.latest(signed.adoption.cohort_sha256)
+    if current == signed:
+        return selected
+    expected = prepare_activation_age_revision(
+        selected,
+        series=series,
+        policy=policy,
+        cohort_sha256=signed.adoption.cohort_sha256,
+        activation_age=age,
+        issued_at_block=signed.adoption.issued_at_block,
+    )
+    if signed.adoption != expected:
+        raise ValueError("signed activation age differs from its qualified proposal")
+    candidate = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1",
+        adoptions=tuple(
+            sorted(
+                (*selected.adoptions, signed),
+                key=lambda value: (value.adoption.cohort_sha256, value.adoption.revision),
+            )
+        ),
+        maximum_decisions=selected.maximum_decisions,
+    )
+    return verify_adoption_selection(candidate, series, policy)
+
+
 def bootstrap_admission(selection):
     """Return the immutable first authorization, retaining it through revisions.
 

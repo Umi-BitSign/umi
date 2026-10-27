@@ -32,6 +32,19 @@ its exact bytes with the configured recovery quorum and append them with
 finalized issuance anchor where its binding still applies. Both builders leave
 the certified package untouched and require the exact signed predecessor.
 
+If an already selected early release omitted the cohort age attestation, obtain
+the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
+finalized control observation through the native proof owner. Convert those
+owned facts with `activation_age_from_owned_control`, then use
+`prepare_activation_age_revision` to prepare a later adoption. Have the same
+recovery quorum sign that exact proposal and append it with
+`select_signed_activation_age_revision`. The new revision retains the prior
+score correction and early-release terms. It cannot accelerate an existing
+control decision: the coordinator must commit a separate revision decision
+that names the new adoption. An adoption alone does not waive the activation
+delay, and the original signed decision and its historical effective block
+remain unchanged.
+
 Distribute one resulting selection through
 `prepare_reward_adoption_boot_candidates` with `early_release_predecessor` to
 the coordinator, independent reviewers, validator writer, reference publisher
