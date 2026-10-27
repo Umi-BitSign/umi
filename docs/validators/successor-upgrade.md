@@ -1397,6 +1397,14 @@ preserved R2 object before reviewing or signing an activation and retains only
 its private receipt. Source schema 2 also requires benchmark materialization on
 a bounded filesystem whose device differs from every configured protected root;
 put that workspace on a dedicated mounted volume before starting the service.
+When a direct R2 cohort joins a standing series that already has completed
+legacy coverage checkpoints, retain those checkpoints and their original model
+verification mode. The selected signed model-delivery history identifies which
+cohorts require the direct verifier. A previously completed legacy checkpoint
+with `not_selected` model dependencies remains reusable for its original
+non-direct cohort; that mode cannot satisfy a direct R2 cohort's checkpoint.
+Do not restore every historical candidate into the local archive or repeat its
+completed model-byte checks solely to add a later cohort.
 
 For legacy local model cleanup, the intake owner first requires authenticated
 remote payload ownership for every original request and current release from

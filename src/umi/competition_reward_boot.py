@@ -482,6 +482,7 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
         maximum_promotion_bytes=config.maximum_promotion_bytes,
         maximum_package_bytes=config.maximum_package_bytes,
         model_artifacts=model_artifacts,
+        model_delivery_adoptions=config.model_delivery_adoptions,
         allocation_sink=files.retain_allocation,
     )
     imported, exported = await run_owned_thread(
