@@ -42,6 +42,7 @@ class RewardAdoptionBootCandidates:
     reviewers: tuple[bytes, ...] = ()
     reference_publisher_config: bytes | None = None
     package_delivery_config: bytes | None = None
+    model_score_config: bytes | None = None
 
 
 def _candidate(original: bytes, selected: RewardAdoptionSelection, kind):
@@ -66,6 +67,9 @@ def prepare_reward_adoption_boot_candidates(
     package_delivery_config_raw: bytes | None = None,
     package_delivery_current_boot_raw: bytes | None = None,
     package_delivery_current_boot_path: str | None = None,
+    model_score_config_raw: bytes | None = None,
+    model_score_current_boot_raw: bytes | None = None,
+    model_score_current_boot_path: str | None = None,
     coordinator_candidate_path: str | None = None,
     early_release_predecessor: RewardControlDecision | None = None,
 ) -> RewardAdoptionBootCandidates:
@@ -141,7 +145,8 @@ def prepare_reward_adoption_boot_candidates(
         if not Path(coordinator_candidate_path).is_absolute():
             raise ValueError("reference publisher target must be an absolute boot path")
     latest = (
-        None if coordinator.reward_adoptions is None
+        None
+        if coordinator.reward_adoptions is None
         else coordinator.reward_adoptions.latest(signed.adoption.cohort_sha256)
     )
     age_revision = (
@@ -150,9 +155,7 @@ def prepare_reward_adoption_boot_candidates(
         and signed.adoption.activation_age is not None
         and latest.adoption.activation_age is None
         and signed.adoption.early_release == latest.adoption.early_release
-    ) or (
-        latest == signed and signed.adoption.activation_age is not None
-    )
+    ) or (latest == signed and signed.adoption.activation_age is not None)
     if signed.adoption.early_release is None:
         if early_release_predecessor is not None:
             raise ValueError("ordinary adoption cannot supply an early release predecessor")
@@ -162,8 +165,10 @@ def prepare_reward_adoption_boot_candidates(
             else select_signed_initial_reward_adoption
         )
         selected = selector(
-            coordinator.reward_adoptions, signed,
-            series=coordinator.series, policy=coordinator.policy,
+            coordinator.reward_adoptions,
+            signed,
+            series=coordinator.series,
+            policy=coordinator.policy,
         )
     else:
         if early_release_predecessor is None:
@@ -190,8 +195,10 @@ def prepare_reward_adoption_boot_candidates(
                     predecessor=early_release_predecessor,
                 )
                 selected = select_signed_activation_age_revision(
-                    coordinator.reward_adoptions, signed,
-                    series=coordinator.series, policy=coordinator.policy,
+                    coordinator.reward_adoptions,
+                    signed,
+                    series=coordinator.series,
+                    policy=coordinator.policy,
                 )
             else:
                 selected = select_signed_early_release_revision(
@@ -258,6 +265,13 @@ def prepare_reward_adoption_boot_candidates(
             raise ValueError("package delivery current or target boot path differs")
         delivery["coordinator_config"] = coordinator_candidate_path
         delivery_candidate = canonical_json_bytes(delivery)
+    score_candidate = _model_score_candidate(
+        coordinator,
+        config_raw=model_score_config_raw,
+        current_boot_raw=model_score_current_boot_raw,
+        current_boot_path=model_score_current_boot_path,
+        candidate_path=coordinator_candidate_path,
+    )
     return RewardAdoptionBootCandidates(
         selection=selected,
         coordinator=_candidate(coordinator_raw, selected, RewardCoordinatorConfig),
@@ -268,4 +282,35 @@ def prepare_reward_adoption_boot_candidates(
         ),
         reference_publisher_config=publisher_candidate,
         package_delivery_config=delivery_candidate,
+        model_score_config=score_candidate,
     )
+
+
+def _model_score_candidate(
+    coordinator, *, config_raw, current_boot_raw, current_boot_path, candidate_path
+):
+    if all(value is None for value in (config_raw, current_boot_raw, current_boot_path)):
+        return None
+    if any(
+        value is None for value in (config_raw, current_boot_raw, current_boot_path, candidate_path)
+    ):
+        raise ValueError("model score handoff requires config, current boot and target path")
+    from .competition_cohort_model_scores import NativeModelScoresConfig
+
+    config = NativeModelScoresConfig.model_validate_json(config_raw)
+    current = RewardCoordinatorConfig.model_validate_json(current_boot_raw)
+    if (
+        canonical_json_bytes(current) != current_boot_raw
+        or current.role != "coordinator"
+        or current.series != coordinator.series
+        or current.policy != coordinator.policy
+        or current.reward_adoptions != coordinator.reward_adoptions
+        or config.policy_sha256 != coordinator.series.policy_sha256
+        or config.reward_coordinator_config not in (None, current_boot_path)
+        or not Path(candidate_path).is_absolute()
+    ):
+        raise ValueError("model score publisher disagrees on selected signed reward lineage")
+    value = config.model_dump(mode="json", by_alias=True)
+    value["reward_coordinator_config"] = candidate_path
+    candidate = NativeModelScoresConfig.model_validate(value)
+    return canonical_json_bytes(candidate)

@@ -31,9 +31,11 @@ from pydantic import Field, model_serializer, model_validator
 from .competition_cohort_coordinator import replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
 from .competition_cohort_intake import history_tip
+from .competition_cohort_model_award import GeometricModelAward
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_reward_allocation import CohortRewardAllocation
 from .competition_cohort_roster import RecoverableRosterEvidence
+from .competition_geometric_rewards import GeometricRewardParameters, baseline_eligibility_threshold
 from .competition_public_results import PublicQuality
 from .competition_public_results_directory import atomic_write, owned_directory, read_owned_file
 from .competition_public_results_publisher import publisher_lease, read_config_file
@@ -67,6 +69,7 @@ class PublicModelScore(StrictProtocolModel):
     status: Literal["scored", "not_scored"]
     aggregate: ModelScore | None
     baseline_aggregate: ModelScore | None
+    baseline_threshold: ModelScore | None = None
     score_rank: int | None = Field(default=None, ge=1, le=512)
     baseline_eligible: bool | None
     model_reward_status: Literal[
@@ -77,11 +80,20 @@ class PublicModelScore(StrictProtocolModel):
     ]
     certified_raw_weight_for_hotkey: int = Field(ge=0, le=65535)
 
+    @model_serializer(mode="wrap")
+    def preserve_original_score(self, handler):
+        value = handler(self)
+        if self.baseline_threshold is None:
+            value.pop("baseline_threshold", None)
+        return value
+
 
 class PublicModelScores(StrictProtocolModel):
-    schema_: Literal["umi-public-cohort-model-results/1", "umi-public-cohort-model-results/2"] = (
-        Field(alias="schema")
-    )
+    schema_: Literal[
+        "umi-public-cohort-model-results/1",
+        "umi-public-cohort-model-results/2",
+        "umi-public-cohort-model-results/3",
+    ] = Field(alias="schema")
     cohort_sha256: Hex32
     round_sha256: Hex32
     policy_sha256: Hex32
@@ -89,11 +101,15 @@ class PublicModelScores(StrictProtocolModel):
     certified_history_tip_sha256: Hex32
     source_metadata_sha256: Hex32
     certification: Literal[
-        "quorum_certified_native_allocation", "quorum_certified_score_correction"
+        "quorum_certified_native_allocation",
+        "quorum_certified_score_correction",
+        "quorum_certified_reward_adoption",
     ]
     original_allocation_sha256: Hex32 | None = None
+    original_source_metadata_sha256: Hex32 | None = None
     score_correction_statement_sha256: Hex32 | None = None
     reward_adoption_sha256: Hex32 | None = None
+    reward_parameters: GeometricRewardParameters | None = None
     reward_activation: Literal["not_assessed_by_this_endpoint"] = "not_assessed_by_this_endpoint"
     raw_weight_scope: Literal["certified_cohort_all_tracks_per_hotkey"] = (
         "certified_cohort_all_tracks_per_hotkey"
@@ -109,8 +125,10 @@ class PublicModelScores(StrictProtocolModel):
         value = handler(self)
         for key in (
             "original_allocation_sha256",
+            "original_source_metadata_sha256",
             "score_correction_statement_sha256",
             "reward_adoption_sha256",
+            "reward_parameters",
         ):
             if getattr(self, key) is None:
                 value.pop(key, None)
@@ -118,8 +136,23 @@ class PublicModelScores(StrictProtocolModel):
 
     @model_validator(mode="after")
     def ranks(self):
+        if self.reward_parameters is not None and self.reward_parameters.baseline_grace_bps is None:
+            raise ValueError("explicit public reward parameters require a selected baseline grace")
+        adopted = self.schema_ == "umi-public-cohort-model-results/3"
         corrected = self.schema_ == "umi-public-cohort-model-results/2"
-        if corrected != (self.certification == "quorum_certified_score_correction") or any(
+        if adopted:
+            if (
+                self.certification != "quorum_certified_reward_adoption"
+                or self.original_allocation_sha256 is None
+                or self.original_source_metadata_sha256 is None
+                or self.reward_adoption_sha256 is None
+            ):
+                raise ValueError("public reward adoption needs its exact signed source")
+        elif self.certification != (
+            "quorum_certified_score_correction"
+            if corrected
+            else "quorum_certified_native_allocation"
+        ) or any(
             (getattr(self, key) is not None) != corrected
             for key in (
                 "original_allocation_sha256",
@@ -128,6 +161,8 @@ class PublicModelScores(StrictProtocolModel):
             )
         ):
             raise ValueError("public score correction needs an explicit signed source")
+        if not adopted and self.original_source_metadata_sha256 is not None:
+            raise ValueError("original public source binding requires a reward adoption")
         keys = [r.submission_sha256 for r in self.items]
         if len(keys) != len(set(keys)):
             raise ValueError("public model scores repeat a submission")
@@ -147,6 +182,7 @@ class PublicModelScores(StrictProtocolModel):
             if r.aggregate is None and (
                 r.score_rank is not None
                 or r.baseline_eligible is not None
+                or r.baseline_threshold is not None
                 or r.model_reward_status != "not_scored"
             ):
                 raise ValueError("unscored model cannot have a rank or reward eligibility")
@@ -157,11 +193,34 @@ class PublicModelScores(StrictProtocolModel):
                 baseline = Fraction(
                     int(r.baseline_aggregate.numerator), int(r.baseline_aggregate.denominator)
                 )
-                if r.baseline_eligible != (f >= baseline) or (
+                threshold = (
+                    baseline
+                    if self.reward_parameters is None
+                    else baseline_eligibility_threshold(baseline, self.reward_parameters)
+                )
+                if (r.baseline_threshold is None) != (self.reward_parameters is None) or (
+                    r.baseline_threshold is not None
+                    and Fraction(
+                        int(r.baseline_threshold.numerator), int(r.baseline_threshold.denominator)
+                    )
+                    != threshold
+                ):
+                    raise ValueError("public baseline threshold differs from selected grace")
+                if r.baseline_eligible != (f >= threshold) or (
                     r.model_reward_status == "below_baseline"
-                ) != (f < baseline):
+                ) != (f < threshold):
                     raise ValueError("public model reward status differs from baseline eligibility")
         return self
+
+
+def _public_reward_parameters(award):
+    """Keep historical publication bytes; expose prospective signed grace explicitly."""
+    return (
+        award.parameters
+        if isinstance(award, GeometricModelAward)
+        and award.parameters.baseline_grace_bps is not None
+        else None
+    )
 
 
 def project_corrected_model_scores(original, adoption, corrected):
@@ -169,11 +228,12 @@ def project_corrected_model_scores(original, adoption, corrected):
     original = PublicModelScores.model_validate_json(canonical_json_bytes(original))
     adoption = RewardModelAdoption.model_validate_json(canonical_json_bytes(adoption))
     corrected = CohortRewardAllocation.model_validate_json(canonical_json_bytes(corrected))
+    if adoption.signed_score_correction is None:
+        raise ValueError("public correction requires explicit signed score evidence")
     evidence = adoption.score_correction_evidence
     statement = adoption.signed_score_correction.statement
     if (
         original.schema_ != "umi-public-cohort-model-results/1"
-        or adoption.schema_ != "umi-standing-model-reward-adoption/4"
         or original.cohort_sha256 != adoption.cohort_sha256
         or original.policy_sha256 != adoption.policy_sha256
         or original.allocation_sha256 != adoption.allocation_sha256
@@ -186,6 +246,7 @@ def project_corrected_model_scores(original, adoption, corrected):
     rows = {row.submission_sha256: row for row in evidence.rows}
     credits = {credit.submission_sha256 for credit in corrected.model_award.credits}
     weights = {identity(row.hotkey): row.raw_weight for row in corrected.recipients}
+    parameters = _public_reward_parameters(corrected.model_award)
     changed = []
     for item in original.items:
         row = rows.pop(item.submission_sha256, None)
@@ -196,12 +257,18 @@ def project_corrected_model_scores(original, adoption, corrected):
             int(evidence.baseline_aggregate.numerator),
             int(evidence.baseline_aggregate.denominator),
         )
-        eligible = aggregate >= baseline
+        threshold = (
+            baseline if parameters is None else baseline_eligibility_threshold(baseline, parameters)
+        )
+        eligible = aggregate >= threshold
         changed.append(
             item.model_copy(
                 update={
                     "aggregate": ModelScore.make(row.aggregate),
                     "baseline_aggregate": ModelScore.make(evidence.baseline_aggregate),
+                    "baseline_threshold": None
+                    if parameters is None
+                    else ModelScore.make(threshold),
                     "baseline_eligible": eligible,
                     "score_rank": None,
                     "model_reward_status": "below_baseline"
@@ -252,7 +319,129 @@ def project_corrected_model_scores(original, adoption, corrected):
             }
         ),
         certification="quorum_certified_score_correction",
+        reward_parameters=parameters,
         items=tuple(changed),
+    )
+
+
+def project_adopted_model_scores(original, adoption, effective):
+    """Project a selected signed adoption; the caller authenticates its full lineage.
+
+    Start from the retained native publication, never an earlier adopted output.
+    Ordinary reward adoption cannot change quality, roster or measured baseline.
+    A score change requires the separate signed correction evidence path.
+    """
+    original = PublicModelScores.model_validate_json(canonical_json_bytes(original))
+    adoption = RewardModelAdoption.model_validate_json(canonical_json_bytes(adoption))
+    effective = CohortRewardAllocation.model_validate_json(canonical_json_bytes(effective))
+    award = effective.model_award
+    if (
+        original.schema_ != "umi-public-cohort-model-results/1"
+        or original.cohort_sha256 != adoption.cohort_sha256
+        or original.policy_sha256 != adoption.policy_sha256
+        or original.allocation_sha256 != adoption.allocation_sha256
+        or original.round_sha256 != effective.round_sha256
+        or original.policy_sha256 != effective.policy_sha256
+        or digest(effective) != adoption.effective_allocation_sha256
+        or not isinstance(award, GeometricModelAward)
+        or award.parameters != adoption.parameters
+        or award.authority_sha256 != adoption.authority_sha256
+        or award.policy_sha256 != original.policy_sha256
+        or award.round_sha256 != original.round_sha256
+        or effective.service_certificate_sha256 != adoption.service_certificate_sha256
+        or effective.quality_manifest_sha256
+        != (
+            adoption.quality_manifest_sha256
+            if adoption.signed_score_correction is None
+            else digest(adoption.score_correction_evidence)
+        )
+        or award.quality_manifest_sha256 != effective.quality_manifest_sha256
+    ):
+        raise ValueError("public reward adoption differs from its exact effective allocation")
+    if adoption.signed_score_correction is not None:
+        projected = project_corrected_model_scores(original, adoption, effective)
+    else:
+        candidates = {candidate.submission_sha256: candidate for candidate in award.candidates}
+        selected = {credit.submission_sha256 for credit in award.credits}
+        weights = {identity(row.hotkey): row.raw_weight for row in effective.recipients}
+        parameters = _public_reward_parameters(award)
+        rows = []
+        for item in original.items:
+            candidate = candidates.pop(item.submission_sha256, None)
+            if candidate is None:
+                if item.status != "not_scored":
+                    raise ValueError("public adoption omitted a certified model score")
+                rows.append(
+                    item.model_copy(
+                        update={
+                            "certified_raw_weight_for_hotkey": weights.get(
+                                identity(item.hotkey), 0
+                            ),
+                        }
+                    )
+                )
+                continue
+            if (
+                item.status != "scored"
+                or candidate.model_sha256 != item.model_sha256
+                or identity(candidate.recipient_hotkey) != identity(item.hotkey)
+                or ModelScore.make(candidate.aggregate) != item.aggregate
+                or ModelScore.make(candidate.baseline_aggregate) != item.baseline_aggregate
+            ):
+                raise ValueError("ordinary reward adoption cannot change certified model quality")
+            measured = Fraction(
+                int(candidate.baseline_aggregate.numerator),
+                int(candidate.baseline_aggregate.denominator),
+            )
+            threshold = baseline_eligibility_threshold(measured, award.parameters)
+            eligible = (
+                Fraction(int(candidate.aggregate.numerator), int(candidate.aggregate.denominator))
+                >= threshold
+            )
+            rows.append(
+                item.model_copy(
+                    update={
+                        "baseline_threshold": None
+                        if parameters is None
+                        else ModelScore.make(threshold),
+                        "baseline_eligible": eligible,
+                        "model_reward_status": "below_baseline"
+                        if not eligible
+                        else "selected_by_certified_rule"
+                        if item.submission_sha256 in selected
+                        else "not_selected_by_certified_rule",
+                        "certified_raw_weight_for_hotkey": weights.get(identity(item.hotkey), 0),
+                    }
+                )
+            )
+        if candidates:
+            raise ValueError("public adoption has a model outside its certified roster")
+        projected = original.model_copy(
+            update={
+                "items": tuple(rows),
+                "reward_parameters": parameters,
+            }
+        )
+    return PublicModelScores.model_validate_json(
+        canonical_json_bytes(
+            projected.model_copy(
+                update={
+                    "schema_": "umi-public-cohort-model-results/3",
+                    "certification": "quorum_certified_reward_adoption",
+                    "allocation_sha256": digest(effective),
+                    "original_allocation_sha256": original.allocation_sha256,
+                    "original_source_metadata_sha256": original.source_metadata_sha256,
+                    "reward_adoption_sha256": digest(adoption),
+                    "source_metadata_sha256": digest(
+                        {
+                            "original_publication": digest(original),
+                            "reward_adoption": digest(adoption),
+                            "effective_allocation": digest(effective),
+                        }
+                    ),
+                }
+            )
+        )
     )
 
 
@@ -373,6 +562,7 @@ def project_model_scores(header, history_packet, policy, *, cohort):
     if winner is not None:
         selected.add(winner)
     weights = {identity(r.hotkey): r.raw_weight for r in allocation.recipients}
+    parameters = _public_reward_parameters(award)
     rows = []
     for participant in roster.participants:
         submission = participant.record.request.signed_submission.submission
@@ -385,6 +575,22 @@ def project_model_scores(header, history_packet, policy, *, cohort):
             submission.hotkey
         ):
             raise ValueError("public model score recipient differs from retained admission")
+        threshold = None
+        eligible = None
+        if candidate is not None:
+            baseline = Fraction(
+                int(candidate.baseline_aggregate.numerator),
+                int(candidate.baseline_aggregate.denominator),
+            )
+            threshold = (
+                baseline
+                if parameters is None
+                else baseline_eligibility_threshold(baseline, parameters)
+            )
+            eligible = (
+                Fraction(int(candidate.aggregate.numerator), int(candidate.aggregate.denominator))
+                >= threshold
+            )
         rows.append(
             PublicModelScore(
                 submission_sha256=key,
@@ -398,11 +604,14 @@ def project_model_scores(header, history_packet, policy, *, cohort):
                 baseline_aggregate=None
                 if candidate is None
                 else ModelScore.make(candidate.baseline_aggregate),
-                baseline_eligible=None if candidate is None else candidate.eligible,
+                baseline_threshold=None
+                if candidate is None or parameters is None
+                else ModelScore.make(threshold),
+                baseline_eligible=eligible,
                 model_reward_status="not_scored"
                 if candidate is None
                 else "below_baseline"
-                if not candidate.eligible
+                if not eligible
                 else "selected_by_certified_rule"
                 if key in selected
                 else "not_selected_by_certified_rule",
@@ -445,6 +654,7 @@ def project_model_scores(header, history_packet, policy, *, cohort):
         certified_history_tip_sha256=history_tip(history),
         source_metadata_sha256=hashlib.sha256(canonical_json_bytes(metadata)).hexdigest(),
         certification="quorum_certified_native_allocation",
+        reward_parameters=parameters,
         items=tuple(rows),
     )
 
@@ -459,6 +669,14 @@ class NativeModelScoresConfig(StrictProtocolModel):
     maximum_package_bytes: int = Field(gt=0)
     maximum_metadata_bytes: int = Field(default=128 * 1024**2, gt=0)
     poll_seconds: float = Field(default=15, ge=1, le=3600)
+    reward_coordinator_config: Directory | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_original_config(self, handler):
+        value = handler(self)
+        if self.reward_coordinator_config is None:
+            value.pop("reward_coordinator_config", None)
+        return value
 
     @model_validator(mode="after")
     def disjoint(self):
@@ -481,6 +699,10 @@ class NativeModelScoresConfig(StrictProtocolModel):
             raise ValueError(
                 "native score source, history, output and completion state must be disjoint"
             )
+        if self.reward_coordinator_config is not None:
+            boot = Path(self.reward_coordinator_config)
+            if any(boot == path or boot.is_relative_to(path) for path in paths):
+                raise ValueError("selected reward boot must be outside mutable public score stores")
         return self
 
 
@@ -526,6 +748,15 @@ class NativeModelScoresPublisher:
             raise ValueError("native score publisher policy selection differs")
         self.receipts, self.published = {}, {}
         self.source_identity = self._source_identity()
+        self.adoptions = None
+        if config.reward_coordinator_config is not None:
+            # This boundary imports the public projection types above; defer it
+            # until the complete module is loaded, not during schema definition.
+            from .competition_cohort_model_score_adoption import SelectedModelScoreAdoptions
+
+            self.adoptions = SelectedModelScoreAdoptions(
+                Path(config.reward_coordinator_config), policy=self.policy, state=self.state
+            )
 
     def _source_identity(self):
         identities = []
@@ -625,10 +856,20 @@ class NativeModelScoresPublisher:
                             "completed native score source changed; explicit repair required"
                         )
                     output = self.output / (cohort + ".json")
+                    stage = "selected_reward_adoption"
+                    projected = (
+                        receipt.projection
+                        if self.adoptions is None
+                        else self.adoptions.project(receipt.projection, output=output)
+                    )
                     stage = "public_artifact_publication"
                     present = output.exists()
                     if not present or self.published.get(cohort) != tuple(_stamp(output)):
-                        atomic_write(output, canonical_json_bytes(receipt.projection))
+                        atomic_write(
+                            output,
+                            canonical_json_bytes(projected),
+                            immutable=projected == receipt.projection,
+                        )
                         self.published[cohort] = tuple(_stamp(output))
                     report["retained" if present else "published"].append(cohort)
                     report["completed"] += 1
@@ -694,7 +935,13 @@ class PublicModelScoreCache:
                 )
                 if (
                     value.cohort_sha256 != cohort
-                    or value.score_correction_statement_sha256 != expected_statement
+                    or (
+                        value.score_correction_statement_sha256 != expected_statement
+                        and (
+                            expected_statement is not None
+                            or value.schema_ != "umi-public-cohort-model-results/3"
+                        )
+                    )
                     or tuple(_stamp(path)) != stamp
                 ):
                     raise ValueError("public model score publication binding changed")

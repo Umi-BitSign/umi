@@ -626,7 +626,13 @@ class CohortExecutionJournal:
             or result.output.case_id != case.case_id
         ):
             raise ValueError("invocation result differs from its assigned model or case")
-        validate_case_execution(result, self.policy)
+        from .competition_evaluation_runtime import prepared_runtime_authorization
+
+        validate_case_execution(
+            result,
+            self.policy,
+            runtime_authorization=prepared_runtime_authorization(job.round, self.policy),
+        )
         return result
 
     def stopped(self, attempt: CohortExecutionAttempt):

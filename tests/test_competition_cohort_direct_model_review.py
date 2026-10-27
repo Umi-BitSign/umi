@@ -224,6 +224,33 @@ async def test_reviewer_independently_verifies_owner_bound_r2_object(
     source.key = preserved_model_object_key(
         reservation.cohort_sha256, payload.model_sha256, payload.payload_sha256
     )
+    # Readiness selects the certified source and checks presence. It cannot
+    # require a new preserved-key byte receipt before the first execution.
+    reads = source.ranges_read
+    await verifier.available(direct_request)
+    assert source.ranges_read == reads
+    heads = source.heads_read
+    damaged = direct_request.model_copy(
+        update={
+            "acceptance": direct_request.acceptance.model_copy(update={"model_sha256": "ef" * 32})
+        }
+    )
+    with pytest.raises(ValueError, match="direct model acceptance source differs"):
+        await verifier.available(damaged)
+    assert source.heads_read == heads and source.ranges_read == reads
+
+    async def missing(*args, **kwargs):
+        return None
+
+    async def wrong_size(*args, **kwargs):
+        return SimpleNamespace(size_bytes=len(body) + 1, etag=source.etag)
+
+    for unavailable in (missing, wrong_size):
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "head", unavailable)
+            with pytest.raises(OSError, match="object is unavailable"):
+                await verifier.available(direct_request)
+    assert source.ranges_read == reads
     scratch = reviews.root / "bounded-scratch"
     scratch.mkdir(mode=0o700)
     monkeypatch.setattr(

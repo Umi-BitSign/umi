@@ -126,7 +126,6 @@ async def test_initial_adoption_proposal_uses_verified_package_without_replaying
         snapshot,
         series=p.reader.series,
         policy=p.reader.policy,
-        parameters=parameters,
         issued_at_block=p.active.decision.observed_at_block,
         previous=None,
     )

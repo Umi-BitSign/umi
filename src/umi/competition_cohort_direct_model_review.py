@@ -303,6 +303,14 @@ class DirectModelArtifactReviewer:
         inputs, _ = await self.verify(request)
         return inputs
 
+    async def available(self, request: ModelReviewRequest) -> None:
+        """Availability for an authenticated source; execution still verifies its bytes."""
+        _, payload, key = self._source(request, preserved=True)
+        async with r2_connection_scope(self.multipart):
+            head = await self.multipart.head(key)
+        if head is None or head.size_bytes != payload.total_bytes:
+            raise OSError("direct model materialization object is unavailable")
+
     def verify_materialization_filesystem(self, root: Path):
         """Select legacy filesystem isolation or an explicit bounded shared cache."""
 

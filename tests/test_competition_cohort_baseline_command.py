@@ -53,6 +53,7 @@ from .test_competition_cohort_baseline_history import (
     runtime as runtime,
 )
 from .test_competition_cohort_review_boot import config_for
+from .test_competition_cohort_settlement_boot import selected as selected
 from .test_competition_reward_boot import (
     chain as chain,
 )
@@ -78,7 +79,9 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(params=("intake", "reviewer", "evaluator"))
+@pytest.fixture(
+    params=("intake", "reviewer", "settlement-coordinator", "settlement-reviewer", "evaluator")
+)
 def publication_case(request, retained_case, model_case, chain_config, public_deployment, tmp_path):
     source, review, baseline, b = retained_case
     policy = source.policy
@@ -130,8 +133,26 @@ def publication_case(request, retained_case, model_case, chain_config, public_de
                 )
             }
         )
-    elif request.param == "reviewer":
-        configured = config_for(request.getfixturevalue("inputs").value, tmp_path / "phase")
+    elif request.param == "reviewer" or request.param.startswith("settlement-"):
+        if request.param == "reviewer":
+            configured = config_for(request.getfixturevalue("inputs").value, tmp_path / "phase")
+        else:
+            configured = request.getfixturevalue("selected").config
+            if request.param == "settlement-reviewer":
+                peer = next(
+                    e.hotkey
+                    for e in configured.policy.evaluators
+                    if e.hotkey != configured.proposer_hotkey
+                )
+                configured = configured.model_copy(
+                    update={
+                        "role": "reviewer",
+                        "signer_hotkey": peer,
+                        "executions": tuple(
+                            e.model_copy(update={"signer": peer}) for e in configured.executions
+                        ),
+                    }
+                )
         config = configured.model_copy(update={"promotion_directory": str(source.directory)})
         plans = config.series.cohorts
         review = review.model_copy(
@@ -198,7 +219,7 @@ def publication_case(request, retained_case, model_case, chain_config, public_de
             "--confirm-quiesced-backup",
             "--certificate",
             str(files["certificate"]),
-            "--" + request.param + "-config",
+            "--" + request.param.split("-", 1)[0] + "-config",
             str(files["config"]),
             "--chain-config",
             str(files["chain"]),
@@ -327,6 +348,8 @@ def test_missing_ledger_is_not_recreated(publication_case, monkeypatch, tmp_path
     field = {
         "intake": "state_directory",
         "reviewer": "promotion_directory",
+        "settlement-coordinator": "promotion_directory",
+        "settlement-reviewer": "promotion_directory",
         "evaluator": "settlement_review_directory",
     }[c.kind]
     c.files["config"].write_bytes(
@@ -359,6 +382,8 @@ def test_observer_cannot_use_service_state_or_checkpoints(publication_case, monk
         if c.kind == "intake"
         else c.config.signing.directory
         if c.kind == "reviewer"
+        else c.config.executions[0].directory
+        if c.kind.startswith("settlement-")
         else c.config.wallet_path
     )
     c.files["chain"].write_bytes(

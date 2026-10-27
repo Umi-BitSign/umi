@@ -26,6 +26,50 @@ The [private holdout](private-holdout.md#open-competition-private-holdout) suppl
 English references from documented annotations. An independent evaluator is a
 separately administered execution service, not a person grading translations.
 
+### Recoverable CPU process capacity
+
+New CPU runtime declarations default to `pids_limit: 256`. Keep the selected
+CPU, memory, scratch and inference budgets explicit. A Linux CPU quota does not
+change the host CPU count returned to MediaPipe, so a 128-process container can
+fail while constructing its thread pools even when memory remains available.
+
+For already signed C7+ policies using 128 processes, select one
+`SignedCohortEvaluationRuntimeAdoption` in the admission host's optional
+`runtime_adoption` configuration (or the standalone preparation publication
+configuration). Its `adoption` body uses schema
+`umi-cohort-evaluation-runtime-adoption/1`, binds the exact policy, recovery
+authority and complete sorted authority cohort list, names the original and
+effective runtime objects, and includes `first_cohort_sequence`,
+`issued_at_block` and a retained reason. Collect the configured independent
+recovery quorum's signatures on that exact body. Only the 128-to-256 process
+change is accepted; image, CPU, RAM, scratch, video and inference limits remain
+bound to the original policy. This is not a Bittensor runtime-version pin.
+
+The owner validates the selection before progression can run. Future prepared
+rounds embed it in `umi-recoverable-evaluation-round/2`; preparation reviewers,
+order delivery, execution journals, sandbox memory admission and settlement
+replay all authenticate the same effective runtime. Existing retained rounds
+reuse their original embedded selection after restart, even if the configured
+selection changes. C5/C6 and earlier round `/1` bytes remain unchanged. No
+previous completed case is executed again for this resource adjustment.
+
+Deploy the compatible owner, preparation reviewers, evaluators, settlement and
+validator replay readers through their supported release selections before
+selecting the amendment. Clients that parse prepared rounds also need the `/2`
+reader. Public model upload requests, signatures, R2 routes and journals do not
+change; upload-only clients do not need a new request format. Keep existing
+intake/progression holds selected: installing this profile does not close intake
+or start challenges.
+
+Direct cohort CPU readiness authenticates each order's selected runtime before
+coalescing shared preflight checks. With R2 model storage selected, it resolves
+the certified candidate and baseline sources and checks their remote presence
+and expected size once per distinct source in that readiness probe. It does not
+require every model to be cached locally or download model bytes while polling.
+Missing or inconsistent source metadata holds readiness; actual materialization
+and execution retain their existing byte-verification requirements and durable
+completed results.
+
 <a id="open-competition-evaluator--inputs-and-identity"></a>
 
 ### Inputs and identity

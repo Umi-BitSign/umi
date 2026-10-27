@@ -2,6 +2,7 @@
 
 import hashlib
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -102,6 +103,86 @@ def test_restart_and_evicted_output_restore_without_source_or_native_work(watche
     result = module.NativePublicCatalogWatcher(config).poll_once()
     assert result["published"] == [projection.catalog.cohort_sha256]
     assert result["held"] == []
+
+
+def adopted_trigger(scores, revision="1"):
+    return module.PublicModelScores.model_validate_json(
+        canonical_json_bytes(
+            scores.model_copy(
+                update={
+                    "schema_": "umi-public-cohort-model-results/3",
+                    "certification": "quorum_certified_reward_adoption",
+                    "original_allocation_sha256": scores.original_allocation_sha256
+                    or scores.allocation_sha256,
+                    "original_source_metadata_sha256": scores.original_source_metadata_sha256
+                    or scores.source_metadata_sha256,
+                    "reward_adoption_sha256": revision * 64,
+                    "source_metadata_sha256": revision * 64,
+                    "allocation_sha256": "9" * 64,
+                }
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize("initially_adopted", [False, True])
+def test_selected_adoption_rebinds_catalog_trigger_without_native_work(
+    watched, monkeypatch, initially_adopted
+):
+    config, projection, calls, trigger = watched
+    original = module.PublicModelScores.model_validate_json(trigger.read_bytes())
+    if initially_adopted:
+        trigger.write_bytes(canonical_json_bytes(adopted_trigger(original)))
+    owner = module.NativePublicCatalogWatcher(config)
+    assert owner.poll_once()["held"] == []
+    receipt_path = Path(config.state_directory) / (projection.catalog.cohort_sha256 + ".json")
+    before = module.CatalogCompletion.model_validate_json(receipt_path.read_bytes()).checked()
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    trigger.write_bytes(canonical_json_bytes(adopted_trigger(original, "2")))
+    assert owner.poll_once()["held"] == []
+    after = module.CatalogCompletion.model_validate_json(receipt_path.read_bytes()).checked()
+    assert after.source_stamp != before.source_stamp
+    assert after.score_metadata_sha256 == original.source_metadata_sha256
+    assert canonical_json_bytes(after.projection) == canonical_json_bytes(before.projection)
+    assert len(calls) == 1
+    # A later adopted revision still names the original native metadata, and
+    # a cold watcher restores the same catalog without admission/model reads.
+    trigger.write_bytes(canonical_json_bytes(adopted_trigger(original, "3")))
+    restarted = module.NativePublicCatalogWatcher(config)
+    assert restarted.poll_once()["held"] == []
+    monkeypatch.setattr(module, "read_owned_file", forbid_native)
+    assert restarted.poll_once()["held"] == []
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["source", "uid", "model", "policy"])
+def test_adopted_trigger_cannot_rebind_another_catalog_source_or_roster(
+    watched, monkeypatch, change
+):
+    config, projection, _, trigger = watched
+    owner = module.NativePublicCatalogWatcher(config)
+    assert owner.poll_once()["held"] == []
+    receipt_path = Path(config.state_directory) / (projection.catalog.cohort_sha256 + ".json")
+    retained = receipt_path.read_bytes()
+    adopted = adopted_trigger(module.PublicModelScores.model_validate_json(trigger.read_bytes()))
+    if change == "source":
+        adopted = adopted.model_copy(update={"original_source_metadata_sha256": "7" * 64})
+    elif change == "policy":
+        adopted = adopted.model_copy(update={"policy_sha256": "7" * 64})
+    else:
+        item = adopted.items[0].model_copy(
+            update={
+                "uid": adopted.items[0].uid + 1,
+            }
+            if change == "uid"
+            else {"model_sha256": "7" * 64}
+        )
+        adopted = adopted.model_copy(update={"items": (item,)})
+    trigger.write_bytes(canonical_json_bytes(adopted))
+    monkeypatch.setattr(module, "prepare_native_cohort", forbid_native)
+    report = owner.poll_once()
+    assert report["completed"] == 0 and report["held"][0]["stage"] == "adopted_score_catalog_rebind"
+    assert receipt_path.read_bytes() == retained
 
 
 def test_interrupted_output_publication_reuses_checkpoint(watched, monkeypatch):

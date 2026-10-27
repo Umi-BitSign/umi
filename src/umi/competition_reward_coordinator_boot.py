@@ -38,6 +38,10 @@ from .competition_model_byte_store import shared_byte_store_paths, validate_shar
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_baseline_restore import (
+    CompletedCoverageBaselineRequest,
+    prepare_completed_coverage_baseline,
+)
 from .competition_reward_boot import Capacity, HistoryCapacity, ObjectCapacity, _disjoint
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_control_journal import RewardControlTransactionJournal
@@ -303,9 +307,17 @@ def load_reward_coordinator_config(path: Path) -> RewardCoordinatorConfig:
 
 
 async def run_reward_coordinator(
-    config: RewardCoordinatorConfig, stop: asyncio.Event, *, credit_repair=None
+    config: RewardCoordinatorConfig,
+    stop: asyncio.Event,
+    *,
+    credit_repair=None,
+    baseline_review: CompletedCoverageBaselineRequest | None = None,
 ):
     config = RewardCoordinatorConfig.model_validate_json(canonical_json_bytes(config))
+    if baseline_review is not None:
+        baseline_review = CompletedCoverageBaselineRequest.model_validate(baseline_review)
+        if credit_repair is not None:
+            raise ValueError("baseline review and credit repair are separate owner operations")
     if credit_repair is not None:
         from .competition_evidence_codec import checked_digest
 
@@ -503,6 +515,11 @@ async def run_reward_coordinator(
                 plan=config.handoff,
                 coverage=predecessor_coverage,
             )
+        if baseline_review is not None:
+            # Original exclusive state lease and configured native sources are
+            # retained. No wallet key, signer, publisher or collector is opened.
+            await provider.start()
+            return await prepare_completed_coverage_baseline(coverage, baseline_review)
         if credit_repair is not None:
             # Original state lease, native configuration and provider are owned;
             # no signer, control publisher or autonomous collector is created.

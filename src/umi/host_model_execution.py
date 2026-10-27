@@ -83,26 +83,39 @@ class ModelExecutionAdmission:
             or selected.evaluation_runtime_sha256 != policy.evaluation_runtime_sha256
         ):
             raise AdmissionBindingError("model execution capacity differs from signed policy")
+        self.protocol_policy = policy.model_copy(deep=True)
         self.slots = tuple(s for s in selected.slots if s.lane == "transient")
 
-    def check_runtime(self, runtime):
-        if digest(runtime) != self.controller.policy.evaluation_runtime_sha256 or any(
-            slot.reservation_bytes < runtime.memory_bytes for slot in self.slots
-        ):
+    def check_runtime(self, runtime, *, runtime_authorization=None):
+        from .competition_evaluation_runtime import validate_evaluation_runtime_authorization
+
+        try:
+            validate_evaluation_runtime_authorization(
+                runtime_authorization,
+                policy=self.protocol_policy,
+                runtime_sha256=digest(runtime),
+            )
+        except ValueError as error:
+            raise AdmissionBindingError(
+                "model execution reservation is below its signed runtime"
+            ) from error
+        if any(slot.reservation_bytes < runtime.memory_bytes for slot in self.slots):
             raise AdmissionBindingError("model execution reservation is below its signed runtime")
 
     @asynccontextmanager
-    async def invocation(self, runtime):
-        self.check_runtime(runtime)
+    async def invocation(self, runtime, *, runtime_authorization=None):
         if _ACTIVE.get() == self.controller.policy_sha256:
+            self.check_runtime(runtime, runtime_authorization=runtime_authorization)
             yield
         else:
-            async with self.hold(runtime):
+            async with self.hold(runtime, runtime_authorization=runtime_authorization):
                 yield
 
     @asynccontextmanager
-    async def hold(self, runtime, *, exclusive=False, preparation=False):
-        self.check_runtime(runtime)
+    async def hold(
+        self, runtime, *, exclusive=False, preparation=False, runtime_authorization=None
+    ):
+        self.check_runtime(runtime, runtime_authorization=runtime_authorization)
         lane = "owner_export" if preparation else "transient"
         count = len(self.slots) if exclusive and not preparation else 1
         with TransferProgress("model_execution_capacity", count, unit="slots") as progress:

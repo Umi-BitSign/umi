@@ -93,6 +93,10 @@ class LegacyCohortModelCache:
             {"schema": "umi-legacy-model-cache-selection/1", "selection": digest(source.selection)}
         )
 
+    async def available(self, source):
+        """Check the authenticated source without filling the execution cache."""
+        await self.sources.reader(source).available()
+
     async def resumable(self, source, archive):
         try:
             retained = await run_owned_thread(

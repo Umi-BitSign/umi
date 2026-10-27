@@ -14,6 +14,7 @@ from ..competition_cohort_baseline_review import (
     verify_baseline_review,
 )
 from ..competition_cohort_review_config import PhaseReviewServiceConfig
+from ..competition_cohort_settlement_config import SettlementServiceConfig
 from ..competition_evaluator import EvaluatorConfig
 from ..competition_execution import execution_boundary
 from ..competition_intake_archive import load_intake_archive
@@ -26,13 +27,15 @@ from ..concurrency import run_owned_thread
 from ..open_competition import CompetitionPolicy, digest
 from .common import load_json
 
-StoreConfig = CompetitionServiceConfig | PhaseReviewServiceConfig | EvaluatorConfig
+StoreConfig = (
+    CompetitionServiceConfig | PhaseReviewServiceConfig | SettlementServiceConfig | EvaluatorConfig
+)
 
 
 def _directory(config: StoreConfig) -> Path:
     if isinstance(config, CompetitionServiceConfig):
         return Path(config.state_directory)
-    if isinstance(config, PhaseReviewServiceConfig):
+    if isinstance(config, (PhaseReviewServiceConfig, SettlementServiceConfig)):
         return Path(config.promotion_directory)
     if config.settlement_review_directory is None or config.settlement_replay_limits is None:
         raise ValueError("cohort baseline requires existing evaluator review history")
@@ -59,8 +62,8 @@ def _open_store(config: StoreConfig, policy: CompetitionPolicy, *, read_only: bo
             ),
             read_only_existing=read_only,
         )
-    if isinstance(config, PhaseReviewServiceConfig):
-        # Matches the current phase review boot's promotion store role/bindings.
+    if isinstance(config, (PhaseReviewServiceConfig, SettlementServiceConfig)):
+        # Both native service boots own an ordinary promotion history here.
         return CompetitionStore(directory, policy, read_only_existing=read_only)
     return EvaluatorReviewStore(
         directory, policy, limits=config.settlement_replay_limits, read_only_existing=read_only
@@ -77,13 +80,12 @@ def _protected_paths(config: StoreConfig):
         if config.recoverable_service is not None:
             yield from config.recoverable_service.stores()
         yield from (Path(item.directory) for item in config.historical_archives)
-    elif isinstance(config, PhaseReviewServiceConfig):
+    elif isinstance(config, (PhaseReviewServiceConfig, SettlementServiceConfig)):
         yield from config.stores()
-        yield from (
-            Path(config.signer_key_file),
-            Path(config.owner_token_file),
-            Path(config.vote_token_file),
-        )
+        yield Path(config.signer_key_file)
+        if isinstance(config, PhaseReviewServiceConfig):
+            yield Path(config.owner_token_file)
+            yield Path(config.vote_token_file)
         if config.direct_model_review is not None:
             yield Path(config.direct_model_review.r2_credentials_file)
     else:
@@ -120,12 +122,14 @@ def activate(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
             config = load_json(args.intake_config, CompetitionServiceConfig)
         elif args.reviewer_config:
             config = load_json(args.reviewer_config, PhaseReviewServiceConfig)
+        elif args.settlement_config:
+            config = load_json(args.settlement_config, SettlementServiceConfig)
         else:
             config = load_json(args.evaluator_config, EvaluatorConfig)
         chain = load_json(args.chain_config, CompetitionChainConfig)
         config_policy = (
             digest(config.policy)
-            if isinstance(config, PhaseReviewServiceConfig)
+            if isinstance(config, (PhaseReviewServiceConfig, SettlementServiceConfig))
             else config.policy_sha256
         )
         if config_policy != digest(policy) or chain.policy_sha256 != digest(policy):
@@ -135,7 +139,7 @@ def activate(args: argparse.Namespace, policy: CompetitionPolicy) -> dict:
             or chain.finality_pin != config.chain.finality_pin
         ):
             raise ValueError("cohort baseline observer differs from the configured chain authority")
-        if isinstance(config, PhaseReviewServiceConfig):
+        if isinstance(config, (PhaseReviewServiceConfig, SettlementServiceConfig)):
             series = config.series
         elif (
             isinstance(config, CompetitionServiceConfig) and config.recoverable_service is not None

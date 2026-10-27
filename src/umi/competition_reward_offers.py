@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .competition_cohort_recovery import GeometricModelRewardCohortAuthority
 from .competition_cohort_reward_package import CohortRewardPackage
-from .competition_geometric_rewards import GeometricRewardParameters
+from .competition_geometric_rewards import cohort_reward_parameters
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
@@ -40,22 +40,17 @@ from .private_files import private_path
 from .protocol import canonical_json_bytes
 
 logger = logging.getLogger(__name__)
-_C5_MODEL_REWARD_PARAMETERS = GeometricRewardParameters(
-    band_width_bps=250,
-    band_decay_bps=7500,
-    within_band_decay_bps=7500,
-    score_duplicate_tolerance_bps=1,
-)
 
 
 def successor_reward_rule_ready(plan, authority, adoption) -> bool:
-    """Gate C6+ offers on the intended C5 economics, without changing signed inputs."""
+    """Require the announced cohort economics without changing signed inputs."""
     if plan.sequence < 6:
         return True
+    expected = cohort_reward_parameters(plan.sequence)
     if adoption is not None:
-        return adoption.adoption.parameters == _C5_MODEL_REWARD_PARAMETERS
+        return adoption.adoption.parameters == expected
     if isinstance(authority, GeometricModelRewardCohortAuthority):
-        return authority.model_reward_parameters == _C5_MODEL_REWARD_PARAMETERS
+        return authority.model_reward_parameters == expected
     return False
 
 
@@ -110,7 +105,7 @@ class StandingRewardOffers:
             self.pending_reason = "reward_adoption_pending"
             if cohort not in self._reported_missing_successor_adoptions:
                 logger.warning(
-                    "reward_offer_waiting_for_c5_style_economics cohort_sha256=%s",
+                    "reward_offer_waiting_for_announced_economics cohort_sha256=%s",
                     cohort,
                 )
                 self._reported_missing_successor_adoptions.add(cohort)

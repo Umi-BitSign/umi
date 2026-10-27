@@ -571,3 +571,65 @@ async def test_credit_repair_boot_owns_original_state_without_signing_or_collect
     )
     assert result == {"status": "coverage_credit_repaired"}
     assert events == ["provider_started", "repair", "provider_closed"]
+
+
+async def test_baseline_restore_boot_owns_existing_state_without_signing_or_collecting(
+    config_case, monkeypatch
+):
+    from umi.competition_reward_baseline_restore import CompletedCoverageBaselineRequest
+    from umi.competition_reward_decisions import RewardActivation
+    from umi.competition_settlement import PromotionHeadBinding
+
+    config, events = config_case.config, []
+    request = CompletedCoverageBaselineRequest(
+        endpoint_key="a" * 64,
+        activation=RewardActivation(
+            cohort_sha256=digest(config.series.cohorts[0]),
+            allocation_sha256="b" * 64,
+            package_sha256="c" * 64,
+            recovery_tip_sha256="d" * 64,
+            prior_opportunity_sha256="e" * 64,
+        ),
+        target_cohort_sha256="f" * 64,
+        previous=PromotionHeadBinding(
+            sequence=0,
+            promotion_sha256="1" * 64,
+            model_sha256="2" * 64,
+            contributor_hotkey=None,
+        ),
+        not_before_block=100,
+        valid_through_block=200,
+    )
+
+    class Provider:
+        def __init__(self, chain, policy, **kwargs):
+            self.config, self.policy = chain, policy
+
+        async def start(self):
+            events.append("provider_started")
+
+        async def aclose(self):
+            events.append("provider_closed")
+
+    async def review(coverage, selected):
+        assert selected == request
+        assert coverage.preparation.reader.series == config.series
+        with pytest.raises(PrivateStateBusyError), boot.owned_reward_state(config):
+            pass
+        events.append("unsigned_review")
+        return "unsigned_review"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsigned baseline restore must not read keys or start autonomous services")
+
+    monkeypatch.setattr(boot, "HistoricalRewardControlProvider", Provider)
+    monkeypatch.setattr(boot, "prepare_completed_coverage_baseline", review)
+    for name in ("load_named_hotkey", "StandingControlPublisher", "StandingRewardCoordinator"):
+        monkeypatch.setattr(boot, name, forbidden)
+    result = await boot.run_reward_coordinator(config, asyncio.Event(), baseline_review=request)
+    assert result == "unsigned_review"
+    assert events == ["provider_started", "unsigned_review", "provider_closed"]
+    with pytest.raises(ValueError, match="separate owner operations"):
+        await boot.run_reward_coordinator(
+            config, asyncio.Event(), baseline_review=request, credit_repair={}
+        )

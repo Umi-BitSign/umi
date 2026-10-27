@@ -15,6 +15,7 @@ from umi.competition_cohort_participation import (
     admit_recovery_participant,
 )
 from umi.competition_evidence import IndependentEvaluationEvidence, replay_independent_evaluation
+from umi.competition_geometric_rewards import cohort_reward_parameters
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -46,10 +47,11 @@ def scenario(legacy_scenario, request):
             "proportional-model-awards",
             "quality-bucket-model-awards",
             "geometric-model-awards",
+            "geometric-model-awards-c7",
         },
         model_rule=(
             "baseline_or_better_geometric_bands_first_complete/1"
-            if request.param == "geometric-model-awards"
+            if request.param in {"geometric-model-awards", "geometric-model-awards-c7"}
             else "baseline_or_better_quality_bucket_best_score_first_complete/1"
             if request.param == "quality-bucket-model-awards"
             else "baseline_or_better_proportional_score_first_complete/1"
@@ -60,7 +62,9 @@ def scenario(legacy_scenario, request):
             500 if request.param == "quality-bucket-model-awards" else None
         ),
         model_reward_parameters=(
-            {"schema": "umi-geometric-reward-parameters/2"}
+            cohort_reward_parameters(7)
+            if request.param == "geometric-model-awards-c7"
+            else {"schema": "umi-geometric-reward-parameters/2"}
             if request.param == "geometric-model-awards"
             else None
         ),

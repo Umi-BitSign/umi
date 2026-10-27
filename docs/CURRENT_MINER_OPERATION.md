@@ -2,11 +2,11 @@
 
 # What SN78 miners should run now
 
-C5 certification is complete and C5 competition rewards are live. C6's original
-evaluation is complete; its reward revision is held pending certification of the
-selected replacement score. C7 and C8 public-model intake are open. Follow each
-cohort's progress API for counted completion and its scoped ETA; intake,
-evaluation and reward activation are separate.
+C6's corrected results are certified and its rewards are live. C7 public-model
+intake is open; C7 challenges have not started. Existing model entries can be
+replaced while intake remains open. Follow the selected cohort's progress API
+for counted completion and its scoped ETA; intake, evaluation and reward
+activation are separate.
 
 ## Submit a model for an open cohort
 
@@ -35,6 +35,15 @@ Install the published client update before submitting to an amended cohort;
 keep existing signed requests and resume them unchanged after updating.
 
 ## Understand the result
+
+C7 and later distribute model rewards in 2.5-point score bands, with a **0.85
+multiplier (15% decay)** between occupied bands and between ranked models within
+each band. Eligibility allows **1% relative grace** below the same-cohort
+baseline: `score >= baseline_score * 0.99`. A 60.00% baseline therefore gives a
+59.40% cutoff. Meeting this cutoff is separate from the existing content and
+near-equal-score duplicate rules. Scores are not rounded before these checks.
+C6's finalized allocation retains its original 0.75 multipliers and strict
+baseline cutoff. See [model award rules](operators/settlement.md#recoverable-cohort-model-awards).
 
 | What you see | What it establishes |
 | --- | --- |

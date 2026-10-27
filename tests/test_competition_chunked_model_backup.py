@@ -171,6 +171,18 @@ def backup(policy):
     return selected(policy)
 
 
+async def test_readiness_checks_remote_presence_without_creating_byte_work(backup, tmp_path):
+    instance = reader(backup, tmp_path)
+    await instance.available()
+    assert backup.remote.reads == []
+    assert not (tmp_path / "verification").exists()
+    key = next(iter(backup.remote.objects))
+    del backup.remote.objects[key]
+    with pytest.raises(OSError, match="unavailable"):
+        await instance.available()
+    assert backup.remote.reads == []
+
+
 async def test_completed_file_restore_keeps_event_loop_running_without_payload_reads(
     backup, tmp_path, monkeypatch
 ):

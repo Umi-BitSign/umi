@@ -843,6 +843,8 @@ async def complete_preparation_case(preparation_case, tmp_path, monkeypatch, req
     weights = dict(zip(projection.uids, projection.weights, strict=True))
     stored = subtensor_stored_weights(tuple(weights.get(i, 0) for i in range(len(members))))
     row = list(enumerate(stored))
+    if "coverage_test_row" in request.fixturenames:
+        row = request.getfixturevalue("coverage_test_row")
     if variant == "raw_row":
         row = [(i, weights.get(i, 0)) for i in range(len(members))]
         assert tuple(v for _, v in row) != stored

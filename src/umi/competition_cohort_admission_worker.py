@@ -273,6 +273,7 @@ async def run_admission_worker(
                     CompetitionStore(Path(selected.promotion_directory), policy),
                     maximum_bytes=selected.maximum_bytes,
                     maximum_promotion_bytes=selected.maximum_promotion_bytes,
+                    runtime_adoption=selected.runtime_adoption,
                 ),
                 provider,
                 Path(selected.output_directory),

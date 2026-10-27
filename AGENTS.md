@@ -1,5 +1,13 @@
 # Maintenance
 
+- C7 and subsequent cohorts use 2.5-point reward bands, 0.85 multipliers between
+  and within occupied bands, and 1% relative baseline grace (score >= baseline
+  * 0.99, with exact fractions). Keep content and one-basis-point score duplicate
+  rules. Grace affects reward eligibility, not measured scores or promotion of
+  a weaker reference. Preserve finalized C6's 0.75 multipliers and strict cutoff.
+  Select the prospective defaults through signed authority/adoption and carry
+  them through replay, public results and supported miner/validator updates.
+
 - Carry each change through affected miner and validator implementations,
   published release selections and supported automatic update paths. Verify
   actual published/installed behavior before claiming rollout, including older

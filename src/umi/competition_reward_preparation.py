@@ -13,7 +13,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .competition_chain import CompetitionChainConfig
 from .competition_chain_state import OwnedCompetitionChainObservation
@@ -71,12 +71,15 @@ from .competition_settlement import PromotionHeadBinding
 from .competition_store import CompetitionStore
 from .competition_transport_verification import TransferProgress
 from .competition_verification_reuse import VerificationReuse, verification_owner_operation
-from .competition_verification_snapshot import verified_package_digest
+from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .concurrency import run_owned_thread
 from .mortal_receipts import MortalReceiptQuery
 from .open_competition import ModelBundle, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .signed_extrinsic import verify_mortal_call
+
+if TYPE_CHECKING:
+    from .competition_reward_coverage_intervals import CoverageEndpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +120,9 @@ class StandingRewardPreparation:
     """Reuse completed native replay while every projection checks fresh proofs.
 
     The caller retains private packages and promotion assets with the existing
-    stores. Restart reconstructs native reviews from those bytes; a serialized
-    success flag cannot populate this process-local cache. One compact result per
+    stores. Restart reuses an owner-restored completed coverage endpoint or the
+    retained native package verification; a serialized success flag cannot
+    populate this process-local cache. One compact result per
     authenticated activation revision is retained here. Original package
     verification remains reusable when only authenticated reward parameters change.
     """
@@ -352,10 +356,104 @@ class StandingRewardPreparation:
             ) as progress:
                 _, allocation = adopted
                 progress.advance(1)
+        return self._retain_prepared(package, activation, allocation, block, digest(requirement))
+
+    @verification_owner_operation
+    async def prepare_from_completed_coverage(
+        self,
+        endpoint: CoverageEndpoint,
+        *,
+        activation: RewardActivation,
+        allocation: CohortRewardAllocation,
+        package: VerifiedPackageSnapshot,
+    ) -> PreparedStandingReward:
+        """Restore preparation from the native endpoint's completed package verdict.
+
+        The coverage owner must first restore the endpoint against its original
+        history, source generations, runtime and model dependency completions.
+        Compact caller-supplied allocation and package metadata are then bound to
+        that owned verdict. No model bytes, package objects or proofs are replayed.
+        Row matching is irrelevant: preparing a baseline does not require payment.
+        """
+        async with self._lock:
+            return await run_owned_thread(
+                partial(
+                    self._prepare_from_completed_coverage, endpoint, activation, allocation, package
+                )
+            )
+
+    def _prepare_from_completed_coverage(self, endpoint, activation, allocation, package):
+        # Coverage depends on preparation, so load the capability boundary here.
+        from .competition_reward_coverage_intervals import (
+            OwnedRetainedCoverageEndpoint,
+            coverage_point,
+        )
+        from .competition_reward_opportunity import opportunity_rule
+
+        self._authority()
+        with TransferProgress(
+            "reward_preparation_coverage_restore",
+            1,
+            unit="preparations",
+            planning_unit_seconds=(0.001, 10),
+        ) as progress:
+            point = coverage_point(
+                endpoint, opportunity_rule(self.manifest, self.reader.series, self.reader.policy)
+            )
+            if type(package) is not VerifiedPackageSnapshot:
+                raise TypeError(
+                    "coverage preparation requires a retained verified package snapshot"
+                )
+            package.check(package.package, activation.package_sha256, self.maximum_package_bytes)
+            requirement = self.manifest.requirement(activation.cohort_sha256)
+            endpoint_package = (
+                endpoint.package_sha256
+                if type(endpoint) is OwnedRetainedCoverageEndpoint
+                else endpoint.prepared.activation.package_sha256
+            )
+            if (
+                type(allocation) is not CohortRewardAllocation
+                or point.chain_config_sha256 != self.reader.admission_chain_config_sha256
+                or point.activation_sha256 != digest(activation)
+                or point.allocation_sha256 != digest(allocation)
+                or point.allocation_sha256
+                != (activation.effective_allocation_sha256 or activation.allocation_sha256)
+                or endpoint_package != activation.package_sha256
+                or digest(package.allocation) != activation.allocation_sha256
+                or digest(package.inputs.history.plan) != activation.cohort_sha256
+                or digest(package.inputs.history.authority.authority)
+                != digest(self.reader.series.recovery.authority)
+                or allocation.policy_sha256 != self.policy_sha256
+                or allocation.round_sha256 != package.allocation.round_sha256
+            ):
+                raise ValueError("completed coverage differs from selected reward preparation")
+            retained = self._prepared.get(digest(activation))
+            if retained is not None:
+                self._check_prepared(retained)
+                if point.block >= retained.reviewed_at_block:
+                    self._export_allocations(package.allocation, retained.allocation)
+                    progress.advance(1)
+                    return retained
+            if activation.reward_adoption_sha256 is not None:
+                verify_reward_adoption(
+                    getattr(self.reader, "reward_adoptions", None),
+                    activation.reward_adoption_sha256,
+                    series=self.reader.series,
+                    policy=self.reader.policy,
+                    activation=activation,
+                    current_block=point.block,
+                )
+            restored = self._retain_prepared(
+                package, activation, allocation, point.block, digest(requirement)
+            )
+            progress.advance(1)
+            return restored
+
+    def _retain_prepared(self, package, activation, allocation, block, requirement_sha256):
         prepared = PreparedStandingReward(
             self.series_sha256,
             activation,
-            digest(requirement),
+            requirement_sha256,
             allocation,
             block,
             _owner=self._owner,

@@ -194,6 +194,7 @@ def replay_preparation_export(
         original.roster.participants,
         promotion,
         original.observation,
+        runtime_adoption=original.roster.round.runtime_adoption,
         eligible_tracks=selected_tracks,
         decision_source=decisions.__getitem__,
         intake_records=records,

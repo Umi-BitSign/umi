@@ -21,9 +21,35 @@ and return `total`, `next_offset` and `items`.
 | --- | --- |
 | `/v1/competition/cohorts/{cohort}/progress` | Cached stage, counted work, scoped ETA and retry/repair status; advisory, never reward or phase authority |
 | `/v1/competition/cohorts/{cohort}/service-results` | All sealed roster hotkeys, including zero-work rows, retained UIDs, successful/failed paid terminals, exact quality credit and certified service weight |
+| `/v1/competition/cohorts/{cohort}/model-results` | Certified model scores, exact ranks, baseline eligibility and certified allocation metadata; does not establish live chain rewards |
 | `/v1/competition/cohorts/{cohort}/models` | Every exported admitted public submission, original terms and license, revision identity, artifact-release state and download availability |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download` | Native bundle manifest, renewable GET capabilities, optional complete tar archive, and the file-download endpoint |
 | `/v1/competition/cohorts/{cohort}/models/{model}/download-files` | One manifest file's bounded pieces or preserved-payload byte range |
+
+Model results keep `baseline_aggregate` as the reference model's actual measured
+score. When the selected signed reward parameters include relative baseline
+grace, `reward_parameters.baseline_grace_bps` states that grace and every scored
+row includes an exact `baseline_threshold`. Eligibility compares the exact score
+against that threshold. For C7 and later's 100 basis-point grace, the threshold
+is 99% of the measured baseline, not one percentage point subtracted from it.
+For example, a baseline score of 0.40 gives a threshold of 0.396.
+`below_baseline` means below this effective eligibility threshold. Historical
+results omit these optional fields and retain their original strict comparison.
+Grace affects reward eligibility; selecting a successor reference still requires
+meeting or exceeding its paired measured baseline.
+
+When a selected signed adoption changes reward parameters after original
+certification, the publisher emits `umi-public-cohort-model-results/3` with
+`certification: quorum_certified_reward_adoption`. `allocation_sha256` identifies
+the effective allocation; `original_allocation_sha256` and
+`reward_adoption_sha256` retain its exact source bindings.
+`original_source_metadata_sha256` binds the original certified metadata used by
+the model/download catalog. The catalog reuses its completed release checks when
+an adopted result retains this source and its exact model roster. Scores, ranks and
+measured baselines remain unchanged unless the adoption also contains an
+independent signed score correction, identified by
+`score_correction_statement_sha256`. These fields still make no claim about a
+finalized live weight row.
 
 Execution counts are confirmed delivered export floors, so live execution can be
 ahead. A completed model requires all of its selected evaluators' terminal exports.
