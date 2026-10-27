@@ -127,7 +127,14 @@ class CohortOrderHost:
         if suite.policy_sha256 != digest(policy):
             raise ValueError("benchmark suite belongs to another policy")
         incumbent = ModelBundle.model_validate_json(self.files(round_.incumbent_model_sha256))
-        runtime = OFFLINE_RUNTIME.validate_json(self.files(round_.runtime_sha256))
+        from .competition_evaluation_runtime import round_runtime_authorization
+
+        authorization = round_runtime_authorization(round_, policy, source.history)
+        runtime = (
+            OFFLINE_RUNTIME.validate_json(self.files(round_.runtime_sha256))
+            if authorization is None
+            else authorization.runtime
+        )
         if not isinstance(runtime, OfflineCpuRuntime):
             raise ValueError("configured benchmark host requires the pinned CPU runtime")
         cases = tuple(

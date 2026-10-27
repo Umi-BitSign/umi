@@ -27,6 +27,7 @@ from .competition_cohort_roster import (
     RecoverableRosterParticipant,
 )
 from .competition_cohort_suite_adoption import selected_evaluation_suite
+from .competition_evaluation_runtime import authorize_evaluation_runtime
 from .competition_execution import ExecutionBoundary
 from .competition_settlement import PromotionHeadBinding
 from .open_competition import CompetitionPolicy, Track, digest
@@ -53,6 +54,7 @@ def prepare_cohort_round(
     intake_records: Iterable[tuple[str, bytes]],
     expected_tip_sha256: str,
     current_block: int,
+    runtime_adoption=None,
 ) -> PreparedCohortRound:
     """Derive the same round from original inputs even after a long outage.
 
@@ -71,6 +73,13 @@ def prepare_cohort_round(
     )
     view = verify_cohort_history(
         history, policy, expected_tip_sha256=expected_tip_sha256, current_block=current_block
+    )
+    runtime_authorization = authorize_evaluation_runtime(
+        runtime_adoption,
+        policy=policy,
+        authority=history.authority.authority,
+        plan=history.plan,
+        current_block=observation.block,
     )
     verify_cohort_tracks(history.plan, eligible_tracks, adoption=view.state.model_delivery_adoption)
     if view.state.phase in {"intake", "revoked"}:
@@ -132,14 +141,22 @@ def prepare_cohort_round(
         ):
             raise ValueError("prepared participant differs from certified intake selection")
     round_ = RecoverableEvaluationRound(
-        schema="umi-recoverable-evaluation-round/1",
+        schema=(
+            "umi-recoverable-evaluation-round/1"
+            if runtime_adoption is None
+            else "umi-recoverable-evaluation-round/2"
+        ),
         policy_sha256=digest(policy),
         cohort_sha256=digest(history.plan),
         intake_closure_sha256=digest(closing),
         sequence=history.plan.sequence,
         suite_sha256=selected_evaluation_suite(history.plan, view.state),
         incumbent_model_sha256=promotion.model_sha256,
-        runtime_sha256=policy.evaluation_runtime_sha256,
+        runtime_sha256=(
+            policy.evaluation_runtime_sha256
+            if runtime_authorization is None
+            else digest(runtime_authorization.runtime)
+        ),
         eligible_tracks=eligible_tracks,
         participants=tuple(
             RecoverableRoundParticipant(
@@ -148,6 +165,7 @@ def prepare_cohort_round(
             for key, p in zip(members, participants, strict=True)
         ),
         prepared_at_block=observation.block,
+        runtime_adoption=runtime_adoption,
     )
     roster = RecoverableRosterEvidence(
         schema="umi-recoverable-roster-evidence/1",

@@ -40,6 +40,7 @@ class CohortPreparation:
         *,
         maximum_bytes: int = 64 * 1024**2,
         maximum_promotion_bytes: int = 16 * 1024**2,
+        runtime_adoption=None,
     ):
         if digest(queue.policy) != digest(promotion_store.policy):
             raise ValueError("round preparation promotion store uses another policy")
@@ -52,6 +53,29 @@ class CohortPreparation:
             raise ValueError("invalid prepared promotion byte bound")
         self.queue, self.promotion = queue, promotion_store
         self.maximum_bytes, self.maximum_promotion_bytes = maximum_bytes, maximum_promotion_bytes
+        self.runtime_adoption = runtime_adoption
+        if runtime_adoption is not None:
+            from .competition_cohort_recovery import verify_recovery_authority
+            from .competition_evaluation_runtime import (
+                SignedCohortEvaluationRuntimeAdoption,
+                verify_runtime_adoption_selection,
+            )
+
+            self.runtime_adoption = SignedCohortEvaluationRuntimeAdoption.model_validate_json(
+                canonical_json_bytes(runtime_adoption)
+            )
+            authority_sha256 = self.runtime_adoption.adoption.authority_sha256
+            cohort = next(
+                (key for key, value in queue.intake.bindings.items() if value == authority_sha256),
+                None,
+            )
+            if cohort is None:
+                raise ValueError("runtime amendment selects no configured intake authority")
+            history = queue.intake.history(cohort)
+            verify_recovery_authority(history.authority, queue.policy)
+            verify_runtime_adoption_selection(
+                self.runtime_adoption, policy=queue.policy, authority=history.authority.authority
+            )
         # A retained round is immutable after the certified intake selection.
         # Its full replay verifies every submission and can be deliberately
         # expensive, so serialize that replay separately from the intake lock
@@ -305,6 +329,17 @@ class CohortPreparation:
                 intake_records=intake._records(db, history),
                 expected_tip_sha256=expected_tip_sha256,
                 current_block=current_block,
+                runtime_adoption=(
+                    previous.roster.round.runtime_adoption
+                    if previous is not None
+                    else (
+                        self.runtime_adoption
+                        if self.runtime_adoption is not None
+                        and history.plan.sequence
+                        >= self.runtime_adoption.adoption.first_cohort_sequence
+                        else None
+                    )
+                ),
             )
             raw = canonical_json_bytes(result)
             if previous is not None:

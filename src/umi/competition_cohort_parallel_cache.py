@@ -97,13 +97,18 @@ class ParallelModelCache:
             await asyncio.wait_for(self.condition.wait(), self.capacity_poll_seconds)
 
     @asynccontextmanager
-    async def scope(self, job):
+    async def scope(self, job, *, runtime_authorization=None):
+        runtime_options = (
+            {}
+            if runtime_authorization is None
+            else {"runtime_authorization": runtime_authorization}
+        )
         with execution_job_scope(digest(job)):
-            async with self._scope(job) as enabled:
+            async with self._scope(job, runtime_options) as enabled:
                 yield enabled
 
     @asynccontextmanager
-    async def _scope(self, job):
+    async def _scope(self, job, runtime_options):
         plans = {
             role: await self.port._source_plan(job, role) for role in ("candidate", "incumbent")
         }
@@ -111,9 +116,9 @@ class ParallelModelCache:
         sizes = {p.identity: budget.model_bytes(p.bundle) for p in plans.values() if p}
         if any(size > budget.maximum_bytes for size in sizes.values()):
             raise OSError("selected model exceeds the bounded boot cache")
-        async with self._reserve_pair(job, plans, budget, sizes) as exclusive:
+        async with self._reserve_pair(job, plans, budget, sizes, runtime_options) as exclusive:
             if not exclusive:
-                async with self.admission.hold(job.runtime, preparation=True):
+                async with self.admission.hold(job.runtime, preparation=True, **runtime_options):
                     selected = []
                     async with self.condition:
                         for plan in {p.identity: p for p in plans.values() if p}.values():
@@ -142,7 +147,7 @@ class ParallelModelCache:
         return exclusive
 
     @asynccontextmanager
-    async def _reserve_pair(self, job, plans, budget, sizes):
+    async def _reserve_pair(self, job, plans, budget, sizes, runtime_options):
         key = digest(job)
         async with AsyncExitStack() as ownership:
             with TransferProgress("model_pair_queue", 1, unit="jobs") as progress:
@@ -155,7 +160,7 @@ class ParallelModelCache:
                             continue
                     async with AsyncExitStack() as candidate:
                         await candidate.enter_async_context(
-                            self.admission.hold(job.runtime, exclusive=exclusive)
+                            self.admission.hold(job.runtime, exclusive=exclusive, **runtime_options)
                         )
                         async with self.condition:
                             # Hardware admission may have waited while peers or
@@ -280,7 +285,7 @@ class ParallelModelCache:
         async with self.condition:
             self.condition.notify_all()
 
-    async def acquire(self, plan, runtime):
+    async def acquire(self, plan, runtime, *, runtime_authorization=None):
         # Resident reads never join the global transfer lane. An unrelated
         # model download must not postpone a ready invocation or its release.
         async with self.condition:
@@ -292,7 +297,12 @@ class ParallelModelCache:
             ):
                 self.readers[path] += 1
                 return path
-        async with self.admission.hold(runtime, preparation=True):
+        runtime_options = (
+            {}
+            if runtime_authorization is None
+            else {"runtime_authorization": runtime_authorization}
+        )
+        async with self.admission.hold(runtime, preparation=True, **runtime_options):
             async with self.condition:
                 self.pins[plan.identity] += 1
             try:

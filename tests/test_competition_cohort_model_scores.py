@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from fractions import Fraction
 
 import httpx
 import pytest
@@ -46,13 +47,39 @@ C = "c" * 64
 
 
 @pytest.fixture
-def certified(model_case):
+def certified(model_case, request):
     b, _, manifest, _, _ = model_case
     completed = {p.submission_sha256 for p in b["closure"].participants}
     selected = award(
         model_case,
         acceptances=tuple(a for a in model_case[3] if a.acceptance.submission_sha256 in completed),
     )
+    if getattr(request, "param", None) in {"grace", "grace_original"}:
+        from umi.competition_cohort_model_award import derive_geometric_model_award
+        from umi.competition_cohort_quality import ExactQuality
+        from umi.competition_geometric_rewards import cohort_reward_parameters
+
+        # Synthetic close-to-baseline quality, followed by the real native
+        # geometric allocation and signed certification metadata consumers.
+        baseline = Fraction(2, 5)
+        changed = []
+        for index, candidate in enumerate(selected.candidates):
+            score = baseline * Fraction(99, 100) - index * Fraction(1, 10000)
+            changed.append(
+                candidate.model_copy(
+                    update={
+                        "aggregate": ExactQuality(
+                            numerator=str(score.numerator), denominator=str(score.denominator)
+                        ),
+                        "baseline_aggregate": ExactQuality(numerator="2", denominator="5"),
+                        "eligible": score >= baseline,
+                    }
+                )
+            )
+        selected = derive_geometric_model_award(
+            selected.model_copy(update={"candidates": tuple(changed)}),
+            cohort_reward_parameters(6 if request.param == "grace_original" else 7),
+        )
     version = {
         "umi-cohort-model-award/1": 2,
         "umi-cohort-model-award/2": 3,
@@ -125,6 +152,142 @@ def test_actual_native_model_metadata_keeps_quality_rank_and_reward_dispositions
         assert row.baseline_eligible == (row.aggregate.decimal >= row.baseline_aggregate.decimal)
         if not row.baseline_eligible:
             assert row.model_reward_status == "below_baseline"
+
+
+@pytest.mark.parametrize("model_case", [("best", 2)], indirect=True)
+@pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
+@pytest.mark.parametrize("certified", ["grace"], indirect=True)
+def test_public_grace_eligibility_uses_exact_effective_threshold_and_keeps_measured_baseline(
+    certified,
+):
+    header, packet, policy, cohort = certified
+    original = CohortRewardAllocation.model_validate_json(
+        canonical_json_bytes(header["allocation"])
+    )
+    assert all(candidate.eligible is False for candidate in original.model_award.candidates)
+    result = module.project_model_scores(header, packet, policy, cohort=cohort)
+    assert result.reward_parameters.baseline_grace_bps == 100
+    assert result.reward_parameters.band_decay_bps == 8500
+    eligible, below = result.items
+    assert eligible.aggregate.decimal < eligible.baseline_aggregate.decimal
+    assert eligible.baseline_eligible is True
+    assert eligible.model_reward_status == "selected_by_certified_rule"
+    assert below.baseline_eligible is False and below.model_reward_status == "below_baseline"
+    for row in result.items:
+        threshold = Fraction(
+            int(row.baseline_threshold.numerator), int(row.baseline_threshold.denominator)
+        )
+        measured = Fraction(
+            int(row.baseline_aggregate.numerator), int(row.baseline_aggregate.denominator)
+        )
+        assert threshold == measured * Fraction(99, 100)
+    raw = canonical_json_bytes(result)
+    assert canonical_json_bytes(module.PublicModelScores.model_validate_json(raw)) == raw
+    for change in (
+        {"baseline_threshold": eligible.baseline_aggregate},
+        {"baseline_threshold": None},
+        {"baseline_eligible": False},
+    ):
+        changed = result.model_copy(update={"items": (eligible.model_copy(update=change), below)})
+        with pytest.raises(ValueError):
+            module.PublicModelScores.model_validate_json(canonical_json_bytes(changed))
+    with pytest.raises(ValueError, match="threshold"):
+        module.PublicModelScores.model_validate_json(
+            canonical_json_bytes(result.model_copy(update={"reward_parameters": None}))
+        )
+
+
+def test_historical_public_score_bytes_omit_prospective_grace_fields():
+    original = sample_scores()
+    raw = canonical_json_bytes(original)
+    assert b'"reward_parameters"' not in raw
+    assert b'"baseline_threshold"' not in raw
+    assert canonical_json_bytes(module.PublicModelScores.model_validate_json(raw)) == raw
+
+
+@pytest.mark.parametrize("model_case", [("best", 2)], indirect=True)
+@pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)
+@pytest.mark.parametrize("certified", ["grace_original"], indirect=True)
+def test_adopted_public_scores_bind_effective_allocation_without_changing_quality(
+    certified, tmp_path
+):
+    from umi.competition_cohort_model_award import derive_geometric_model_award
+    from umi.competition_geometric_rewards import cohort_reward_parameters
+    from umi.competition_reward_adoption import RewardModelAdoption
+
+    header, packet, policy, cohort = certified
+    original = module.project_model_scores(header, packet, policy, cohort=cohort)
+    original_bytes = canonical_json_bytes(original)
+    allocation = CohortRewardAllocation.model_validate_json(
+        canonical_json_bytes(header["allocation"])
+    )
+    parameters = cohort_reward_parameters(7)
+    effective = allocation.model_copy(
+        update={"model_award": derive_geometric_model_award(allocation.model_award, parameters)}
+    )
+    adoption = RewardModelAdoption(
+        schema="umi-standing-model-reward-adoption/1",
+        series_sha256="a" * 64,
+        policy_sha256=original.policy_sha256,
+        cohort_sha256=cohort,
+        authority_sha256=allocation.model_award.authority_sha256,
+        package_sha256="b" * 64,
+        allocation_sha256=original.allocation_sha256,
+        service_certificate_sha256=allocation.service_certificate_sha256,
+        quality_manifest_sha256=allocation.quality_manifest_sha256,
+        effective_allocation_sha256=digest(effective),
+        parameters=parameters,
+        revision=1,
+        predecessor_adoption_sha256=None,
+        issued_at_block=3000,
+        lifetime="until_first_verified_live_reward_then_locked",
+    )
+    assert all(row.baseline_eligible is False for row in original.items)
+    result = module.project_adopted_model_scores(original, adoption, effective)
+    assert result.schema_ == "umi-public-cohort-model-results/3"
+    assert result.certification == "quorum_certified_reward_adoption"
+    assert result.reward_adoption_sha256 == digest(adoption)
+    assert result.original_allocation_sha256 == digest(allocation)
+    assert result.original_source_metadata_sha256 == original.source_metadata_sha256
+    assert result.allocation_sha256 == digest(effective)
+    assert [row.baseline_eligible for row in result.items] == [True, False]
+    assert [(row.aggregate, row.baseline_aggregate, row.score_rank) for row in result.items] == [
+        (row.aggregate, row.baseline_aggregate, row.score_rank) for row in original.items
+    ]
+    assert canonical_json_bytes(original) == original_bytes
+    # Public cache accepts the new envelope and retains its signed adoption
+    # bindings without an optional historical C6 correction overlay.
+    root = tmp_path / "public"
+    owned_directory(root, create=True)
+    owned_directory(root / "model-results", create=True)
+    atomic_write(root / "model-results" / (cohort + ".json"), canonical_json_bytes(result))
+    cache = module.PublicModelScoreCache(root)
+    cache.sample()
+    assert cache.read(cohort)["reward_adoption_sha256"] == digest(adoption)
+    for body in (
+        adoption.model_copy(update={"effective_allocation_sha256": "f" * 64}),
+        adoption.model_copy(update={"allocation_sha256": "e" * 64}),
+    ):
+        with pytest.raises(ValueError, match="effective allocation"):
+            module.project_adopted_model_scores(original, body, effective)
+    with pytest.raises(ValueError, match="effective allocation"):
+        module.project_adopted_model_scores(result, adoption, effective)
+    changed_row = original.items[0].model_copy(update={"model_sha256": "f" * 64})
+    with pytest.raises(ValueError, match="certified model quality"):
+        module.project_adopted_model_scores(
+            original.model_copy(update={"items": (changed_row, original.items[1])}),
+            adoption,
+            effective,
+        )
+    for field in (
+        "original_allocation_sha256",
+        "reward_adoption_sha256",
+        "original_source_metadata_sha256",
+    ):
+        with pytest.raises(ValueError, match="exact signed source"):
+            module.PublicModelScores.model_validate_json(
+                canonical_json_bytes(result.model_copy(update={field: None}))
+            )
 
 
 @pytest.mark.parametrize("receipt_scenario", ["model-awards"], indirect=True)

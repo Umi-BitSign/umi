@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from umi.competition_geometric_rewards import GeometricRewardParameters
+from umi.competition_geometric_rewards import GeometricRewardParameters, cohort_reward_parameters
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
     RewardEarlyRelease,
@@ -204,6 +204,41 @@ def test_independent_parameters_are_authenticated_and_original_evidence_is_fixed
             policy=c.control.policy,
             current_block=180,
         )
+
+
+def test_signed_baseline_grace_is_prospective_and_authenticated(series_case):
+    c = series_case
+    _, original = adoption_case(c, revisions=1)
+    original_bytes = canonical_json_bytes(original)
+    for sequence in (6, 7):
+        cohort = next(plan for plan in c.series.cohorts if plan.sequence == sequence)
+        body = original.adoptions[0].adoption.model_copy(
+            update={
+                "cohort_sha256": digest(cohort),
+                "parameters": cohort_reward_parameters(7),
+            }
+        )
+        signed_grace = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+        selection = RewardAdoptionSelection(schema=original.schema_, adoptions=(signed_grace,))
+        if sequence == 6:
+            with pytest.raises(ValueError, match="C7"):
+                verify_adoption_selection(selection, c.series, c.control.policy)
+            continue
+        assert verify_adoption_selection(selection, c.series, c.control.policy) == selection
+        altered = signed_grace.model_copy(
+            update={
+                "adoption": body.model_copy(
+                    update={
+                        "parameters": body.parameters.model_copy(update={"baseline_grace_bps": 0})
+                    }
+                )
+            }
+        )
+        with pytest.raises(ValueError):
+            verify_adoption_selection(
+                selection.model_copy(update={"adoptions": (altered,)}), c.series, c.control.policy
+            )
+    assert canonical_json_bytes(original) == original_bytes
 
 
 def test_signed_initial_selection_is_idempotent_and_refuses_replacement(series_case):

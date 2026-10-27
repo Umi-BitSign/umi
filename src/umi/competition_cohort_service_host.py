@@ -63,6 +63,10 @@ from .competition_cohort_recovery import (
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
 from .competition_cohort_service_work import MAX_CATALOG_BYTES, SignedServiceWorkCatalog
+from .competition_evaluation_runtime import (
+    SignedCohortEvaluationRuntimeAdoption,
+    verify_runtime_adoption_selection,
+)
 from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
@@ -320,6 +324,7 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
     lifecycle: LifecycleHostConfig | None = None
     dispatch: ServiceDispatchConfig | None = None
     orders: OrderHostConfig | None = None
+    runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
 
     @model_serializer(mode="wrap")
     def serialize(self, handler):
@@ -346,6 +351,8 @@ class ServiceAdmissionHostConfig(StrictProtocolModel):
             value.pop("dispatch", None)
         if self.orders is None:
             value.pop("orders", None)
+        if self.runtime_adoption is None:
+            value.pop("runtime_adoption", None)
         return value
 
     @model_validator(mode="after")
@@ -563,6 +570,9 @@ class ServiceAdmissionHost:
         c, policy = self.config, intake.policy
         verify_reward_manifest(canonical_json_bytes(c.manifest), c.series, policy)
         verify_recovery_authority(c.series.recovery, policy)
+        verify_runtime_adoption_selection(
+            c.runtime_adoption, policy=policy, authority=c.series.recovery.authority
+        )
         expected = {digest(p): digest(c.series.recovery.authority) for p in c.series.cohorts}
         if intake.bindings != expected:
             raise ValueError("service admission series differs from owned intake")
@@ -694,7 +704,9 @@ class ServiceAdmissionHost:
                     policy=policy,
                 )
             self.direct_uploads = DirectModelUploadOwners(owners)
-        self.preparation = CohortPreparation(CohortAdmissionQueue(intake), promotion)
+        self.preparation = CohortPreparation(
+            CohortAdmissionQueue(intake), promotion, runtime_adoption=c.runtime_adoption
+        )
 
         async def prepare_legacy_review(cohort, sub):
             if not self.legacy_payloads.sources.has_cohort(cohort):

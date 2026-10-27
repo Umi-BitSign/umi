@@ -101,6 +101,9 @@ class CohortReferenceModelCache:
     def cache_identity(self, source):
         return self._materializer(source).cache_identity(source.selection)
 
+    async def available(self, source):
+        await self._materializer(source).available(source.selection)
+
     async def resumable(self, source, archive):
         return await self._materializer(source).resumable(source.selection, archive)
 

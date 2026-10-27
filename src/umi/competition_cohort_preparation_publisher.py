@@ -15,6 +15,7 @@ from .competition_cohort_intake import history_tip
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_preparation_publication import PreparedRoundFiles
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
+from .competition_evaluation_runtime import SignedCohortEvaluationRuntimeAdoption
 from .competition_execution import execution_boundary
 from .competition_historical_registration import HistoricalRegistrationProvider
 from .competition_work_progress import await_progress
@@ -31,6 +32,7 @@ class CohortPreparationPublicationConfig(StrictProtocolModel):
     promotion_directory: Directory
     output_directory: Directory
     objects_directory: Directory | None = None
+    runtime_adoption: SignedCohortEvaluationRuntimeAdoption | None = None
     maximum_bytes: Annotated[int, Field(ge=1, le=256 * 1024**2)] = 64 * 1024**2
     maximum_promotion_bytes: Annotated[int, Field(ge=1, le=16 * 1024**2)] = 16 * 1024**2
 
@@ -39,6 +41,8 @@ class CohortPreparationPublicationConfig(StrictProtocolModel):
         value = handler(self)
         if self.objects_directory is None:
             value.pop("objects_directory", None)
+        if self.runtime_adoption is None:
+            value.pop("runtime_adoption", None)
         return value
 
 

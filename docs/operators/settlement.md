@@ -1834,20 +1834,30 @@ all original signed work and already-earned credit through closure and replay.
 The recoverable cohort implementation separates model payout from reference-model
 promotion. Native geometric rewards use `umi-cohort-recovery-authority/4` with
 `baseline_or_better_geometric_bands_first_complete/1` and signed
-`model_reward_parameters`. The parameters are independently configurable:
+`model_reward_parameters`. C7 and every subsequent cohort use these parameters:
 
 ```json
 {
-  "schema": "umi-geometric-reward-parameters/2",
-  "band_width_bps": 500,
-  "band_decay_bps": 7500,
-  "within_band_decay_bps": 7500,
-  "score_duplicate_tolerance_bps": 1
+  "schema": "umi-geometric-reward-parameters/3",
+  "band_width_bps": 250,
+  "band_decay_bps": 8500,
+  "within_band_decay_bps": 8500,
+  "score_duplicate_tolerance_bps": 1,
+  "baseline_grace_bps": 100
 }
 ```
 
-These defaults mean five-point quality bands and a 0.75 multiplier between
-successive occupied bands and between successive models within a band. Width
+These defaults mean 2.5-point quality bands and a 0.85 multiplier (15% decay)
+between successive occupied bands and between successive models within a band.
+Reward eligibility allows 1% relative baseline grace: a model qualifies at
+`score >= baseline_score * 0.99`, using exact fractions. For example, a 60.00%
+baseline gives a 59.40% cutoff. The candidate and baseline run on the same
+cohort's suite; their measured scores are unchanged. This grace affects reward
+eligibility only. A weaker model cannot replace the incumbent reference.
+
+C6 retains its finalized 0.75 multiplier at both levels and strict baseline
+eligibility. Use `cohort_reward_parameters(sequence)` for new authorities and
+adoptions; historical schema constructor defaults remain unchanged. Width
 can be any integer from 1 through 10000 basis points. Each decay multiplier can
 independently range from 0 through 10000: zero gives all weight at that level to
 its first rank, while 10000 gives equal weights at that level. A full-scale width
@@ -1863,8 +1873,9 @@ Apply this across band boundaries. Excluded models cannot extend a group: scores
 30.000, 29.995 and 29.988 retain the first and third. Exact-score ties retain the
 first completed certified acceptance. Exclusion affects public-model rewards
 only; independent service-work earnings remain unchanged. Normalize the full
-public pool over the remaining models and occupied bands. Version1 parameters
-retain their original behavior and bytes; the score rule requires version2.
+public pool over the remaining models and occupied bands. Version1 and version2
+parameters retain their original behavior and bytes. Version2 adds the score
+duplicate rule; version3 adds the signed baseline grace for C7 and later.
 
 Existing signed authorities and allocations retain their original bytes and
 behavior. Applying geometric rewards or revising their parameters for an
@@ -1877,17 +1888,24 @@ revision lineage, pending transactions and the finalized activation lock must
 be qualified across coordinator, reviewer, coverage and writer before cutover.
 Public status must identify the selected authority, cohort and adoption.
 
-The standing offer path holds C6 and later cohorts until they select the C5-style
-2.5-point band width, 0.75 decay between occupied bands and within each band,
-and one basis point duplicate tolerance. A matching native signed authority or
+The standing offer path holds C6 and later cohorts until they select the announced
+parameters for their sequence: the finalized version2 C6 settings, or the
+version3 C7+ settings above. A matching native signed authority or
 a matching separately signed reward adoption satisfies this guard. The guard
-logs `reward_offer_waiting_for_c5_style_economics` once per cohort per process
+logs `reward_offer_waiting_for_announced_economics` once per cohort per process
 while an adoption is absent or has different parameters; it never constructs
 an original-rule activation for that cohort. Prepare and sign an adoption only
 after the original certified package exists, then select its complete lineage
 on the coordinator, reviewer and writer through their supported update paths.
 The guard itself grants no signing authority and does not change the original
 signed cohort history or scoring results.
+
+`prepare_initial_reward_adoption` and `prepare_initial_early_release_adoption`
+select the announced sequence-specific parameters when none are supplied.
+Explicit historical parameters remain readable, while the offer guard refuses
+a new C7+ activation using C6's decay or omitting its grace. These paths still
+require the original certified package, configured signatures and supported
+consumer handoff before activation.
 
 Select the complete signed adoption lineage in `reward_adoptions` on the
 coordinator, reviewers and standing writer. A successor consuming an adopted
@@ -2010,6 +2028,26 @@ must be evaluated together on the successor's frozen suite and runtime. Equality
 qualifies. A model's declared parent remains provenance and need not be the
 reference used for that paired measurement.
 
+Completed reward coverage can supply this native preparation without replaying
+the package, model payloads or proofs. Use
+`run_reward_coordinator(config, stop, baseline_review=request)` with a
+`CompletedCoverageBaselineRequest` naming the exact completed endpoint,
+activation, successor, authenticated current promotion head and review window.
+This unsigned operation holds the existing coordinator's exclusive state lease
+and uses its configured history, R2, runtime and model-verification owners. It
+checks that fresh authenticated control still selects that activation, restores
+only existing completion metadata and returns a `CohortBaselineReview`. A
+matching paid weight row is not required. Missing checkpoint or package metadata
+requires explicit restoration; the operation never starts a replacement replay.
+
+Run it after a cooperative coordinator stop, under the same service identity
+and namespace dependencies. Arrange automatic coordinator restart through the
+operation's service manager on success or failure before initiating the stop.
+Do not change the selected production source merely to prepare the review.
+The unsigned result still needs the ordinary independent signatures and
+supported baseline application path below; it cannot publish weights, promote
+a model or change intake/scoring holds.
+
 Before long reward-history preparation, read the parent from the authoritative
 intake or evaluator history using `CompetitionStore(..., read_only_existing=True)`
 or the corresponding `EvaluatorReviewStore` option. Supply that source's exact
@@ -2049,6 +2087,15 @@ copiers and upgrade/replay consumers must support the record and the retained
 intake transition before publication; implementing this API alone does not
 establish a deployed promotion. Retain compatibility readers while any signed
 history or recovery consumer still needs them.
+
+Use `apply-cohort-baseline --settlement-config CONFIG` for the installed cohort
+settlement coordinator and reviewer promotion histories. It uses each service's
+existing native store and binds the certificate to its selected series and
+source/target cohorts, just as `--reviewer-config` does for phase reviewers.
+Include these settlement owners in the cooperative baseline handoff. The
+separate finalized observer must not share any service, proof, execution or
+credential path. Repeat application restores the completed receipt without
+repeating model verification or starting another observer.
 
 Duplicate content retains the earliest certified complete-artifact acceptance's
 recipient, score and eligibility. A later alias cannot make originally ineligible
@@ -4268,6 +4315,30 @@ matching exported certified histories), separate `output_directory` and
 capacity; the metadata read has its own explicit bound. All four directories must
 be private, owned and disjoint. The publisher has no network or signing need.
 
+For C7 and later, set optional `reward_coordinator_config` to the selected
+root-owned, mode-0444 reward coordinator boot. The publisher authenticates that
+boot's signed adoption lineage and consumes only its compact digest-addressed
+effective allocations. It retains a separate adopted-score completion and uses
+the original native completion as its source, so changing reward terms never
+replays model work or rewrites original certification. The public `/3` result
+names the original allocation, selected adoption and effective allocation, with
+the measured baseline and exact eligibility threshold. This is certified reward
+metadata, not confirmation that weights are live. C6's existing correction
+overlay and retained original bytes remain unchanged.
+With this selection enabled, a C7+ original-rule result stays unpublished until
+its announced signed adoption is available; a native allocation already carrying
+the announced parameters needs no second adoption. Archived completed public
+results remain reusable when later standing series become current.
+
+Include the standalone score publisher in every reward adoption handoff using
+`prepare_reward_adoption_boot_candidates`'s `model_score_config_raw`,
+`model_score_current_boot_raw` and `model_score_current_boot_path` inputs. Install
+the returned `model_score_config` with the other consumer candidates, then
+restart the publisher. A changed boot at the old configured path holds publication
+until restart; an unchanged adoption reuses its retained result across restart
+and removal of local effective-allocation copies. Upgrade the catalog watcher
+and API's public-score reader alongside this publisher before publishing `/3`.
+
 The publisher reads only aggregate metadata preceding the private object
 inventory. It authenticates the historical native history/decision packet and
 checks the allocation digest against its signed certification closure, then binds
@@ -4287,7 +4358,20 @@ namespace or redoing completed certification. Preserve these records in R2 with
 their recovery controls. Publication never gates settlement or reward activation.
 
 Deliver only `<cohort_sha256>.json` score artifacts to the public account's
-`<results.directory>/model-results/`, through the immutable artifact delivery path.
+`<results.directory>/model-results/`, through the bounded public-metadata delivery
+path. The delivery must support replacement of an original result by its selected
+signed adoption and later signed revisions; original native completion evidence
+remains immutable. Catalog refresh must retain the same certified model roster
+when this score metadata changes, without repeating artifact verification.
+Run `python -m umi.competition_cohort_model_score_delivery --config <config.json>
+--watch` as the existing root delivery service. It accepts the retained
+`umi-native-public-model-score-delivery/1` configuration and copies between the
+existing validator UID54 and public API accounts. Give this Python service a
+512 MiB memory limit; imports alone exceed 128 MiB. Checksummed completion state
+reuses unchanged file identities across restart. Its leased
+`<destination_directory>/.umi-model-score-delivery/` scratch root reclaims
+interrupted temporary copies automatically; retain that bounded service
+directory and its lock while the delivery remains installed.
 Do not copy private completion state or native packages into that directory.
 Select the score reader on the existing public API service and route
 `/v1/competition/cohorts/<cohort>/model-results` to it. Existing catalog, download,

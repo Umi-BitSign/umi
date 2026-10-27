@@ -61,6 +61,8 @@ def recovery(policy, request):
     )
     if getattr(request, "param", "legacy") == "legacy6":
         plan = plan.model_copy(update={"sequence": 6})
+    if getattr(request, "param", "legacy") == "legacy7":
+        plan = plan.model_copy(update={"sequence": 7})
     if getattr(request, "param", "legacy") == "hard12h":
         plan = RecoverableCohortPlan.model_validate(
             plan.model_dump(by_alias=True)

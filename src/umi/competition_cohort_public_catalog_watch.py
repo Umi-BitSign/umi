@@ -325,7 +325,10 @@ class NativePublicCatalogWatcher:
                             schema="umi-native-public-catalog-completion/1",
                             binding_sha256=self._binding(config),
                             source_stamp=source_stamp,
-                            score_metadata_sha256=scores.source_metadata_sha256,
+                            score_metadata_sha256=(
+                                scores.original_source_metadata_sha256
+                                or scores.source_metadata_sha256
+                            ),
                             projection=projection,
                         ).sealed()
                         raw = canonical_json_bytes(receipt)
@@ -351,9 +354,38 @@ class NativePublicCatalogWatcher:
                         score_path.exists()
                         and tuple(map(str, _stamp(score_path))) != receipt.source_stamp
                     ):
-                        raise ValueError(
-                            "completed catalog trigger changed; explicit repair required"
+                        stage = "adopted_score_catalog_rebind"
+                        source_stamp = tuple(map(str, _stamp(score_path)))
+                        scores = PublicModelScores.model_validate_json(
+                            read_owned_file(score_path, 2 * 1024**2)
                         )
+                        catalog = receipt.projection.catalog
+                        known = {
+                            row.submission_sha256: (row.model_sha256, row.uid, row.hotkey)
+                            for row in catalog.items
+                        }
+                        selected = {
+                            row.submission_sha256: (row.model_sha256, row.uid, row.hotkey)
+                            for row in scores.items
+                        }
+                        if (
+                            scores.schema_ != "umi-public-cohort-model-results/3"
+                            or scores.cohort_sha256 != cohort
+                            or scores.policy_sha256 != catalog.policy_sha256
+                            or scores.original_source_metadata_sha256
+                            != receipt.score_metadata_sha256
+                            or selected != known
+                            or tuple(map(str, _stamp(score_path))) != source_stamp
+                        ):
+                            raise ValueError(
+                                "completed catalog trigger changed; explicit repair required"
+                            )
+                        # Only the trigger's delivered metadata changed. Keep the
+                        # original authenticated release source and projection;
+                        # later signed revisions use this same immutable basis.
+                        receipt = receipt.model_copy(update={"source_stamp": source_stamp}).sealed()
+                        atomic_write(receipt_path, canonical_json_bytes(receipt), immutable=False)
+                        self.receipts[cohort] = (tuple(_stamp(receipt_path)), receipt)
                     stage = "legacy_public_transport_metadata"
                     enriched = self._legacy_transports(cohort, receipt)
                     if enriched is not receipt:

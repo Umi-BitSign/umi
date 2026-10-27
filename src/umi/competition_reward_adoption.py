@@ -19,7 +19,11 @@ from .competition_cohort_score_correction import (
     SignedModelScoreCorrection,
     verify_signed_score_correction,
 )
-from .competition_geometric_rewards import GeometricRewardParameters
+from .competition_geometric_rewards import (
+    GeometricRewardParameters,
+    cohort_reward_parameters,
+    validate_cohort_reward_parameters,
+)
 from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_timing import RewardActivationAge
 from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
@@ -218,6 +222,7 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
             raise ValueError("reward adoption differs from the selected standing authority")
         if body.activation_age is not None:
             body.activation_age.check_plan(cohorts[body.cohort_sha256])
+        validate_cohort_reward_parameters(body.parameters, cohorts[body.cohort_sha256].sequence)
         if body.bootstrap_predecessor is not None:
             if body.cohort_sha256 != digest(series.cohorts[0]):
                 raise ValueError("bootstrap adoption must bind the first standing cohort")
@@ -378,7 +383,7 @@ def prepare_initial_reward_adoption(
     *,
     series,
     policy: CompetitionPolicy,
-    parameters: GeometricRewardParameters,
+    parameters: GeometricRewardParameters | None = None,
     issued_at_block: Block,
     previous: RewardAdoptionSelection | None,
 ) -> RewardModelAdoption:
@@ -393,8 +398,11 @@ def prepare_initial_reward_adoption(
     """
     if type(package) is not VerifiedPackageSnapshot:
         raise TypeError("reward adoption proposal requires a native verified package snapshot")
+    if parameters is None:
+        parameters = cohort_reward_parameters(package.inputs.history.plan.sequence)
     if type(parameters) is not GeometricRewardParameters:
         raise TypeError("reward adoption proposal requires explicit geometric parameters")
+    validate_cohort_reward_parameters(parameters, package.inputs.history.plan.sequence)
     if type(issued_at_block) is not int:
         raise TypeError("reward adoption issuance requires a finalized block number")
     package_sha = verified_package_digest(package)

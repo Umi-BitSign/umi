@@ -301,7 +301,7 @@ def prepare_initial_early_release_adoption(
     policy: CompetitionPolicy,
     manifest: RewardManifest,
     predecessor: RewardControlDecision,
-    parameters: GeometricRewardParameters,
+    parameters: GeometricRewardParameters | None = None,
     issued_at_block: int,
     reason: str,
 ) -> RewardModelAdoption:

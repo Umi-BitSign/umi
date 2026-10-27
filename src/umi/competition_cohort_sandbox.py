@@ -10,11 +10,13 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
+from .competition_artifacts import preserved_bundle_available
 from .competition_cohort_direct_model_review import DirectModelArtifactReviewer
 from .competition_cohort_execution import RecoverableExecutionJob
 from .competition_cohort_execution_journal import CohortExecutionAttempt, case_role_model
 from .competition_cohort_model_acceptance import ModelReviewRequest
 from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
+from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_execution import read_case_video
 from .competition_model_cache_space import BootDiskModelCache, managed_model_slot
 from .competition_runner import (
@@ -85,6 +87,12 @@ class CohortCpuSandbox:
                 "retained cohort invocation requires its pinned CPU job"
             )
         case, _, model = case_role_model(job, attempt.step_index)
+        runtime_authorization = prepared_runtime_authorization(job.round, self.policy)
+        runtime_options = (
+            {}
+            if runtime_authorization is None
+            else {"runtime_authorization": runtime_authorization}
+        )
         video = await run_owned_thread(
             read_case_video, self.videos, case.video_sha256, job.runtime.maximum_video_bytes
         )
@@ -101,11 +109,12 @@ class CohortCpuSandbox:
                 video=video,
                 invocation_sha256=digest(attempt),
                 workspace=path,
+                **runtime_options,
             )
 
         if self.execution_admission is None:
             return await execute()
-        async with self.execution_admission.invocation(job.runtime):
+        async with self.execution_admission.invocation(job.runtime, **runtime_options):
             return await execute()
 
 
@@ -186,6 +195,40 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
     def prepared_execution_scope(self):
         return getattr(self, "parallel", None) is not None
 
+    async def models_available(self, orders):
+        """Check one authenticated source per model, without filling the local cache."""
+        plans, local, resolved = {}, {}, set()
+        for order in orders:
+            roles = (
+                ("candidate", "incumbent")
+                if order.submission.submission.track == "model"
+                else ("incumbent",)
+            )
+            for role in roles:
+                bundle = (
+                    order.submission.submission.model_bundle
+                    if role == "candidate"
+                    else order.incumbent
+                )
+                source = (
+                    digest(order.round),
+                    role,
+                    digest(bundle),
+                    digest(order.submission.submission) if role == "candidate" else None,
+                )
+                if source in resolved:
+                    continue
+                plan = await self._source_plan(order, role)
+                resolved.add(source)
+                if plan is None:
+                    local[digest(bundle)] = bundle
+                else:
+                    plans[(id(plan.materializer), plan.identity)] = plan
+        for plan in plans.values():
+            await plan.materializer.available(plan.request)
+        for bundle in local.values():
+            await run_owned_thread(preserved_bundle_available, bundle, self.archive, self.policy)
+
     def resume_model_revisions(self):
         """Names in bounded managed slots are startup preferences, not byte verdicts."""
         slots = (
@@ -227,7 +270,10 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         if getattr(self, "parallel", None) is not None:
             token = PUBLIC_COHORT_SCOPE.set(order.round.cohort_sha256)
             try:
-                async with self.parallel.scope(order) as active:
+                async with self.parallel.scope(
+                    order,
+                    runtime_authorization=prepared_runtime_authorization(order.round, self.policy),
+                ) as active:
                     yield active
             finally:
                 PUBLIC_COHORT_SCOPE.reset(token)
@@ -385,7 +431,11 @@ class DirectCohortCpuSandbox(CohortCpuSandbox):
         path = self._path(attempt)
         completed = False
         archive = (
-            await self.parallel.acquire(plan, job.runtime)
+            await self.parallel.acquire(
+                plan,
+                job.runtime,
+                runtime_authorization=prepared_runtime_authorization(job.round, self.policy),
+            )
             if self.parallel is not None
             else await self._candidate_archive(
                 plan.request,

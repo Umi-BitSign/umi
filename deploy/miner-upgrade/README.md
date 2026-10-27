@@ -39,6 +39,14 @@ maintenance `runtime.revision` to the existing live deployment. Policy or track
 changes require matching public records; future cohort rules are selected by the
 manifest rather than inferred from cohort numbers.
 
+The standalone model-client installer reads this same `current.json`; it has no
+separate automatic release feed. Publish its qualified exact implementation
+commit in `runtime.revision`, retaining `runtime.deployment_revision` and all
+existing cohort/policy fields for a compatible maintenance release. A new intake
+`runtime` in public status does not override that explicit pointer. The installed
+model client adopts a new source when its installation command is run again;
+authenticated cohort history still selects C7+ intake and delivery rules.
+
 Runtime installation uses the exact policy-selected CPython and dependency pins,
 isolated imports and an absolute `/usr/bin/env` executable. The service account
 verifies source and scoring pins before promotion. A failed runtime or health

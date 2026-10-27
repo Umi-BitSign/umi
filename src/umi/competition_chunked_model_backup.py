@@ -732,6 +732,11 @@ class ChunkedModelBackupReader:
         shared.remember_verified(document)
         return document
 
+    async def available(self):
+        """Check selected remote objects; this is no byte-integrity certificate."""
+        self._namespace()
+        await self._heads(None)
+
     @pooled_r2_reads
     async def export_completed(self, *, report=None):
         """Export complete native results without fetching or repairing model bytes.

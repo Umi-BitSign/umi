@@ -440,6 +440,12 @@ or verification fails. Previously installed releases remain available for
 already-running uploads and recovery. Do not remove their directories while a
 process uses them. A failed new installation does not erase earlier releases.
 
+The installer reads `deploy/miner-upgrade/current.json` for the exact client
+source, including while that manifest names C5 for retained endpoint work. The
+client selects C7+ participation from the requested cohort's signed history.
+It does not install new code in the background; a new server deployment alone
+does not update an installed client.
+
 This mode does not discover, stop or change an endpoint service. It does not read
 wallets, migrate a startup file, change service accounts, move grant or protocol
 journals, sign consent or enroll a model. It works alongside an older, manual,
