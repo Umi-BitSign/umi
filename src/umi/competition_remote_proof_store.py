@@ -29,7 +29,7 @@ from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_conne
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
-PROOF_PUBLICATION_WORKERS = 4
+PROOF_PUBLICATION_WORKERS = 8
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
