@@ -145,6 +145,9 @@ class RewardCoverageCollector:
         # below add their freshly credited intervals to _replayed; a restarted
         # collector scans retained evidence again before claiming any credit.
         self._retained_inventory_drained = False
+        self._retained_scan_failed = False
+        self._retained_scan_started: float | None = None
+        self._retained_scanned = 0
         self._next: dict[str, int] = {}
         self._left: dict[str, CoverageEndpoint] = {}
         self._backfill_next: dict[str, int] = {}
@@ -292,6 +295,9 @@ class RewardCoverageCollector:
                         # the retained scan so a later pass can recover it even
                         # if the live endpoint source remains unavailable.
                         self._retained_inventory_drained = False
+                        self._retained_scan_failed = False
+                        self._retained_scan_started = None
+                        self._retained_scanned = 0
                         self._cursor = None
                     errors.append((hotkey, type(error).__name__))
                     _log_retry(error, phase=phase, operation=operation, hotkey=hotkey, block=height)
@@ -403,6 +409,8 @@ class RewardCoverageCollector:
             self._credit_start = dict(before_replay)
         phase_started = time.monotonic()
         already_drained = self._retained_inventory_drained
+        if not already_drained and self._retained_scan_started is None:
+            self._retained_scan_started = phase_started
         # Retry an incomplete first scan from the start. Once all retained
         # intervals have been checked, new intervals from this owner are already
         # natively credited by _capture_page and need no second inventory pass.
@@ -459,11 +467,15 @@ class RewardCoverageCollector:
                 replayed += 1
             except Exception as error:
                 errors.append(("replay", type(error).__name__))
+                self._retained_scan_failed = True
                 _log_retry(error, phase="replay", operation="restore_and_credit_interval")
+        if not already_drained:
+            self._retained_scanned += len(keys)
+        scan_failed = self._retained_scan_failed
         totals = await self._totals()
         if not already_drained and len(keys) < self.maximum_replay_intervals:
             self._cursor = None
-            if not errors:
+            if not self._retained_scan_failed:
                 self._retained_inventory_drained = True
                 logger.info(
                     "coverage_native_credit_restore %s",
@@ -477,6 +489,57 @@ class RewardCoverageCollector:
                         eta_basis="completed_retained_inventory_scope_not_activation",
                     ),
                 )
+            else:
+                # A failed item on an earlier full page must be revisited even
+                # if the final page in this pass had no errors. Successful
+                # native credits in _replayed remain reusable.
+                self._retained_scan_failed = False
+        if not already_drained:
+            total = self._owner_counts["retained_intervals"]
+            scanned = min(self._retained_scanned, total)
+            remaining = max(0, total - scanned)
+            elapsed = max(0.0, time.monotonic() - self._retained_scan_started)
+            enough = scanned >= 8 and elapsed >= 1
+            measured_eta = (
+                remaining * elapsed / scanned
+                if enough and not scan_failed and not self._retained_inventory_drained
+                else None
+            )
+            planning_eta = (
+                [remaining, 600 * remaining]
+                if remaining and not enough and not scan_failed
+                else None
+            )
+            logger.info(
+                "coverage_retained_inventory_progress %s",
+                {
+                    "state": "completed"
+                    if self._retained_inventory_drained
+                    else "retrying"
+                    if scan_failed
+                    else "running",
+                    "completed_intervals": scanned,
+                    "total_intervals": total,
+                    "percent": 100 * scanned / total if total else 100.0,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": 0 if self._retained_inventory_drained else measured_eta,
+                    "planning_eta_seconds": planning_eta,
+                    "eta_basis": "completed_retained_inventory_scope"
+                    if self._retained_inventory_drained
+                    else "withdrawn_retrying"
+                    if scan_failed
+                    else "measured_current_scan_intervals_per_elapsed_second"
+                    if enough
+                    else "planning_1_to_600_seconds_per_interval_excludes_external_waits",
+                    "eta_scope": (
+                        "retained_inventory_current_attempt_not_native_credit_or_activation"
+                    ),
+                    "stalled_or_retrying": scan_failed,
+                },
+            )
+            if scan_failed and self._cursor is None:
+                self._retained_scan_started = None
+                self._retained_scanned = 0
         if not already_drained:
             self._report_credit(
                 "retained_interval_replay",

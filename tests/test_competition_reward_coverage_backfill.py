@@ -231,6 +231,40 @@ async def test_failed_retained_scan_retries_before_marking_it_complete(lanes, mo
     assert restarted._retained_inventory_drained
 
 
+async def test_failed_full_retained_page_prevents_later_clean_drain(lanes, monkeypatch, caplog):
+    h = lanes
+    first, journal = h.owner()
+    await first.step()
+    keys = await journal.interval_keys(limit=4096)
+    assert len(keys) > 2
+    first_interval = await journal.retained_interval(keys[0])
+    restarted, _ = h.owner(maximum_replay_intervals=1)
+    replay = restarted.source.replay
+    fail_once = True
+
+    async def interrupted(key):
+        nonlocal fail_once
+        if fail_once and key == first_interval.left:
+            fail_once = False
+            raise OSError("interrupted retained endpoint read")
+        return await replay(key)
+
+    monkeypatch.setattr(restarted.source, "replay", interrupted)
+    with caplog.at_level("INFO"):
+        assert (await restarted.step()).errors
+    assert any(
+        "coverage_retained_inventory_progress" in record.message
+        and "withdrawn_retrying" in record.message
+        for record in caplog.records
+    )
+    for _ in keys:
+        await restarted.step()
+    assert not restarted._retained_inventory_drained
+    assert restarted._cursor is None
+    await restarted.step()
+    assert keys[0] in restarted._replayed
+
+
 async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lanes, caplog):
     h = lanes
     owner, _ = h.owner()
