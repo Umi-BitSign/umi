@@ -24,6 +24,7 @@ from pydantic import Field, JsonValue
 from .canonical_reuse import canonical_json_reuse
 from .competition_evidence_codec import (
     MAX_EVIDENCE_BYTES,
+    MAX_PROOF_OBJECT_BYTES,
     MAX_RECIPE_BYTES,
     PreparedEvidenceEncoding,
     checked_digest,
@@ -359,7 +360,7 @@ class RewardProofArchive:
             publish_private_model(
                 path,
                 _Bytes(hex=raw.hex()),
-                maximum_bytes=2 * MAX_EVIDENCE_BYTES + 1024,
+                maximum_bytes=MAX_PROOF_OBJECT_BYTES,
             )
 
     def _published_object_present(self, sha: str, size: int) -> bool:
@@ -641,7 +642,7 @@ class RewardProofArchive:
                     return self._retain_bytes(raw)
                 sha = hashlib.sha256(raw).hexdigest()
                 if sha not in pending:
-                    if pending_bytes + len(raw) > MAX_EVIDENCE_BYTES:
+                    if pending_bytes + len(raw) > MAX_PROOF_OBJECT_BYTES:
                         flush()
                     pending[sha] = raw
                     pending_bytes += len(raw)

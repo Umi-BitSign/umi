@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
 
-from .competition_evidence_codec import MAX_EVIDENCE_BYTES, checked_digest
+from .competition_evidence_codec import MAX_PROOF_OBJECT_BYTES, checked_digest
 from .competition_remote_proof_generation import install_generation, validate_generation
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
@@ -28,8 +28,8 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
-MAX_PROOF_OBJECT_BYTES = 2 * MAX_EVIDENCE_BYTES + 1024
 PROOF_PUBLICATION_WORKERS = 8
+MAX_ACTIVE_PROOF_PUBLICATION_BYTES = 2 * MAX_PROOF_OBJECT_BYTES
 
 
 class ProofArchiveR2Config(StrictProtocolModel):
@@ -566,16 +566,20 @@ class RemoteProofStore:
 
     @contextmanager
     def _publication_slot(self, key, size, progress):
-        # The existing maximum object size also bounds aggregate active bytes.
-        # One maximum supported object always fits; admission waits, never drops it.
+        # Two maximum supported objects or eight ordinary smaller objects can
+        # share the bounded active-byte window. Admission waits, never drops.
         waited = False
         with self._publication_condition:
-            while (
-                key in self._publishing_keys
-                or len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS
-                or self._publishing_bytes + size > MAX_PROOF_OBJECT_BYTES
-            ):
-                progress.emit("waiting", reason="bounded_proof_publication_admission")
+            while True:
+                if key in self._publishing_keys:
+                    reason = "proof_publication_same_key_wait"
+                elif len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS:
+                    reason = "proof_publication_worker_limit_wait"
+                elif self._publishing_bytes + size > MAX_ACTIVE_PROOF_PUBLICATION_BYTES:
+                    reason = "proof_publication_byte_budget_wait"
+                else:
+                    break
+                progress.emit("waiting", reason=reason)
                 waited = True
                 self._publication_condition.wait(timeout=1)
             self._publishing_keys.add(key)
@@ -619,12 +623,15 @@ class RemoteProofStore:
                                 "encoded proof object differs from its content identity"
                             )
                         progress.advance(len(raw), restored=restored)
+                        progress.advance_operations(1, restored=restored)
             except BaseException:
                 stop.set()
                 raise
 
         with TransferProgress(
-            "proof_graph_replication", sum(len(raw) for raw in objects.values())
+            "proof_graph_replication",
+            sum(len(raw) for raw in objects.values()),
+            total_operations=len(objects),
         ) as progress:
             if len(lanes) == 1:
                 publish_lane(lanes[0])
