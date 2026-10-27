@@ -5,7 +5,11 @@ import json
 import pytest
 
 from umi.competition_geometric_rewards import GeometricRewardParameters
-from umi.competition_reward_adoption import RewardModelAdoption, SignedRewardModelAdoption
+from umi.competition_reward_adoption import (
+    RewardEarlyRelease,
+    RewardModelAdoption,
+    SignedRewardModelAdoption,
+)
 from umi.competition_reward_adoption_handoff import (
     REFERENCE_PUBLISHER_CONFIG_MODE,
     WRITER_SUPPLEMENTAL_MODE,
@@ -13,6 +17,8 @@ from umi.competition_reward_adoption_handoff import (
 )
 from umi.competition_reward_boot import StandingRewardBootConfig
 from umi.competition_reward_coordinator_boot import RewardCoordinatorConfig
+from umi.competition_reward_decisions import RewardActivation, RewardControlDecision
+from umi.competition_reward_opportunity import prepare_early_release_revision
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 from umi.translation_reference_config import ReferencePublisherConfig
@@ -79,6 +85,109 @@ def test_candidate_handoff_changes_only_reward_selection_and_repeats_exactly(han
         assert kind.model_validate_json(candidate).reward_adoptions == staged.selection
     repeated = prepare_reward_adoption_boot_candidates(staged.coordinator, staged.writer, signed)
     assert repeated == staged
+
+
+def test_early_release_revision_uses_same_consumer_handoff(handoff):
+    coordinator, writer, initial = handoff
+    staged = prepare_reward_adoption_boot_candidates(coordinator, writer, initial)
+    config = RewardCoordinatorConfig.model_validate_json(staged.coordinator)
+    predecessor = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(config.series),
+        sequence=1,
+        predecessor_sha256="10" * 32,
+        kind="activate",
+        observed_at_block=config.series.recovery.authority.issued_at_block,
+        activation=RewardActivation(
+            cohort_sha256=digest(config.series.cohorts[0]),
+            allocation_sha256="11" * 32,
+            package_sha256="12" * 32,
+            recovery_tip_sha256="13" * 32,
+            prior_opportunity_sha256="14" * 32,
+        ),
+    )
+    proposal = prepare_early_release_revision(
+        staged.selection,
+        series=config.series,
+        policy=config.policy,
+        manifest=config.manifest,
+        predecessor=predecessor,
+        successor_cohort_sha256=initial.adoption.cohort_sha256,
+        issued_at_block=initial.adoption.issued_at_block + 1,
+        reason="Operator authorizes release of the certified successor package",
+    )
+    signed = SignedRewardModelAdoption(adoption=proposal, signatures=signatures(proposal))
+    result = prepare_reward_adoption_boot_candidates(
+        staged.coordinator,
+        staged.writer,
+        signed,
+        early_release_predecessor=predecessor,
+    )
+    assert result.selection.latest(initial.adoption.cohort_sha256) == signed
+    assert (
+        prepare_reward_adoption_boot_candidates(
+            result.coordinator,
+            result.writer,
+            signed,
+            early_release_predecessor=predecessor,
+        )
+        == result
+    )
+    with pytest.raises(ValueError, match="signed predecessor"):
+        prepare_reward_adoption_boot_candidates(staged.coordinator, staged.writer, signed)
+
+
+def test_initial_early_release_uses_one_signed_adoption(handoff):
+    coordinator, writer, original = handoff
+    config = RewardCoordinatorConfig.model_validate_json(coordinator)
+    prior = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(config.series),
+        sequence=1,
+        predecessor_sha256="10" * 32,
+        kind="activate",
+        observed_at_block=config.series.recovery.authority.issued_at_block,
+        activation=RewardActivation(
+            cohort_sha256=digest(config.series.cohorts[0]),
+            allocation_sha256="11" * 32,
+            package_sha256="12" * 32,
+            recovery_tip_sha256="13" * 32,
+            prior_opportunity_sha256="14" * 32,
+        ),
+    )
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256=digest(prior),
+        predecessor_activation_sha256=digest(prior.activation),
+        successor_cohort_sha256=original.adoption.cohort_sha256,
+        successor_package_sha256=original.adoption.package_sha256,
+        manifest_sha256=digest(config.manifest),
+        reason="Operator authorizes first adoption of this certified package",
+    )
+    body = RewardModelAdoption.model_validate_json(
+        canonical_json_bytes(
+            original.adoption.model_copy(
+                update={
+                    "schema_": "umi-standing-model-reward-adoption/5",
+                    "early_release": release,
+                }
+            )
+        )
+    )
+    signed = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+    result = prepare_reward_adoption_boot_candidates(
+        coordinator, writer, signed, early_release_predecessor=prior
+    )
+    assert result.selection.latest(body.cohort_sha256) == signed
+    with pytest.raises(ValueError, match="signed predecessor"):
+        prepare_reward_adoption_boot_candidates(
+            coordinator,
+            writer,
+            signed,
+            early_release_predecessor=prior.model_copy(
+                update={"observed_at_block": prior.observed_at_block + 1}
+            ),
+        )
 
 
 def test_candidate_handoff_rejects_split_lineage_and_changed_signature(handoff):

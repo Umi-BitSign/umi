@@ -30,12 +30,29 @@ MAX_REWARD_ADOPTION_BYTES = 256 * 1024
 MAX_REWARD_DECISIONS = 10000
 
 
+class RewardEarlyRelease(StrictProtocolModel):
+    """Quorum-signed operator choice to advance one exact successor early.
+
+    This is embedded in a signed reward adoption. It authorizes skipping only
+    the predecessor's minimum opportunity; it supplies no coverage evidence.
+    """
+
+    schema_: Literal["umi-reward-early-release/1"] = Field(alias="schema")
+    predecessor_decision_sha256: Hex32
+    predecessor_activation_sha256: Hex32
+    successor_cohort_sha256: Hex32
+    successor_package_sha256: Hex32
+    manifest_sha256: Hex32
+    reason: Annotated[str, Field(min_length=8, max_length=1024)]
+
+
 class RewardModelAdoption(StrictProtocolModel):
     schema_: Literal[
         "umi-standing-model-reward-adoption/1",
         "umi-standing-model-reward-adoption/2",
         "umi-standing-model-reward-adoption/3",
         "umi-standing-model-reward-adoption/4",
+        "umi-standing-model-reward-adoption/5",
     ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
@@ -57,6 +74,7 @@ class RewardModelAdoption(StrictProtocolModel):
     bootstrap_predecessor: BootstrapRewardPredecessor | None = None
     score_correction_evidence: ModelScoreCorrectionEvidence | None = None
     signed_score_correction: SignedModelScoreCorrection | None = None
+    early_release: RewardEarlyRelease | None = None
 
     @model_serializer(mode="wrap")
     def preserve_original_adoption(self, handler):
@@ -69,26 +87,34 @@ class RewardModelAdoption(StrictProtocolModel):
             value.pop("score_correction_evidence", None)
         if self.signed_score_correction is None:
             value.pop("signed_score_correction", None)
+        if self.early_release is None:
+            value.pop("early_release", None)
         return value
 
     @model_validator(mode="after")
     def lineage(self):
         bootstrap = self.schema_ == "umi-standing-model-reward-adoption/3"
         correction = self.schema_ == "umi-standing-model-reward-adoption/4"
+        early = self.schema_ == "umi-standing-model-reward-adoption/5"
         if bootstrap != (self.bootstrap_predecessor is not None):
             raise ValueError("bootstrap admission requires an explicit versioned adoption")
-        if correction != (
-            self.score_correction_evidence is not None and self.signed_score_correction is not None
-        ) or (self.score_correction_evidence is None) != (self.signed_score_correction is None):
+        if (self.score_correction_evidence is None) != (self.signed_score_correction is None):
             raise ValueError("score correction requires complete versioned evidence")
+        if correction and self.score_correction_evidence is None:
+            raise ValueError("score correction requires complete versioned evidence")
+        if early != (self.early_release is not None):
+            raise ValueError("early release requires an explicit versioned adoption")
+        if not correction and not early and self.score_correction_evidence is not None:
+            raise ValueError("score correction requires an explicit versioned adoption")
         if (
             not bootstrap
             and not correction
+            and not early
             and (self.schema_ == "umi-standing-model-reward-adoption/2")
             != (self.activation_age is not None)
         ):
             raise ValueError("reward timing requires an explicit versioned adoption")
-        if correction and (
+        if self.score_correction_evidence is not None and (
             self.score_correction_evidence.cohort_sha256 != self.cohort_sha256
             or self.score_correction_evidence.original_package_sha256 != self.package_sha256
             or self.score_correction_evidence.original_allocation_sha256 != self.allocation_sha256
@@ -102,6 +128,11 @@ class RewardModelAdoption(StrictProtocolModel):
             self.activation_age.observed_at_block > self.issued_at_block
         ):
             raise ValueError("reward timing observation is ahead of adoption issuance")
+        if self.early_release is not None and (
+            self.early_release.successor_cohort_sha256 != self.cohort_sha256
+            or self.early_release.successor_package_sha256 != self.package_sha256
+        ):
+            raise ValueError("early release differs from the adopted successor package")
         if (self.revision == 1) != (self.predecessor_adoption_sha256 is None):
             raise ValueError("reward adoption requires its exact revision predecessor")
         return self
@@ -150,6 +181,7 @@ class RewardAdoptionSelection(StrictProtocolModel):
                 or value.predecessor_adoption_sha256 != digest(prior)
                 or value.issued_at_block < prior.issued_at_block
                 or any(getattr(value, k) != getattr(prior, k) for k in immutable)
+                or (prior.early_release is not None and value.early_release != prior.early_release)
             ):
                 raise ValueError("reward adoption revision changed its original evidence or parent")
             preceding[value.cohort_sha256] = value
@@ -190,6 +222,10 @@ def verify_adoption_selection(selection, series, policy: CompetitionPolicy):
             if body.cohort_sha256 != digest(series.cohorts[0]):
                 raise ValueError("bootstrap adoption must bind the first standing cohort")
             body.bootstrap_predecessor.check_series(series)
+        if body.early_release is not None:
+            index = tuple(digest(c) for c in series.cohorts).index(body.cohort_sha256)
+            if index == 0 or body.early_release.manifest_sha256 != series.manifest_sha256:
+                raise ValueError("early release requires a successor and the signed manifest")
         # The original policy selects the independent quorum, not new economics.
         # This distinct forward contract is selected explicitly by every host.
         verify_recovery_quorum(body, signed.signatures, policy)

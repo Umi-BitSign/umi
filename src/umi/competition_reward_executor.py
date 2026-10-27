@@ -23,6 +23,9 @@ from .competition_reward_decisions import (
     DecisionSource,
     RewardActivation,
     activation_requires_revision,
+    effective_activation_decision,
+    original_activation_decision,
+    retained_reward_decisions,
 )
 from .competition_reward_handoff_models import (
     StandingRewardHandoffPlan,
@@ -36,7 +39,10 @@ from .competition_reward_host import (
     validate_standing_reward_handoff,
 )
 from .competition_reward_manifest import StandingRewardOpportunityManifest
-from .competition_reward_opportunity import VerifiedRewardOpportunity
+from .competition_reward_opportunity import (
+    VerifiedRewardOpportunity,
+    verify_signed_early_release,
+)
 from .competition_reward_preparation import PreparedStandingReward, StandingRewardPreparation
 from .competition_reward_transaction_outcome import resolve_standing_transaction
 from .competition_reward_transactions import (
@@ -276,14 +282,38 @@ class StandingRewardExecutor:
         if prepared is None:
             prepared = await self._prepare_package(activation, control, history)
             self._prepared[key] = prepared
+        first_cohort = prepared.activation == self.first.activation or (
+            type(prepared.activation) is RewardActivation
+            and type(self.first.activation) is RewardActivation
+            and prepared.activation.cohort_sha256 == self.first.activation.cohort_sha256
+        )
+        early = False
+        if not first_cohort:
+            reader = self.preparation.reader
+            cohorts = tuple(digest(c) for c in reader.series.cohorts)
+            index = cohorts.index(prepared.activation.cohort_sha256)
+            prefix = await run_owned_thread(retained_reward_decisions, reader)
+            original = original_activation_decision(prefix, prepared.activation.cohort_sha256)
+            predecessor = effective_activation_decision(
+                prefix,
+                cohorts[index - 1],
+                through_sequence=None if original is None else original.sequence - 1,
+            )
+            if predecessor is not None:
+                early = verify_signed_early_release(
+                    reader.reward_adoptions,
+                    series=reader.series,
+                    policy=reader.policy,
+                    manifest=self.preparation.manifest,
+                    predecessor=predecessor,
+                    successor=prepared.activation,
+                    current_block=control.snapshot.block_number,
+                )
         prior = (
             getattr(self, "prior", self.handoff)
-            if prepared.activation == self.first.activation
-            or (
-                type(prepared.activation) is RewardActivation
-                and type(self.first.activation) is RewardActivation
-                and prepared.activation.cohort_sha256 == self.first.activation.cohort_sha256
-            )
+            if first_cohort
+            else None
+            if early
             else await self.opportunity(prepared.activation)
         )
         # Slow immutable replay above has no aggregate timeout. Refresh proofs

@@ -9,9 +9,38 @@
 - [Per-round successor signing](#open-competition-round-publisher)
 - [Work progress and ETA logs](#work-progress-and-eta-logs)
 - [Reward-history checkpoints and repair](#reward-history-checkpoints-and-repair)
+- [Operator early reward release](#operator-early-reward-release)
 - [Existing-owner repair and independent preparation](#existing-owner-repair-and-independent-preparation)
 
 Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
+
+## Operator early reward release
+
+The normal standing reward path waits for the predecessor's signed minimum
+validator opportunity. An operator can release a certified successor earlier
+by adding `umi-reward-early-release/1` to a quorum-signed model reward adoption
+`/5`. It names the exact effective predecessor decision and activation, signed
+manifest, successor cohort and certified package, plus a retained reason. This
+decision waives only the predecessor opportunity minimum; it does not claim
+coverage, change certified scores or grant transaction authority.
+
+For a successor that has no adoption yet, build the first adoption with
+`prepare_initial_early_release_adoption` so the release needs one quorum vote.
+For an already selected adoption, use `prepare_early_release_revision`, sign
+its exact bytes with the configured recovery quorum and append them with
+`select_signed_early_release_revision`. Reuse a previously authenticated
+finalized issuance anchor where its binding still applies. Both builders leave
+the certified package untouched and require the exact signed predecessor.
+
+Distribute one resulting selection through
+`prepare_reward_adoption_boot_candidates` with `early_release_predecessor` to
+the coordinator, independent reviewers, validator writer, reference publisher
+and package delivery service. Install the matching immutable source and boot
+files with the supported guard-aware cooperative handoff. Check each selected
+service after restart. The coordinator and validator still replay the package,
+current finalized control, registration and weight transaction. Confirm the
+finalized successor weight row before announcing rewards live. A signed
+adoption or a prepared boot candidate alone is not a live reward row.
 
 Before starting or upgrading Linux cohort owners, apply the
 [controlled package-restart policy](../validators/successor-upgrade.md#package-triggered-service-restarts).

@@ -7,6 +7,7 @@ import pytest
 from umi.competition_geometric_rewards import GeometricRewardParameters
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
+    RewardEarlyRelease,
     RewardModelAdoption,
     SignedRewardModelAdoption,
     select_signed_initial_reward_adoption,
@@ -113,6 +114,61 @@ def test_legacy_signed_serialization_is_unchanged(series_case):
     assert canonical_json_bytes(RewardControlDecision.model_validate(raw)) == canonical_json_bytes(
         old.decision
     )
+
+
+def test_early_release_requires_versioned_quorum_and_exact_package(series_case):
+    c = series_case
+    successor = c.series.cohorts[1]
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256="10" * 32,
+        predecessor_activation_sha256="11" * 32,
+        successor_cohort_sha256=digest(successor),
+        successor_package_sha256="12" * 32,
+        manifest_sha256=c.series.manifest_sha256,
+        reason="Operator authorized release before the coverage minimum",
+    )
+    _, source = adoption_case(c, revisions=1)
+    body = source.adoptions[0].adoption.model_copy(
+        update={
+            "schema_": "umi-standing-model-reward-adoption/5",
+            "cohort_sha256": digest(successor),
+            "package_sha256": release.successor_package_sha256,
+            "early_release": release,
+        }
+    )
+    body = RewardModelAdoption.model_validate_json(canonical_json_bytes(body))
+    signed_release = SignedRewardModelAdoption(adoption=body, signatures=signatures(body))
+    selection = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1", adoptions=(signed_release,)
+    )
+    assert verify_adoption_selection(selection, c.series, c.control.policy) == selection
+    with pytest.raises(ValueError):
+        verify_adoption_selection(
+            selection.model_copy(
+                update={
+                    "adoptions": (
+                        signed_release.model_copy(
+                            update={
+                                "adoption": body.model_copy(
+                                    update={
+                                        "early_release": release.model_copy(
+                                            update={"reason": "Changed"}
+                                        )
+                                    }
+                                )
+                            }
+                        ),
+                    )
+                }
+            ),
+            c.series,
+            c.control.policy,
+        )
+    with pytest.raises(ValueError, match="successor package"):
+        RewardModelAdoption.model_validate_json(
+            canonical_json_bytes(body.model_copy(update={"package_sha256": "13" * 32}))
+        )
 
 
 def test_independent_parameters_are_authenticated_and_original_evidence_is_fixed(series_case):
