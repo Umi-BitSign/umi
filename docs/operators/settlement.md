@@ -2039,6 +2039,11 @@ checks that fresh authenticated control still selects that activation, restores
 only existing completion metadata and returns a `CohortBaselineReview`. A
 matching paid weight row is not required. Missing checkpoint or package metadata
 requires explicit restoration; the operation never starts a replacement replay.
+The control read waits for the same native observer's first authenticated head
+within its configured startup budget. Only absent or below-startup-floor finality
+is retried; proof, transport, freshness and observer failures remain fatal. The
+`cohort_baseline_initial_finality` progress stage exposes this wait without
+reconstructing the provider or repeating completed preparation.
 
 Run it after a cooperative coordinator stop, under the same service identity
 and namespace dependencies. Arrange automatic coordinator restart through the

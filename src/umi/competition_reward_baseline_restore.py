@@ -1,15 +1,18 @@
 """Unsigned baseline review from exact completed coverage under its existing owner."""
 
+import asyncio
 from functools import partial
 from typing import Annotated
 
 from pydantic import Field
 
+from .competition_chain import _AwaitingFinality
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_reward_decisions import RewardActivation
 from .competition_settlement import PromotionHeadBinding
 from .competition_transport_verification import TransferProgress
-from .concurrency import run_owned_thread
+from .concurrency import run_owned_thread, wait_for_owned
+from .grandpa_finality_supervisor import GrandpaFinalitySupervisorError
 from .protocol import Hex32, StrictProtocolModel
 
 
@@ -20,6 +23,34 @@ class CompletedCoverageBaselineRequest(StrictProtocolModel):
     previous: PromotionHeadBinding
     not_before_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
     valid_through_block: Annotated[int, Field(ge=1, le=2**53 - 1)]
+
+
+async def _collect_initial_control(provider, hotkey):
+    """Await this observer's first authenticated head without rebuilding its owners."""
+    with TransferProgress(
+        "cohort_baseline_initial_finality",
+        1,
+        unit="observations",
+        planning_unit_seconds=(0.1, provider.config.startup_timeout_seconds),
+    ) as progress:
+
+        async def collect():
+            while True:
+                provider.ensure_observer_running()
+                try:
+                    observation = await provider.collect_control(hotkey)
+                except _AwaitingFinality:
+                    pass
+                except GrandpaFinalitySupervisorError as error:
+                    if error.reason_code != "no_verified_finalized_head":
+                        raise
+                else:
+                    progress.advance(1)
+                    return observation
+                progress.emit("retrying", reason="awaiting_initial_verified_finality")
+                await asyncio.sleep(0.25)
+
+        return await wait_for_owned(collect(), timeout=provider.config.startup_timeout_seconds)
 
 
 async def prepare_completed_coverage_baseline(coverage, request):
@@ -40,7 +71,9 @@ async def prepare_completed_coverage_baseline(coverage, request):
         # Fresh proof of the control slot prevents promoting a superseded
         # activation. Historical endpoint restoration supplies complete native
         # history and original package semantics separately.
-        control = await coverage.provider.collect_control(preparation.reader.series.control_hotkey)
+        control = await _collect_initial_control(
+            coverage.provider, preparation.reader.series.control_hotkey
+        )
         selected = await run_owned_thread(preparation.reader.select, control, files.decision)
         if selected.state != "selected" or selected.activation != request.activation:
             raise ValueError("baseline source differs from current authenticated reward activation")
