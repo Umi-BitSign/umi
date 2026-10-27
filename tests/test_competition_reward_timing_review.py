@@ -4,7 +4,10 @@ import hashlib
 
 import pytest
 
-from umi.competition_reward_timing_review import review_activation_age
+from umi.competition_reward_timing_review import (
+    activation_age_from_owned_control,
+    review_activation_age,
+)
 
 from .test_competition_reward_control_archive import historical as historical
 from .test_competition_reward_decisions import chain as chain
@@ -12,6 +15,38 @@ from .test_competition_reward_decisions import chain_config as chain_config
 from .test_competition_reward_decisions import control as control
 from .test_competition_reward_decisions import policy as policy
 from .test_competition_reward_decisions import series_case as series_case
+
+
+async def test_owned_start_timestamp_is_reused_without_a_second_native_proof(
+    historical, monkeypatch
+):
+    h = historical
+    plan = h.c.series.cohorts[0].model_copy(update={"not_before_block": h.old.height})
+    series = h.c.series.model_copy(update={"cohorts": (plan,)})
+    start = await h.item.provider.review_control(h.raw, h.metadata)
+    assert start.timestamp_ms == h.old.timestamp_ms
+    for _ in range(7):
+        h.advance()
+    observation = await h.item.provider.collect_control(h.item.hotkey)
+    import umi.competition_reward_timing_review as review
+
+    async def cannot_repeat(*args, **kwargs):
+        raise AssertionError("owned start proof must not be verified twice")
+
+    monkeypatch.setattr(review, "verify_slot_archive", cannot_repeat)
+    age = activation_age_from_owned_control(
+        h.item.provider, series=series, plan=plan,
+        observation=observation, start=start,
+    )
+    assert age.skips_activation_delay
+    assert age.start_evidence_sha256 == start.evidence_sha256
+    with pytest.raises(ValueError, match="selected native owner"):
+        activation_age_from_owned_control(
+            h.item.provider, series=series,
+            plan=plan.model_copy(update={"not_before_block": h.old.height + 1}),
+            observation=observation, start=start,
+        )
+    await h.item.provider.aclose()
 
 
 @pytest.mark.parametrize("damage", ["missing", "damaged_without_marker", "legacy_damaged"])
