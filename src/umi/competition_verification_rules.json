@@ -383,7 +383,7 @@
     "competition_reward_admission_source.py": "6d6d3dd9164e7a86b5e8654fbb1717e84d001fdb05a75b3ca0d330d1dbfbd704",
     "competition_reward_adoption.py": "50c54f3f0f85211ac63673da82c902d697946d51250ede5f931f906e456ba2ff",
     "competition_reward_adoption_handoff.py": "99869b6bbc061ed4452b8040d6fa2e6dbf8d489f03c92a1f05ba13388041285b",
-    "competition_reward_baseline_restore.py": "bd438809e50f57f9eb34e17bcc1e111285402b13b40af59f59743316a284dc2a",
+    "competition_reward_baseline_restore.py": "9ac348c243e7d2ae7d92a580e651156d0d9a4a6eed247314dc7cc71c2b2c193e",
     "competition_reward_boot.py": "a0fb8d1a76a00dd6e7251a3c71c36d95eb454e651277f21d110af4c143ceb19c",
     "competition_reward_bootstrap.py": "45607a838d5513b9b59c374bf2642c34d4ac4f691ec09c0f888bc1e41495281e",
     "competition_reward_checkpoint_progress.py": "d46a3f9ea9e4a7be5f72af6e03fc7aa5a57e9a4b93f5559b212d5d5bd3835d86",

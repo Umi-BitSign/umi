@@ -176,7 +176,9 @@ async def test_baseline_preparation_restores_completed_native_coverage_without_p
 
 
 @pytest.mark.parametrize("failure", ["superseded_activation", "missing_checkpoint"])
-async def test_owned_baseline_hook_does_not_replay_missing_or_superseded_work(failure):
+async def test_owned_baseline_hook_does_not_replay_missing_or_superseded_work(failure, monkeypatch):
+    from umi import competition_reward_baseline_restore as restore_module
+    from umi.competition_chain import _AwaitingFinality
     from umi.competition_reward_baseline_restore import (
         CompletedCoverageBaselineRequest,
         prepare_completed_coverage_baseline,
@@ -204,12 +206,21 @@ async def test_owned_baseline_hook_does_not_replay_missing_or_superseded_work(fa
         not_before_block=100,
         valid_through_block=200,
     )
-    restored = []
+    restored, collected, selected_controls = [], [], []
+
+    async def no_delay(_):
+        pass
+
+    monkeypatch.setattr(restore_module.asyncio, "sleep", no_delay)
 
     async def control(_):
+        collected.append("same started provider")
+        if len(collected) == 1:
+            raise _AwaitingFinality("first owned head pending")
         return "owned current observation"
 
     def selected(control, _):
+        selected_controls.append(control)
         assert control == "owned current observation"
         return SimpleNamespace(
             state="selected", activation=activation if failure == "missing_checkpoint" else None
@@ -224,7 +235,11 @@ async def test_owned_baseline_hook_does_not_replay_missing_or_superseded_work(fa
         return None
 
     coverage = SimpleNamespace(
-        provider=SimpleNamespace(collect_control=control),
+        provider=SimpleNamespace(
+            collect_control=control,
+            ensure_observer_running=lambda: None,
+            config=SimpleNamespace(startup_timeout_seconds=1),
+        ),
         preparation=SimpleNamespace(
             reader=SimpleNamespace(
                 series=SimpleNamespace(control_hotkey="control"), select=selected
@@ -239,3 +254,5 @@ async def test_owned_baseline_hook_does_not_replay_missing_or_superseded_work(fa
     with pytest.raises(ValueError, match=r"current authenticated|existing completed"):
         await prepare_completed_coverage_baseline(coverage, request)
     assert restored == ([request.endpoint_key] if failure == "missing_checkpoint" else [])
+    assert len(collected) == 2
+    assert selected_controls == ["owned current observation"]
