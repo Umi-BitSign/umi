@@ -351,6 +351,48 @@ async def test_legacy_models_keep_native_path_and_no_model_receipts_need_no_payl
         await restore_coverage_model_dependencies(case.preparation, absent)
 
 
+async def test_completed_legacy_cohort_survives_later_direct_reviewer_selection(
+    dependency,
+):
+    case = dependency
+    cohort = case.certificate.acceptance.cohort_sha256
+    case.preparation.model_artifacts = None
+    historical = await capture_coverage_model_dependencies(
+        case.preparation, case.package, case.prepared
+    )
+    assert historical["mode"] == "not_selected"
+    case.preparation.model_artifacts = case.verifier
+    case.preparation.model_deliveries = {
+        cohort: SimpleNamespace(mechanism="coordinator_chunked_v1")
+    }
+    case.preparation.cohort_sha256s = frozenset({cohort})
+    prior_reads = case.source.ranges_read
+    for cache in ({}, None):
+        assert await models.restore_completed_model_dependencies(
+            case.preparation, historical, cache, cohort_sha256=cohort
+        )
+    assert case.source.ranges_read == prior_reads
+    with pytest.raises(
+        CoverageModelDependencyRepairRequired, match="outside the authenticated reward series"
+    ):
+        await models.restore_completed_model_dependencies(
+            case.preparation, historical, {}, cohort_sha256="ff" * 32
+        )
+    case.preparation.model_deliveries = {}
+    assert await models.restore_completed_model_dependencies(
+        case.preparation, historical, {}, cohort_sha256=cohort
+    )
+    case.preparation.model_deliveries[cohort] = SimpleNamespace(
+        mechanism="direct_r2_multipart_v1"
+    )
+    with pytest.raises(
+        CoverageModelDependencyRepairRequired, match="verifier context changed"
+    ):
+        await models.restore_completed_model_dependencies(
+            case.preparation, historical, {}, cohort_sha256=cohort
+        )
+
+
 def _dependency_metadata(case):
     context = models.ModelDependencyContext.model_validate_json(
         canonical_json_bytes(case.snapshot["context"])

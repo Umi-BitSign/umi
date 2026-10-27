@@ -24,6 +24,10 @@ from .competition_cohort_baseline import (
 from .competition_cohort_baseline_review import CohortBaselineReview, validate_baseline_review
 from .competition_cohort_capacity import check_aggregate_evidence_bytes
 from .competition_cohort_direct_model_review import DirectModelSettlementVerifier
+from .competition_cohort_model_transport_selection import (
+    ModelDeliveryAdoptionSelections,
+    effective_model_deliveries,
+)
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     CohortRewardProjection,
@@ -128,6 +132,7 @@ class StandingRewardPreparation:
         maximum_promotion_bytes: int,
         maximum_package_bytes: int = DEFAULT_PACKAGE_BYTES,
         model_artifacts: DirectModelSettlementVerifier | None = None,
+        model_delivery_adoptions: ModelDeliveryAdoptionSelections = (),
         allocation_sink: Callable[[CohortRewardAllocation], None] | None = None,
     ):
         check_aggregate_evidence_bytes(maximum_package_bytes)
@@ -144,6 +149,10 @@ class StandingRewardPreparation:
         self.maximum_promotion_bytes = maximum_promotion_bytes
         self.maximum_package_bytes = maximum_package_bytes
         self.model_artifacts = model_artifacts
+        self.model_deliveries = effective_model_deliveries(
+            reader.series, reader.policy, model_delivery_adoptions
+        )
+        self.cohort_sha256s = frozenset(digest(plan) for plan in reader.series.cohorts)
         if allocation_sink is not None and not callable(allocation_sink):
             raise TypeError("reward allocation export requires an explicit owner sink")
         self.allocation_sink = allocation_sink
