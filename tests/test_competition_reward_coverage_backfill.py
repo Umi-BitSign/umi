@@ -133,6 +133,23 @@ async def test_new_head_checks_precede_gap_capture_and_never_credit_the_jump(lan
         assert right.block == left.block + 1
 
 
+async def test_successor_boundary_caps_fresh_and_backfill_after_head_advances(lanes):
+    h = lanes
+    h.state.head = 106
+    owner, _ = h.owner()
+    await owner.step()
+    owner.limit_through_block(110)
+    h.state.calls.clear()
+    h.state.head = 132
+    for _ in range(8):
+        await owner.step()
+    assert h.state.calls
+    assert all(block <= 110 for _, block in h.state.calls)
+    assert any(block == 110 for _, block in h.state.calls)
+    with pytest.raises(ValueError, match="boundary changed"):
+        owner.limit_through_block(111)
+
+
 @pytest.mark.parametrize("failure", ["pending", "lost_ack"])
 async def test_failed_gap_block_is_retried_after_new_fresh_checks(lanes, monkeypatch, failure):
     h = lanes

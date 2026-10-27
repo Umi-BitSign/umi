@@ -4059,6 +4059,15 @@ the capture window does not delete older evidence or truncate retained block
 history. A source update requires the supported runtime upgrade; it does not
 change the scheduling of an already running collector.
 
+When complete native control history proves a later activation, the collector
+stops both recent capture and historical backfill at the block before that
+activation first became effective. It uses the original transition even if a
+later revision is the only successor work item retained. The
+`coverage_capture_boundary` log identifies that block; `capture_limit_block`
+appears in backfill progress. A collector already running before an upgrade
+adopts the boundary on the next qualified service handoff. Retained endpoint
+and interval results before the boundary remain reusable.
+
 For direct models, compact dependency receipts bind the selected native verifier,
 standing review policy, original receipt owner and authenticated R2 object
 generation. Restore checks those small receipts and object HEADs without loading
