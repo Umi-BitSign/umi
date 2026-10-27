@@ -1,5 +1,6 @@
 """Real immutable hold configurations; system-manager and process ports substituted."""
 
+import hashlib
 import json
 import os
 import pwd
@@ -366,3 +367,282 @@ def test_unsafe_source_removes_old_view(mirror_case, damage):
     with pytest.raises(ValueError):
         module.update_hold_mirror(h.config, publish=True)
     assert not h.target.exists()
+
+
+@pytest.fixture
+def admission_projection(mirror_case):
+    h = mirror_case
+    h.source = Path(h.c.config.admission_config)
+    h.config = h.config.model_copy(
+        update={
+            "role": "admission",
+            "admission_compatibility": module.ADMISSION_PROJECTION,
+        }
+    )
+    h.state["argv"] = [
+        "/usr/bin/python3",
+        "-I",
+        "-m",
+        module.MODULES["admission"][0],
+        "serve-intake",
+        "--config",
+        str(h.source),
+    ]
+    value = json.loads(h.source.read_bytes())
+    lifecycle = value["recoverable_service"]["lifecycle"]
+    lifecycle["automatic_progression_hold_cohorts"] = [h.c.cohorts[1]]
+    lifecycle["held_intake_sampling_cohorts"] = [h.c.cohorts[1]]
+    lifecycle["request_start"]["operator_start_overrides"] = [
+        {
+            "schema": "umi-cohort-operator-request-start/1",
+            "cohort_sha256": h.c.cohorts[1],
+            "authorized_history_tip_sha256": "11" * 32,
+            "suite_sha256": "22" * 32,
+            "baseline_model_sha256": "33" * 32,
+            "evaluation_runtime_sha256": "44" * 32,
+            "runtime_adoption_sha256": None,
+            "not_before_unix_ms": 1,
+            "source_sha256": "55" * 32,
+        }
+    ]
+    h.c.save(h.source, canonical_json_bytes(value))
+    h.exact = h.source.read_bytes()
+    h.source_copy = h.target.with_name(h.target.name + ".source.json")
+    return h
+
+
+def test_explicit_projection_preserves_every_reward_field_and_exact_source(admission_projection):
+    h = admission_projection
+    assert module.update_hold_mirror(h.config, publish=True)["status"] == "published"
+    expected = json.loads(h.exact)
+    lifecycle = expected["recoverable_service"]["lifecycle"]
+    del lifecycle["held_intake_sampling_cohorts"]
+    del lifecycle["request_start"]["operator_start_overrides"]
+    assert json.loads(h.target.read_bytes()) == expected
+    assert h.source.read_bytes() == h.source_copy.read_bytes() == h.exact
+    receipt = json.loads(h.receipt.read_bytes())
+    assert receipt["binding"]["schema"] == "umi-reward-hold-mirror-receipt/2"
+    assert receipt["projection"]["source_sha256"] == hashlib.sha256(h.exact).hexdigest()
+    assert (
+        receipt["projection"]["output_sha256"] == hashlib.sha256(h.target.read_bytes()).hexdigest()
+    )
+    native = h.c.reader
+    projected = RewardTransitionControlReader(
+        h.c.config.model_copy(update={"admission_config": str(h.target)}),
+        series=h.c.series,
+        policy=h.c.policy,
+    )
+    assert [native.held(c) for c in h.c.cohorts] == [projected.held(c) for c in h.c.cohorts]
+
+
+def test_projection_repeat_and_restart_reuse_validation(admission_projection, monkeypatch):
+    h = admission_projection
+    module.update_hold_mirror(h.config, publish=True)
+    source_identity = h.source_copy.stat()
+    read = module.root_files._read_root_control_path
+
+    def no_original_read(path, *args, **kwargs):
+        assert path != h.source
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.root_files, "_read_root_control_path", no_original_read)
+    monkeypatch.setattr(module, "_validate_source", lambda *a: pytest.fail("repeat validation"))
+    assert module.update_hold_mirror(h.config, publish=True)["status"] == "unchanged"
+    module.update_hold_mirror(h.config, publish=False)
+    h.state["ExecMainStartTimestamp"] += 1_000_000
+    assert module.update_hold_mirror(h.config, publish=True)["status"] == "published"
+    assert h.source_copy.stat() == source_identity
+    assert (
+        json.loads(h.receipt.read_bytes())["projection"]["output_sha256"]
+        == hashlib.sha256(h.target.read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("damaged", ["target", "source_copy", "receipt"])
+def test_projection_damage_refuses_and_removes_visible_mirror(admission_projection, damaged):
+    h = admission_projection
+    module.update_hold_mirror(h.config, publish=True)
+    path = getattr(h, damaged)
+    h.c.save(path, b"{}")
+    with pytest.raises(ValueError):
+        module.update_hold_mirror(h.config, publish=True)
+    assert not h.target.exists()
+
+
+@pytest.mark.parametrize("fault", ["unknown_field", "invalid_sampling"])
+def test_projection_cannot_hide_invalid_actual_source(admission_projection, fault):
+    h = admission_projection
+    value = json.loads(h.exact)
+    lifecycle = value["recoverable_service"]["lifecycle"]
+    if fault == "unknown_field":
+        lifecycle["unknown_reward_authority"] = True
+    else:
+        lifecycle["held_intake_sampling_cohorts"] = ["ff" * 32]
+    h.c.save(h.source, canonical_json_bytes(value))
+    with pytest.raises(ValueError):
+        module.update_hold_mirror(h.config, publish=True)
+    assert not h.target.exists()
+
+
+def test_projection_tracks_new_selected_hold_and_preserves_default_exact_mode(admission_projection):
+    h = admission_projection
+    module.update_hold_mirror(h.config, publish=True)
+    value = json.loads(h.exact)
+    lifecycle = value["recoverable_service"]["lifecycle"]
+    lifecycle["automatic_progression_hold_cohorts"] = [h.c.cohorts[2]]
+    lifecycle["held_intake_sampling_cohorts"] = [h.c.cohorts[2]]
+    successor = h.source.with_name("new-scheduled-owner.json")
+    h.c.save(successor, canonical_json_bytes(value))
+    h.state["argv"][-1] = str(successor)
+    h.state["ExecMainStartTimestamp"] += 1_000_000
+    module.update_hold_mirror(h.config, publish=True)
+    reader = RewardTransitionControlReader(
+        h.c.config.model_copy(update={"admission_config": str(h.target)}),
+        series=h.c.series,
+        policy=h.c.policy,
+    )
+    assert not reader.held(h.c.cohorts[1]) and reader.held(h.c.cohorts[2])
+    exact_config = h.config.model_copy(update={"admission_compatibility": None})
+    module.update_hold_mirror(exact_config, publish=True)
+    assert h.target.read_bytes() == successor.read_bytes()
+    assert b"admission_compatibility" not in canonical_json_bytes(exact_config)
+
+
+def test_settlement_cannot_select_admission_projection(mirror_case):
+    value = mirror_case.config.model_dump(mode="json", by_alias=True)
+    value["admission_compatibility"] = module.ADMISSION_PROJECTION
+    with pytest.raises(ValueError, match="cannot select settlement"):
+        module.RewardHoldMirrorConfig.model_validate_json(canonical_json_bytes(value))
+
+
+def test_projection_selection_revalidates_existing_exact_receipt(admission_projection, monkeypatch):
+    h = admission_projection
+    exact = h.config.model_copy(update={"admission_compatibility": None})
+    module.update_hold_mirror(exact, publish=True)
+    assert json.loads(h.receipt.read_bytes())["binding"]["schema"].endswith("/1")
+    validate = module._validate_source
+    validations = []
+
+    def checked(raw, role):
+        validations.append((raw, role))
+        validate(raw, role)
+
+    monkeypatch.setattr(module, "_validate_source", checked)
+    module.update_hold_mirror(h.config, publish=True)
+    assert validations == [(h.exact, "admission")]
+    assert h.target.read_bytes() != h.exact
+    module.update_hold_mirror(exact, publish=True)
+    assert validations == [(h.exact, "admission")] * 2
+    assert h.target.read_bytes() == h.exact
+
+
+@pytest.mark.parametrize("after", ["source_copy", "target", "receipt"])
+@pytest.mark.parametrize("previous", [False, True])
+def test_projection_interrupted_publication_recovers(
+    admission_projection, monkeypatch, after, previous
+):
+    h = admission_projection
+    if previous:
+        module.update_hold_mirror(h.config, publish=True)
+        value = json.loads(h.exact)
+        value["recoverable_service"]["lifecycle"]["automatic_progression_hold_cohorts"] = [
+            h.c.cohorts[1],
+            h.c.cohorts[2],
+        ]
+        successor = h.source.with_name("next-owner.json")
+        h.c.save(successor, canonical_json_bytes(value))
+        h.state["argv"][-1] = str(successor)
+        h.state["ExecMainStartTimestamp"] += 1_000_000
+        h.source = successor
+    write = module._write
+
+    def interrupted(parent, name, raw):
+        write(parent, name, raw)
+        if name == getattr(h, after).name:
+            raise InterruptedError("publication interrupted after atomic write")
+
+    with monkeypatch.context() as interrupted_context:
+        interrupted_context.setattr(module, "_write", interrupted)
+        with pytest.raises(InterruptedError):
+            module.update_hold_mirror(h.config, publish=True)
+    assert not h.target.exists()
+    assert module.update_hold_mirror(h.config, publish=True)["status"] == "published"
+    assert h.source_copy.read_bytes() == h.source.read_bytes()
+    reader = RewardTransitionControlReader(
+        h.c.config.model_copy(update={"admission_config": str(h.target)}),
+        series=h.c.series,
+        policy=h.c.policy,
+    )
+    assert reader.held(h.c.cohorts[1])
+    assert reader.held(h.c.cohorts[2]) == previous
+    assert module.update_hold_mirror(h.config, publish=True)["status"] == "unchanged"
+
+
+def test_projection_receipt_policy_damage_requires_repair(admission_projection):
+    h = admission_projection
+    module.update_hold_mirror(h.config, publish=True)
+    value = json.loads(h.receipt.read_bytes())
+    value["binding"]["projection_policy"] = "other-policy/1"
+    h.c.save(h.receipt, canonical_json_bytes(value))
+    with pytest.raises(ValueError, match="receipt requires repair"):
+        module.update_hold_mirror(h.config, publish=True)
+    assert not h.target.exists()
+
+
+@pytest.mark.parametrize("legacy_source", os.environ.get("UMI_LEGACY_HOLD_SOURCES", "").split(":"))
+def test_actual_selected_legacy_parser_and_control_parity(admission_projection, legacy_source):
+    if not legacy_source:
+        pytest.skip("actual installed source compatibility is an operator qualification")
+    h = admission_projection
+    module.update_hold_mirror(h.config, publish=True)
+    script = """
+import json,os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from umi import competition_host_activation as files
+from umi.competition_service import CompetitionServiceConfig
+from umi.competition_cohort_settlement_config import SettlementServiceConfig
+from umi.competition_reward_transition_controls import (
+    RewardTransitionControlReader, RewardTransitionControls,
+)
+files._root_owner_uid=os.getuid
+original,projected,settlement,approvals=map(Path,sys.argv[2:])
+try: CompetitionServiceConfig.model_validate_json(original.read_bytes())
+except ValueError: rejected=True
+else: rejected=False
+view=CompetitionServiceConfig.model_validate_json(projected.read_bytes())
+final=SettlementServiceConfig.model_validate_json(settlement.read_bytes())
+reader=RewardTransitionControlReader(
+    RewardTransitionControls(
+        admission_config=str(projected), settlement_config=str(settlement),
+        operator_approval_directory=str(approvals),
+    ), series=view.recoverable_service.series, policy=final.policy,
+)
+print(json.dumps({
+    'full_new_source_rejected':rejected,
+    'holds':[reader.held(v.cohort_sha256) for v in view.recoverable_intake.cohorts],
+}))
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            script,
+            legacy_source,
+            str(h.source),
+            str(h.target),
+            h.c.config.settlement_config,
+            h.c.config.operator_approval_directory,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    value = json.loads(result.stdout)
+    assert value["full_new_source_rejected"]
+    assert value["holds"] == [
+        h.c.reader.held(v.cohort_sha256) for v in h.c.admission.recoverable_intake.cohorts
+    ]

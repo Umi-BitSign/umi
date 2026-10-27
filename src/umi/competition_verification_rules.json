@@ -469,7 +469,7 @@
     "competition_reward_history_transfer_runtime.py": "33b5ffcac725c3ae7aadefed27d4111161521b4c04b12ad14b24c88a75682960",
     "competition_reward_history_verifier.py": "ba72ba9b1571cb647d65f87d0385067c6264529f27f6ecd5cd6e440bc90db258",
     "competition_reward_history_workers.py": "c68b01aa4ec67deb1581f96e03d0a560ddaf26997514b8eb1d253db2d0e226b9",
-    "competition_reward_hold_mirror.py": "6af57f41cf763c04f47b3d00579cf1eb8ac623d05b8aeddedd7ab2f49336df45",
+    "competition_reward_hold_mirror.py": "a610333b47914c6bf6620a975eaeb81a34d70d8c7b878200e3fcf74264f24282",
     "competition_reward_hold_mirror_cli.py": "8070e8958458f9735fc53505463a43575afd938f1689fffadcfce02b6114c1d7",
     "competition_reward_host.py": "a9b8e32f429e8c1aefe13a50a12ebd322fce1250750446dfe0c7a97e3ee49b5a",
     "competition_reward_legacy_recovery.py": "e4f35377d06fe57ff9b291d086c5140226f2378e1ab8403eb9562d793e6fbca1",

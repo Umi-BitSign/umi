@@ -1,6 +1,8 @@
 """Root-owned mirrors of the configurations actually selected by cohort owners.
 
 Mirrors carry existing configuration bytes, not new hold or signing authority.
+An explicit admission compatibility selection omits only non-reward scheduling
+fields after full native validation, retaining the exact source and its receipt.
 Lifecycle hooks remove them before start and after stop. Publication follows the
 system manager's command and brackets the copy with stable process/source checks.
 """
@@ -8,6 +10,7 @@ system manager's command and brackets the copy with stable process/source checks
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import pwd
@@ -17,7 +20,7 @@ import subprocess
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from . import competition_host_activation as root_files
 from .competition_cohort_settlement_config import SettlementServiceConfig
@@ -29,6 +32,7 @@ from .private_files import Directory, lock_private_file
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 MAX_METADATA_BYTES = 128 * 1024
+ADMISSION_PROJECTION = "umi-reward-hold-admission-pre-scheduling/1"
 MODULES = {
     "admission": ("umi.competition_cli", "umi-competition", "serve-intake"),
     "settlement": ("umi.competition_cohort_settlement_cli", "umi-cohort-settlement", "run"),
@@ -41,6 +45,20 @@ class RewardHoldMirrorConfig(StrictProtocolModel):
     role: Literal["admission", "settlement"]
     service_user: Annotated[str, Field(pattern=r"^[a-z_][a-z0-9_-]*$", max_length=64)]
     target: Directory
+    admission_compatibility: Literal["umi-reward-hold-admission-pre-scheduling/1"] | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_exact_default(self, handler):
+        value = handler(self)
+        if self.admission_compatibility is None:
+            value.pop("admission_compatibility", None)
+        return value
+
+    @model_validator(mode="after")
+    def admission_only(self):
+        if self.admission_compatibility is not None and self.role != "admission":
+            raise ValueError("admission compatibility projection cannot select settlement")
+        return self
 
 
 def load_mirror_config(path):
@@ -239,6 +257,41 @@ def _validate_source(raw, role):
             raise ValueError("selected settlement configuration is not its canonical coordinator")
 
 
+def _project_admission(raw):
+    """After full native validation, omit only two non-reward scheduling fields.
+
+    RewardTransitionControlReader consumes policy/series/intake authority and
+    automatic_progression_hold_cohorts. Neither scheduling field participates
+    in that decision. Preserve every other supplied value exactly, including
+    unknown fields that the full native parser must already have rejected.
+    This output is solely a hold-reader view, never an intake configuration.
+    """
+    value = json.loads(raw)
+    lifecycle = value["recoverable_service"]["lifecycle"]
+    lifecycle.pop("held_intake_sampling_cohorts", None)
+    lifecycle["request_start"].pop("operator_start_overrides", None)
+    return canonical_json_bytes(value)
+
+
+def _projection_record(saved):
+    value = saved.get("projection")
+    if (
+        not isinstance(value, dict)
+        or saved["binding"].get("projection_policy") != ADMISSION_PROJECTION
+        or set(value) != {"policy", "source_sha256", "output_sha256", "source_copy_identity"}
+        or value["policy"] != ADMISSION_PROJECTION
+        or any(
+            not isinstance(value[k], str) or not re.fullmatch(r"[0-9a-f]{64}", value[k])
+            for k in ("source_sha256", "output_sha256")
+        )
+        or not isinstance(value["source_copy_identity"], list)
+        or len(value["source_copy_identity"]) != 5
+        or not all(isinstance(v, str) and v.isdigit() for v in value["source_copy_identity"])
+    ):
+        raise ValueError("retained admission compatibility receipt requires repair")
+    return value
+
+
 def _stamp(path, maximum=MAX_CONFIG_BYTES):
     return [str(part) for part in _identity(path, maximum)]
 
@@ -287,6 +340,8 @@ def update_hold_mirror(config, *, publish):
     parent = root_files._open_absolute_directory(target.parent)
     lease = None
     receipt = target.with_name(target.name + ".receipt.json")
+    source_copy = target.with_name(target.name + ".source.json")
+    projected = config.admission_compatibility is not None
     try:
         info = os.fstat(parent)
         if info.st_uid != root_files._root_owner_uid() or info.st_mode & 0o022:
@@ -304,6 +359,8 @@ def update_hold_mirror(config, *, publish):
                 _remove(parent, target.name)
                 _remove(parent, target.name + ".pending")
                 _remove(parent, receipt.name + ".pending")
+                if projected:
+                    _remove(parent, source_copy.name + ".pending")
                 # Retain the bounded successful source check. A restarted owner
                 # may select identical immutable bytes even though its old
                 # process binding no longer authorizes a visible mirror.
@@ -313,7 +370,7 @@ def update_hold_mirror(config, *, publish):
                 state = selected_service(config)
                 process = process_identity(state)
                 source = selected_config(state["argv"], config.role)
-                if source in {target, receipt}:
+                if source in {target, receipt, source_copy}:
                     raise ValueError("hold mirror cannot select itself as its source")
                 stamp = _stamp(source)
                 # The live process loaded its configuration at startup. A new
@@ -321,7 +378,9 @@ def update_hold_mirror(config, *, publish):
                 if int(stamp[-1]) > state["ExecMainStartTimestamp"] * 1000:
                     raise ValueError("selected configuration changed after the owner started")
                 binding = {
-                    "schema": "umi-reward-hold-mirror-receipt/1",
+                    "schema": "umi-reward-hold-mirror-receipt/2"
+                    if projected
+                    else "umi-reward-hold-mirror-receipt/1",
                     "config_sha256": digest(config),
                     "source": str(source),
                     "source_identity": stamp,
@@ -332,6 +391,8 @@ def update_hold_mirror(config, *, publish):
                     },
                     "process": process,
                 }
+                if projected:
+                    binding["projection_policy"] = config.admission_compatibility
                 progress.advance()
                 saved = None
                 if receipt.exists():
@@ -342,15 +403,38 @@ def update_hold_mirror(config, *, publish):
                     )
                     if (
                         not isinstance(saved, dict)
-                        or set(saved) != {"binding", "mirror_identity"}
-                        or not isinstance(saved["binding"], dict)
-                        or saved["binding"].get("schema") != binding["schema"]
+                        or not isinstance(saved.get("binding"), dict)
+                        or saved["binding"].get("schema")
+                        not in {
+                            "umi-reward-hold-mirror-receipt/1",
+                            "umi-reward-hold-mirror-receipt/2",
+                        }
                     ):
                         raise ValueError("retained hold mirror receipt requires repair")
+                    old_projected = saved["binding"]["schema"] == "umi-reward-hold-mirror-receipt/2"
+                    expected_keys = {"binding", "mirror_identity"} | (
+                        {"projection"} if old_projected else set()
+                    )
+                    if set(saved) != expected_keys:
+                        raise ValueError("retained hold mirror receipt requires repair")
+                    if old_projected:
+                        _projection_record(saved)
                 try:
                     mirror_stamp = _stamp(target)
                 except FileNotFoundError:
                     mirror_stamp = None
+                previous = {} if saved is None else saved.get("binding", {})
+                source_unchanged = saved is not None and all(
+                    previous.get(key) == binding[key]
+                    for key in ("schema", "config_sha256", "source", "source_identity")
+                )
+                projection = None
+                if projected and source_unchanged:
+                    projection = _projection_record(saved)
+                    if _stamp(source_copy) != projection["source_copy_identity"]:
+                        raise ValueError("retained admission source copy requires repair")
+                    if mirror_stamp is not None and saved["mirror_identity"] != mirror_stamp:
+                        raise ValueError("retained admission projection requires repair")
                 unchanged = (
                     saved is not None
                     and saved.get("binding") == binding
@@ -358,20 +442,25 @@ def update_hold_mirror(config, *, publish):
                 )
                 raw = None
                 if not unchanged:
-                    raw = root_files._read_root_control_path(
-                        source, MAX_CONFIG_BYTES, modes={0o444}
+                    original = root_files._read_root_control_path(
+                        source_copy if projected and source_unchanged else source,
+                        MAX_CONFIG_BYTES,
+                        modes={0o444},
                     )
-                    previous = {} if saved is None else saved.get("binding", {})
-                    if any(
-                        previous.get(key) != binding[key]
-                        for key in (
-                            "schema",
-                            "config_sha256",
-                            "source",
-                            "source_identity",
-                        )
-                    ):
-                        _validate_source(raw, config.role)
+                    if not source_unchanged:
+                        _validate_source(original, config.role)
+                    raw = original
+                    if projected:
+                        raw = _project_admission(original)
+                        if source_unchanged:
+                            if _stamp(source_copy) != projection["source_copy_identity"]:
+                                raise ValueError("retained admission source changed during reuse")
+                        else:
+                            projection = {
+                                "policy": config.admission_compatibility,
+                                "source_sha256": hashlib.sha256(original).hexdigest(),
+                                "output_sha256": hashlib.sha256(raw).hexdigest(),
+                            }
                 progress.advance()
 
                 def stable():
@@ -385,6 +474,9 @@ def update_hold_mirror(config, *, publish):
 
                 stable()
                 if not unchanged:
+                    if projected and not source_unchanged:
+                        _write(parent, source_copy.name, original)
+                        projection["source_copy_identity"] = _stamp(source_copy)
                     _write(parent, target.name, raw)
                     stable()
                     _write(
@@ -394,6 +486,7 @@ def update_hold_mirror(config, *, publish):
                             {
                                 "binding": binding,
                                 "mirror_identity": _stamp(target),
+                                **({"projection": projection} if projected else {}),
                             }
                         ),
                     )

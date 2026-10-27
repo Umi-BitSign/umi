@@ -268,7 +268,8 @@ The three privileged hooks invalidate the visible mirror before startup,
 publish it after startup, and invalidate it after stop. Missing or failed
 publication stops new reward transitions. The publisher reads structured
 system-manager `ExecStart`, matches the actual process, service account and
-cgroup, and copies only its exact bounded, single-link, root-owned 0444 config.
+cgroup, and reads only its bounded, single-link, root-owned 0444 config.
+The default mirror retains those exact bytes.
 It supports module entry points, installed console scripts and existing
 `runpy` wrappers with either literal `sys.argv` or trailing arguments. A config
 changed after the owner started requires the supported owner restart; a stale
@@ -281,6 +282,29 @@ brackets the copy with process/config identity checks and removes the mirror
 on failure. Successful source checks remain in bounded root-owned receipts:
 unchanged refreshes do not reread config payloads, and startup reuses unchanged
 validation. Hooks report counted stages, elapsed time and a scoped planning ETA.
+
+When supported reward readers predate the intake scheduling fields, explicitly
+select `"admission_compatibility": "umi-reward-hold-admission-pre-scheduling/1"`
+in the admission mirror owner file. This versioned projection validates the
+complete actual config with the selected current native parser, then omits only
+`recoverable_service.lifecycle.held_intake_sampling_cohorts` and
+`recoverable_service.lifecycle.request_start.operator_start_overrides`. Neither
+field determines a reward hold. All reward holds, series, policies, authority
+bindings and other supplied values remain unchanged. The projected file is only
+a reward hold-reader view; never select it as an intake startup configuration.
+Settlement mirrors cannot select this projection.
+
+Projected publication retains the exact original in `TARGET.source.json` and
+records its SHA256, the projection policy, the output SHA256 and immutable file
+identities in a version 2 receipt. Lifecycle invalidation retains this bounded
+evidence; an unchanged restart reuses the completed full validation. Changed or
+damaged retained source/output identities fail closed with a repair error.
+Switching back to exact mode retains the bounded original source as evidence.
+Deploy the publisher source and owner-file selection through the supported hook
+handoff, then use `publish` to refresh an already running owner's mirror. Legacy
+reward consumers with the stable directory mount can read the compatible view
+without restarting. Qualify the actual selected legacy parsers and hold decisions
+before claiming adoption; a newer parser accepting the view is insufficient.
 
 ## Work progress and ETA logs
 
