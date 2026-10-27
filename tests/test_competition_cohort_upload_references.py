@@ -7,7 +7,7 @@ import pytest
 from umi.competition_assignment_reuse import AssignmentVerificationReuse
 from umi.competition_cohort_model_upload import CohortModelUploads
 from umi.competition_cohort_participation import CohortParticipationRequest
-from umi.open_competition import digest, sign_object
+from umi.open_competition import digest, digest_canonical_bytes, sign_object
 from umi.protocol import canonical_json_bytes
 
 from .test_competition_cohort_intake import capture_at
@@ -137,7 +137,15 @@ def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, c
     active_reuse = versions._reuse["umi-upload-model-reference/1"]
     receipts = list(active_reuse.directory.glob("*.json"))
     assert len(receipts) == len(keys)
-    target = receipts[0]
+    # glob order is unrelated to the journal's poll order. Bind the damage
+    # to a known row so the assertion can distinguish it from the one valid
+    # representative that polling may still decode.
+    with h.owner.journal.read_transaction() as db:
+        token = versions.identity("upload", keys[0], db=db)
+    target = active_reuse.directory / (
+        digest([active_reuse.owner, active_reuse.runtime, token]) + ".json"
+    )
+    assert target in receipts
     if damage == "missing":
         target.unlink()
     elif damage == "corrupt":
@@ -161,7 +169,8 @@ def test_reference_damage_is_explicit_and_scoped_repair(delivery, monkeypatch, c
     calls = decode_counter(monkeypatch)
     result = h.owner.poll_once()
     assert result["last_error_type"] == "UploadReferenceRepairRequired"
-    assert not calls
+    assert len(calls) <= 1
+    assert all(digest_canonical_bytes(raw) != keys[0] for raw in calls)
     assert "repair_required" in caplog.text
     reports = []
     assert h.owner.repair_retained_references(report=reports.append) == {
@@ -178,7 +187,9 @@ def test_duplicate_rows_keep_current_conflict_and_exact_byte_fences(delivery, ch
     keys = duplicates(h)
     h.owner.poll_once()
     # A nonrepresentative row must still be checked on every pass.
-    key = keys[-1]
+    # The original reservation can sort last; replacing it with itself would
+    # leave the source bytes unchanged and correctly produce no error.
+    key = next(key for key in reversed(keys) if key != digest(h.request))
     with h.owner.journal.transaction() as db:
         if change == "hold":
             db.execute("INSERT INTO holds VALUES (?)", (key,))
