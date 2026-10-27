@@ -56,6 +56,18 @@ class SettlementRegistrationFiles:
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("shared proof archive must be owned and private")
 
+    @staticmethod
+    def _read(archive: RewardProofArchive, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
+        """Read the selected original for phase-reviewer registration fallback."""
+        context, fields = archive.read(
+            "registration",
+            digest(observation),
+            bounds={"proof": MAX_ARCHIVE_BYTES, "metadata": MAX_METADATA_BYTES},
+        )
+        if context != observation.model_dump(mode="json", by_alias=True):
+            raise ValueError("settlement proof changes its original observation")
+        return fields["proof"], fields["metadata"]
+
     def _publish_selected_original(self, observation):
         for archive in (self.inbox, *self.shared):
             if archive in self.shared:

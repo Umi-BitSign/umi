@@ -249,7 +249,7 @@
     "competition_cohort_settlement_inputs.py": "8d25db9e9a450443d9a17df28126f692eb801600e0409c0cf0ba714220907a4d",
     "competition_cohort_settlement_preparation.py": "799020815b87202633fe5815e925c345df501ef552b5c2352dd23fb4a0c496ff",
     "competition_cohort_settlement_progress.py": "a7f8dce219da226c66a00f0dfaa76286567d07cf029bd4d5ccff4b5d35bbf5dd",
-    "competition_cohort_settlement_proofs.py": "2df6e8fc4effa00c79ca250e5f512f1e483f91ee13c8e9e443a040e0e6f5c92d",
+    "competition_cohort_settlement_proofs.py": "dc6c5f0427802ade07135349aac6f9dae171182a089d921ab2d6a994f5ad90ec",
     "competition_cohort_settlement_pulses.py": "2b80bb067d948d3ea3c986adf08dcf58334f4ee2e289a59c5c5d1ee2b31b42e2",
     "competition_cohort_settlement_service.py": "b2742c0517e7bd8a3457ce14e7c61b6502ee88a2e0721cc19abd5b3a88fc3aca",
     "competition_cohort_settlement_signing.py": "46d9acc349f23d1c5ed7fc426b4c0a44ee34be5af3637f5fc08d09026a453c34",

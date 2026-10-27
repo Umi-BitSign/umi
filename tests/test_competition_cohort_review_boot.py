@@ -579,6 +579,58 @@ async def test_restart_retains_host_selection_and_allows_capacity_change(selecte
     assert providers.events[-1] == "closed"
 
 
+@pytest.mark.parametrize("fault", [None, "context", "object"])
+async def test_boot_registration_fallback_reads_retained_legacy_original_after_restart(
+    selected, providers, monkeypatch, fault
+):
+    from umi.competition_execution import ExecutionBoundary
+    from umi.competition_reward_proof_archive import RewardProofArchive
+
+    from .test_competition_cohort_settlement_proofs import _legacy_proof_recipe
+
+    observation = ExecutionBoundary(
+        source="verifier_attested_finality", block=123,
+        block_hash="0x" + "aa" * 32, state_root="0x" + "bb" * 32,
+        snapshot_sha256="cc" * 32, evidence_sha256="dd" * 32,
+    )
+    archive = RewardProofArchive(Path(selected.config.proof_import_directory))
+    archive.root.mkdir(mode=0o700)
+    archive.write(
+        "registration", digest(observation),
+        context=observation.model_dump(mode="json", by_alias=True),
+        fields={"proof": b"original-registration", "metadata": b"original-metadata"},
+    )
+    frame = _legacy_proof_recipe(archive, observation)
+    callbacks = []
+    reviewer = boot.SelectedPhaseReviewer
+
+    def capture(*args, **kwargs):
+        callbacks.append(args[4])
+        return reviewer(*args, **kwargs)
+
+    monkeypatch.setattr(boot, "SelectedPhaseReviewer", capture)
+    async with boot.phase_review_app(selected.config):
+        assert await callbacks[-1](observation) == (b"original-registration", b"original-metadata")
+    path = archive.root / "registration" / (digest(observation) + ".json")
+    if fault == "context":
+        value = json.loads(frame)
+        value["context"]["block"] += 1
+        path.write_bytes(canonical_json_bytes(value))
+    elif fault == "object":
+        recipe = json.loads(frame)["fields"]["proof"][0]["recipe_sha256"]
+        (archive.root / "objects" / (recipe + ".json")).write_bytes(b"damaged")
+    async with boot.phase_review_app(selected.config):
+        if fault is None:
+            assert await callbacks[-1](observation) == (
+                b"original-registration", b"original-metadata"
+            )
+            assert path.read_bytes() == frame
+        else:
+            with pytest.raises(ValueError):
+                await callbacks[-1](observation)
+    assert providers.events.count("started") == providers.events.count("closed") == 2
+
+
 @pytest.mark.parametrize("selected_profile", [False, True])
 @pytest.mark.parametrize("adoption", ["request_tail", "model_delivery", "evaluation_suite"])
 async def test_boot_selects_adoption_route_and_readers_from_same_profile(
