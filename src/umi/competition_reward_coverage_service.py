@@ -102,12 +102,13 @@ class StandingRewardCoverageService:
         self._target = None
         self._active = None
         self._collector = None
+        self._verified_transitions = ()
         self._completed: dict[str, VerifiedRewardOpportunity] = {}
         self._opportunities: dict[str, VerifiedRewardOpportunity] = {}
         self._lock = asyncio.Lock()
         self._package_guard = package_guard if package_guard is not None else asyncio.Lock()
 
-    async def _selection(self, height):
+    async def _selection_detail(self, height):
         try:
             prefix = await self.history.verified_prefix(height)
         except ValueError:
@@ -123,7 +124,11 @@ class StandingRewardCoverageService:
         reviewed = await run_owned_thread(
             self.preparation.reader.review_history, control, self.files.decision, prefix
         )
-        return reviewed.effective_selection
+        return reviewed
+
+    async def _selection(self, height):
+        reviewed = await self._selection_detail(height)
+        return None if reviewed is None else reviewed.effective_selection
 
     async def _discover(self):
         if self._target is None:
@@ -132,7 +137,10 @@ class StandingRewardCoverageService:
         if self._target < self.history.first_block:
             self._target = None
             return
-        selection = await self._selection(self._target)
+        reviewed = await self._selection_detail(self._target)
+        selection = None if reviewed is None else reviewed.effective_selection
+        if reviewed is not None:
+            self._verified_transitions = reviewed.activation_transitions
         if selection is not None:
             key = coverage_work_key(selection.activation)
             retained = await run_owned_thread(self.journal.journal.get, "coverage_work", key)
@@ -228,6 +236,16 @@ class StandingRewardCoverageService:
         # available, then finish retained predecessors. Recreating collectors
         # every pass would repeatedly replay the same first page after restart.
         key, work = pending[-1]
+        successor_starts = (
+            transition.effective_at_block
+            for transition in self._verified_transitions
+            if transition.activation is not None
+            and transition.activation != work.activation
+            and transition.effective_at_block is not None
+            and transition.effective_at_block > work.first_block
+        )
+        successor_start = min(successor_starts, default=None)
+        last_block = None if successor_start is None else successor_start - 1
         if self._active != key:
             selection = await self._selection(work.observed_block)
             if (
@@ -247,9 +265,12 @@ class StandingRewardCoverageService:
                 policy=reader.policy,
                 activation=work.activation,
                 first_block=work.first_block,
+                last_block=last_block,
                 maximum_witness_bytes=self.files.maximum_witness_bytes,
             )
             self._active = key
+        elif last_block is not None:
+            self._collector.limit_through_block(last_block)
         collector = self._collector
         retained = await run_owned_thread(self.journal.journal.get, "coverage_completion", key)
         if retained is None:

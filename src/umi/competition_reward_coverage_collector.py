@@ -112,6 +112,7 @@ class RewardCoverageCollector:
         policy: CompetitionPolicy,
         activation: RewardActivation,
         first_block: int,
+        last_block: int | None = None,
         maximum_replay_intervals: int = 8,
         maximum_endpoints_per_validator: int = 4,
         maximum_backfill_endpoints_per_validator: int = 4,
@@ -140,6 +141,7 @@ class RewardCoverageCollector:
             manifest.opportunity.minimum_validator_ms,
         )
         self.first_block = first_block
+        self.last_block = None
         self.maximum_replay_intervals = maximum_replay_intervals
         self.maximum_endpoints = maximum_endpoints_per_validator
         self.maximum_backfill = maximum_backfill_endpoints_per_validator
@@ -168,6 +170,35 @@ class RewardCoverageCollector:
         self._credit_start = None
         self._credit_observations = 0
         self._lock = asyncio.Lock()
+        if last_block is not None:
+            self.limit_through_block(last_block)
+
+    def limit_through_block(self, last_block: int) -> None:
+        """Stop an old activation at its native-reviewed successor boundary."""
+        _uint(last_block, 2**53 - 1)
+        if last_block < self.first_block - 1 or (
+            self.last_block is not None and last_block > self.last_block
+        ):
+            raise ValueError("coverage capture boundary changed its selected interval")
+        if self.last_block == last_block:
+            return
+        self.last_block = last_block
+        floor = max(self.first_block, last_block - self.capture_window + 1)
+        for hotkey, next_block in self._next.items():
+            if next_block > last_block:
+                self._next[hotkey] = floor
+                self._left.pop(hotkey, None)
+        if self._initial_head is not None:
+            self._initial_head = min(self._initial_head, last_block)
+        logger.info(
+            "coverage_capture_boundary %s",
+            {
+                "activation_sha256": self.activation,
+                "first_block": self.first_block,
+                "last_block": last_block,
+                "basis": "native_reviewed_successor_activation",
+            },
+        )
 
     async def _totals(self):
         return tuple(
@@ -373,6 +404,7 @@ class RewardCoverageCollector:
                     "backfill_enabled": bool(self.maximum_backfill),
                     "stalled": stalled,
                     "first_block": self.first_block,
+                    "capture_limit_block": self.last_block,
                     "next_block": next_block,
                     "target_block": target,
                     "completed_endpoints": completed,
@@ -576,8 +608,9 @@ class RewardCoverageCollector:
             )
             return CoverageProgress(totals, (), None, True, retained_page=True)
         try:
-            head = await self.source.finalized_height()
-            _uint(head, 2**53 - 1)
+            chain_head = await self.source.finalized_height()
+            _uint(chain_head, 2**53 - 1)
+            head = min(chain_head, self.last_block) if self.last_block is not None else chain_head
         except Exception as error:
             _log_retry(error, phase="head", operation="finalized_height")
             return CoverageProgress(totals, tuple([*errors, ("head", type(error).__name__)]), None)

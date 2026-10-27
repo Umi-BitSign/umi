@@ -268,6 +268,7 @@ class HistoryVerifiedStandingRewardSelection:
     effective_selection: StandingRewardSelection | None
     chain_submission_authorized: Literal[False] = False
     initial_selection: StandingRewardSelection | None = None
+    activation_transitions: tuple[StandingRewardSelection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,7 @@ class HistoricalStandingRewardSelection:
     effective_selection: StandingRewardSelection | None
     chain_submission_authorized: Literal[False] = False
     initial_selection: StandingRewardSelection | None = None
+    activation_transitions: tuple[StandingRewardSelection, ...] = ()
 
 
 def verify_reward_decisions(
@@ -590,7 +592,7 @@ class StandingRewardControlReader:
     def select(
         self, observation: OwnedRewardControlObservation, source: DecisionSource
     ) -> StandingRewardSelection:
-        selection, _, _ = self._select(observation, source, admission=None)
+        selection, _, _, _ = self._select(observation, source, admission=None)
         return selection
 
     def select_admitted(
@@ -612,7 +614,7 @@ class StandingRewardControlReader:
             expected_control_hotkey=self.series.control_hotkey,
             expected_chain_config_sha256=self.admission_chain_config_sha256,
         )
-        selection, _, _ = self._select(observation, source, admission=admission)
+        selection, _, _, _ = self._select(observation, source, admission=admission)
         return AdmittedStandingRewardSelection(selection, admission)
 
     def select_history(
@@ -628,11 +630,15 @@ class StandingRewardControlReader:
         cannot choose a shorter history. The reserved control key must publish
         only this series' ordered decisions throughout that interval.
         """
-        selection, effective, initial = self._select(
+        selection, effective, initial, transitions = self._select(
             observation, source, admission=None, history=history
         )
         return HistoryVerifiedStandingRewardSelection(
-            selection, history, effective, initial_selection=initial
+            selection,
+            history,
+            effective,
+            initial_selection=initial,
+            activation_transitions=transitions,
         )
 
     def review_history(
@@ -648,11 +654,16 @@ class StandingRewardControlReader:
         Newly recovered decisions may be retained, but historical review never
         advances or rewinds the current finalized highwater mark.
         """
-        selection, effective, initial = self._select(
+        selection, effective, initial, transitions = self._select(
             observation, source, admission=None, history=history, historical=True
         )
         return HistoricalStandingRewardSelection(
-            observation, selection, history, effective, initial_selection=initial
+            observation,
+            selection,
+            history,
+            effective,
+            initial_selection=initial,
+            activation_transitions=transitions,
         )
 
     def _history_committed_blocks(
@@ -755,7 +766,10 @@ class StandingRewardControlReader:
         history: OwnedRewardControlHistory | None = None,
         historical: bool = False,
     ) -> tuple[
-        StandingRewardSelection, StandingRewardSelection | None, StandingRewardSelection | None
+        StandingRewardSelection,
+        StandingRewardSelection | None,
+        StandingRewardSelection | None,
+        tuple[StandingRewardSelection, ...],
     ]:
         if historical and (history is None or admission is not None):
             raise ValueError("historical selection requires complete control history")
@@ -889,12 +903,37 @@ class StandingRewardControlReader:
                 observation.snapshot.block_number,
             )
             effective = None
-            if committed_blocks is not None and tip.kind != "revoke":
-                for item, block in zip(decisions, committed_blocks, strict=True):
-                    prior = self._selection_at(
-                        item.decision, block, observation.snapshot.block_number
+            transitions = []
+            if committed_blocks is not None:
+                selections = tuple(
+                    self._selection_at(item.decision, block, observation.snapshot.block_number)
+                    for item, block in zip(decisions, committed_blocks, strict=True)
+                )
+                for index, prior in enumerate(selections):
+                    invalidated_before_effect = (
+                        prior.effective_at_block is not None
+                        and any(
+                            committed_blocks[later] <= prior.effective_at_block
+                            and (
+                                decisions[later].decision.kind == "revoke"
+                                or (
+                                    selections[later].activation is not None
+                                    and selections[later].activation != prior.activation
+                                    and selections[later].effective_at_block is not None
+                                    and selections[later].effective_at_block
+                                    <= prior.effective_at_block
+                                )
+                            )
+                            for later in range(index + 1, len(selections))
+                        )
                     )
-                    if prior.state == "selected":
+                    if (
+                        prior.activation is not None
+                        and prior.effective_at_block is not None
+                        and not invalidated_before_effect
+                    ):
+                        transitions.append(prior)
+                    if tip.kind != "revoke" and prior.state == "selected":
                         effective = prior
             # Preserve the first activation as a historical fact, even when a
             # successor or revocation is current. Boot needs it to reopen the
@@ -908,4 +947,4 @@ class StandingRewardControlReader:
                 initial = self._selection_at(
                     decisions[1].decision, committed_blocks[1], observation.snapshot.block_number
                 )
-            return selection, effective, initial
+            return selection, effective, initial, tuple(transitions)
