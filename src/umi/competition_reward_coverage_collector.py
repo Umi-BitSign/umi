@@ -546,7 +546,7 @@ class RewardCoverageCollector:
                 before_replay,
                 totals,
                 phase_started,
-                retrying=bool(errors),
+                retrying=scan_failed,
             )
         if await self._complete(totals) is not None:
             return CoverageProgress(totals, tuple(errors), self._certificate)
