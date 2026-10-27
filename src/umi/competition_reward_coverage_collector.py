@@ -37,6 +37,7 @@ from .competition_transport_verification import TransferProgress
 from .open_competition import CompetitionPolicy, digest, identity
 from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
 from .protocol import canonical_json_bytes
+from .r2_evidence import R2EvidenceHTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,12 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
     # Report only source coordinates inside this installed package, never locals.
     details = _failure_details(error)
     runtime_code = None
+    r2_http_status = None
     cause, seen = error, set()
     while cause is not None and id(cause) not in seen and len(seen) < 6:
         seen.add(id(cause))
+        if isinstance(cause, R2EvidenceHTTPError):
+            r2_http_status = cause.status_code
         if isinstance(cause, RewardRuntimeCodeMismatch):
             runtime_code = {
                 "expected_sha256": cause.expected_runtime_code_sha256,
@@ -76,6 +80,7 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
             "error_type": type(error).__name__,
             "reason_codes": [detail["reason_code"] for detail in details],
             "runtime_code": runtime_code,
+            "r2_http_status": r2_http_status,
             "origin": origin,
         },
     )

@@ -14,7 +14,7 @@ from umi.competition_remote_proof_store import (
     RemoteProofStore,
 )
 from umi.competition_reward_proof_archive import MAX_FRAME_BYTES, RewardProofArchive
-from umi.r2_evidence import R2EvidenceClient
+from umi.r2_evidence import R2EvidenceClient, R2EvidenceHTTPError
 from umi.r2_sigv4 import R2Credentials, R2SigV4
 
 
@@ -217,8 +217,10 @@ def test_bounded_http_response_and_safe_error_text(tmp_path):
         server.client().signer,
         transport=httpx.MockTransport(lambda _: httpx.Response(503, content=b"SECRET-body")),
     )
-    with pytest.raises(OSError, match="HTTP 503") as error:
+    with pytest.raises(R2EvidenceHTTPError, match="HTTP 503") as error:
         client.head("proofs/object")
+    assert isinstance(error.value, OSError)
+    assert error.value.status_code == 503
     assert "SECRET" not in str(error.value)
 
 

@@ -25,6 +25,18 @@ class EvidenceObjectHead:
     content_sha256: str
 
 
+class R2EvidenceHTTPError(OSError):
+    """A bounded HTTP status, without response bytes, URL or credentials."""
+
+    reason_code = "r2_http_failure"
+
+    def __init__(self, status_code: int):
+        if type(status_code) is not int or not 100 <= status_code <= 599:
+            raise ValueError("R2 evidence HTTP status is invalid")
+        self.status_code = status_code
+        super().__init__(f"R2 evidence request failed with HTTP {status_code}")
+
+
 class R2EvidenceClient:
     def __init__(self, signer: R2SigV4, *, timeout_seconds=60, transport=None):
         if not 1 <= timeout_seconds <= 300:
@@ -85,7 +97,7 @@ class R2EvidenceClient:
                 if response.status_code not in statuses:
                     if method == "GET" and response.status_code in {404, 412}:
                         raise ValueError("R2 evidence object disappeared or changed generation")
-                    raise OSError(f"R2 evidence request failed with HTTP {response.status_code}")
+                    raise R2EvidenceHTTPError(response.status_code)
                 if response.headers.get("content-encoding") not in {None, "identity"}:
                     raise ValueError("R2 evidence response used content encoding")
                 if method == "HEAD":

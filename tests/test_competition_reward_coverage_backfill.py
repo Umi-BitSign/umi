@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from umi import competition_reward_coordinator_cli, competition_supervisor_cli
-from umi.competition_reward_coverage_collector import RewardCoverageCollector
+from umi.competition_reward_coverage_collector import RewardCoverageCollector, _log_retry
 from umi.competition_reward_coverage_intervals import (
     CoveragePoint,
     _issue_retained_coverage,
@@ -19,6 +19,7 @@ from umi.competition_reward_coverage_source import (
 )
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.open_competition import digest, identity
+from umi.r2_evidence import R2EvidenceHTTPError
 
 from .test_competition_reward_opportunity import chain as chain
 from .test_competition_reward_opportunity import chain_config as chain_config
@@ -332,6 +333,22 @@ async def test_actual_cli_reports_failed_gap_without_exception_secrets(
     assert (hotkey, "OSError") in result.errors
     assert owner._backfill_next[hotkey] == 100
     assert coverage_point(owner._backfill_left[hotkey], h.rule).block == 99
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(caplog, status):
+    try:
+        raise R2EvidenceHTTPError(status)
+    except R2EvidenceHTTPError as error:
+        with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
+            _log_retry(error, phase="replay", operation="restore_and_credit_interval")
+    report = [
+        record.args for record in caplog.records if record.msg == "coverage_retry %s"
+    ]
+    assert len(report) == 1
+    assert report[0]["r2_http_status"] == status
+    assert report[0]["reason_codes"] == ["r2_http_failure"]
+    assert "secret" not in caplog.text.lower()
 
 
 async def test_source_capture_restores_exact_owned_history_before_attempting_rpc(monkeypatch):
