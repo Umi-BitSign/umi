@@ -8,6 +8,7 @@ import pytest
 from umi.competition_geometric_rewards import GeometricRewardParameters
 from umi.competition_reward_adoption import (
     RewardAdoptionSelection,
+    RewardEarlyRelease,
     RewardModelAdoption,
     SignedRewardModelAdoption,
 )
@@ -36,7 +37,10 @@ from umi.competition_reward_opportunity import (
     _issue_opportunity,
     check_opportunity_claim,
     opportunity_rule,
+    prepare_early_release_revision,
     require_previous_opportunity,
+    select_signed_early_release_revision,
+    verify_signed_early_release,
 )
 from umi.open_competition import digest, identity
 from umi.protocol import canonical_json_bytes
@@ -241,6 +245,222 @@ def test_handoff_requires_process_native_result_and_immutable_exact_predecessor(
         require_previous_opportunity(changed, **args)
     late = replace(selection, committed_at_block=99999999, effective_at_block=100000159)
     require_previous_opportunity(checked, **(args | {"selection": late}))
+
+
+def test_quorum_signed_early_release_names_exact_boundary(opportunity_case):
+    c = opportunity_case
+    first = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(c.series),
+        sequence=1,
+        predecessor_sha256=digest(c.admission),
+        kind="activate",
+        observed_at_block=200,
+        activation=c.activation,
+    )
+    next_cohort = digest(c.series.cohorts[1])
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256=digest(first),
+        predecessor_activation_sha256=digest(c.activation),
+        successor_cohort_sha256=next_cohort,
+        successor_package_sha256="ab" * 32,
+        manifest_sha256=digest(c.manifest),
+        reason="Operator requests C6 reward release before coverage completes",
+    )
+    adoption = RewardModelAdoption(
+        schema="umi-standing-model-reward-adoption/5",
+        series_sha256=digest(c.series),
+        policy_sha256=digest(c.policy),
+        cohort_sha256=next_cohort,
+        authority_sha256=digest(c.series.recovery.authority),
+        package_sha256=release.successor_package_sha256,
+        allocation_sha256="01" * 32,
+        service_certificate_sha256="02" * 32,
+        quality_manifest_sha256="03" * 32,
+        effective_allocation_sha256="04" * 32,
+        parameters=GeometricRewardParameters(),
+        revision=1,
+        predecessor_adoption_sha256=None,
+        issued_at_block=201,
+        lifetime="until_first_verified_live_reward_then_locked",
+        early_release=release,
+    )
+    selection = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1",
+        adoptions=(SignedRewardModelAdoption(adoption=adoption, signatures=signatures(adoption)),),
+    )
+    successor = RewardActivation(
+        cohort_sha256=next_cohort,
+        allocation_sha256=adoption.allocation_sha256,
+        package_sha256=adoption.package_sha256,
+        recovery_tip_sha256="05" * 32,
+        prior_opportunity_sha256=digest(release),
+        reward_adoption_sha256=digest(adoption),
+        effective_allocation_sha256=adoption.effective_allocation_sha256,
+    )
+    args = dict(
+        series=c.series,
+        policy=c.policy,
+        manifest=c.manifest,
+        predecessor=first,
+        successor=successor,
+    )
+    assert verify_signed_early_release(selection, **args, current_block=201)
+    assert not verify_signed_early_release(None, **args, current_block=201)
+    with pytest.raises(ValueError, match="signed predecessor"):
+        verify_signed_early_release(selection, **args, current_block=200)
+    with pytest.raises(ValueError, match="signed predecessor"):
+        verify_signed_early_release(
+            selection,
+            **(args | {"predecessor": first.model_copy(update={"observed_at_block": 199})}),
+            current_block=201,
+        )
+
+
+def test_operator_release_revision_preserves_signed_adoption(opportunity_case):
+    c = opportunity_case
+    first = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(c.series),
+        sequence=1,
+        predecessor_sha256=digest(c.admission),
+        kind="activate",
+        observed_at_block=200,
+        activation=c.activation,
+    )
+    next_cohort = digest(c.series.cohorts[1])
+    base = RewardModelAdoption(
+        schema="umi-standing-model-reward-adoption/1",
+        series_sha256=digest(c.series),
+        policy_sha256=digest(c.policy),
+        cohort_sha256=next_cohort,
+        authority_sha256=digest(c.series.recovery.authority),
+        package_sha256="ab" * 32,
+        allocation_sha256="01" * 32,
+        service_certificate_sha256="02" * 32,
+        quality_manifest_sha256="03" * 32,
+        effective_allocation_sha256="04" * 32,
+        parameters=GeometricRewardParameters(),
+        revision=1,
+        predecessor_adoption_sha256=None,
+        issued_at_block=200,
+        lifetime="until_first_verified_live_reward_then_locked",
+    )
+    original = SignedRewardModelAdoption(adoption=base, signatures=signatures(base))
+    selection = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1", adoptions=(original,)
+    )
+    args = dict(
+        series=c.series,
+        policy=c.policy,
+        manifest=c.manifest,
+        predecessor=first,
+    )
+    proposal = prepare_early_release_revision(
+        selection,
+        **args,
+        successor_cohort_sha256=next_cohort,
+        issued_at_block=201,
+        reason="Operator requests early signing for this certified C6 package",
+    )
+    assert proposal.revision == 2
+    assert proposal.predecessor_adoption_sha256 == digest(base)
+    assert proposal.package_sha256 == base.package_sha256
+    signed_release = SignedRewardModelAdoption(adoption=proposal, signatures=signatures(proposal))
+    updated = select_signed_early_release_revision(selection, signed_release, **args)
+    assert updated.adoptions == (original, signed_release)
+    assert select_signed_early_release_revision(updated, signed_release, **args) == updated
+    changed = proposal.model_copy(update={"effective_allocation_sha256": "ff" * 32})
+    with pytest.raises(ValueError):
+        select_signed_early_release_revision(
+            selection,
+            SignedRewardModelAdoption(adoption=changed, signatures=signatures(changed)),
+            **args,
+        )
+
+
+def test_writer_handoff_accepts_only_selected_signed_early_release(opportunity_case):
+    c = opportunity_case
+    first = RewardControlDecision(
+        schema="umi-reward-control-decision/1",
+        series_sha256=digest(c.series),
+        sequence=1,
+        predecessor_sha256=digest(c.admission),
+        kind="activate",
+        observed_at_block=200,
+        activation=c.activation,
+    )
+    cohort = digest(c.series.cohorts[1])
+    release = RewardEarlyRelease(
+        schema="umi-reward-early-release/1",
+        predecessor_decision_sha256=digest(first),
+        predecessor_activation_sha256=digest(c.activation),
+        successor_cohort_sha256=cohort,
+        successor_package_sha256="ab" * 32,
+        manifest_sha256=digest(c.manifest),
+        reason="Operator authorizes this certified C6 reward package now",
+    )
+    adoption = RewardModelAdoption(
+        schema="umi-standing-model-reward-adoption/5",
+        series_sha256=digest(c.series),
+        policy_sha256=digest(c.policy),
+        cohort_sha256=cohort,
+        authority_sha256=digest(c.series.recovery.authority),
+        package_sha256=release.successor_package_sha256,
+        allocation_sha256="01" * 32,
+        service_certificate_sha256="02" * 32,
+        quality_manifest_sha256="03" * 32,
+        effective_allocation_sha256="04" * 32,
+        parameters=GeometricRewardParameters(),
+        revision=1,
+        predecessor_adoption_sha256=None,
+        issued_at_block=201,
+        lifetime="until_first_verified_live_reward_then_locked",
+        early_release=release,
+    )
+    c.reader.reward_adoptions = RewardAdoptionSelection(
+        schema="umi-standing-reward-adoption-selection/1",
+        adoptions=(SignedRewardModelAdoption(adoption=adoption, signatures=signatures(adoption)),),
+    )
+    activation = RewardActivation(
+        cohort_sha256=cohort,
+        allocation_sha256=adoption.allocation_sha256,
+        package_sha256=adoption.package_sha256,
+        recovery_tip_sha256="05" * 32,
+        prior_opportunity_sha256=digest(release),
+        reward_adoption_sha256=digest(adoption),
+        effective_allocation_sha256=adoption.effective_allocation_sha256,
+    )
+    current = RewardControlDecision(
+        schema="umi-reward-control-decision/3",
+        series_sha256=digest(c.series),
+        sequence=2,
+        predecessor_sha256=digest(first),
+        kind="activate",
+        observed_at_block=10000,
+        activation=activation,
+    )
+    c.reader.journal.put("reward_control_decision", "0001", signed(first))
+    c.reader.journal.put("reward_control_decision", "0002", signed(current))
+    selection = StandingRewardSelection(
+        digest(c.series), digest(current), 2, "selected", 10000, 10160, activation
+    )
+    require_previous_opportunity(
+        None,
+        reader=c.reader,
+        manifest=c.manifest,
+        selection=selection,
+        current_block=10000,
+    )
+    with pytest.raises(ValueError):
+        require_previous_opportunity(
+            None,
+            reader=c.reader,
+            manifest=c.manifest,
+            selection=selection,
+            current_block=200,
+        )
 
 
 @pytest.mark.parametrize("change", ["future", "other_certificate"])

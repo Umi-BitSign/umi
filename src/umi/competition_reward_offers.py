@@ -31,6 +31,7 @@ from .competition_reward_opportunity import (
     RewardOpportunityCertificate,
     check_opportunity_claim,
     opportunity_rule,
+    verify_signed_early_release,
 )
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_verification_snapshot import verified_package_digest
@@ -121,21 +122,28 @@ class StandingRewardOffers:
             prior = self.predecessor.certificate_sha256()
             if prior is None:
                 return None
+        predecessor = None
+        early = None if adoption is None else adoption.adoption.early_release
         if index:
             predecessor = effective_activation_decision(prefix).activation
             assert predecessor is not None
-            raw = self.coverage.journal.get("coverage_completion", coverage_work_key(predecessor))
-            if raw is None:
-                return None
-            prior = CoverageCompletion.model_validate(raw).certificate_sha256
-            certificate = self.files.certificate(prior)
-            check_opportunity_claim(
-                RewardOpportunityCertificate.model_validate_json(certificate),
-                manifest=self.manifest,
-                series=self.series,
-                policy=self.policy,
-                activation=predecessor,
-            )
+            if early is None:
+                raw = self.coverage.journal.get(
+                    "coverage_completion", coverage_work_key(predecessor)
+                )
+                if raw is None:
+                    return None
+                prior = CoverageCompletion.model_validate(raw).certificate_sha256
+                certificate = self.files.certificate(prior)
+                check_opportunity_claim(
+                    RewardOpportunityCertificate.model_validate_json(certificate),
+                    manifest=self.manifest,
+                    series=self.series,
+                    policy=self.policy,
+                    activation=predecessor,
+                )
+            else:
+                prior = digest(early)
         try:
             package = self.packages.load(
                 self.settlements / (cohort + ".json"),
@@ -159,7 +167,7 @@ class StandingRewardOffers:
         # repeats exact immutable publication; it cannot reserve a signing slot.
         self.files.retain_package(package)
         tip = history.transitions[-1].transition if history.transitions else history.genesis
-        return RewardActivation(
+        result = RewardActivation(
             cohort_sha256=cohort,
             allocation_sha256=digest(package.allocation),
             package_sha256=verified_package_digest(package),
@@ -170,3 +178,15 @@ class StandingRewardOffers:
             if adoption is None
             else adoption.adoption.effective_allocation_sha256,
         )
+        if early is not None:
+            preceding = effective_activation_decision(prefix)
+            assert preceding is not None
+            verify_signed_early_release(
+                self.reward_adoptions,
+                series=self.series,
+                policy=self.policy,
+                manifest=self.manifest,
+                predecessor=preceding,
+                successor=result,
+            )
+        return result
