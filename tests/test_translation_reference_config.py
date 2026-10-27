@@ -141,6 +141,25 @@ async def test_executable_owner_wires_isolated_native_resources_and_lazy_signer(
     await service.provider.aclose()
 
 
+async def test_reference_publisher_carries_declared_cache_predecessor(installed):
+    config = installed.config.model_copy(
+        update={
+            "maximum_cache_bytes": 512 * 1024**2,
+            "previous_maximum_cache_bytes": 256 * 1024**2,
+        }
+    )
+    service = wiring.build_reference_service(config)
+    try:
+        assert service.provider.config.maximum_cache_bytes == 512 * 1024**2
+        assert service.provider.config.previous_maximum_cache_bytes == 256 * 1024**2
+        predecessor = service.provider.config.model_copy(
+            update={"maximum_cache_bytes": 256 * 1024**2, "previous_maximum_cache_bytes": None}
+        )
+        assert service.reader.admission_chain_config_sha256 == digest(predecessor)
+    finally:
+        await service.provider.aclose()
+
+
 @pytest.mark.parametrize("protected", ["state_directory", "files_directory"])
 def test_installed_state_overlap_refuses_before_owner_creation(installed, protected):
     item = installed
@@ -246,6 +265,54 @@ def test_expired_horizon_cli_reports_only_safe_numeric_diagnostics(
     record = json.loads(capsys.readouterr().out)
     assert record["reason_code"] == "reference_directive_horizon_expired"
     assert record["selected_horizon"] == 9317800 and record["current_block"] == 9327218
+
+
+def test_reference_observer_failure_reports_redacted_cause(
+    installed, tmp_path, monkeypatch, capsys
+):
+    from umi import translation_reference_cli as cli
+
+    async def observer_stopped(_config):
+        cause = RuntimeError("private provider URL and token must stay hidden")
+        cause.reason_code = "proof_rpc_rate_limited"
+        raise RuntimeError("owned_finality_observer_stopped") from cause
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", observer_stopped)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    output = capsys.readouterr().out
+    record = json.loads(output)
+    assert record["error_chain"] == [
+        {"error_type": "RuntimeError", "reason_code": "owned_finality_observer_stopped"},
+        {"error_type": "RuntimeError", "reason_code": "proof_rpc_rate_limited"},
+    ]
+    assert "private provider URL" not in output and "token" not in output
+
+
+def test_reference_observer_reports_stable_finality_reason_without_error_text(
+    installed, tmp_path, monkeypatch, capsys
+):
+    from umi import translation_reference_cli as cli
+    from umi.grandpa_finality import GrandpaFinalityObserverError
+
+    async def observer_stopped(_config):
+        cause = GrandpaFinalityObserverError("record_count_mismatch")
+        raise RuntimeError("owned_finality_observer_stopped") from cause
+
+    p = tmp_path / "private" / "config.json"
+    p.write_bytes(canonical_json_bytes(installed.config))
+    p.chmod(0o600)
+    monkeypatch.setattr(cli, "run", observer_stopped)
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--config", str(p)])
+    record = json.loads(capsys.readouterr().out)
+    assert record["error_chain"][-1] == {
+        "error_type": "GrandpaFinalityObserverError",
+        "reason_code": "record_count_mismatch",
+    }
 
 
 def test_original_input_reader_rejects_links_and_untrusted_writers(tmp_path):

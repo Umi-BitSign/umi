@@ -36,6 +36,9 @@ seeds = [
     "competition_cohort_settlement",
     "competition_cohort_settlement_service",
     "competition_reward_preparation",
+    # Signed reward-adoption handoff candidates select every native consumer,
+    # including package delivery, before any held reward row can be released.
+    "competition_reward_adoption_handoff",
     "competition_reward_coordinator",
     "competition_reward_admission_runner",
     "competition_reward_history_origin_cli",

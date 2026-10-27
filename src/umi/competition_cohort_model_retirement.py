@@ -247,10 +247,32 @@ class ModelUploadRetirement:
         self._report(cohorts, completed=completed, total=len(models))
         if not models or completed == len(models):
             return self.latest
+        # The upload journal can contain partial models from before the selected
+        # remote preservation inventory was signed. Their original upload must
+        # remain available for its retry/expiry path. Check the already
+        # authenticated metadata before decoding any original requests.
+        remote_models = {
+            item.model_sha256 for source in cohorts.values() for item in source.preservation.models
+        }
         attempted = 0
         for offset in range(len(models)):
             model = models[(self.cursor + offset) % len(models)]
             if self.uploads.allocations.state(model) == "released":
+                continue
+            if model not in remote_models:
+                self._report(
+                    cohorts,
+                    completed=completed,
+                    total=len(models),
+                    state="waiting",
+                    reason="preserved_model_selection_pending",
+                    model=model,
+                    operation="remote_selection",
+                )
+                attempted += 1
+                if attempted >= self.config.batch_models:
+                    self.cursor = (self.cursor + offset + 1) % len(models)
+                    break
                 continue
             operation = "retained_requests"
 

@@ -34,7 +34,10 @@ def legacy_full(journal, records, monkeypatch, *, batch_size=256):
             try:
                 journal.put_many(batch)
             except sqlite3.OperationalError as error:
-                assert error.sqlite_errorcode == sqlite3.SQLITE_FULL
+                assert (
+                    getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL
+                    or str(error) == "database or disk is full"
+                )
                 assert stored(journal) == before  # Entire failed batch rolls back.
                 assert before[1] < journal.maximum_bytes
                 return first

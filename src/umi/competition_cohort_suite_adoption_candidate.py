@@ -130,6 +130,14 @@ def require_successor_suite_diversity(sequence: int, counts: SuiteSelectionCount
             "C7+ suite adoption requires at least two fingerspelling sources "
             "and a maximum 75% share from one source"
         )
+    if sequence >= 7 and (
+        counts.minimum_training_excluded_fingerspelling < counts.fingerspelling
+        or counts.minimum_training_excluded_continuous < counts.continuous
+    ):
+        raise ValueError(
+            "C7+ suite adoption requires every scored case in both tasks "
+            "to have documented training-exclusion evidence"
+        )
 
 
 def validate_suite_adoption_candidates(candidates, cohorts):

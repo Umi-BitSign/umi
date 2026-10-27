@@ -27,7 +27,6 @@ from .competition_cohort_direct_model_review import DirectModelSettlementVerifie
 from .competition_cohort_reward_allocation import (
     CohortRewardAllocation,
     CohortRewardProjection,
-    derive_effective_reward_allocation,
     project_owned_reward_allocation,
 )
 from .competition_cohort_reward_package import (
@@ -293,7 +292,7 @@ class StandingRewardPreparation:
             package_sha256=activation.package_sha256,
             cohort_sha256=activation.cohort_sha256,
         )
-        adoption = (
+        adopted = (
             None
             if activation.reward_adoption_sha256 is None
             else verify_reward_adoption(
@@ -304,6 +303,7 @@ class StandingRewardPreparation:
                 activation=activation,
                 package=package,
                 current_block=block,
+                include_effective_allocation=True,
             )
         )
         retained = self._prepared.get(digest(activation))
@@ -334,16 +334,14 @@ class StandingRewardPreparation:
                 None if self.model_artifacts is None else self.model_artifacts.verify_candidate
             ),
         )
-        if adoption is not None:
+        if adopted is not None:
             with TransferProgress(
                 "reward_effective_allocation",
                 1,
                 unit="allocations",
                 planning_unit_seconds=(0.001, 1),
             ) as progress:
-                allocation = derive_effective_reward_allocation(package, adoption.parameters)
-                if digest(allocation) != activation.effective_allocation_sha256:
-                    raise ValueError("effective reward allocation differs from signed adoption")
+                _, allocation = adopted
                 progress.advance(1)
         prepared = PreparedStandingReward(
             self.series_sha256,

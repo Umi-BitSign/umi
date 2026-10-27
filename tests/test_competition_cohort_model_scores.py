@@ -237,6 +237,38 @@ def test_cache_restart_and_damage_remain_explicit(tmp_path, monkeypatch):
         restarted.read(C)
 
 
+def test_signed_correction_overlay_is_selected_and_missing_artifact_fails_closed(tmp_path):
+    original_dir = tmp_path / "model-results"
+    corrected_dir = tmp_path / "model-results-corrections"
+    owned_directory(original_dir, create=True)
+    owned_directory(corrected_dir, create=True)
+    original = sample_scores()
+    selected = original.model_copy(
+        update={
+            "schema_": "umi-public-cohort-model-results/2",
+            "certification": "quorum_certified_score_correction",
+            "allocation_sha256": "e" * 64,
+            "original_allocation_sha256": original.allocation_sha256,
+            "score_correction_statement_sha256": "d" * 64,
+            "reward_adoption_sha256": "f" * 64,
+        }
+    )
+    atomic_write(original_dir / (C + ".json"), canonical_json_bytes(original))
+    overlay = corrected_dir / (C + ".json")
+    atomic_write(overlay, canonical_json_bytes(selected))
+    cache = module.PublicModelScoreCache(tmp_path, corrections={C: "d" * 64})
+    cache.sample()
+    assert cache.read(C)["schema"] == "umi-public-cohort-model-results/2"
+    assert cache.read(C)["allocation_sha256"] == "e" * 64
+    (original_dir / (C + ".json")).write_bytes(canonical_json_bytes(original))
+    cache.sample()
+    assert cache.read(C)["schema"] == "umi-public-cohort-model-results/2"
+    overlay.unlink()
+    cache.sample()
+    with pytest.raises(ValueError, match="metadata needs repair"):
+        cache.read(C)
+
+
 def test_header_never_traverses_native_objects_and_refuses_link_or_partial(tmp_path, monkeypatch):
     path = tmp_path / "native.json"
     header = dict(

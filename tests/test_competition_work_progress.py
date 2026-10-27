@@ -75,6 +75,32 @@ def test_empty_scope_finishes_only_when_exhausted(events):
     assert [e["percent"] for e in events] == [0, 100]
 
 
+def test_single_item_stage_reports_bounded_planning_eta_and_invalidates_overrun(events, clock):
+    meter = progress.WorkProgress(
+        "model_acceptance_promotion",
+        1,
+        unit="submissions",
+        estimate=False,
+        planning_range_seconds=(30, 120),
+        planning_basis="planning_previous_stage_durations",
+    )
+    assert events[-1]["planning_eta_seconds"] == [30, 120]
+    assert events[-1]["eta_basis"] == "planning_previous_stage_durations"
+    assert events[-1]["percent"] == 0
+    clock.now += 50
+    meter.emit("running")
+    assert events[-1]["planning_eta_seconds"] == [0, 70]
+    assert events[-1]["eta_seconds"] is None
+    clock.now += 71
+    meter.emit("running")
+    assert events[-1]["eta_basis"] == "planning_range_exceeded_retrying"
+    assert events[-1]["stalled"] is True
+    assert "planning_eta_seconds" not in events[-1]
+    meter.advance()
+    meter.finish()
+    assert events[-1]["state"] == "completed" and events[-1]["eta_seconds"] == 0
+
+
 def test_eta_excludes_fast_reuse_and_invalidates_stalled_rate(events, clock):
     meter = progress.WorkProgress("closure_participants", 209, unit="participants")
     for _ in range(124):

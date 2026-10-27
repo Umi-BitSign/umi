@@ -111,6 +111,11 @@ def grow_registration_cache(path, previous, current, *, transport_policy_sha256=
         count, tail = (0, None) if exists is None else _cache_history(db)
         if tail is not None and tail[3] != transport_policy_sha256:
             raise ValueError("registration capacity history changed")
+        if bound == [(new,)] and tail is None:
+            # A fresh successor namespace may have been created with this
+            # configuration, with no predecessor database to migrate.
+            db.commit()
+            return
         if (
             bound == [(new,)]
             and tail is not None

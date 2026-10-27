@@ -27,6 +27,7 @@ _FIELDS = (
     "eta_basis",
     "eta_scope",
     "eta_assumptions",
+    "eta_samples",
     "estimated_finish_unix_ms",
     "stalled_or_retrying",
     "stalled",
@@ -218,8 +219,27 @@ class CohortProgressSnapshots:
 
                     for worker in value["workers"]:
                         worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
-                if kind == "acceptance" and value.get("status") == "running":
-                    value["elapsed_seconds"] = round(age, 3)
+                if (kind == "acceptance" and value.get("status") == "running") or kind in {
+                    "certification",
+                    "intake_certification",
+                }:
+                    if kind == "acceptance":
+                        value["elapsed_seconds"] = round(age, 3)
+                    planning = value.get("planning_eta_seconds")
+                    if (
+                        isinstance(planning, list)
+                        and len(planning) == 2
+                        and all(type(v) in (int, float) for v in planning)
+                    ):
+                        if age > planning[1]:
+                            value["planning_eta_seconds"] = None
+                            value["eta_basis"] = "planning_range_exceeded_retrying"
+                            value["stalled_or_retrying"] = True
+                        else:
+                            value["planning_eta_seconds"] = [
+                                round(max(0.0, planning[0] - age), 1),
+                                round(max(0.0, planning[1] - age), 1),
+                            ]
                 parts[kind] = value
         phase = parts.get("lifecycle", {}).get("phase")
         selected = parts.get("lifecycle", {})
@@ -235,13 +255,25 @@ class CohortProgressSnapshots:
                         type(certification.get("total")) is int
                         and certification.get("completed") == certification["total"]
                     )
-                    if not (complete and stage in {"progress_review", "decision_certification"}):
+                    if not (
+                        complete
+                        and stage
+                        in {
+                            "automatic_progression_held",
+                            "progress_review",
+                            "decision_certification",
+                        }
+                    ):
                         selected = certification
                         stage = "model_certification"
                     break
-            if stage == "model_certification" and selected.get("stale"):
-                # An old roster meter must not hide a live acceptance attempt.
-                # Keep its last count in components until its owner refreshes it.
+            if stage == "model_certification" and (
+                selected.get("stale")
+                or (selected.get("stalled_or_retrying") and not selected.get("repair_required"))
+            ):
+                # A roster meter can lack new certificates while the owner is
+                # actively verifying the next model. Show that live work and
+                # keep the certificate count in components.
                 work = parts.get("work")
                 live_work = (
                     work is not None
@@ -357,6 +389,14 @@ class CohortProgressSnapshots:
             components=parts,
         )
         result.update({key: value for key, value in selected.items() if key != "stage"})
+        if (
+            phase in (None, "intake")
+            and stage != "model_certification"
+            and "intake_certification" in parts
+        ):
+            # A failed acceptance item does not make unrelated current work
+            # idle. Keep its unresolved count visible beside the active stage.
+            result["blocked_count"] = parts["intake_certification"].get("blocked_count", 0)
         result["phase"] = phase
         result["stage"] = stage
         operation = parts.get("acceptance", {})

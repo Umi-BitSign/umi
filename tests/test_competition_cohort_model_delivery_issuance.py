@@ -435,6 +435,31 @@ async def test_model_only_owner_routes_quorum_commit_preserve_hold_and_original_
     assert adoption.eligible_tracks == ("model",) and adoption.service_pool_bps == 0
 
 
+@pytest.mark.parametrize("model_only", [True], indirect=True)
+async def test_catalog_follows_signed_model_only_profile(owner_api, tmp_path):
+    from umi.competition_cohort_api import cohort_routes
+
+    await test_normal_owner_routes_review_quorum_commit_and_repeat(owner_api, tmp_path)
+    intake = owner_api.i.case.owner.intake
+
+    async def capture():
+        raise AssertionError("catalog discovery must not request fresh chain state")
+
+    app = FastAPI()
+    app.include_router(cohort_routes(intake, capture, maximum_body_bytes=4 * 1024**2))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.get("http://test/v1/competition/cohorts")
+    assert response.status_code == 200, response.text
+    entry = next(
+        item
+        for item in response.json()["cohorts"]
+        if item["cohort_sha256"] == owner_api.i.case.cohort
+    )
+    assert entry["effective_eligible_tracks"] == ["model"]
+    assert entry["effective_service_pool_bps"] == 0
+    assert entry["profile_source"] == "signed_model_delivery_adoption"
+
+
 @pytest.mark.parametrize("model_only", [True, False], indirect=True)
 def test_independent_candidate_rejects_unselected_reward_profile(issuance):
     i = issuance

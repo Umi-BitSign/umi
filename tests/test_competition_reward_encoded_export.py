@@ -208,8 +208,8 @@ async def test_lost_compact_export_acknowledgement_reuses_durable_completion(
         raise OSError("completion acknowledgement lost")
 
     monkeypatch.setattr(h.reader.checkpoints, "remember", lost_ack)
-    with pytest.raises(OSError, match="acknowledgement"):
-        await h.reader.advance(h.item.provider, through_block=h.old.height)
+    assert (await h.reader.advance(h.item.provider, through_block=h.old.height)).history is not None
+    assert h.reader.progress.archive_delivery["state"] == "retrying"
     assert h.reader.checkpoints.load(h.old.height)["exports"]
     h.reader = await h.restart()
     h.reader.export_archive = archive
@@ -224,7 +224,7 @@ async def test_lost_compact_export_acknowledgement_reuses_durable_completion(
 
 @pytest.mark.parametrize("historical", ["exact_runtime"], indirect=True)
 @pytest.mark.parametrize("existing_destination", [False, True])
-async def test_completed_legacy_boundaries_rechunk_only_affected_field_and_restart(
+async def test_completed_legacy_boundaries_preserve_new_copy_and_rechunk_conflict_on_restart(
     history_case, tmp_path, monkeypatch, existing_destination
 ):
     from umi import competition_reward_history as module
@@ -293,9 +293,14 @@ async def test_completed_legacy_boundaries_rechunk_only_affected_field_and_resta
     monkeypatch.setattr(module, "review_control_writes", forbidden)
     monkeypatch.setattr(module, "capture_control_writes", forbidden)
     assert await h.reader.advance(h.item.provider, through_block=height) == expected
-    assert prepared_fields == [{"slot_evidence", "slot_metadata"}]
+    # A new destination can retain the original authenticated two-part recipe
+    # without expanding it. A conflicting preexisting frame uses the original
+    # writer and rechunks only the affected evidence field.
+    assert prepared_fields == ([{"slot_evidence", "slot_metadata"}] if existing_destination else [])
     assert archive.read("history", key, bounds=module._FIELDS)[1] == fields
-    assert len(archive._frame("history", key).fields["evidence"]) == 1
+    assert len(archive._frame("history", key).fields["evidence"]) == (
+        1 if existing_destination else 2
+    )
     assert h.reader.checkpoints.load(height)["sources"] == checkpoint["sources"]
     with journal.read_transaction() as db:
         assert journal.get("control_history_block", str(height), db=db) == frame

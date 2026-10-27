@@ -2,10 +2,11 @@
 
 # What SN78 miners should run now
 
-C5 certification is complete and C5 competition rewards are live. C6 intake is
-closed and public-model evaluation is running. Follow the cohort progress API
-for counted completion and its scoped ETA; evaluation is separate from final
-certification and reward activation.
+C5 certification is complete and C5 competition rewards are live. C6's original
+evaluation is complete; its reward revision is held pending certification of the
+selected replacement score. C7 and C8 public-model intake are open. Follow each
+cohort's progress API for counted completion and its scoped ETA; intake,
+evaluation and reward activation are separate.
 
 ## Submit a model for an open cohort
 
@@ -23,10 +24,13 @@ certification and reward activation.
    it is not a live status display.
 
 Use the [cohort catalog](https://api.umi.vision/v1/competition/cohorts) to identify
-the exact cohort and its history, accepted tracks, readiness and admission URL.
-For C6 and later, prepare public models. C7–C10 remain held; their original mixed
-plans require the authenticated model-only amendment before opening. An older
-endpoint plan is not an instruction to enroll an endpoint for a held successor.
+the exact cohort, its signed history, effective tracks and admission URL. Check
+`/v1/competition/cohorts/<cohort_sha256>/readiness?nonce=<32 lowercase hex characters>`
+before signing a new submission. `effective_eligible_tracks` and
+`effective_service_pool_bps` reflect the latest signed cohort profile amendment;
+the original plan in `/history` remains unchanged. C6 and later accept public
+models only when their effective profile selects `model`. A prior mixed plan is
+not an instruction to enroll an endpoint after a model-only amendment.
 Install the published client update before submitting to an amended cohort;
 keep existing signed requests and resume them unchanged after updating.
 
@@ -48,7 +52,9 @@ server hold. Do not share wallet secrets or presigned R2 capabilities.
 ## Existing endpoint installations
 
 The [connection guide](miners/connection.md) remains authoritative for supported
-runtime upgrades, policy files and retained endpoint-state compatibility. Preserve
+endpoint runtime upgrades, policy files and retained endpoint-state compatibility.
+Its C5 `current.json` profile is for retained C5 endpoint work; successor model
+participation follows each signed cohort history through the separate model client. Preserve
 existing assignment, grant, nonce and retirement journals. Endpoint participation
 and public-model participation are distinct; running an endpoint does not submit
 a model for C6.

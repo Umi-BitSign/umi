@@ -158,7 +158,9 @@ async def test_new_export_destination_keeps_native_fold_and_exposes_delivery(
 
     monkeypatch.setattr(h.reader.checkpoints, "load_restore_batch", forbidden)
     assert await h.reader.advance(h.item.provider, through_block=h.end) == expected
-    assert h.reader.progress.archive_delivery["state"] == "pending"
+    delivery = h.reader.progress.archive_delivery
+    assert delivery["state"] == "completed"
+    assert delivery["completed_blocks"] == delivery["total_blocks"]
     assert h.reader.progress.archive_delivery["native_fold_reused"]
 
 

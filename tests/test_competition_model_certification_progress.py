@@ -18,8 +18,23 @@ def test_progress_resets_rate_after_replacement_or_restart_without_losing_counts
     assert measured["eta_seconds"] == 20 and measured["sample_certificates"] == 1
     replacement = state.report(inventory(2, scope="replacement"), now=40)
     assert replacement["completed"] == 2 and replacement["eta_seconds"] is None
+    assert replacement["planning_eta_seconds"] == [30, 1200]
+    assert replacement["eta_basis"] == "planning_30_to_1200_seconds_per_remaining_certificate"
     restarted = ModelCertificationProgress().report(inventory(2), now=50)
     assert restarted["completed"] == 2 and restarted["eta_seconds"] is None
+    assert restarted["planning_eta_seconds"] == [30, 1200]
+
+
+def test_unmeasured_replacement_range_counts_down_then_withdraws_when_idle():
+    state = ModelCertificationProgress()
+    first = state.report(inventory(2), now=10)
+    assert first["planning_eta_seconds"] == [30, 1200]
+    later = state.report(inventory(2), now=30)
+    assert later["planning_eta_seconds"] == [10, 1180]
+    idle = state.report(inventory(2), now=311)
+    assert idle["planning_eta_seconds"] is None
+    assert idle["stalled_or_retrying"]
+    assert idle["eta_basis"] == "certificate_completion_idle"
 
 
 def test_known_failure_withdraws_eta_and_successful_retry_restores_measurement():

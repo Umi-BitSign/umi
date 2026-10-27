@@ -1,6 +1,7 @@
 """Native background retirement with actual signed, live consumer leases."""
 
 from contextlib import AsyncExitStack
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -137,9 +138,28 @@ async def test_background_poll_retires_then_restarts_and_reuses_original_request
         assert not (f.uploads.archive / f.model / "model").exists()
 
 
-async def test_remote_reconciliation_uses_one_representative_per_model(
+async def test_unselected_partial_model_waits_without_decoding_original_requests(
     retirement, monkeypatch
 ):
+    f = retirement
+    cohort = f.request.consent.consent.cohort_sha256
+    f.delivery.preserved.sources = SimpleNamespace(
+        authenticated={cohort: SimpleNamespace(preservation=SimpleNamespace(models=()))}
+    )
+
+    def unexpected_request(_key):
+        raise AssertionError("unselected partial upload must not decode its request")
+
+    monkeypatch.setattr(f.uploads, "retained", unexpected_request)
+    result = await f.delivery.retirement.poll_once({f.model: [digest(f.request)]}, None)
+    assert result["status"] == "waiting"
+    assert result["reason_code"] == "preserved_model_selection_pending"
+    assert result["operation"] == "remote_selection"
+    assert f.uploads.allocations.state(f.model) == "local_reserved"
+    assert (f.uploads.archive / f.model / "model").exists()
+
+
+async def test_remote_reconciliation_uses_one_representative_per_model(retirement, monkeypatch):
     f = retirement
     key = digest(f.request)
     async with AsyncExitStack() as stack:

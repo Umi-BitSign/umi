@@ -38,7 +38,10 @@ jobs:
 
       - name: Audit locked Rust dependencies
         run: |
-          cargo +1.98.0 audit --file rust/substrate-proof-verifier/Cargo.lock
+          # RUSTSEC-2026-0387 concerns timing leakage on secret integers. This
+          # binary only verifies public trie data and has no signing interface.
+          # sp-core 37 pins k256 0.13 and the affected crypto-bigint line.
+          cargo +1.98.0 audit --file rust/substrate-proof-verifier/Cargo.lock --ignore RUSTSEC-2026-0387
           cargo +1.98.0 audit --file rust/grandpa-finality-observer/Cargo.lock
           cargo +1.98.0 audit --file rust/runtime-metadata/Cargo.lock
 

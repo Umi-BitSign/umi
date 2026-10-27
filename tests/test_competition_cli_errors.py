@@ -32,7 +32,7 @@ from umi.competition_client import CompetitionSubmissionError
 def test_cli_failure_diagnostic_is_bounded_and_redacted(monkeypatch, capsys, error, diagnostic):
     # Reach the real parser's exit path without loading a policy or wallet.
     parser = competition_cli._parser()
-    monkeypatch.setattr(parser, "parse_args", lambda argv: SimpleNamespace())
+    monkeypatch.setattr(parser, "parse_args", lambda argv: SimpleNamespace(command="submit-model"))
     monkeypatch.setattr(competition_cli, "_parser", lambda: parser)
 
     def fail(args):
