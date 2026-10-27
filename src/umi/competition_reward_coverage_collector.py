@@ -35,7 +35,7 @@ from .competition_reward_opportunity_review import (
 )
 from .competition_transport_verification import TransferProgress
 from .open_competition import CompetitionPolicy, digest, identity
-from .private_files import MAX_CONFIGURED_PRIVATE_BYTES
+from .private_files import MAX_CONFIGURED_PRIVATE_BYTES, PrivateStateBusyError
 from .protocol import canonical_json_bytes
 from .r2_evidence import R2EvidenceHTTPError
 
@@ -48,11 +48,30 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
     details = _failure_details(error)
     runtime_code = None
     r2_http_status = None
+    private_mutex = None
     cause, seen = error, set()
     while cause is not None and id(cause) not in seen and len(seen) < 6:
         seen.add(id(cause))
         if isinstance(cause, R2EvidenceHTTPError):
             r2_http_status = cause.status_code
+        if isinstance(cause, PrivateStateBusyError):
+            # Identify the contended owner without exposing filesystem paths,
+            # exception messages or arbitrary attributes from a wrapped error.
+            operation_name = cause.operation
+            resource = cause.resource_sha256
+            number = cause.errno
+            private_mutex = {
+                "operation": operation_name
+                if type(operation_name) is str
+                and operation_name in {"private_file_lock", "round_journal_lock"}
+                else None,
+                "resource_sha256": resource
+                if type(resource) is str
+                and len(resource) == 64
+                and all(char in "0123456789abcdef" for char in resource)
+                else None,
+                "errno": number if type(number) is int and 0 <= number < 4096 else None,
+            }
         if isinstance(cause, RewardRuntimeCodeMismatch):
             runtime_code = {
                 "expected_sha256": cause.expected_runtime_code_sha256,
@@ -81,7 +100,11 @@ def _log_retry(error, *, phase, operation, hotkey=None, block=None):
             "reason_codes": [detail["reason_code"] for detail in details],
             "runtime_code": runtime_code,
             "r2_http_status": r2_http_status,
+            "private_mutex": private_mutex,
             "origin": origin,
+            "source_frames": max(
+                (detail["source_frames"] for detail in details), key=len, default=[]
+            ),
         },
     )
 

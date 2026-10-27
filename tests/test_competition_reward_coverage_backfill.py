@@ -1,6 +1,9 @@
 """Scheduling over isolated synthetic endpoints; native capture is qualified separately."""
 
 import asyncio
+import errno
+import hashlib
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +22,7 @@ from umi.competition_reward_coverage_source import (
 )
 from umi.competition_reward_opportunity import opportunity_rule
 from umi.open_competition import digest, identity
+from umi.private_files import PrivateStateBusyError, lock_private_file
 from umi.r2_evidence import R2EvidenceHTTPError
 
 from .test_competition_reward_opportunity import chain as chain
@@ -359,13 +363,51 @@ def test_coverage_retry_logs_bounded_r2_http_status_without_response_data(caplog
     except R2EvidenceHTTPError as error:
         with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
             _log_retry(error, phase="replay", operation="restore_and_credit_interval")
-    report = [
-        record.args for record in caplog.records if record.msg == "coverage_retry %s"
-    ]
+    report = [record.args for record in caplog.records if record.msg == "coverage_retry %s"]
     assert len(report) == 1
     assert report[0]["r2_http_status"] == status
     assert report[0]["reason_codes"] == ["r2_http_failure"]
     assert "secret" not in caplog.text.lower()
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_coverage_retry_identifies_real_private_mutex_without_secrets(tmp_path, caplog, damaged):
+    path = tmp_path / "secret-owner-path.lock"
+    owner = lock_private_file(path)
+    try:
+        with pytest.raises(PrivateStateBusyError) as caught:
+            lock_private_file(path)
+        error = caught.value
+        if damaged:
+            error.operation = "secret-operation"
+            error.resource_sha256 = "secret-resource"
+            error.errno = "secret-errno"
+        try:
+            raise RuntimeError("https://private.invalid/?token=secret-token") from error
+        except RuntimeError as wrapped:
+            with caplog.at_level("INFO", logger="umi.competition_reward_coverage_collector"):
+                _log_retry(wrapped, phase="backfill", operation="capture", block=100)
+    finally:
+        os.close(owner)
+    reports = [record.args for record in caplog.records if record.msg == "coverage_retry %s"]
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["private_mutex"] == (
+        {"operation": None, "resource_sha256": None, "errno": None}
+        if damaged
+        else {
+            "operation": "private_file_lock",
+            "resource_sha256": hashlib.sha256(
+                b"umi-private-state-lock-v1\0" + os.fsencode(os.path.abspath(path))
+            ).hexdigest(),
+            "errno": errno.EWOULDBLOCK,
+        }
+    )
+    assert 1 <= len(report["source_frames"]) <= 8
+    assert all(set(frame) == {"module", "function", "line"} for frame in report["source_frames"])
+    assert any(frame["function"] == "acquire_private_mutex" for frame in report["source_frames"])
+    assert str(tmp_path) not in caplog.text and "secret" not in caplog.text
+    assert "private.invalid" not in caplog.text
 
 
 async def test_source_capture_restores_exact_owned_history_before_attempting_rpc(monkeypatch):

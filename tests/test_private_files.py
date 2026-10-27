@@ -97,7 +97,7 @@ def _unsafe_destination(path, kind):
 # Historical evaluator tests cover these cases at the inbox reader. Exercise
 # the shared lock and existing-output boundaries here without duplicating them.
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "public", "fifo"])
-@pytest.mark.parametrize("operation", ["lock", "publish"])
+@pytest.mark.parametrize("operation", ["lock", "shared_lock", "publish"])
 def test_unsafe_lock_or_existing_output_is_rejected(tmp_path, kind, operation, monkeypatch):
     root = tmp_path / "private"
     files.ensure_private_directory(root)
@@ -116,8 +116,8 @@ def test_unsafe_lock_or_existing_output_is_rejected(tmp_path, kind, operation, m
     with monkeypatch.context() as patch:
         patch.setattr(files.os, "open", tracked_open)
         with pytest.raises((OSError, ValueError)):
-            if operation == "lock":
-                files.lock_private_file(path)
+            if operation in {"lock", "shared_lock"}:
+                files.lock_private_file(path, shared=operation == "shared_lock")
             else:
                 files.publish_private_model(path, StoredRecord(value="replacement"))
     assert path.lstat().st_ino == before.st_ino
@@ -147,6 +147,56 @@ def test_lock_contention_prevents_publication_and_release_allows_retry(tmp_path)
         os.close(lock)
     files.publish_private_model(path, value)
     assert files.read_private_model(path, StoredRecord) == value
+
+
+def test_read_only_shared_archive_lease_blocks_exclusive_release(tmp_path, monkeypatch):
+    lock_path = tmp_path / ".proof-read-release.lock"
+    owner = files.lock_private_file(lock_path)
+    os.close(owner)
+    inode = lock_path.stat().st_ino
+    open_file = os.open
+
+    def read_only_mount(path, flags, *args, **kwargs):
+        if path == lock_path and flags & (os.O_CREAT | os.O_RDWR | os.O_WRONLY):
+            raise OSError(errno.EROFS, "read-only archive mount")
+        return open_file(path, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(files.os, "open", read_only_mount)
+        first = files.lock_private_file(lock_path, shared=True)
+        second = files.lock_private_file(lock_path, shared=True)
+    try:
+        assert fcntl.fcntl(first, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+        assert os.fstat(first).st_ino == os.fstat(second).st_ino == inode
+        with pytest.raises(files.PrivateStateBusyError):
+            files.lock_private_file(lock_path)
+        os.close(first)
+        first = None
+        with pytest.raises(files.PrivateStateBusyError):
+            files.lock_private_file(lock_path)
+    finally:
+        if first is not None:
+            os.close(first)
+        os.close(second)
+    owner = files.lock_private_file(lock_path)
+    os.close(owner)
+    assert lock_path.stat().st_ino == inode
+
+
+def test_read_only_archive_missing_lease_requires_owner_provisioning(tmp_path, monkeypatch):
+    path = tmp_path / ".proof-read-release.lock"
+    open_file = os.open
+
+    def read_only_mount(candidate, flags, *args, **kwargs):
+        if candidate == path and flags & (os.O_CREAT | os.O_RDWR | os.O_WRONLY):
+            raise OSError(errno.EROFS, "owner must provision the archive lease")
+        return open_file(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(files.os, "open", read_only_mount)
+    with pytest.raises(OSError) as caught:
+        files.lock_private_file(path, shared=True)
+    assert caught.value.errno == errno.EROFS
+    assert list(tmp_path.iterdir()) == []
 
 
 @contextmanager
