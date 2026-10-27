@@ -57,6 +57,7 @@ from .host_memory_runtime import memory_operation
 from .open_competition import digest, identity
 from .private_files import lock_private_file
 from .protocol import canonical_json_bytes
+from .r2_evidence import R2EvidenceHTTPError
 from .signed_extrinsic import encode_mortal_call
 
 logger = logging.getLogger(__name__)
@@ -438,7 +439,14 @@ class StandingRewardExecutor:
                 except Exception as error:
                     weight_wait = None
                     # Error text can contain RPC credentials or response data.
-                    logger.warning("standing_retry reason=%s", type(error).__name__)
+                    if isinstance(error, R2EvidenceHTTPError):
+                        logger.warning(
+                            "standing_retry reason=%s r2_http_status=%d",
+                            type(error).__name__,
+                            error.status_code,
+                        )
+                    else:
+                        logger.warning("standing_retry reason=%s", type(error).__name__)
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=delay)
 

@@ -22,6 +22,7 @@ from umi.competition_reward_transactions import _issue_standing_end
 from umi.competition_weight_timing import WeightRateLimitWait
 from umi.open_competition import digest
 from umi.private_files import PrivateStateBusyError
+from umi.r2_evidence import R2EvidenceHTTPError
 from umi.signed_extrinsic import verify_mortal_call
 
 from .test_competition_reward_transaction import transaction as transaction
@@ -368,7 +369,19 @@ async def test_network_cleanup_finishes_before_writer_is_released(executing, can
         assert (await e.step()).status == "transaction_pending"
 
 
-async def test_loop_retries_without_leaking_exception_details(executing, caplog):
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (ConnectionError("secret-url-do-not-log"), "standing_retry reason=ConnectionError"),
+        (
+            R2EvidenceHTTPError(429),
+            "standing_retry reason=R2EvidenceHTTPError r2_http_status=429",
+        ),
+    ],
+)
+async def test_loop_retries_without_leaking_exception_details(
+    executing, caplog, failure, expected
+):
     e = executing.executor
     stop = asyncio.Event()
     calls = []
@@ -377,13 +390,13 @@ async def test_loop_retries_without_leaking_exception_details(executing, caplog)
         calls.append(1)
         if len(calls) == 3:
             stop.set()
-        raise ConnectionError("secret-url-do-not-log")
+        raise failure
 
     e.step = step
     await e.run(stop, poll_seconds=0.001)
     assert len(calls) == 3 and e._descriptor is None
     assert "secret-url-do-not-log" not in caplog.text
-    assert "standing_retry reason=ConnectionError" in caplog.text
+    assert expected in caplog.text
 
 
 async def test_rate_wait_never_reserves_or_signs_and_retry_collects_new_state(executing):
