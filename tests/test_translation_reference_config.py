@@ -93,6 +93,7 @@ def installed(channel_case, tmp_path, monkeypatch):
         state_directory=str(tmp_path / "production-owner"),
         files_directory=str(tmp_path / "files"),
         reward_adoptions=None,
+        reward_adoption_feed=None,
     )
     monkeypatch.setattr(wiring, "load_reward_coordinator_config", lambda path: selected)
 
@@ -158,6 +159,53 @@ async def test_reference_publisher_carries_declared_cache_predecessor(installed)
         assert service.reader.admission_chain_config_sha256 == digest(predecessor)
     finally:
         await service.provider.aclose()
+
+
+async def test_reference_owner_adopts_signed_feed_and_retains_frontier_on_restart(installed):
+    from umi.competition_reward_adoption_feed import RewardAdoptionFeed, RewardAdoptionFeedConfig
+
+    from .test_competition_reward_adoption_boot import selected_adoption
+
+    item = installed
+    item.selected.reward_adoption_feed = RewardAdoptionFeedConfig(
+        path=str(item.root.parent / "signed-adoptions.json")
+    )
+    producer = RewardAdoptionFeed(
+        item.root.parent / "producer-feed",
+        source=item.selected.reward_adoption_feed,
+        series=item.selected.series,
+        policy=item.selected.policy,
+        initial=None,
+    )
+    service = wiring.build_reference_service(item.config)
+    try:
+        assert service.reader.reward_adoptions is None
+        assert service.reader._reward_adoption_feed.journal is None
+        signed = selected_adoption(item.selected).adoptions[0]
+        accepted = producer.publish(signed)
+        assert service.reader.refresh_reward_adoptions() == accepted
+    finally:
+        await service.provider.aclose()
+    reopened = wiring.build_reference_service(item.config)
+    try:
+        # Construction occurs before the service's existing owner lease. The
+        # protected first tick, rather than construction, restores the frontier.
+        assert reopened.reader._reward_adoption_feed.journal is None
+        assert reopened.reader.refresh_reward_adoptions() == accepted
+        assert reopened.reader._reward_adoption_feed.journal.root != producer.journal.root
+    finally:
+        await reopened.provider.aclose()
+
+
+def test_reference_feed_cannot_overlap_private_owner(installed):
+    from umi.competition_reward_adoption_feed import RewardAdoptionFeedConfig
+
+    installed.selected.reward_adoption_feed = RewardAdoptionFeedConfig(
+        path=str(installed.root / "feed.json")
+    )
+    with pytest.raises(ValueError, match="overlaps"):
+        wiring.selected_inputs(installed.config)
+    assert not installed.root.exists()
 
 
 @pytest.mark.parametrize("protected", ["state_directory", "files_directory"])

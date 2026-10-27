@@ -282,6 +282,7 @@ class StandingRewardCoordinator:
         offers: Callable[[str, Prefix], RewardActivation | None],
         voters: Sequence[VotePort],
         vote_timeout_seconds: float = 300,
+        transition_producer=None,
     ):
         if (
             type(reviewer) is not StandingRewardDecisionReviewer
@@ -307,6 +308,7 @@ class StandingRewardCoordinator:
         self.reviewer, self.signer, self.readback = reviewer, signer, readback
         self.publisher, self.offers, self.voters = p, offers, tuple(voters)
         self.vote_timeout = vote_timeout_seconds
+        self.transition_producer = transition_producer
         self.serial = asyncio.Lock()
         self._reviewed: ReviewedRewardDecision | None = None
         self._unreviewed: RewardControlDecision | None = None
@@ -408,6 +410,7 @@ class StandingRewardCoordinator:
     async def step(self) -> RewardCoordinationProgress:
         async with self.serial:
             self.publisher._writer()
+            await run_owned_thread(self.publisher.reader.refresh_reward_adoptions)
             return await await_owned_task(asyncio.create_task(self._step()))
 
     async def _step(self) -> RewardCoordinationProgress:
@@ -426,6 +429,15 @@ class StandingRewardCoordinator:
                     "delivery_pending", sequence - 1, digest(prefix[-1].decision)
                 )
             self.phase = "publish_control"
+            if (
+                self.transition_producer is not None
+                and prefix[-1].decision.activation is not None
+                and await run_owned_thread(
+                    self.transition_producer.controls.held,
+                    prefix[-1].decision.activation.cohort_sha256,
+                )
+            ):
+                return RewardCoordinationProgress("progression_held", sequence - 1)
             effect = await p.step(prefix)
             if effect.status != "control_finalized":
                 return RewardCoordinationProgress(
@@ -447,6 +459,7 @@ class StandingRewardCoordinator:
                 self._unreviewed = None
         if body is None:
             activation = None
+            observation = None
             try:
                 revision = await self._revision_proposal(prefix)
             except RewardRevisionPending:
@@ -458,6 +471,19 @@ class StandingRewardCoordinator:
                 )
             if sequence and revision is None:
                 cohort = digest(p.series.cohorts[activated])
+                if self.transition_producer is not None:
+                    self.phase = "reward_transition"
+                    transition = await self.transition_producer.step(cohort, prefix)
+                    if transition.status != "selected":
+                        logger.info(
+                            "reward_transition_pending cohort_sha256=%s status=%s "
+                            "remaining_seconds=%s eta_basis=finalized_predecessor_live_time",
+                            cohort,
+                            transition.status,
+                            transition.remaining_seconds,
+                        )
+                        return RewardCoordinationProgress(transition.status, sequence)
+                    observation = transition.observation
                 activation = await run_memory_thread(self.offers, cohort, prefix)
                 if activation is None:
                     return RewardCoordinationProgress(
@@ -468,7 +494,8 @@ class StandingRewardCoordinator:
                 if activation.cohort_sha256 != cohort:
                     raise ValueError("reward offer skips the next admitted cohort")
             if revision is None:
-                observation = await p.provider.collect_control(p.hotkey)
+                if observation is None:
+                    observation = await p.provider.collect_control(p.hotkey)
                 kind = "admit_series" if sequence == 0 else "activate"
                 height, clearance = observation.snapshot.block_number, None
             else:
@@ -522,6 +549,14 @@ class StandingRewardCoordinator:
         # Only a successfully reviewed body becomes an immutable intent.
         # Bad offers cannot pin this sequence, and no signature precedes retention.
         self.phase = "sign_decision"
+        if (
+            self.transition_producer is not None
+            and body.activation is not None
+            and await run_owned_thread(
+                self.transition_producer.controls.held, body.activation.cohort_sha256
+            )
+        ):
+            return RewardCoordinationProgress("progression_held", sequence, digest(body))
         await self.signer.attest(review)
         self.phase = "collect_quorum"
         for voter in (None, *self.voters):

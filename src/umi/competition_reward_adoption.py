@@ -26,6 +26,7 @@ from .competition_geometric_rewards import (
 )
 from .competition_reward_bootstrap import BootstrapRewardPredecessor
 from .competition_reward_timing import RewardActivationAge
+from .competition_reward_transition_timing import RewardPredecessorLiveAge
 from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .open_competition import CompetitionPolicy, Signature, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
@@ -50,6 +51,23 @@ class RewardEarlyRelease(StrictProtocolModel):
     reason: Annotated[str, Field(min_length=8, max_length=1024)]
 
 
+class RewardAutomaticRelease(RewardEarlyRelease):
+    """Quorum-reviewed elapsed-time alternative; never fabricated opportunity."""
+
+    schema_: Literal["umi-reward-early-release/2"] = Field(alias="schema")
+    trigger: Literal["predecessor_live_for_24h"]
+    live_age: RewardPredecessorLiveAge
+
+    @model_validator(mode="after")
+    def completed_live_wait(self):
+        if (
+            not self.live_age.ready
+            or self.live_age.predecessor_activation_sha256 != self.predecessor_activation_sha256
+        ):
+            raise ValueError("automatic reward release requires 24 hours of predecessor live age")
+        return self
+
+
 class RewardModelAdoption(StrictProtocolModel):
     schema_: Literal[
         "umi-standing-model-reward-adoption/1",
@@ -57,6 +75,7 @@ class RewardModelAdoption(StrictProtocolModel):
         "umi-standing-model-reward-adoption/3",
         "umi-standing-model-reward-adoption/4",
         "umi-standing-model-reward-adoption/5",
+        "umi-standing-model-reward-adoption/6",
     ] = Field(alias="schema")
     series_sha256: Hex32
     policy_sha256: Hex32
@@ -78,7 +97,10 @@ class RewardModelAdoption(StrictProtocolModel):
     bootstrap_predecessor: BootstrapRewardPredecessor | None = None
     score_correction_evidence: ModelScoreCorrectionEvidence | None = None
     signed_score_correction: SignedModelScoreCorrection | None = None
-    early_release: RewardEarlyRelease | None = None
+    early_release: (
+        Annotated[RewardEarlyRelease | RewardAutomaticRelease, Field(discriminator="schema_")]
+        | None
+    ) = None
 
     @model_serializer(mode="wrap")
     def preserve_original_adoption(self, handler):
@@ -99,7 +121,11 @@ class RewardModelAdoption(StrictProtocolModel):
     def lineage(self):
         bootstrap = self.schema_ == "umi-standing-model-reward-adoption/3"
         correction = self.schema_ == "umi-standing-model-reward-adoption/4"
-        early = self.schema_ == "umi-standing-model-reward-adoption/5"
+        early = self.schema_ in {
+            "umi-standing-model-reward-adoption/5",
+            "umi-standing-model-reward-adoption/6",
+        }
+        automatic = self.schema_ == "umi-standing-model-reward-adoption/6"
         if bootstrap != (self.bootstrap_predecessor is not None):
             raise ValueError("bootstrap admission requires an explicit versioned adoption")
         if (self.score_correction_evidence is None) != (self.signed_score_correction is None):
@@ -108,6 +134,10 @@ class RewardModelAdoption(StrictProtocolModel):
             raise ValueError("score correction requires complete versioned evidence")
         if early != (self.early_release is not None):
             raise ValueError("early release requires an explicit versioned adoption")
+        if automatic != isinstance(self.early_release, RewardAutomaticRelease):
+            raise ValueError("automatic reward release requires its explicit versioned adoption")
+        if automatic and self.early_release.live_age.observed_at_block > self.issued_at_block:
+            raise ValueError("automatic release observation is ahead of adoption issuance")
         if not correction and not early and self.score_correction_evidence is not None:
             raise ValueError("score correction requires an explicit versioned adoption")
         if (

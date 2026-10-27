@@ -67,9 +67,52 @@ def test_missing_adoption_stops_offer_before_package_io(sequence, monkeypatch, c
     offers = object.__new__(StandingRewardOffers)
     offers.series = SimpleNamespace(cohorts=(plan,), recovery=SimpleNamespace(authority=object()))
     offers.policy = object()
-    offers.reward_adoptions = None
+    offers._configure_reward_adoptions(None, series=offers.series, policy=offers.policy)
     offers._reported_missing_successor_adoptions = set()
     for _ in range(2):
         assert offers(cohort, prefix) is None
         assert offers.pending_reason == "reward_adoption_pending"
     assert caplog.text.count("reward_offer_waiting_for_announced_economics") == 1
+
+
+@pytest.mark.parametrize("changed", ["plan", "policy", "authority", "terms", "catalogs"])
+def test_adoption_discovery_rejects_unapproved_package_inputs(changed, tmp_path, monkeypatch):
+    """Discovery cannot expose an unrelated package merely because it completed."""
+    cohort = "ab" * 32
+    plan = SimpleNamespace(sequence=7)
+    prefix = (SimpleNamespace(decision=SimpleNamespace(kind="admit_series")),)
+    monkeypatch.setattr(offers_module, "verify_reward_decisions", lambda *a, **k: prefix)
+    monkeypatch.setattr(offers_module, "digest", lambda value: cohort if value is plan else value)
+    history = SimpleNamespace(plan=plan, authority=SimpleNamespace(authority="authority"))
+    inputs = SimpleNamespace(
+        history=history, terms="terms", catalogs=(SimpleNamespace(catalog="catalog"),)
+    )
+    package = SimpleNamespace(policy_sha256="policy", inputs=inputs)
+    if changed == "plan":
+        history.plan = SimpleNamespace(sequence=8)
+    elif changed == "policy":
+        package.policy_sha256 = "another-policy"
+    elif changed == "authority":
+        history.authority.authority = "another-authority"
+    elif changed == "terms":
+        inputs.terms = "other-terms"
+    else:
+        inputs.catalogs = (SimpleNamespace(catalog="another-catalog"),)
+
+    def forbidden_retention(_):
+        pytest.fail("discovery retained a package outside the approved cohort inputs")
+
+    offers = object.__new__(StandingRewardOffers)
+    offers.series = SimpleNamespace(
+        cohorts=(plan,), recovery=SimpleNamespace(authority="authority")
+    )
+    offers.policy = "policy"
+    offers._configure_reward_adoptions(None, series=offers.series, policy=offers.policy)
+    offers.settlements = tmp_path
+    offers.packages = SimpleNamespace(load=lambda *a, **k: package)
+    offers.files = SimpleNamespace(maximum_package_bytes=1024, retain_package=forbidden_retention)
+    offers.manifest = SimpleNamespace(
+        requirement=lambda _: SimpleNamespace(terms_sha256="terms", catalog_sha256s=("catalog",))
+    )
+    with pytest.raises(ValueError, match="approved cohort inputs"):
+        offers.completed_package(cohort, prefix)

@@ -72,7 +72,10 @@ def exchange_case(signing_case, tmp_path):
 
     reviewer = SimpleNamespace(
         reader=SimpleNamespace(
-            series=c.series, policy=c.control.policy, chain_config_sha256=digest(c.control.config)
+            series=c.series,
+            policy=c.control.policy,
+            chain_config_sha256=digest(c.control.config),
+            refresh_reward_adoptions=lambda: None,
         ),
         review=review,
         provider=SimpleNamespace(ensure_observer_running=lambda: None),
@@ -88,6 +91,23 @@ def exchange_case(signing_case, tmp_path):
         peerkey=peerkey,
         first=signer_vote,
     )
+
+
+async def test_invalid_feed_defers_review_without_reading_requests(exchange_case, monkeypatch):
+    h = exchange_case
+    stop = asyncio.Event()
+
+    def damaged():
+        stop.set()
+        raise ValueError("signed reward feed needs repair")
+
+    def unexpected(*args):
+        pytest.fail("invalid feed must block new review work")
+
+    h.reviewer.reader.refresh_reward_adoptions = damaged
+    monkeypatch.setattr(h.peer, "request", unexpected)
+    await h.peer.run_reviewer(h.reviewer, stop, poll_seconds=0.001)
+    assert not h.signed
 
 
 async def test_exchange_recovers_request_vote_and_lost_delivery_after_restart(exchange_case):

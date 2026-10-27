@@ -16,6 +16,7 @@ from .competition_reward_coordinator_boot import (
 from .competition_reward_coverage_credits import CoverageCreditRepairRequired
 from .competition_reward_history_checkpoint import HistoryCheckpointRepairRequired
 from .competition_reward_history_repair import run_reward_history_repair
+from .competition_reward_transition_cli import approve_successor
 from .competition_round_journal import RoundCapacityRepairRequired
 from .concurrency import run_until_stopped
 from .open_competition import digest
@@ -38,6 +39,8 @@ def _logs():
                 "history_checkpoint",
                 "checkpoint_progress",
                 "history_repair",
+                "adoption_exchange",
+                "adoption_feed",
             )
         ),
         "umi.competition.progress",
@@ -81,7 +84,9 @@ async def _run(config, *, repair=None, credit_repair=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check", "run", "repair-history", "repair-credit"))
+    parser.add_argument(
+        "action", choices=("check", "run", "repair-history", "repair-credit", "approve-successor")
+    )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--through-block", type=int, help="Inclusive bounded history repair target")
     parser.add_argument("--reason", help="Required operator reason retained with repaired work")
@@ -89,8 +94,29 @@ def main(argv=None):
         "--interval", help="Exact native coverage interval digest for credit repair"
     )
     parser.add_argument("--history", choices=("current", "predecessor"))
+    parser.add_argument(
+        "--predecessor", help="Exact currently selected predecessor decision digest"
+    )
+    parser.add_argument("--cohort", help="Exact completed successor cohort digest")
+    parser.add_argument("--package", help="Exact completed successor reward-package digest")
     args = parser.parse_args(argv)
-    if args.action == "repair-credit":
+    if args.action == "approve-successor":
+        if (
+            not all((args.predecessor, args.cohort, args.package, args.reason))
+            or not args.reason.strip()
+            or any(value is not None for value in (args.interval, args.through_block, args.history))
+        ):
+            parser.error(
+                "approve-successor requires --predecessor, --cohort, --package and --reason"
+            )
+        try:
+            for value in (args.predecessor, args.cohort, args.package):
+                checked_digest(value)
+        except (ValueError, TypeError):
+            parser.error("approve-successor requires exact digests")
+    elif any(value is not None for value in (args.predecessor, args.cohort, args.package)):
+        parser.error("successor selection options require approve-successor")
+    elif args.action == "repair-credit":
         if (
             not args.interval
             or not args.reason
@@ -115,6 +141,19 @@ def main(argv=None):
         parser.error("history repair options require the repair-history action")
     try:
         config = load_reward_coordinator_config(args.config)
+        if args.action == "approve-successor":
+            print(
+                json.dumps(
+                    approve_successor(
+                        config,
+                        predecessor=args.predecessor,
+                        cohort=args.cohort,
+                        package=args.package,
+                        reason=args.reason,
+                    )
+                )
+            )
+            return
         if args.action == "check":
             print(
                 json.dumps(

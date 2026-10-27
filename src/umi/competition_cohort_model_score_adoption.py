@@ -19,6 +19,7 @@ from .competition_cohort_model_scores import (
 from .competition_cohort_reward_allocation import CohortRewardAllocation
 from .competition_geometric_rewards import cohort_reward_parameters
 from .competition_public_results_directory import atomic_write, owned_directory, read_owned_file
+from .competition_reward_adoption_consumer import open_reward_adoption_feed
 from .competition_reward_coordinator_boot import load_reward_coordinator_config
 from .competition_verification_snapshot import _Checksummed
 from .open_competition import digest
@@ -74,6 +75,15 @@ class SelectedModelScoreAdoptions:
         self.root = state / "reward-adoptions"
         owned_directory(self.root, create=True)
         self.completed = {}
+        self.feed = open_reward_adoption_feed(
+            self.root / "feed",
+            source=self.config.reward_adoption_feed,
+            series=self.config.series,
+            policy=policy,
+            initial=self.config.reward_adoptions,
+            deferred=True,
+        )
+        self.current_cohorts = {digest(plan) for plan in self.config.series.cohorts}
 
     def project(self, original, *, output=None):
         # Config handoff is deliberate and restarts this consumer. Never keep
@@ -92,6 +102,10 @@ class SelectedModelScoreAdoptions:
             self._check_original(receipt, original)
             return receipt.projection
         cohort, lineage = selected_cohort
+        if self.feed is not None and original.cohort_sha256 in self.current_cohorts:
+            # poll_once already holds this publisher's state lease. The feed
+            # retains its own frontier and unchanged metadata requires no parse.
+            lineage = self.feed.refresh()
         # C6's existing correction overlay and retained publications stay exact.
         if cohort.sequence < 7:
             return original

@@ -24,13 +24,85 @@ manifest, successor cohort and certified package, plus a retained reason. This
 decision waives only the predecessor opportunity minimum; it does not claim
 coverage, change certified scores or grant transaction authority.
 
-For a successor that has no adoption yet, build the first adoption with
+The explicit automatic alternative is adoption `/6`, containing
+`umi-reward-early-release/2` with trigger `predecessor_live_for_24h`. Its signed
+evidence binds a matching predecessor weight row at the row's actual finalized
+write block and a later finalized timestamp at least 24 hours after it. This
+counts elapsed chain time, not accumulated validator coverage and not time since
+intake or certification. The native producer retains the earliest proved live
+anchor and reuses its checkpoint; later polls need only a current observation.
+An operator approval uses the immediate `/5` path. Explicit progression holds
+take precedence over either trigger, and the successor still needs its completed
+certification and authenticated adoption. A ready clock alone never starts scoring,
+closes intake or submits weights. Legacy manifests and interval certificates keep
+their original interpretation; the new release is a separately signed decision.
+
+Configure `reward_transition` on the coordinator and independent reviewers with
+`admission_config`, `settlement_config`, and `operator_approval_directory`.
+The first two paths name the existing root-owned admission and settlement
+configurations; their existing progression holds remain authoritative. The
+approval directory must be root owned and protected from other writers. These
+owners also require `reward_adoption_feed` and its configured replication path.
+Keep private review envelopes within the installed transport and parser bounds:
+an adoption request can contain up to 32 MiB of original proof and 16 MiB of
+metadata, hex encoded, plus the bounded signed intent. It carries no wallet keys.
+
+The recurring producer discovers completed packages before the economics gate,
+reviews each package through the existing native verification owner, and retains
+its exact original issuance before requesting signatures. Both roles reuse their
+durable votes after restart. To request immediate release of an exact completed
+successor, without restarting the coordinator, run:
+
+```sh
+sudo umi-reward-coordinator approve-successor --config /path/to/coordinator.json --predecessor <current-decision-sha256> --cohort <successor-cohort-sha256> --package <certified-package-sha256> --reason 'Operator approved successor reward release'
+```
+
+This signs an approval document using the configured control hotkey. It sends no
+transaction and does not bypass independent review or quorum. An exact retry
+reuses the recorded approval without reopening the key or signing again. A held
+cohort refuses approval; remove a hold only through its separately authorized
+admission/settlement transition. Without approval, the producer waits for the
+24-hour native live-row boundary. A missing old anchor requests recovery of one
+explicit row-write endpoint, never a new full-history pass.
+
+For installations still using static adoption selection, build the first adoption with
 `prepare_initial_early_release_adoption` so the release needs one quorum vote.
 For an already selected adoption, use `prepare_early_release_revision`, sign
 its exact bytes with the configured recovery quorum and append them with
 `select_signed_early_release_revision`. Reuse a previously authenticated
 finalized issuance anchor where its binding still applies. Both builders leave
 the certified package untouched and require the exact signed predecessor.
+For the automatic alternative, pass `live_age` from
+`predecessor_live_age_from_owned_control`; do not construct it from RPC-reported
+timestamps or a local clock. The same native signature, selection and consumer
+handoff paths carry either release. Install the compatible `/6` readers before
+selecting an automatic adoption; older supported readers reject that schema
+without changing their retained `/1`–`/5` evidence.
+
+Coordinator and writer boots may select a `reward_adoption_feed` object with
+`path` (an absolute shared selection-file path) and `maximum_bytes` (default
+4 MiB). The configured producer atomically publishes complete, quorum-signed
+selections there. Each consuming service retains its own private append-only
+frontier; coordinator reader, signer and offers share one accepted snapshot.
+Writer, reference publisher and public score publisher refresh during their normal
+operations. Package delivery uses `RewardPackageSelection` on each enumeration.
+When the coordinator also enables `reward_transition`, the delivery adapter selects
+`allow_completed_successors=True`: it discovers completed package filenames from
+the exact signed series before their first reward adoption, so native review can
+prepare that adoption. Discovery reads no model or proof payload and grants no
+signing or publication permission. Feed-only installations still enumerate only
+adopted cohorts; both modes refuse damaged feeds and need no copier restart for
+later cohorts. Without the optional feed, existing boots retain their original
+behavior and canonical bytes.
+
+Bind the feed's **parent directory**, read-only, into each consuming service
+namespace: binding just the file inode hides atomic replacements. Preserve each
+service's private `adoption-feed` state through updates. Removed, malformed or
+rolled-back selections stop new adoption-dependent work and require explicit
+repair; they do not reset a consumer to an empty frontier. Unchanged file
+identities reuse their accepted selection without payload reads, and checkpoints
+retain each signed revision once. A feed transports existing approval; it neither
+signs an adoption nor overrides cohort holds.
 
 If an already selected early release omitted the cohort age attestation, obtain
 the cohort-start timestamp at the plan's signed `not_before_block` and a fresh

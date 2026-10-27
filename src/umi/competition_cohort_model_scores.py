@@ -864,13 +864,14 @@ class NativeModelScoresPublisher:
                     )
                     stage = "public_artifact_publication"
                     present = output.exists()
-                    if not present or self.published.get(cohort) != tuple(_stamp(output)):
+                    current_publication = (tuple(_stamp(output)), projected) if present else None
+                    if not present or self.published.get(cohort) != current_publication:
                         atomic_write(
                             output,
                             canonical_json_bytes(projected),
                             immutable=projected == receipt.projection,
                         )
-                        self.published[cohort] = tuple(_stamp(output))
+                        self.published[cohort] = (tuple(_stamp(output)), projected)
                     report["retained" if present else "published"].append(cohort)
                     report["completed"] += 1
                     progress.advance()

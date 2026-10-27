@@ -56,8 +56,13 @@ class RewardReviewExchange:
         for path in (self.inbox, self.outbox):
             ensure_private_directory(path)
         self.series = digest(signer.journal.series)
-        self.maximum_bytes = (
-            reward_decision_capacity(signer.journal.series, signer.journal.reward_adoptions)
+
+    @property
+    def maximum_bytes(self):
+        return (
+            reward_decision_capacity(
+                self.signer.journal.series, self.signer.journal.reward_adoptions
+            )
             * MAX_DECISION_BYTES
         )
 
@@ -175,6 +180,13 @@ class RewardReviewExchange:
         completed: dict[int, bytes] = {}
         while not stop.is_set():
             reviewer.provider.ensure_observer_running()
+            try:
+                await run_owned_thread(reviewer.reader.refresh_reward_adoptions)
+            except Exception as error:
+                logger.warning("reward_adoption_feed_retry reason=%s", type(error).__name__)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=poll_seconds)
+                continue
             # Fixed approved slots, not an unbounded directory scan. An early
             # missing or failed request cannot starve a delivered successor.
             for sequence in range(

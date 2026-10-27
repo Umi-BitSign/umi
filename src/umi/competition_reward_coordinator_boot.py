@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -38,6 +39,9 @@ from .competition_model_byte_store import shared_byte_store_paths, validate_shar
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_adoption_consumer import open_reward_adoption_feed
+from .competition_reward_adoption_exchange import RewardAdoptionReviewExchange
+from .competition_reward_adoption_feed import RewardAdoptionFeedConfig
 from .competition_reward_baseline_restore import (
     CompletedCoverageBaselineRequest,
     prepare_completed_coverage_baseline,
@@ -71,6 +75,13 @@ from .competition_reward_runtime_adoption import RewardRuntimeAdoptionSelection,
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
 from .competition_reward_service import StandingRewardServiceLimits, _close_provider, _stop_task
 from .competition_reward_signing import RewardDecisionJournal, RewardDecisionSigner
+from .competition_reward_transition_controls import (
+    RewardTransitionControlReader,
+    RewardTransitionControls,
+)
+from .competition_reward_transition_native import NativeRewardTransitionReviewer
+from .competition_reward_transition_producer import StandingRewardTransitionProducer
+from .competition_reward_transition_signing import RewardAdoptionJournal, RewardAdoptionSigner
 from .competition_store import CompetitionStore
 from .concurrency import run_owned_thread
 from .host_memory_runtime import HostMemoryAdmissionSelection, memory_runtime
@@ -130,6 +141,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
     reward_adoptions: RewardAdoptionSelection | None = None
+    reward_adoption_feed: RewardAdoptionFeedConfig | None = None
+    reward_transition: RewardTransitionControls | None = None
     predecessor_reward_adoptions: RewardAdoptionSelection | None = None
     runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
     predecessor_runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
@@ -151,6 +164,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             "predecessor_manifest",
             "predecessor_eligibility",
             "reward_adoptions",
+            "reward_adoption_feed",
+            "reward_transition",
             "predecessor_reward_adoptions",
             "runtime_adoptions",
             "predecessor_runtime_adoptions",
@@ -226,6 +241,8 @@ class RewardCoordinatorConfig(StrictProtocolModel):
             )
         verify_handoff_plan(self.handoff, self.series)
         verify_adoption_selection(self.reward_adoptions, self.series, self.policy)
+        if self.reward_transition is not None and self.reward_adoption_feed is None:
+            raise ValueError("reward transition requires all-consumer signed adoption delivery")
         select_boot_runtime(self)
         select_boot_runtime(self, predecessor=True)
         if self.predecessor_reward_adoptions is not None:
@@ -357,6 +374,16 @@ async def run_reward_coordinator(
             maximum_package_bytes=config.maximum_package_bytes,
             maximum_witness_bytes=config.maximum_witness_bytes,
         )
+        adoption_feed = await run_owned_thread(
+            partial(
+                open_reward_adoption_feed,
+                root / "adoption-feed",
+                source=config.reward_adoption_feed,
+                series=config.series,
+                policy=config.policy,
+                initial=config.reward_adoptions,
+            )
+        )
         reader = StandingRewardControlReader(
             root / "control",
             config.series,
@@ -365,6 +392,7 @@ async def run_reward_coordinator(
             expected_chain_config_sha256=digest(config.chain),
             maximum_bytes=config.maximum_reader_bytes,
             reward_adoptions=config.reward_adoptions,
+            reward_adoption_feed=adoption_feed,
         )
         imported, exported = await run_owned_thread(
             selected_proof_archives,
@@ -546,6 +574,7 @@ async def run_reward_coordinator(
                 expected_chain_config_sha256=digest(config.chain),
                 maximum_bytes=config.service.maximum_journal_bytes,
                 reward_adoptions=config.reward_adoptions,
+                reward_adoption_feed=adoption_feed,
             ),
             sign,
         )
@@ -564,7 +593,7 @@ async def run_reward_coordinator(
             predecessor=predecessor,
             revision_reviewer=(
                 NativeRewardRevisionReviewer(coverage=coverage)
-                if config.reward_adoptions is not None
+                if config.reward_adoptions is not None or adoption_feed is not None
                 else None
             ),
         )
@@ -574,6 +603,32 @@ async def run_reward_coordinator(
             inbox=Path(config.exchange_inbox),
             outbox=Path(config.exchange_outbox),
         )
+        transition_controls = None
+        adoption_signer = adoption_exchange = transition_reviewer = None
+        if config.reward_transition is not None:
+            transition_controls = RewardTransitionControlReader(
+                config.reward_transition, series=config.series, policy=config.policy
+            )
+            adoption_signer = RewardAdoptionSigner(
+                RewardAdoptionJournal(
+                    root / "adoption-signatures",
+                    series=config.series,
+                    policy=config.policy,
+                    signer=config.signer_hotkey,
+                    chain_config_sha256=digest(config.chain),
+                    maximum_bytes=config.service.maximum_journal_bytes,
+                    reward_adoptions=config.reward_adoptions,
+                    reward_adoption_feed=adoption_feed,
+                ),
+                sign,
+            )
+            transition_reviewer = NativeRewardTransitionReviewer(reviewer)
+            adoption_exchange = RewardAdoptionReviewExchange(
+                signer=adoption_signer,
+                proposer=config.proposer_hotkey,
+                inbox=Path(config.exchange_inbox),
+                outbox=Path(config.exchange_outbox),
+            )
         if config.role == "coordinator":
             control = await run_owned_thread(
                 load_named_hotkey,
@@ -597,21 +652,37 @@ async def run_reward_coordinator(
                 submission_timeout_seconds=config.service.submission_timeout_seconds,
             )
 
+            offers = StandingRewardOffers(
+                series=config.series,
+                policy=config.policy,
+                manifest=config.manifest,
+                handoff=config.handoff,
+                settlements=Path(config.settlement_directory),
+                files=files,
+                coverage=coverage.journal,
+                predecessor=predecessor,
+                reward_adoptions=config.reward_adoptions,
+                reward_adoption_feed=adoption_feed,
+            )
+            transition = None
+            if transition_controls is not None:
+                transition = StandingRewardTransitionProducer(
+                    root=root / "transition-originals",
+                    reviewer=transition_reviewer,
+                    signer=adoption_signer,
+                    exchange=adoption_exchange,
+                    coverage=coverage,
+                    offers=offers,
+                    controls=transition_controls,
+                    feed=adoption_feed,
+                    maximum_bytes=config.service.maximum_journal_bytes,
+                )
             coordinator = StandingRewardCoordinator(
                 reviewer=reviewer,
                 publisher=publisher,
                 signer=signer,
-                offers=StandingRewardOffers(
-                    series=config.series,
-                    policy=config.policy,
-                    manifest=config.manifest,
-                    handoff=config.handoff,
-                    settlements=Path(config.settlement_directory),
-                    files=files,
-                    coverage=coverage.journal,
-                    predecessor=predecessor,
-                    reward_adoptions=config.reward_adoptions,
-                ),
+                offers=offers,
+                transition_producer=transition,
                 readback=StandingRewardFiles(
                     Path(config.readback_directory),
                     maximum_package_bytes=config.maximum_package_bytes,
@@ -632,6 +703,21 @@ async def run_reward_coordinator(
         await provider.start()
         work = asyncio.create_task(run(stop, poll_seconds=config.service.poll_seconds))
         resources.push_async_callback(_stop_task, work)
+        transition_workers = []
+        if config.role == "reviewer" and adoption_exchange is not None:
+            transition_workers.append(
+                asyncio.create_task(
+                    adoption_exchange.run_reviewer(
+                        transition_reviewer,
+                        stop,
+                        coverage=coverage,
+                        controls=transition_controls,
+                        poll_seconds=config.service.poll_seconds,
+                    )
+                )
+            )
+        for worker in transition_workers:
+            resources.push_async_callback(_stop_task, worker)
         # Both roles keep their native history and opportunity evidence ready
         # while waiting for work. Otherwise a reviewer would start a full
         # historical replay only after the coordinator requests its first vote.
@@ -647,7 +733,9 @@ async def run_reward_coordinator(
             )
         for collector in collectors:
             resources.push_async_callback(_stop_task, collector)
-        done, _ = await asyncio.wait((work, *collectors), return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(
+            (work, *collectors, *transition_workers), return_when=asyncio.FIRST_COMPLETED
+        )
         for task in done:
             task.result()
         if not stop.is_set():

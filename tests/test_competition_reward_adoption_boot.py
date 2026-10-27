@@ -10,6 +10,8 @@ from umi.competition_reward_adoption import (
     RewardModelAdoption,
     SignedRewardModelAdoption,
 )
+from umi.competition_reward_adoption_feed import RewardAdoptionFeedConfig
+from umi.competition_reward_transition_controls import RewardTransitionControls
 from umi.open_competition import digest, identity, sign_object
 from umi.protocol import canonical_json_bytes
 
@@ -89,6 +91,7 @@ def test_optional_adoption_preserves_old_bytes_and_original_state(
     original = inputs.value if role == "writer" else config_case.config
     raw = canonical_json_bytes(original)
     assert b'"reward_adoptions"' not in raw
+    assert b'"reward_adoption_feed"' not in raw
     assert b'"predecessor_reward_adoptions"' not in raw
     selected = original.model_copy(
         update={"reward_adoptions": selected_adoption(original, timing=timing)}
@@ -142,10 +145,22 @@ def test_bad_adoption_fails_before_owner_construction(inputs, config_case, role,
 
 
 @pytest.mark.parametrize("role", ["coordinator", "reviewer"])
-async def test_native_coordinator_assembly_keeps_selected_adoption(config_case, monkeypatch, role):
+@pytest.mark.parametrize("feed", [False, True])
+async def test_native_coordinator_assembly_keeps_selected_adoption(
+    config_case, monkeypatch, tmp_path, role, feed
+):
     original = config_case.config
     selected = original.model_copy(update={"reward_adoptions": selected_adoption(original)})
+    if feed:
+        selected = selected.model_copy(
+            update={
+                "reward_adoption_feed": RewardAdoptionFeedConfig(
+                    path=str(tmp_path / "signed-selection.json")
+                )
+            }
+        )
     observed = []
+    feeds = []
     native_reader = coordinator.boot.StandingRewardControlReader
     native_signer = coordinator.boot.RewardDecisionJournal
     native_offers = coordinator.boot.StandingRewardOffers
@@ -153,16 +168,19 @@ async def test_native_coordinator_assembly_keeps_selected_adoption(config_case, 
     def reader(*args, **kwargs):
         result = native_reader(*args, **kwargs)
         observed.append(("reader", result.reward_adoptions))
+        feeds.append(result._reward_adoption_feed)
         return result
 
     def signer(*args, **kwargs):
         result = native_signer(*args, **kwargs)
         observed.append(("signer", result.reward_adoptions))
+        feeds.append(result._reward_adoption_feed)
         return result
 
     def offers(*args, **kwargs):
         result = native_offers(*args, **kwargs)
         observed.append(("offers", result.reward_adoptions))
+        feeds.append(result._reward_adoption_feed)
         return result
 
     monkeypatch.setattr(coordinator.boot, "StandingRewardControlReader", reader)
@@ -176,16 +194,80 @@ async def test_native_coordinator_assembly_keeps_selected_adoption(config_case, 
         {"reader", "signer", "offers"} if role == "coordinator" else {"reader", "signer"}
     )
     assert all(value == selected.reward_adoptions for _, value in observed)
+    assert all(value is feeds[0] for value in feeds)
+    assert (feeds[0] is not None) is feed
 
 
-async def test_native_writer_assembly_keeps_selected_adoption(inputs, monkeypatch):
+@pytest.mark.parametrize("role", ["coordinator", "reviewer"])
+async def test_transition_boot_assembles_shared_native_owners(
+    config_case, monkeypatch, tmp_path, role
+):
+    original = config_case.config
+    transition = RewardTransitionControls(
+        admission_config=str(tmp_path / "admission.json"),
+        settlement_config=str(tmp_path / "settlement.json"),
+        operator_approval_directory=str(tmp_path / "approvals"),
+    )
+    assert b'"reward_transition"' not in canonical_json_bytes(original)
+    with pytest.raises(ValueError, match="all-consumer"):
+        type(original).model_validate_json(
+            canonical_json_bytes(original.model_copy(update={"reward_transition": transition}))
+        )
+    selected = original.model_copy(
+        update={
+            "reward_adoptions": selected_adoption(original),
+            "reward_adoption_feed": RewardAdoptionFeedConfig(path=str(tmp_path / "feed.json")),
+            "reward_transition": transition,
+        }
+    )
+    assembled = []
+
+    # The reused startup harness substitutes native chain/reviewer execution;
+    # this checks actual signer/exchange/config assembly and owner lifetimes.
+    monkeypatch.setattr(coordinator.boot, "NativeRewardTransitionReviewer", lambda native: native)
+
+    def producer(**kwargs):
+        assert kwargs["coverage"].provider is kwargs["reviewer"].provider
+        assert kwargs["offers"].files is kwargs["reviewer"].files
+        assert kwargs["signer"].journal._reward_adoption_feed is kwargs["feed"]
+        assert kwargs["controls"].config == transition
+        assembled.append("producer")
+        return SimpleNamespace(**kwargs)
+
+    async def peer(self, native, stop, *, coverage, controls, poll_seconds):
+        assert coverage.provider is native.provider
+        assert controls.config == transition
+        assert self.signer.journal._reward_adoption_feed is native.reader._reward_adoption_feed
+        assembled.append("independent_reviewer")
+        await stop.wait()
+
+    monkeypatch.setattr(coordinator.boot, "StandingRewardTransitionProducer", producer)
+    monkeypatch.setattr(coordinator.boot.RewardAdoptionReviewExchange, "run_reviewer", peer)
+    case = SimpleNamespace(**(vars(config_case) | {"config": selected}))
+    await coordinator.test_boot_loads_only_role_keys_and_closes_provider_on_every_exit(
+        case, monkeypatch, role, None, False, successor=False
+    )
+    assert assembled == ["producer" if role == "coordinator" else "independent_reviewer"]
+
+
+@pytest.mark.parametrize("feed", [False, True])
+async def test_native_writer_assembly_keeps_selected_adoption(inputs, monkeypatch, tmp_path, feed):
     selected = inputs.value.model_copy(update={"reward_adoptions": selected_adoption(inputs.value)})
+    if feed:
+        selected = selected.model_copy(
+            update={
+                "reward_adoption_feed": RewardAdoptionFeedConfig(
+                    path=str(tmp_path / "writer-signed-selection.json")
+                )
+            }
+        )
     observed = []
     native_reader = writer.boot.StandingRewardControlReader
 
     def reader(*args, **kwargs):
         result = native_reader(*args, **kwargs)
         observed.append(result.reward_adoptions)
+        assert (result._reward_adoption_feed is not None) is feed
         return result
 
     monkeypatch.setattr(writer.boot, "StandingRewardControlReader", reader)

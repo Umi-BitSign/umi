@@ -39,6 +39,8 @@ seeds = [
     # Signed reward-adoption handoff candidates select every native consumer,
     # including package delivery, before any held reward row can be released.
     "competition_reward_adoption_handoff",
+    "competition_reward_adoption_delivery",
+    "competition_reward_transition_signing",
     "competition_reward_coordinator",
     "competition_reward_admission_runner",
     "competition_reward_history_origin_cli",

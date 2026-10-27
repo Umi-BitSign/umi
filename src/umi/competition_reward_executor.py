@@ -254,6 +254,7 @@ class StandingRewardExecutor:
     async def step(self) -> StandingExecutionProgress:
         async with self._lock:
             self._fence(self.handoff.through_block)
+            await run_owned_thread(self.preparation.reader.refresh_reward_adoptions)
             return await self._step()
 
     @memory_operation

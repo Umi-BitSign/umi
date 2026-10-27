@@ -10,7 +10,9 @@ from pathlib import Path
 from .competition_cohort_recovery import GeometricModelRewardCohortAuthority
 from .competition_cohort_reward_package import CohortRewardPackage
 from .competition_geometric_rewards import cohort_reward_parameters
-from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_adoption import RewardAdoptionSelection
+from .competition_reward_adoption_consumer import RewardAdoptionConsumer
+from .competition_reward_adoption_feed import RewardAdoptionFeed
 from .competition_reward_coordinator import Prefix
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import CoverageCompletion, coverage_work_key
@@ -34,7 +36,7 @@ from .competition_reward_opportunity import (
     verify_signed_early_release,
 )
 from .competition_reward_series_handoff import StandingRewardPredecessorOpportunity
-from .competition_verification_snapshot import verified_package_digest
+from .competition_verification_snapshot import VerifiedPackageSnapshot, verified_package_digest
 from .open_competition import CompetitionPolicy, digest
 from .private_files import private_path
 from .protocol import canonical_json_bytes
@@ -54,7 +56,7 @@ def successor_reward_rule_ready(plan, authority, adoption) -> bool:
     return False
 
 
-class StandingRewardOffers:
+class StandingRewardOffers(RewardAdoptionConsumer):
     """Consume the next cohort's package; no operator-authored activation file."""
 
     def __init__(
@@ -69,6 +71,7 @@ class StandingRewardOffers:
         coverage: RewardCoverageJournal,
         predecessor: StandingRewardPredecessorOpportunity | None = None,
         reward_adoptions: RewardAdoptionSelection | None = None,
+        reward_adoption_feed: RewardAdoptionFeed | None = None,
     ):
         verify_reward_manifest(canonical_json_bytes(manifest), series, policy)
         handoff = verify_handoff_plan(handoff, series)
@@ -80,14 +83,15 @@ class StandingRewardOffers:
         self.series, self.policy, self.manifest = series, policy, manifest
         self.handoff, self.files, self.coverage = handoff, files, coverage
         self.predecessor = predecessor
-        self.reward_adoptions = verify_adoption_selection(reward_adoptions, series, policy)
+        self._configure_reward_adoptions(
+            reward_adoptions, series=series, policy=policy, feed=reward_adoption_feed
+        )
         self.settlements = Path(private_path(str(settlements)))
         self.packages = files.package_store
         self._reported_missing_successor_adoptions: set[str] = set()
         self.pending_reason: str | None = None
 
-    def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
-        self.pending_reason = None
+    def _next_cohort(self, cohort: str, prefix: Prefix) -> tuple[Prefix, int]:
         prefix = verify_reward_decisions(
             self.series, self.policy, prefix, reward_adoptions=self.reward_adoptions
         )
@@ -98,6 +102,46 @@ class StandingRewardOffers:
             or cohort != digest(self.series.cohorts[index])
         ):
             raise ValueError("reward offer must extend the next admitted cohort")
+        return prefix, index
+
+    def completed_package(self, cohort: str, prefix: Prefix) -> VerifiedPackageSnapshot | None:
+        """Discover approved settlement inputs before reward adoption is ready.
+
+        Reuse the owning store's import and replica receipts. This discovery
+        grants no activation, signature or chain permission; native review and
+        opportunity timing remain the responsibility of their existing owners.
+        """
+        _, index = self._next_cohort(cohort, prefix)
+        return self._completed_package(cohort, index)
+
+    def _completed_package(self, cohort: str, index: int) -> VerifiedPackageSnapshot | None:
+        try:
+            package = self.packages.load(
+                self.settlements / (cohort + ".json"),
+                CohortRewardPackage,
+                maximum_bytes=self.files.maximum_package_bytes,
+            )
+        except FileNotFoundError:
+            return None
+        history = package.inputs.history
+        requirement = self.manifest.requirement(cohort)
+        if (
+            history.plan != self.series.cohorts[index]
+            or package.policy_sha256 != digest(self.policy)
+            or digest(history.authority.authority) != digest(self.series.recovery.authority)
+            or digest(package.inputs.terms) != requirement.terms_sha256
+            or tuple(digest(c.catalog) for c in package.inputs.catalogs)
+            != requirement.catalog_sha256s
+        ):
+            raise ValueError("settlement package differs from the approved cohort inputs")
+        # Retain content before exposing discovery or a proposal. Immutable
+        # replica receipts make retries metadata-only, without a signing slot.
+        self.files.retain_package(package)
+        return package
+
+    def __call__(self, cohort: str, prefix: Prefix) -> RewardActivation | None:
+        self.pending_reason = None
+        prefix, index = self._next_cohort(cohort, prefix)
         adoption = None if self.reward_adoptions is None else self.reward_adoptions.latest(cohort)
         if not successor_reward_rule_ready(
             self.series.cohorts[index], self.series.recovery.authority, adoption
@@ -139,28 +183,10 @@ class StandingRewardOffers:
                 )
             else:
                 prior = digest(early)
-        try:
-            package = self.packages.load(
-                self.settlements / (cohort + ".json"),
-                CohortRewardPackage,
-                maximum_bytes=self.files.maximum_package_bytes,
-            )
-        except FileNotFoundError:
+        package = self._completed_package(cohort, index)
+        if package is None:
             return None
         history = package.inputs.history
-        requirement = self.manifest.requirement(cohort)
-        if (
-            history.plan != self.series.cohorts[index]
-            or package.policy_sha256 != digest(self.policy)
-            or digest(history.authority.authority) != digest(self.series.recovery.authority)
-            or digest(package.inputs.terms) != requirement.terms_sha256
-            or tuple(digest(c.catalog) for c in package.inputs.catalogs)
-            != requirement.catalog_sha256s
-        ):
-            raise ValueError("settlement package differs from the approved cohort inputs")
-        # Retain content before exposing a proposal. A lost acknowledgement
-        # repeats exact immutable publication; it cannot reserve a signing slot.
-        self.files.retain_package(package)
         tip = history.transitions[-1].transition if history.transitions else history.genesis
         result = RewardActivation(
             cohort_sha256=cohort,

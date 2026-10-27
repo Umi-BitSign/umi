@@ -1522,7 +1522,10 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
     cohort = digest(plans[-1])
     with pytest.raises(ValueError, match="next admitted"):
         offers("ff" * 32, prefix)
+    with pytest.raises(ValueError, match="next admitted"):
+        offers.completed_package("ff" * 32, prefix)
     assert offers(cohort, prefix) is None
+    assert offers.completed_package(cohort, prefix) is None
     path = settlements / (cohort + ".json")
     publish_reward_package(path, package)
     if successor:
@@ -1569,6 +1572,21 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
         with pytest.raises(FileNotFoundError):
             offers(cohort, prefix)
         files.retain_completion(certificate, lambda _: canonical_json_bytes(witness))
+    # The adoption producer must discover the genuine completed package while
+    # ordinary offers remain held for announced economics. Discovery neither
+    # accesses opportunity coverage nor changes that hold.
+    with monkeypatch.context() as pending:
+        from umi import competition_reward_offers as offers_module
+        from umi.competition_verification_snapshot import VerifiedPackageSnapshot
+
+        pending.setattr(offers_module, "successor_reward_rule_ready", lambda *a: False)
+        assert offers(cohort, prefix) is None
+        assert offers.pending_reason == "reward_adoption_pending"
+        pending.setattr(offers, "coverage", object())
+        discovered = offers.completed_package(cohort, prefix)
+        assert type(discovered) is VerifiedPackageSnapshot
+        assert discovered.sha256 == digest(package)
+        assert offers.pending_reason == "reward_adoption_pending"
     offer = offers(cohort, prefix)
     assert offer.package_sha256 == digest(package)
     assert offer.prior_opportunity_sha256 == (digest(certificate) if successor else digest(handoff))
@@ -1665,6 +1683,8 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
         )
         assert reopened(cohort, prefix) == offer
         assert reopened(cohort, prefix) == offer
+        assert reopened.completed_package(cohort, prefix).sha256 == offer.package_sha256
+        assert reopened.completed_package(cohort, prefix).sha256 == offer.package_sha256
         snapshot = files.verified_package(offer.package_sha256)
         assert snapshot.sha256 == offer.package_sha256
     # Replacing a completed source requires explicit repair before a native
@@ -1674,6 +1694,8 @@ async def test_offer_discovery_waits_for_bound_settlement_and_prior_opportunity(
 
     with pytest.raises(VerificationSnapshotRepairRequired):
         offers(cohort, prefix)
+    with pytest.raises(VerificationSnapshotRepairRequired):
+        offers.completed_package(cohort, prefix)
 
 
 async def test_boot_reconstructs_initial_package_from_native_retained_history(

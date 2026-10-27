@@ -103,6 +103,19 @@ def coordinator_case(publisher_case, tmp_path, monkeypatch):
     return h
 
 
+async def test_invalid_feed_blocks_new_coordinator_work(coordinator_case, monkeypatch):
+    h = coordinator_case
+
+    def damaged():
+        raise ValueError("signed reward feed needs repair")
+
+    monkeypatch.setattr(h.publisher.reader, "refresh_reward_adoptions", damaged)
+    with h.publisher.hold_writer(), pytest.raises(ValueError, match="feed needs repair"):
+        await h.coordinator.step()
+    assert not h.reviews and not h.votes and not h.sends
+    assert h.owner.journal.load(0) is None
+
+
 async def test_restart_preserves_reviewed_intent_and_waits_for_delivery_before_chain(
     coordinator_case,
 ):

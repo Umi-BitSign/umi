@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -40,6 +41,8 @@ from .competition_model_byte_store import shared_byte_store_paths, validate_shar
 from .competition_proof_archive_selection import selected_proof_archives
 from .competition_remote_proof_store import ProofArchiveStores
 from .competition_reward_adoption import RewardAdoptionSelection, verify_adoption_selection
+from .competition_reward_adoption_consumer import open_reward_adoption_feed
+from .competition_reward_adoption_feed import RewardAdoptionFeedConfig
 from .competition_reward_control_archive import HistoricalRewardControlProvider
 from .competition_reward_coverage_journal import RewardCoverageJournal
 from .competition_reward_coverage_service import StandingRewardCoverageService
@@ -136,6 +139,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
     predecessor_manifest: StandingRewardOpportunityManifest | None = None
     predecessor_eligibility: RewardEligibilityRuntime | None = None
     reward_adoptions: RewardAdoptionSelection | None = None
+    reward_adoption_feed: RewardAdoptionFeedConfig | None = None
     predecessor_reward_adoptions: RewardAdoptionSelection | None = None
     runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
     predecessor_runtime_adoptions: RewardRuntimeAdoptionSelection | None = None
@@ -158,6 +162,7 @@ class StandingRewardBootConfig(StrictProtocolModel):
             "predecessor_manifest",
             "predecessor_eligibility",
             "reward_adoptions",
+            "reward_adoption_feed",
             "predecessor_reward_adoptions",
             "runtime_adoptions",
             "predecessor_runtime_adoptions",
@@ -441,6 +446,16 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
         maximum_package_bytes=config.maximum_package_bytes,
         maximum_witness_bytes=config.maximum_witness_bytes,
     )
+    adoption_feed = await run_owned_thread(
+        partial(
+            open_reward_adoption_feed,
+            root / "adoption-feed",
+            source=config.reward_adoption_feed,
+            series=config.series,
+            policy=config.policy,
+            initial=config.reward_adoptions,
+        )
+    )
     reader = StandingRewardControlReader(
         root / "control",
         config.series,
@@ -449,6 +464,7 @@ async def _run_owned_standing_inputs(host, config, stop, *, runtime=None, credit
         expected_chain_config_sha256=digest(config.chain),
         maximum_bytes=config.maximum_reader_bytes,
         reward_adoptions=config.reward_adoptions,
+        reward_adoption_feed=adoption_feed,
     )
     store = CompetitionStore(Path(config.promotion_directory), config.policy)
     direct_artifacts = (

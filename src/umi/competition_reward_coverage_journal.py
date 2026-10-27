@@ -66,6 +66,7 @@ from .competition_reward_opportunity import (
 from .competition_reward_preparation import StandingRewardPreparation
 from .competition_reward_proof_archive import RewardProofArchive
 from .competition_reward_runtime_adoption import SelectedRewardRuntime
+from .competition_reward_transition_anchor import first_live_anchor, remember_live_anchor
 from .competition_reward_transport_qualification import PackageTransportRepairRequired
 from .competition_round_journal import RoundJournal
 from .competition_transport_verification import TransferProgress
@@ -354,15 +355,31 @@ class RewardCoverageJournal:
 
     def _remember_endpoint(self, endpoint):
         if type(endpoint) is OwnedRetainedCoverageEndpoint:
-            return self._validate_retained(endpoint)
-        key = coverage_point(endpoint, self.rule).key()
-        keys = self._pending_sources.pop(key, None)
-        if keys is not None:
-            tokens = self._pending_tokens.pop(key, None)
-            return self.checkpoints.remember(
-                endpoint, keys, expected_sources=tokens, repair_reason=self._repair_reason
-            )
-        return self.checkpoints.load(key)
+            completed = self._validate_retained(endpoint)
+        else:
+            key = coverage_point(endpoint, self.rule).key()
+            keys = self._pending_sources.pop(key, None)
+            if keys is not None:
+                tokens = self._pending_tokens.pop(key, None)
+                completed = self.checkpoints.remember(
+                    endpoint, keys, expected_sources=tokens, repair_reason=self._repair_reason
+                )
+            else:
+                completed = self.checkpoints.load(key)
+        remember_live_anchor(self, endpoint, completed)
+        return completed
+
+    def first_live_anchor(
+        self, activation, *, validators, chain_config_sha256, not_before_block
+    ) -> str:
+        """Discover one retained row-write key for native source replay."""
+        return first_live_anchor(
+            self,
+            activation,
+            validators=validators,
+            chain_config_sha256=chain_config_sha256,
+            not_before_block=not_before_block,
+        )
 
     def _commit_records(self, records):
         def capture(db):
