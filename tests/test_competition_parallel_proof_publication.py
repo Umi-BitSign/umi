@@ -60,7 +60,7 @@ def test_each_lane_reuses_and_closes_its_own_http_client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(selected.client, "_new_client", owned)
     selected.put_many(objects(*(str(i).encode() for i in range(12))))
-    assert len(clients) == transport.PROOF_PUBLICATION_WORKERS
+    assert len(clients) == 8
     assert all(client.is_closed for _, client in clients)
     assert len({id(client) for _, client in clients}) == len(clients)
 
