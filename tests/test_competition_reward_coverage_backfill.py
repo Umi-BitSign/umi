@@ -155,6 +155,8 @@ async def test_failed_gap_block_is_retried_after_new_fresh_checks(lanes, monkeyp
         monkeypatch.setattr(journal, "credit", lost_ack)
     result = await owner.step()
     assert result.errors and not result.immediate
+    if failure == "lost_ack":
+        assert not owner._retained_inventory_drained
     assert owner._backfill_next[hotkey] == 100
     assert coverage_point(owner._backfill_left[hotkey], h.rule).block == 99
     h.state.head = 132
@@ -188,6 +190,45 @@ async def test_restart_replays_intervals_and_recovers_the_missing_lane_boundary(
         await restarted.step()
     assert await restarted._totals() == before
     assert h.state.replays
+
+
+async def test_completed_retained_scan_is_not_repeated_after_new_owned_credit(lanes, monkeypatch):
+    h = lanes
+    owner, journal = h.owner()
+    await owner.step()
+    assert owner._retained_inventory_drained
+    before = len(await journal.interval_keys())
+    assert before
+
+    async def repeated_inventory(*, after=None, limit=256):
+        pytest.fail("completed retained interval inventory was scanned again")
+
+    monkeypatch.setattr(journal, "interval_keys", repeated_inventory)
+    h.state.head = 132
+    await owner.step()
+    assert len(journal.journal.keys("coverage_interval")) > before
+
+
+async def test_failed_retained_scan_retries_before_marking_it_complete(lanes, monkeypatch):
+    h = lanes
+    first, _ = h.owner()
+    await first.step()
+    restarted, _ = h.owner(maximum_replay_intervals=64)
+    replay = restarted.source.replay
+    fail_once = True
+
+    async def interrupted(key):
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OSError("interrupted retained endpoint read")
+        return await replay(key)
+
+    monkeypatch.setattr(restarted.source, "replay", interrupted)
+    assert (await restarted.step()).errors
+    assert not restarted._retained_inventory_drained
+    assert not (await restarted.step()).errors
+    assert restarted._retained_inventory_drained
 
 
 async def test_backfill_progress_withdraws_eta_on_retry_and_separates_credit(lanes, caplog):
