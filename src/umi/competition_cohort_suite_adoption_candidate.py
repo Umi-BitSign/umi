@@ -37,7 +37,9 @@ class EvaluationSuiteQualification:
 
 
 class EvaluationSuiteAdoptionCandidateConfig(StrictProtocolModel):
-    schema_: Literal["umi-evaluation-suite-adoption-candidate/1"] = Field(alias="schema")
+    schema_: Literal[
+        "umi-evaluation-suite-adoption-candidate/1", "umi-evaluation-suite-adoption-candidate/2"
+    ] = Field(default="umi-evaluation-suite-adoption-candidate/2", alias="schema")
     cohort_sha256: Hex32
     verification_owner_hotkey: Hotkey
     suite_file: Directory
@@ -110,8 +112,18 @@ EvaluationSuiteAdoptionCandidates = Annotated[
 ]
 
 
-def require_successor_suite_diversity(sequence: int, counts: SuiteSelectionCounts) -> None:
+def require_successor_suite_diversity(
+    sequence: int,
+    counts: SuiteSelectionCounts,
+    *,
+    candidate_schema: str = "umi-evaluation-suite-adoption-candidate/2",
+) -> None:
     """Apply new adoption rules without reinterpreting earlier signed suites."""
+    if candidate_schema not in {
+        "umi-evaluation-suite-adoption-candidate/1",
+        "umi-evaluation-suite-adoption-candidate/2",
+    }:
+        raise ValueError("unsupported suite candidate qualification schema")
     if sequence >= 7 and (
         counts.maximum_continuous_dataset_share_bps is None
         or counts.maximum_continuous_dataset_share_bps > 5000
@@ -130,13 +142,26 @@ def require_successor_suite_diversity(sequence: int, counts: SuiteSelectionCount
             "C7+ suite adoption requires at least two fingerspelling sources "
             "and a maximum 75% share from one source"
         )
-    if sequence >= 7 and (
-        counts.minimum_training_excluded_fingerspelling < counts.fingerspelling
-        or counts.minimum_training_excluded_continuous < counts.continuous
+    if (
+        sequence >= 7
+        and candidate_schema == "umi-evaluation-suite-adoption-candidate/1"
+        and (
+            counts.minimum_training_excluded_fingerspelling < counts.fingerspelling
+            or counts.minimum_training_excluded_continuous < counts.continuous
+        )
     ):
         raise ValueError(
             "C7+ suite adoption requires every scored case in both tasks "
             "to have documented training-exclusion evidence"
+        )
+    if (
+        sequence >= 7
+        and candidate_schema == "umi-evaluation-suite-adoption-candidate/2"
+        and (counts.maximum_cases_per_dataset is None or counts.maximum_cases_per_dataset > 2)
+    ):
+        raise ValueError(
+            "C7+ suite adoption requires maximum_cases_per_dataset of 1 or 2 "
+            "across both tasks and every split/version of each source"
         )
 
 
@@ -240,7 +265,9 @@ class EvaluationSuiteAdoptionCandidate:
         counts = SuiteSelectionCounts.model_validate(manifest["counts"])
         if not counts.require_qualified_cases or not counts.distinct_signer_per_case:
             raise ValueError("suite adoption requires qualified cases and distinct known signers")
-        require_successor_suite_diversity(history.plan.sequence, counts)
+        require_successor_suite_diversity(
+            history.plan.sequence, counts, candidate_schema=self.config.schema_
+        )
         if counts.fingerspelling_category_minimums is None:
             raise ValueError(
                 "suite adoption requires explicit four-category fingerspelling minimums"

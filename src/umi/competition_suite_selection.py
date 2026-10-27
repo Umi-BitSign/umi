@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from typing import Annotated, Literal
@@ -103,6 +104,7 @@ class SuiteSelectionCounts(StrictProtocolModel):
     maximum_continuous_dataset_share_bps: (
         Annotated[int, Field(strict=True, ge=1, le=10000)] | None
     ) = None
+    maximum_cases_per_dataset: Annotated[int, Field(strict=True, ge=1, le=2048)] | None = None
     near_sentence_token_jaccard_bps: Annotated[int, Field(ge=5000, le=10000)] = 8000
     require_qualified_cases: bool = True
     distinct_signer_per_case: bool = True
@@ -121,6 +123,8 @@ class SuiteSelectionCounts(StrictProtocolModel):
             value.pop("maximum_fingerspelling_dataset_share_bps", None)
         if self.maximum_continuous_dataset_share_bps is None:
             value.pop("maximum_continuous_dataset_share_bps", None)
+        if self.maximum_cases_per_dataset is None:
+            value.pop("maximum_cases_per_dataset", None)
         return value
 
     @model_validator(mode="after")
@@ -149,6 +153,20 @@ class SuiteSelectionCounts(StrictProtocolModel):
         ):
             raise ValueError("requested diversity must fit the suite case counts")
         return self
+
+
+def canonical_dataset_identity(dataset: str) -> str:
+    """Identify the source corpus, independently of its split, version or task.
+
+    Inventory owners supply one stable dataset name per original corpus and
+    retain split/version details in dataset_version. Normalization prevents case
+    and whitespace variants from creating extra quota; provenance review must
+    still resolve genuinely different aliases for the same source.
+    """
+    identity = " ".join(unicodedata.normalize("NFKC", dataset).casefold().split())
+    if not identity:
+        raise ValueError("dataset source identity must not be empty")
+    return identity
 
 
 def reference_identities(text: str) -> frozenset[str]:
@@ -260,6 +278,26 @@ def select_future_suite(
             hashlib.sha256,
         ).digest()
 
+    cap = counts.maximum_cases_per_dataset
+    dataset_keys = {
+        c.case.case_id: canonical_dataset_identity(c.dataset) if cap is not None else c.dataset
+        for c, _, _ in pool
+    }
+    total_dataset_counts = Counter()
+    if cap is not None:
+        available = Counter(
+            dataset_keys[c.case.case_id]
+            for c, _, _ in pool
+            if c.case.stratum in {"fingerspelling", "continuous"}
+        )
+        capacity = sum(min(number, cap) for number in available.values())
+        required = counts.fingerspelling + counts.continuous
+        if capacity < required:
+            raise ValueError(
+                "future suite dataset quota has insufficient capacity: "
+                f"maximum_cases_per_dataset={cap}, available_slots={capacity}, "
+                f"required_cases={required}; add distinct qualified sources"
+            )
     selected = []
     for task in ("fingerspelling", "continuous"):
         wanted = getattr(counts, task)
@@ -283,7 +321,8 @@ def select_future_suite(
                 (c, text, tokens)
                 for c, text, tokens in pool
                 if c.case.stratum == task
-                and dataset_counts[c.dataset] < maximum_per_dataset
+                and dataset_counts[dataset_keys[c.case.case_id]] < maximum_per_dataset
+                and (cap is None or total_dataset_counts[dataset_keys[c.case.case_id]] < cap)
                 and c.source_group_sha256 not in used_groups
                 and (
                     not counts.distinct_signer_per_case
@@ -305,13 +344,13 @@ def select_future_suite(
                         for c, text, tokens in eligible
                         if deficits[c.fingerspelling_category]
                     ]
-            available = Counter(c.dataset for c, _, _ in eligible)
+            available = Counter(dataset_keys[c.case.case_id] for c, _, _ in eligible)
             need_new_dataset = len(dataset_counts) < minimum
             if need_new_dataset:
                 eligible = [
                     (c, text, tokens)
                     for c, text, tokens in eligible
-                    if not dataset_counts[c.dataset]
+                    if not dataset_counts[dataset_keys[c.case.case_id]]
                 ]
             private_deficit = max(0, private_minimum - private_selected)
             if private_deficit and wanted - index == private_deficit:
@@ -321,18 +360,24 @@ def select_future_suite(
                     if item[0].training_exposure == "documented_training_excluded"
                 ]
             if not eligible:
+                if cap is not None:
+                    raise ValueError(
+                        "future suite disjoint diversity constraints cannot fill the dataset "
+                        f"quota: maximum_cases_per_dataset={cap}, task={task}, "
+                        f"selected_cases={index}, required_cases={wanted}"
+                    )
                 raise ValueError("future suite disjoint diversity constraints are not satisfied")
             candidate, texts, tokens = min(
                 eligible,
                 key=lambda item: (
                     private_deficit > 0
                     and item[0].training_exposure != "documented_training_excluded",
-                    dataset_counts[item[0].dataset],
+                    dataset_counts[dataset_keys[item[0].case.case_id]],
                     item[0].signer_group_sha256 is None,
                     signer_counts[item[0].signer_group_sha256],
                     item[0].topic is None,
                     topic_counts[item[0].topic],
-                    available[item[0].dataset],
+                    available[dataset_keys[item[0].case.case_id]],
                     rank(item[0]),
                 ),
             )
@@ -341,7 +386,8 @@ def select_future_suite(
                 private_selected += 1
             if candidate.fingerspelling_category is not None:
                 category_counts[candidate.fingerspelling_category] += 1
-            dataset_counts[candidate.dataset] += 1
+            dataset_counts[dataset_keys[candidate.case.case_id]] += 1
+            total_dataset_counts[dataset_keys[candidate.case.case_id]] += 1
             if candidate.signer_group_sha256 is not None:
                 signer_counts[candidate.signer_group_sha256] += 1
                 used_signers.add(candidate.signer_group_sha256)
@@ -441,4 +487,6 @@ def select_future_suite(
                 ).items()
             )
         )
+    if cap is not None:
+        report["selected_dataset_totals"] = dict(sorted(total_dataset_counts.items()))
     return suite, report
