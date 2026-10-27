@@ -18,8 +18,7 @@ def test_bridge_image_supplies_the_fixed_native_manifest_and_binaries():
         in dockerfile
     )
     assert "COPY deploy/native-verifiers/build.sh /build/build-native-verifiers.sh" in dockerfile
-    for name in ("umi-substrate-proof-verifier", "umi-runtime-metadata"):
-        assert f"COPY --from=native-builder /build/bin/{name} /opt/umi/bin/{name}" in dockerfile
+    assert "COPY --from=native-builder /build/bin/ /opt/umi/bin/" in dockerfile
     assert "python /build/seal-native.py" in dockerfile
     assert "UMI_PINNED_ARTIFACT_STAGE=/run/umi-finality/stage" in dockerfile
     assert "USER 65532:65532" in dockerfile

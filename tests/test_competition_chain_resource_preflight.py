@@ -98,12 +98,15 @@ async def test_cancel_waits_for_owned_probe_and_retains_no_execution_fact(tmp_pa
         ),
     )
     task = asyncio.create_task(run_owned_thread(runtime.preflight))
-    async with asyncio.timeout(5):
+
+    async def cancel_after_start():
         while not started.exists():
             await asyncio.sleep(0.005)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    await asyncio.wait_for(cancel_after_start(), timeout=5)
     assert finished.exists()
     assert not runtime._executed
 

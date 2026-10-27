@@ -124,6 +124,32 @@ def directory_inventory(
         os.close(fd)
 
 
+def _bound_sqlite_values(db: sqlite3.Connection, maximum: int) -> None:
+    """Apply the selected value bound on supported CPython SQLite versions.
+
+    Python 3.10 does not expose sqlite3_limit. Its row factory still rejects
+    every returned value before the transition can use it; the larger native
+    bodies are also checked with SQL LENGTH before they are selected.
+    """
+    if type(maximum) is not int or maximum <= 0:
+        raise TransitionPreflightRefused("invalid_selected_sqlite_value_bound")
+    db.row_factory = sqlite3.Row
+    setlimit = getattr(db, "setlimit", None)
+    if setlimit is not None:
+        setlimit(sqlite3.SQLITE_LIMIT_LENGTH, maximum)
+        return
+
+    def bounded_row(cursor, values):
+        if any(
+            isinstance(value, (str, bytes, bytearray, memoryview)) and len(value) > maximum
+            for value in values
+        ):
+            raise TransitionPreflightRefused("retained_sqlite_value_exceeds_selected_bound")
+        return sqlite3.Row(cursor, values)
+
+    db.row_factory = bounded_row
+
+
 @contextmanager
 def stopped_snapshots(
     databases: tuple[tuple[Path, Path], ...], *, maximum_value_bytes: int
@@ -161,8 +187,7 @@ def stopped_snapshots(
             selected = Path(db.execute("PRAGMA database_list").fetchone()[2])
             if selected != path or file_identity(selected) != facts:
                 raise TransitionPreflightRefused("database_descriptor_selection_changed")
-            db.row_factory = sqlite3.Row
-            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, maximum_value_bytes)
+            _bound_sqlite_values(db, maximum_value_bytes)
             db.execute("PRAGMA query_only=ON")
             db.execute("PRAGMA temp_store=MEMORY")
             db.execute("BEGIN")
