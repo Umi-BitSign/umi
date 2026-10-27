@@ -164,6 +164,50 @@ async def test_suspension_must_drain_before_any_absence_claim(revision_case):
     assert h.captured == []
 
 
+async def test_signed_future_start_clears_without_transaction_drain(
+    revision_case, series_case
+):
+    h, c = revision_case, series_case
+    original = h.prefix[1].model_copy(
+        update={"decision": h.prefix[1].decision.model_copy(
+            update={"observed_at_block": 500}
+        )}
+    )
+    suspension = transition(
+        c, (h.prefix[0], original), "suspend_activation",
+        original.decision.activation, observed=501,
+    )
+    h.prefix = (h.prefix[0], original, suspension)
+    h.suspension = suspension
+    h.history.writes = (
+        SimpleNamespace(decision_sha256=digest(original.decision), block_number=500),
+        SimpleNamespace(decision_sha256=digest(suspension.decision), block_number=501),
+    )
+    with pytest.raises(RewardRevisionPending, match="drain"):
+        await h.owner().target(
+            suspension.decision, h.control(503), original=original.decision
+        )
+    control = h.control(502)
+    assert await h.owner().target(
+        suspension.decision, control, original=original.decision
+    ) == 502
+    clearance = await h.owner().review(prefix=h.prefix, control=control, history=h.history)
+    assert clearance.clearance.first_block == 503
+    assert clearance.clearance.through_block == clearance.clearance.drained_at_block == 502
+    assert clearance.clearance.reviewed_endpoints == 0
+    assert h.captured == []
+    _, selection = adoption_case(c)
+    proposal = transition(
+        c, h.prefix, "revise_activation",
+        revised(h.old, selection.adoptions[0]),
+        clearance=digest(clearance.clearance), observed=502,
+    ).decision
+    assert validate_revision_clearance(
+        clearance, decision=proposal, prefix=h.prefix,
+        series=h.coverage.preparation.reader.series, history=h.history,
+    ) == clearance.clearance
+
+
 async def test_bounded_restart_reuses_native_endpoints_and_rechecks_dependencies(revision_case):
     h = revision_case
     for _ in range(2):
