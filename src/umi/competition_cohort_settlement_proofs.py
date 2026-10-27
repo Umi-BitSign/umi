@@ -56,23 +56,27 @@ class SettlementRegistrationFiles:
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError("shared proof archive must be owned and private")
 
-    @staticmethod
-    def _read(archive: RewardProofArchive, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
-        context, fields = archive.read(
-            "registration",
-            digest(observation),
-            bounds={"proof": MAX_ARCHIVE_BYTES, "metadata": MAX_METADATA_BYTES},
-        )
-        if context != observation.model_dump(mode="json", by_alias=True):
-            raise ValueError("settlement proof changes its original observation")
-        return fields["proof"], fields["metadata"]
+    def _publish_selected_original(self, observation):
+        for archive in (self.inbox, *self.shared):
+            if archive in self.shared:
+                self._check_shared(archive)
+            if archive.copy_original_if_present(
+                self.outbox,
+                "registration",
+                digest(observation),
+                context=observation.model_dump(mode="json", by_alias=True),
+                bounds={"proof": MAX_ARCHIVE_BYTES, "metadata": MAX_METADATA_BYTES},
+            ):
+                return True
+        return False
 
     async def publish(self, observation: ExecutionBoundary) -> None:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
-        try:
-            raw, metadata = await run_owned_thread(self._read, self.outbox, observation)
-        except FileNotFoundError:
-            raw, metadata = await self.provider.retained_archive(observation)
+        if await run_owned_thread(self._publication_completed, observation):
+            return
+        if await run_owned_thread(self._publish_selected_original, observation):
+            return
+        raw, metadata = await self.provider.retained_archive(observation)
         if not 0 < len(raw) <= MAX_ARCHIVE_BYTES or not 0 < len(metadata) <= MAX_METADATA_BYTES:
             raise ValueError("settlement original proof exceeds its delivery bounds")
         # Exact retries also retry the directory sync after a lost write ack.
@@ -121,9 +125,7 @@ class SettlementRegistrationFiles:
         return True
 
     async def ensure_published(self, observation: ExecutionBoundary) -> None:
-        observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))
-        if not await run_owned_thread(self._publication_completed, observation):
-            await self.publish(observation)
+        await self.publish(observation)
 
     async def read(self, observation: ExecutionBoundary) -> tuple[bytes, bytes]:
         observation = ExecutionBoundary.model_validate_json(canonical_json_bytes(observation))

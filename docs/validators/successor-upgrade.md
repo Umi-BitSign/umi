@@ -2238,10 +2238,14 @@ another phase.
 
 The proposer exports its original registration archive, runtime metadata and
 native result objects before publishing a request. `SettlementRegistrationFiles`
-uses bounded, immutable proof
-frames; the receiver authenticates them against its own finality provider. The
-file envelope alone supplies no verification authority. Existing exported proof
-bytes remain available when the original provider is offline. The reviewer loop
+reuses completed output publications, then consults its configured proof inbox
+and shared registration archives before asking its own provider for the retained
+original. It preserves the original proof bytes, bounded immutable frame and
+codec recipes, including older supported encodings. A present damaged archive
+requires repair; it is never hidden by trying another source. Completed local
+frames and remote publication receipts avoid payload reads on restart. The
+receiver still authenticates the proof against its own finality provider; the
+file envelope alone supplies no verification authority. The reviewer loop
 visits only the eight selected slots, logs retry reasons without evidence payloads,
 and continues after an unavailable slot. All these stores are private.
 

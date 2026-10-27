@@ -30,6 +30,7 @@ from .competition_evidence_codec import (
     checked_digest,
     checked_size,
     decode_evidence,
+    decode_evidence_for_reuse,
     encode_evidence,
     inspect_recipe,
     prepare_evidence_with_recipe,
@@ -768,7 +769,36 @@ class RewardProofArchive:
                 return None
             return self._read_frame(frame, kind, key, bounds)
 
-    def _read_frame(self, frame, kind, key, bounds):
+    def copy_original_if_present(
+        self, destination, kind: Kind, key: str, *, context: dict, bounds: dict[str, int]
+    ) -> bool:
+        """Publish a selected original, preserving its frame and codec recipes.
+
+        Only an absent frame permits another source. Present damaged evidence
+        requires repair. Ordinary decoding runs once and retains the original
+        encoding for transport; independent native proof acceptance is unchanged.
+        The source release lease covers the whole operation.
+        """
+        with self.read_release_lease():
+            try:
+                frame = self._frame(kind, key)
+            except FileNotFoundError:
+                return False
+            if frame.context != context:
+                raise ValueError("proof archive changes its original observation")
+            _, prepared = self._read_frame(frame, kind, key, bounds, retain_encoding=True)
+            fields, objects = {}, {}
+            for name, parts in prepared.items():
+                fields[name] = tuple((p.sha256, len(p.raw), p.recipe) for p in parts)
+                for part in parts:
+                    objects.update(part.objects)
+            if not destination.copy_encoded_transport(
+                kind, key, context=context, fields=fields, resolve=lambda sha, size: objects[sha]
+            ):
+                raise ValueError("destination changes original archive encoding")
+            return True
+
+    def _read_frame(self, frame, kind, key, bounds, *, retain_encoding=False):
         if frame.kind != kind or frame.key != key or set(frame.fields) != set(bounds):
             raise ValueError("reward archive frame changes its requested domain")
         with self._directory_scope(enabled=bool(frame.fields)) as directory:
@@ -782,8 +812,9 @@ class RewardProofArchive:
                     or sum(p.expanded_bytes for p in parts) > maximum
                 ):
                     raise ValueError("reward archive field expansion exceeds its bound")
-                result[name] = b"".join(
-                    decode_evidence(
+                decode = decode_evidence_for_reuse if retain_encoding else decode_evidence
+                decoded = tuple(
+                    decode(
                         resolver.resolve(p.recipe_sha256, MAX_RECIPE_BYTES),
                         sha256=p.sha256,
                         expanded_bytes=p.expanded_bytes,
@@ -792,6 +823,7 @@ class RewardProofArchive:
                     )
                     for p in parts
                 )
+                result[name] = decoded if retain_encoding else b"".join(decoded)
             resolver.finish()
             return frame.context, result
 
