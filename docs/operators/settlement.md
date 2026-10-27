@@ -3827,9 +3827,10 @@ bounds each local directory rather than collecting all facts in one flat folder.
 
 Chunked model readers use 32 concurrent metadata HEAD workers by default. The
 reader constructor accepts an explicit `metadata_workers` override from 1 to 32.
-This changes metadata transport only: payload transfer and materialization keep
-their own budgets, and every initial and final object-generation check remains
-required.
+Without an explicitly selected generation owner, initial and final generation
+checks retain their existing behavior. A selected owner reuses intact completed
+generations as described below; actual transfers still validate the original
+remote generation and bytes.
 
 Transfer progress keeps byte counts and completed GET/HEAD operation counts
 separate. Restored work contributes to neither native rate. When both rates are
@@ -3856,7 +3857,8 @@ Legacy settlement completion snapshots retain full remote object keys, including
 the authenticated `object_key_prefix`. Certification, reward preparation and
 coverage recovery compare those exact prefixed keys with the original chunk
 digests and sizes. They reuse the existing completion and snapshot unchanged
-across restart, with fresh remote generation checks. Updating a reader that
+across restart. An explicitly selected generation owner reuses this completion;
+older layouts keep fresh remote generation checks. Updating a reader that
 previously omitted the prefix requires no model download, rehash, rewritten
 acceptance or receipt migration. A changed prefix, namespace, chunk coverage or
 generation still requires explicit repair. Carry this reader through both the
@@ -3864,10 +3866,100 @@ private settlement services and signed reward coordinator/writer hosts; a local
 settlement-source update alone does not update every consuming host.
 
 Repairing a missing small legacy completion receipt confirms its original remote
-generations once, publishes the exact retained receipt, and reuses that result
+generations once, or consumes its selected intact generation owner, then publishes
+the exact retained receipt and reuses that result
 when authenticating the restored receipt. If the authenticated receipt differs,
 its dependencies still require their own check. This removes a duplicate check
-within that repair; ordinary settlement and coverage generation checks remain.
+within that repair; layouts without a selected generation owner keep their
+ordinary settlement and coverage generation checks.
+
+The optional `generation_owner` within the same `shared_byte_store` selects a
+common damage and retention owner. It uses schema `umi-model-generation-owner/1`,
+a nonzero `owner_sha256` naming the retained root-controlled retention decision,
+`namespace_sha256` for the canonical endpoint/bucket/prefix namespace, the literal
+`retention: "retain_original_generations_until_authenticated_release"`, and bounded
+`maximum_bytes` (default 256 MiB). This selection retains the original generations;
+it does not authorize remote deletion, replacement or model admission. The owner
+has no remote-delete operation. All same-account readers that share damage state
+must select this exact owner and durable root. Independent roots are independent
+owners; do not describe a byte export as sharing their damage state.
+
+Provision a new owner once with `python -I -B -m umi.competition_model_byte_store_cli
+initialize-generations --request PATH`. The canonical root-controlled mode0444
+request has schema `umi-model-generation-owner-initialize/1` and a `store` containing
+the full selected byte-store configuration. Initialization creates no completed
+model fact and performs no remote access. It is idempotent for intact owner state.
+If the rename of a new native journal finished but enrollment publication was
+interrupted, repeating initialization resumes only that exact empty journal with
+its original binding. A missing enrollment on an established owner, or a missing
+journal with retained enrollment, remains an explicit metadata repair. Never use
+initialization to reset an existing owner or restore a pre-damage snapshot to
+forget failures. Supported upgrades must preserve the complete
+`generation-owners-v1/` subtree with the native byte store. Portable byte exports
+remain byte facts only and do not replace that owner state.
+
+On the first selected use, the reader migrates exact native file completions or
+an independently bound legacy settlement seal/snapshot. This is a counted,
+metadata-only migration: original receipt, snapshot, seal and signed acceptance
+bytes remain intact. Each imported object completion is checkpointed, so an
+interruption reuses finished work. A completed owner scope then supplies original
+object key/digest/size/ETag and compatible verifier semantics without HEAD or
+payload rehash. Its immutable enrollment and completion markers prevent lost or
+damaged ledger records from silently becoming fresh work. Native model, cohort,
+rights, admission, quorum and reward authority remain separately authenticated.
+
+Recorded completion is historical byte validity, not proof of current remote
+availability. Explicit `available()` probes and real restoration/read operations
+still contact R2. Missing, changed or corrupt results create an append-only damage
+hold visible to every consumer of the selected owner, including settlement and
+reward coverage. Network failures, rate limits and quota failures remain retry
+errors and do not invent object damage. Local retirement keeps its existing live
+consumer leases, restore coverage and current availability checks; this feature
+never substitutes an old completion for those requirements.
+
+When ordinary generation metadata capacity is exhausted, the owner retains a
+compact immutable pending event for each affected original object. Unaffected
+completed objects remain reusable. The emergency allowance is bounded to one
+outstanding damage event and one outstanding repair event per completed object,
+with at most 512 bytes per event; account for this metadata headroom in the
+selected filesystem. These records are never deleted to make capacity available.
+
+Use `python -I -B -m umi.competition_model_byte_store_cli grow-generations --request
+PATH` to increase capacity. Its canonical root-controlled mode0444 request has
+schema `umi-model-generation-owner-grow/1` and the same `store` identity with a
+larger `generation_owner.maximum_bytes`. The native command appends the exact
+capacity decision and checkpoints each pending event into ordinary history.
+Original enrollment and ledger binding bytes remain unchanged. Repetition and
+interruption reuse completed event migration. Old installed configurations can
+consume the retained larger limit on reopen; selecting a larger limit before its
+native command is refused. Capacity may not shrink. If the requested limit is
+still insufficient, completed migration remains and the remaining original events
+stay held with counted repair progress.
+
+Capacity recovery performs no remote request or byte hash and does not clear
+object damage. A pending repair that already completed its original transfer is
+retained and promoted without repeating that transfer; any later damage remains
+independently held. A native owner restart also lets SQLite recover an abandoned
+hot rollback journal using its original committed state. SQLite locking preserves
+live writers; contention reports a retry. Never delete a journal sidecar or
+substitute an older database to force startup.
+
+After restoring the original remote object, run `python -I -B -m
+umi.competition_model_byte_store_cli repair-generations --request PATH` with the
+same authenticated `umi-model-byte-store-export-request/1` request used by export.
+The native candidate reauthenticates the original model inventories and selected
+owner, then reads and hashes only damaged chunks and requires the original ETag.
+A changed ETag requires authenticated adoption, not clearing or overwriting an
+old completion. The repair appends history rather than deleting evidence; a
+concurrent new damage observation prevents the repair from clearing it. It does
+not re-sign or republish a cohort or repair another independent owner's state.
+
+Owner initialization, metadata migration, completion and original-generation
+repair expose counts, elapsed time and planning/measured ETA through the existing
+progress channel. Missing owner metadata is an explicit repair condition. Install
+this reader and the identical owner selection in every affected candidate,
+reviewer, preparation, settlement, coverage and writer service before claiming
+shared reuse; publishing source alone does not select a common owner.
 
 Provision a separate mode0700 root owned by each actual service UID. Candidate,
 reviewer and owner may reuse one root only when they run as that same UID; another

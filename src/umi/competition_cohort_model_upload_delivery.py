@@ -61,6 +61,32 @@ class ModelUploadDelivery:
     def require_owned_payload(self, request):
         self._payload_owner(request).require_owned_payload(request)
 
+    async def confirm_retirement_availability(self, request, confirmed):
+        """Keep actual restore availability separate from durable byte validity.
+
+        Native direct continuations retain their existing owner protocol. A
+        selected chunk generation owner needs one current availability probe at
+        the local unlink boundary, deduplicated across requests for this model.
+        This capability is scoped to the current retirement attempt only.
+        """
+        owner = self._payload_owner(request)
+        if owner is self.continued:
+            return
+        resolution = owner.sources.resolve(
+            request.consent.consent.cohort_sha256, request_sha256=digest(request)
+        )
+        reader = owner.sources.reader(resolution)
+        if reader.generation_owner is None:
+            return
+        key = (
+            str(reader.root),
+            digest(reader.generation_owner),
+            reader.selection.binding.model_sha256,
+        )
+        if key not in confirmed:
+            await reader.available()
+            confirmed.add(key)
+
     def _remote_review(self, request):
         owner = self._payload_owner(request)
         owner.require_owned_payload(request)

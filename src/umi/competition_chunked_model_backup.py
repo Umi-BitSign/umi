@@ -44,6 +44,11 @@ from .competition_model_byte_store import (
     import_completed_byte_facts,
     publish_byte_export,
 )
+from .competition_model_generation_store import (
+    CHUNKED_MODEL_BYTE_ABI,
+    ModelGenerationRepairRequired,
+    ModelGenerationStore,
+)
 from .competition_shared_file_bytes import SharedRemoteFileBytes
 from .competition_transport_verification import (
     ByteCheckpoints,
@@ -57,12 +62,12 @@ from .open_competition import CompetitionPolicy, ModelBundle, digest, validate_b
 from .private_files import ensure_private_directory, private_path, publish_private_model
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 from .r2_metadata_batch import R2MetadataBatchUnavailable
-from .r2_multipart import R2MultipartClient, pooled_r2_reads
+from .r2_multipart import R2MultipartClient, _R2HTTPFailure, pooled_r2_reads
 
 CHUNK_BYTES = 8 * 1024**2
 MATERIALIZATION_PREFETCH_CHUNKS = 4
 METADATA_BYTES = 64 * 1024**2
-BYTE_ABI = "umi-chunked-model-backup-bytes/1"
+BYTE_ABI = CHUNKED_MODEL_BYTE_ABI
 ObjectKeyPrefix = Annotated[
     str, Field(max_length=128, pattern=r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*$")
 ]
@@ -275,6 +280,7 @@ class ChunkedModelBackupReader:
         verification_root: Path,
         metadata_workers: int = 32,
         byte_store_imports=(),
+        generation_owner=None,
     ):
         self.selection = ChunkedBackupSelection.model_validate_json(canonical_json_bytes(selection))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -286,12 +292,158 @@ class ChunkedModelBackupReader:
         self.metadata_workers = metadata_workers
         self.multipart, self.root = multipart, Path(verification_root)
         self.byte_store_imports = tuple(byte_store_imports)
+        self.generation_owner = generation_owner
         private_path(str(self.root))
         self.serial = asyncio.Lock()
         self._namespace()
         self.chunks = {
             chunk.sha256: chunk for item in self.selection.package.files for chunk in item.chunks
         }
+        if generation_owner is not None and generation_owner.namespace_sha256 != digest(
+            self._namespace()
+        ):
+            raise ValueError("model generation owner differs from authenticated namespace")
+
+    def _generations(self):
+        if self.generation_owner is None:
+            return None
+        return ModelGenerationStore(
+            self.root, self.generation_owner, semantics=[BYTE_ABI, verifier_semantics()]
+        )
+
+    def _declarations(self):
+        return [
+            {"key": self._key(chunk), "sha256": key, "size_bytes": chunk.size_bytes}
+            for key, chunk in sorted(self.chunks.items())
+        ]
+
+    def _retained_generations(self, *, allow_damage=False):
+        owner = self._generations()
+        if owner is None:
+            return None
+        found = owner.scope(self._remote_context(), self._declarations(), allow_damage=allow_damage)
+        return (
+            None
+            if found is None
+            else {
+                key: ChunkedObjectGeneration.model_validate(value) for key, value in found.items()
+            }
+        )
+
+    def _complete_generations(self, heads, report=None):
+        owner = self._generations()
+        if owner is not None:
+            owner.complete(
+                self._remote_context(),
+                self._declarations(),
+                {key: value.model_dump(mode="json") for key, value in heads.items()},
+                report=report,
+            )
+
+    def migrate_completed_generations(self, snapshot, *, report=None):
+        """Explicit metadata migration from a caller-authenticated native completion.
+
+        Callers must bind the original completion seal and exact snapshot before
+        entry. No model/admission authority or present remote availability follows.
+        A lost owner or completed scope cannot re-enter this migration.
+        """
+        owner = self._generations()
+        if owner is None:
+            return False
+        heads = self._snapshot_heads(snapshot)
+        retained = self._retained_generations()
+        if retained is not None:
+            if retained != heads:
+                raise ModelGenerationRepairRequired("original model generations changed")
+            return True
+        self._complete_generations(heads, report)
+        return True
+
+    def _hold_generation(self, value, reason):
+        owner = self._generations()
+        if owner is not None and value is not None:
+            owner.hold(value.model_dump(mode="json"), reason=reason)
+
+    def _legacy_generations(self, report=None):
+        """Migrate native original file results, not an untrusted supplied ETag.
+
+        A missing file has no successful fact to import. A present damaged fact
+        is held for explicit repair; generation enrollment never conceals it by
+        doing a new HEAD or hashing its payload again.
+        """
+        owner = self._generations()
+        known = owner.known(self._declarations())
+        values = {
+            key: ChunkedObjectGeneration.model_validate(value) for key, value in known.items()
+        }
+        with TransferProgress(
+            "model_generation_metadata_migration",
+            len(self.selection.bundle.files),
+            report,
+            unit="files",
+            planning_unit_seconds=(0.0001, 0.01),
+        ) as progress:
+            stores = [self._store(progress)]
+            legacy = self.root / self.selection.binding.model_sha256 / "remote"
+            if legacy.exists():
+                stores.append(ByteCheckpoints(legacy, self._context(), progress))
+            for record, item in zip(
+                self.selection.bundle.files, self.selection.package.files, strict=True
+            ):
+                if all(chunk.sha256 in values for chunk in item.chunks):
+                    progress.advance(1, restored=True)
+                    continue
+                for store in stores:
+                    path = store.path(record.path)
+                    try:
+                        raw = store._read(path)
+                    except FileNotFoundError:
+                        continue
+                    value = store._validated_record(raw)
+                    if value["context"] != store.context or value["result"] != record.sha256:
+                        raise ModelGenerationRepairRequired(
+                            "original byte metadata context changed"
+                        )
+                    if store._read(path.with_suffix(".complete")) != path.stem.encode():
+                        raise ModelGenerationRepairRequired(
+                            "original byte completion marker damaged"
+                        )
+                    objects = tuple(
+                        ChunkedObjectGeneration.model_validate(v) for v in value["identity"]
+                    )
+                    if len(objects) != len(item.chunks) or any(
+                        (v.key, v.sha256, v.size_bytes) != (self._key(c), c.sha256, c.size_bytes)
+                        for v, c in zip(objects, item.chunks, strict=True)
+                    ):
+                        raise ModelGenerationRepairRequired("original byte object coverage changed")
+                    for v in objects:
+                        if values.setdefault(v.sha256, v) != v:
+                            raise ModelGenerationRepairRequired(
+                                "original byte generations conflict"
+                            )
+                    # Each original file checkpoints once; interruption reuses it.
+                    owner.remember_objects(v.model_dump(mode="json") for v in objects)
+                    break
+                progress.advance(1)
+        return values
+
+    async def _verification_generations(self, report=None):
+        """Return originals plus the subset whose initial transfer is unfinished."""
+        owner = await run_owned_thread(self._generations)
+        if owner is None:
+            heads = await self._heads(report)
+            return heads, set(heads)
+        retained = await run_owned_thread(self._retained_generations)
+        if retained is not None:
+            return retained, set()
+        await run_owned_thread(owner.begin, self._remote_context(), self._declarations())
+        await run_owned_thread(self._legacy_generations, report)
+        known = await run_owned_thread(owner.known, self._declarations())
+        heads = {key: ChunkedObjectGeneration.model_validate(value) for key, value in known.items()}
+        missing = {key: value for key, value in self.chunks.items() if key not in heads}
+        if missing:
+            heads.update(await self._heads(report, missing))
+        return heads, set(missing)
 
     def _namespace(self):
         binding = self.selection.binding
@@ -341,14 +493,22 @@ class ChunkedModelBackupReader:
 
             def consume(key, chunk, head):
                 if head is None:
+                    self._hold_generation(
+                        None if expected is None else expected[key], "remote_object_missing"
+                    )
                     raise OSError("retained model chunk is unavailable")
                 if head.size_bytes != chunk.size_bytes or not head.etag or len(head.etag) > 256:
+                    self._hold_generation(
+                        None if expected is None else expected[key],
+                        "remote_object_metadata_changed",
+                    )
                     progress.emit("repair_required", reason="chunked_model_generation_changed")
                     raise ValueError("retained model chunk metadata differs")
                 value = ChunkedObjectGeneration(
                     key=self._key(chunk), sha256=key, size_bytes=chunk.size_bytes, etag=head.etag
                 )
                 if expected is not None and value != expected[key]:
+                    self._hold_generation(expected[key], "remote_object_generation_changed")
                     progress.emit("repair_required", reason="chunked_model_generation_changed")
                     raise ValueError("retained model chunk generation changed")
                 values[key] = value
@@ -423,16 +583,46 @@ class ChunkedModelBackupReader:
     def _source(self, item, heads):
         return [heads[c.sha256].model_dump(mode="json") for c in item.chunks]
 
-    async def _chunk(self, chunk, heads):
+    async def _chunk(self, chunk, heads, *, repairing=False):
         self._namespace()
         object_key = self._key(chunk)
-        raw = await self.multipart.read_range(object_key, offset=0, size_bytes=chunk.size_bytes)
+        expected = heads[chunk.sha256]
+        owner = await run_owned_thread(self._generations)
+        if owner is not None and not repairing:
+            # A new, not-yet-complete object may be transferred. Completed
+            # generations consume the same owner damage state in every reader.
+            known = await run_owned_thread(
+                owner.known,
+                [
+                    {
+                        "key": object_key,
+                        "sha256": chunk.sha256,
+                        "size_bytes": chunk.size_bytes,
+                    }
+                ],
+            )
+            if chunk.sha256 in known and known[chunk.sha256] != expected.model_dump(mode="json"):
+                raise ModelGenerationRepairRequired(
+                    "model transfer changes its original generation"
+                )
+        try:
+            raw = await self.multipart.read_range(object_key, offset=0, size_bytes=chunk.size_bytes)
+        except OSError as error:
+            if isinstance(error, FileNotFoundError) or (
+                isinstance(error, _R2HTTPFailure) and error.http_status == 404
+            ):
+                self._hold_generation(expected, "remote_object_missing")
+            raise
+        except ValueError:
+            self._hold_generation(expected, "remote_object_malformed_range")
+            raise
         if len(raw) != chunk.size_bytes or sha256_hex(raw) != chunk.sha256:
+            self._hold_generation(expected, "remote_object_bytes_changed")
             raise ValueError("retained model chunk bytes differ")
         self._namespace()
         head = await self.multipart.head(object_key)
-        expected = heads[chunk.sha256]
         if head is None or (head.size_bytes, head.etag) != (expected.size_bytes, expected.etag):
+            self._hold_generation(expected, "remote_object_changed_during_transfer")
             raise ValueError("retained model chunk changed during transfer")
         return raw
 
@@ -583,7 +773,7 @@ class ChunkedModelBackupReader:
         report: Callable[[dict], None] | None = None,
         completed_only: bool = False,
     ) -> ChunkedModelVerification:
-        """Reuse successful files after HEAD; interrupted work rechecks unfinished files only."""
+        """Reuse original completed generations; finish only interrupted native work."""
         async with self.serial:
             names = set(document_paths)
             bundle = self.selection.bundle
@@ -597,7 +787,7 @@ class ChunkedModelBackupReader:
             ):
                 raise ValueError("chunked model document selection exceeds its bound")
             self._context()  # Refuse an unqualified verifier before remote I/O.
-            heads = await self._heads(report)
+            heads, unfinished = await self._verification_generations(report)
             documents = {}
             async with AsyncExitStack() as stack:
                 progress = stack.enter_context(
@@ -607,7 +797,7 @@ class ChunkedModelBackupReader:
                         report,
                         total_operations=2
                         * sum(len(f.chunks) for f in self.selection.package.files)
-                        + len(heads),
+                        + len(unfinished),
                     )
                 )
                 saved = await stack.enter_async_context(
@@ -647,7 +837,16 @@ class ChunkedModelBackupReader:
                         )
                     if document is not None:
                         documents[record.path] = document.hex()
-                await self._unchanged(heads, progress.child_report(), operation_progress=progress)
+                if unfinished:
+                    await self._unchanged(
+                        {key: heads[key] for key in unfinished},
+                        progress.child_report(),
+                        operation_progress=progress,
+                    )
+                if self.generation_owner is not None and (
+                    unfinished or await run_owned_thread(self._retained_generations) is None
+                ):
+                    await run_owned_thread(self._complete_generations, heads, report)
             return ChunkedModelVerification(
                 schema="umi-chunked-model-verification/1",
                 selection_sha256=digest(self.selection),
@@ -735,7 +934,17 @@ class ChunkedModelBackupReader:
     async def available(self):
         """Check selected remote objects; this is no byte-integrity certificate."""
         self._namespace()
-        await self._heads(None)
+        if self.generation_owner is None:
+            await self._heads(None)
+            return
+        owner = await run_owned_thread(self._generations)
+        known = await run_owned_thread(owner.known, self._declarations())
+        heads = {key: ChunkedObjectGeneration.model_validate(value) for key, value in known.items()}
+        if heads:
+            await self._heads(None, {k: self.chunks[k] for k in heads}, expected=heads)
+        missing = {k: v for k, v in self.chunks.items() if k not in heads}
+        if missing:
+            await self._heads(None, missing)
 
     @pooled_r2_reads
     async def export_completed(self, *, report=None):
@@ -749,7 +958,7 @@ class ChunkedModelBackupReader:
             self._context()
             with TransferProgress("chunked_model_export", 1, report, unit="models") as progress:
                 async with owned_byte_checkpoint(self._store(progress), progress) as saved:
-                    heads = await self._heads(report)
+                    heads, unfinished = await self._verification_generations(report)
                     value = await run_owned_thread(
                         partial(
                             export_completed_byte_facts,
@@ -759,18 +968,17 @@ class ChunkedModelBackupReader:
                             checkpoint=saved,
                         )
                     )
-                    await self._unchanged(heads, report)
+                    if unfinished:
+                        await self._unchanged({key: heads[key] for key in unfinished}, report)
+                    if self.generation_owner is not None and (
+                        await run_owned_thread(self._retained_generations) is None
+                    ):
+                        await run_owned_thread(self._complete_generations, heads, report)
                     result = await run_owned_thread(publish_byte_export, self, value)
                     progress.advance(1)
                     return result
 
-    def require_verified(self, snapshot: ChunkedModelVerification):
-        """Consume owned byte checkpoints, never a supplied digest as byte proof.
-
-        The asynchronous verifier first confirms remote generations. Synchronous
-        owner commit boundaries can then check every durable receipt without
-        rereading payloads. Restart reconstructs the snapshot through verify().
-        """
+    def _snapshot_heads(self, snapshot):
         snapshot = ChunkedModelVerification.model_validate_json(canonical_json_bytes(snapshot))
         heads = {value.sha256: value for value in snapshot.objects}
         if (
@@ -784,6 +992,13 @@ class ChunkedModelBackupReader:
             )
         ):
             raise ValueError("chunked model verification differs from selected source")
+        return heads
+
+    def require_verified(self, snapshot: ChunkedModelVerification):
+        """Check native byte facts and the selected owner's current damage fence."""
+        heads = self._snapshot_heads(snapshot)
+        if self.generation_owner is not None and self._retained_generations() != heads:
+            raise ModelGenerationRepairRequired("selected model generation completion is missing")
         with (
             TransferProgress(
                 "chunked_model_verification_commit", len(self.selection.bundle.files), unit="files"
@@ -797,6 +1012,41 @@ class ChunkedModelBackupReader:
                     progress.emit("repair_required", reason="chunked_model_file_receipt_missing")
                     raise OSError("owned model byte verification requires repair")
                 progress.advance(1, restored=True)
+
+    @pooled_r2_reads
+    async def repair_generations(self, *, report=None):
+        """Explicit owner repair: GET/hash only held original object generations.
+
+        This never uploads a replacement, clears a foreign owner's hold, changes
+        an ETag, or repeats whole-model verification. The caller first authenticates
+        the original model and selected owner through the normal native resolver.
+        """
+        async with self.serial:
+            owner = await run_owned_thread(self._generations)
+            if owner is None:
+                raise ValueError("model generation repair requires its selected owner")
+            heads = await run_owned_thread(partial(self._retained_generations, allow_damage=True))
+            if heads is None:
+                raise ModelGenerationRepairRequired("original model scope required before repair")
+            pending = []
+            for key, value in heads.items():
+                token = await run_owned_thread(owner.repair_token, value.model_dump(mode="json"))
+                if token is not None:
+                    pending.append((key, value, token))
+            with TransferProgress(
+                "model_generation_original_repair",
+                sum(v.size_bytes for _, v, _ in pending),
+                report,
+                planning_unit_seconds=(0.00000001, 0.000001),
+            ) as progress:
+                for key, value, token in pending:
+                    await self._heads(report, {key: self.chunks[key]}, expected=heads)
+                    raw = await self._chunk(self.chunks[key], heads, repairing=True)
+                    await run_owned_thread(
+                        owner.finish_repair, value.model_dump(mode="json"), token
+                    )
+                    progress.advance(len(raw))
+                    del raw
 
     @pooled_r2_reads
     async def read_verified_range(
@@ -954,7 +1204,25 @@ class ChunkedModelBackupReader:
                 # Intact local bytes depend on their signed hashes and retained
                 # file identities, not current remote availability. Only missing
                 # files require an R2 generation snapshot and subsequent checks.
-                heads = await self._heads(report, needed) if needed else {}
+                heads = {}
+                if self.generation_owner is not None:
+                    retained_heads = await run_owned_thread(self._retained_generations)
+                    if retained_heads is None:
+                        await run_owned_thread(self._legacy_generations, report)
+                        owner = await run_owned_thread(self._generations)
+                        known = await run_owned_thread(owner.known, self._declarations())
+                        retained_heads = {
+                            key: ChunkedObjectGeneration.model_validate(value)
+                            for key, value in known.items()
+                        }
+                    heads = {key: value for key, value in retained_heads.items() if key in needed}
+                    if heads:
+                        await self._heads(
+                            report, {key: needed[key] for key in heads}, expected=heads
+                        )
+                unknown = {key: chunk for key, chunk in needed.items() if key not in heads}
+                if unknown:
+                    heads.update(await self._heads(report, unknown))
                 async with self._materialization_chunks(retained, heads) as read_chunk:
                     for record, item in zip(
                         bundle.files, self.selection.package.files, strict=True

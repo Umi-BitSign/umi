@@ -198,10 +198,12 @@ class LegacyModelSettlementStorage:
         return receipt
 
     async def check_receipt(self, receipts, receipt):
-        """Read metadata and HEAD generations only; never repair by rereading weights."""
+        """Consume authenticated completion and selected generation damage state."""
         try:
             reader, snapshot = await run_owned_thread(self._bound_snapshot, receipts, receipt)
-            await reader._heads(None, expected={v.sha256: v for v in snapshot.objects})
+            reused = await run_owned_thread(reader.migrate_completed_generations, snapshot)
+            if not reused:
+                await reader._heads(None, expected={v.sha256: v for v in snapshot.objects})
             if (
                 await run_owned_thread(check_legacy_settlement_metadata, receipts, receipt)
                 != snapshot

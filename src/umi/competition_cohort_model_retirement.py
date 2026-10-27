@@ -301,6 +301,7 @@ class ModelUploadRetirement:
                     pass
                 operation = "remote_payload_ownership"
                 report_operation(operation)
+                availability = set()
                 for request in selected:
                     owner = self.delivery._payload_owner(request)
                     try:
@@ -309,6 +310,7 @@ class ModelUploadRetirement:
                         if digest(request) in owner.verified:
                             raise  # Damage is repair, never an implicit payload hash pass.
                         await owner.ensure_owned(request, completed_only=True)
+                    await self.delivery.confirm_retirement_availability(request, availability)
                 operation = "local_payload_retirement"
                 report_operation(operation)
                 released = await run_owned_thread(self._retire, model, selected, generation)
