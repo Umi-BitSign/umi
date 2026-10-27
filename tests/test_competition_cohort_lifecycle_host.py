@@ -684,6 +684,7 @@ def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_pa
     config = configured(lifecycle, tmp_path / "host").lifecycle
     old = canonical_json_bytes(config)
     assert b"automatic_progression_hold_cohorts" not in old
+    assert b"held_intake_sampling_cohorts" not in old
     assert b"forecast_accounting_bytes" not in old
     assert canonical_json_bytes(LifecycleHostConfig.model_validate_json(old)) == old
     expanded = LifecycleHostConfig.model_validate_json(
@@ -696,6 +697,19 @@ def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_pa
     held = LifecycleHostConfig.model_validate(value)
     assert held.automatic_progression_hold_cohorts == (cohort,)
     assert LifecycleHostConfig.model_validate_json(canonical_json_bytes(held)) == held
+    sampling = LifecycleHostConfig.model_validate(
+        dict(value, held_intake_sampling_cohorts=(cohort,))
+    )
+    assert LifecycleHostConfig.model_validate_json(canonical_json_bytes(sampling)) == sampling
+    for bad in ((cohort, cohort), ("ff" * 32,)):
+        with pytest.raises(ValueError, match="distinct held cohorts"):
+            LifecycleHostConfig.model_validate(dict(value, held_intake_sampling_cohorts=bad))
+    with pytest.raises(ValueError, match="distinct held cohorts"):
+        LifecycleHostConfig.model_validate(
+            dict(
+                value, automatic_progression_hold_cohorts=(), held_intake_sampling_cohorts=(cohort,)
+            )
+        )
     for bad in ((cohort, cohort), ("ff" * 32,)):
         value["automatic_progression_hold_cohorts"] = bad
         with pytest.raises(ValueError, match="distinct configured cohorts"):
@@ -703,8 +717,9 @@ def test_progression_hold_configuration_preserves_legacy_bytes(lifecycle, tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sample_held", [False, True])
 async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
-    monkeypatch, lifecycle_before_intake
+    monkeypatch, lifecycle_before_intake, sample_held
 ):
     import umi.competition_cohort_lifecycle_host as module
 
@@ -715,6 +730,12 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
     node_started = asyncio.Event()
     node_stopped = asyncio.Event()
     calls = []
+    samples = []
+
+    async def sample(cohort, observer):
+        assert sample_held and cohort == held and observer == "observer"
+        samples.append(cohort)
+        return {"status": "held_intake_sample_retained"}
 
     class Node:
         async def run(self, event, **kwargs):
@@ -732,7 +753,10 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
 
     host = SimpleNamespace(
         config=SimpleNamespace(
-            automatic_progression_hold_cohorts=(held,), poll_seconds=1, sample_seconds=1
+            automatic_progression_hold_cohorts=(held,),
+            held_intake_sampling_cohorts=(held,) if sample_held else (),
+            poll_seconds=1,
+            sample_seconds=1,
         ),
         service=SimpleNamespace(
             config=SimpleNamespace(series=SimpleNamespace(cohorts=(held, active)))
@@ -741,6 +765,8 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
         requests={},
         execution_progress={},
         node=node,
+        _intake_observer=lambda: "observer",
+        _sample_held_intake=sample,
     )
     task = asyncio.create_task(module.LifecycleHost.run(host, stop))
     await asyncio.wait_for(node_started.wait(), timeout=1)
@@ -749,10 +775,115 @@ async def test_held_cohort_never_constructs_controller_and_other_cohort_runs(
     assert report["status"] == "automatic_progression_held"
     assert report["percent"] == 0 and report["eta_seconds"] is None
     assert report["signed_state_changed"] is False
+    assert samples == ([held] if sample_held else [])
+    if sample_held:
+        assert report["availability_sampling"]["status"] == "held_intake_sample_retained"
     stop.set()
     await asyncio.wait_for(task, timeout=1)
     assert node_stopped.is_set()
     assert host.last_reports[active] == {"status": "stopped"}
+
+
+async def test_held_sampling_retains_native_credit_without_seal_and_releases_after_restart(
+    host, monkeypatch
+):
+    h = host.h
+    for worker in h.admissions:
+        await worker.poll_once()
+    promotion = h.owner.promotion.reviewed_promotion_head(
+        h.cohort, maximum_bytes=h.owner.maximum_promotion_bytes
+    )
+    request_start = host.config.lifecycle.request_start.model_copy(
+        update={
+            "operator_start_overrides": (
+                {
+                    "schema": "umi-cohort-operator-request-start/1",
+                    "cohort_sha256": h.cohort,
+                    "authorized_history_tip_sha256": digest(h.history.genesis),
+                    "suite_sha256": h.history.plan.suite_sha256,
+                    "baseline_model_sha256": promotion.model_sha256,
+                    "evaluation_runtime_sha256": h.intake.policy.evaluation_runtime_sha256,
+                    "runtime_adoption_sha256": None,
+                    "not_before_unix_ms": 2_000_000,
+                    "source_sha256": "ca" * 32,
+                },
+            )
+        }
+    )
+    selected = host.config.lifecycle.model_copy(
+        update={
+            "automatic_progression_hold_cohorts": (h.cohort,),
+            "held_intake_sampling_cohorts": (h.cohort,),
+            "request_start": request_start,
+        }
+    )
+    host.service.config = ServiceAdmissionHostConfig.model_validate_json(
+        canonical_json_bytes(host.config.model_copy(update={"lifecycle": selected}))
+    )
+    original = canonical_json_bytes(h.intake.history(h.cohort))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("held availability sampling must not seal, vote or construct a controller")
+
+    async with host.open() as app:
+        control = app.state.lifecycle
+        monkeypatch.setattr(control, "node", forbidden)
+        monkeypatch.setattr(control, "_peers", forbidden)
+        observer = control._intake_observer()
+        monkeypatch.setattr(observer.phase, "observe", forbidden)
+        for h.block in range(240, 346, 5):
+            result = await control._sample_held_intake(h.cohort, observer)
+        assert result["healthy_service_blocks"] == 105
+        assert result["unavailable_blocks"] == 40
+        assert result["serving"]
+        repeated = await control._sample_held_intake(h.cohort, observer)
+        assert repeated == result
+        h.ready, h.block = False, 350
+        unavailable = await control._sample_held_intake(h.cohort, observer)
+        assert not unavailable["serving"]
+        assert unavailable["healthy_service_blocks"] == 105
+        h.ready, h.block = True, 355
+        recovered = await control._sample_held_intake(h.cohort, observer)
+        assert recovered["serving"] and recovered["unavailable_blocks"] == 50
+        assert not control.nodes and not control.stores
+        assert h.intake.sealed(h.cohort) is None
+        assert canonical_json_bytes(h.intake.history(h.cohort)) == original
+
+    # A real restart cannot reuse the prior process epoch or guess the gap.
+    h.block = 365
+    async with host.open() as app:
+        control = app.state.lifecycle
+        restarted = await control._sample_held_intake(h.cohort, control._intake_observer())
+        assert restarted["healthy_service_blocks"] == 105
+        assert restarted["unavailable_blocks"] == 60
+        assert (
+            restarted["service_observation_sequence"]
+            == recovered["service_observation_sequence"] + 1
+        )
+        assert h.intake.sealed(h.cohort) is None
+
+    # Normal native closure and independent reviewers consume the retained
+    # samples without a sampler-specific wire format, signature or bypass.
+    host.service.config = host.service.config.model_copy(
+        update={
+            "lifecycle": host.service.config.lifecycle.model_copy(
+                update={
+                    "automatic_progression_hold_cohorts": (),
+                    "held_intake_sampling_cohorts": (),
+                }
+            )
+        }
+    )
+    async with host.open() as app:
+        control = app.state.lifecycle
+        node = await control.node(h.cohort)
+        await node.tick()
+        assert node.controller.store.status(h.cohort)[0].phase == "preparation"
+        assert h.intake.sealed(h.cohort, result["recovery_tip_sha256"]) is not None
+        assert (await node.tick())["status"] == "waiting_request_rest"
+        h.timestamp, h.block = 2_030_000, h.block + 1
+        await node.tick()
+        assert node.controller.store.status(h.cohort)[0].phase == "requests"
 
 
 async def test_older_lifecycle_boot_owns_separate_epoch_client_until_shutdown(host):

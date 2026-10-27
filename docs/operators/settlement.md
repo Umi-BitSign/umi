@@ -4610,16 +4610,56 @@ The admission host accepts `recoverable_service.lifecycle.automatic_progression_
 as a list of configured cohort digests. An empty or omitted list preserves historical
 configuration bytes and behavior. With a cohort selected, its automatic lifecycle
 worker reports `automatic_progression_held` and constructs no phase controller:
-it cannot publish history, sample availability, seal intake, request votes or resume
+it cannot publish history, seal intake, request votes or resume
 a retained phase intent. Admission HTTP workers, upload processing and unselected
 cohorts remain configured normally. Explicit operator recovery/signing interfaces
 remain separate; do not use them to close a held cohort.
+
+By default a held worker does not sample availability. To keep a genuinely open
+intake window measured while waiting for an authorized release, explicitly select
+that cohort in `held_intake_sampling_cohorts`, a subset of the hold list. Its native
+intake owner then retains only actual finalized readiness observations, with no
+controller, votes, seal or phase changes. The hold report includes the sampled
+block, retained observation count, healthy service blocks and any sampling retry.
+The next-sample ETA is separate from the unknown hold-release ETA. Unknown time
+before sampling and gaps across a process restart remain unavailable; previously
+retained healthy intervals survive. Existing independent reviewers consume the
+unchanged native receipt format after release. This owner-only option requires no
+miner or reviewer protocol upgrade; select it only on a host supporting the field.
 
 Drain the owning service cooperatively before selecting this configuration, preserve
 its state directories and signed history, then restart and verify the hold report
 and admission health. The setting does not undo a seal or decision already retained;
 inspect the actual phase and pending intent before deployment. Remove the selected
 digest only after the intended release is qualified, through the same supported
-service transition. No signed clocks are reset; native availability recovery accounts
+service transition, removing it from both lists if sampling was selected. No signed
+clocks are reset; native availability recovery accounts
 for unsampled intervals when progression resumes. The reported ETA is unknown while
 waiting for explicit release, rather than a deadline that automatically lifts the hold.
+
+An explicitly authorized scheduled challenge start can select
+`request_start.operator_start_overrides`. Each entry uses schema
+`umi-cohort-operator-request-start/1` and binds the cohort, authorized signed-history
+tip, effective suite, baseline model, evaluation runtime and runtime-adoption
+digests, the absolute `not_before_unix_ms`, and the retained authenticated operator
+decision's `source_sha256`. The native reader checks the authorized history prefix
+and allows only ordinary phase closures after it. It checks the current reviewed
+promotion and signed runtime selection without restoring model payloads. A changed
+suite, baseline or runtime refuses startup under that decision. The first verified
+clock observation is retained, so restart preserves its countdown and refuses a
+conflicting override. Preserve the exact decision and selected configuration in the
+service handoff controls.
+
+This override replaces only the local five-hour request-rest floor for that cohort.
+It does not close intake, satisfy native availability, sign preparation, replace
+the predecessor's certified request closure, authorize weights or backdate cutover.
+Other cohorts keep their normal rest rule and every old rest/cutover receipt stays
+unchanged. The finalized chain clock and configured future-skew allowance must
+reach the authorized floor before native preparation can advance to requests.
+The preparation target is a completion budget rather than a minimum wait: a
+completed, independently certified preparation can close before that target.
+Remove the hold at the scheduled time using the existing cooperative service
+transition; confirm actual native phase progression and first execution separately.
+This local gate does not change signed phase evidence or miner/validator protocols.
+Select the new owner configuration only with a source supporting the optional
+field; keep the original configuration for an older-owner rollback.

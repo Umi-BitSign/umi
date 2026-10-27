@@ -165,13 +165,14 @@ def rest(recovery, policy, tmp_path):
         return value
 
     def reopen(root=tmp_path / "rest", **changes):
+        selection = changes.pop("operator_selection", None)
         cfg = RequestStartConfig(
             schema="umi-cohort-request-start-config/1",
             directory=str(root),
             first_cohort_not_before_unix_ms=1_000_000,
             **changes,
         )
-        return SeriesRequestStart(cfg, series, provider, history)
+        return SeriesRequestStart(cfg, series, provider, history, operator_selection=selection)
 
     h.closed, h.reopen, h.capture, h.provider = closed, reopen, capture, provider
     h.gate = reopen()
@@ -187,6 +188,92 @@ async def test_first_cohort_respects_approved_start_floor_and_freshness(rest):
     h.offline = True
     with pytest.raises(OSError, match="finality"):
         await h.gate.check(key)
+
+
+def operator_start(rest):
+    current = rest.closed(index=1, phases=("intake",))
+    key = digest(current.history.plan)
+    selected = {
+        "baseline_model_sha256": "ad" * 32,
+        "evaluation_runtime_sha256": rest.policy.evaluation_runtime_sha256,
+        "runtime_adoption_sha256": None,
+    }
+
+    async def selection(cohort, block):
+        assert cohort == key and block == rest.block
+        return dict(selected)
+
+    override = dict(
+        schema="umi-cohort-operator-request-start/1",
+        cohort_sha256=key,
+        authorized_history_tip_sha256=digest(current.history.genesis),
+        suite_sha256=current.history.plan.suite_sha256,
+        **selected,
+        not_before_unix_ms=rest.timestamp + 60_000,
+        source_sha256="ca" * 32,
+    )
+    return key, override, selected, selection
+
+
+async def test_operator_start_uses_exact_deadline_and_preserves_rest_across_restart(rest):
+    h = rest
+    key, override, _, selection = operator_start(h)
+    # An operator clock never supplies the preceding cohort's closure.
+    gate = h.reopen(operator_start_overrides=(override,), operator_selection=selection)
+    assert (await gate.check(key))["status"] == "waiting_predecessor_requests"
+    h.closed()
+    legacy = await h.gate.check(key)
+    saved = canonical_json_bytes(h.gate.journal.get("request_rest", key))
+    result = await gate.check(key)
+    assert not result["ready"] and result["eta_seconds"] == 90
+    assert result["not_before_unix_ms"] == override["not_before_unix_ms"]
+    h.timestamp = override["not_before_unix_ms"] + gate.future_skew - 1
+    h.block += 1
+    gate = h.reopen(operator_start_overrides=(override,), operator_selection=selection)
+    assert not (await gate.check(key))["ready"]
+    h.timestamp += 1
+    ready = await gate.check(key)
+    assert ready["ready"] and ready["percent"] == 100
+    assert ready["operator_start_source_sha256"] == override["source_sha256"]
+    assert ready["cutover_unix_ms"] is None
+    assert legacy["not_before_unix_ms"] > ready["not_before_unix_ms"]
+    assert canonical_json_bytes(gate.journal.get("request_rest", key)) == saved
+    changed = dict(override, not_before_unix_ms=override["not_before_unix_ms"] + 1)
+    with pytest.raises(ValueError, match="operator request start changed"):
+        await h.reopen(operator_start_overrides=(changed,), operator_selection=selection).check(key)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "baseline_model_sha256",
+        "evaluation_runtime_sha256",
+        "runtime_adoption_sha256",
+        "suite_sha256",
+        "authorized_history_tip_sha256",
+    ],
+)
+async def test_operator_start_refuses_changed_native_selection(rest, changed):
+    h = rest
+    h.closed()
+    key, override, selection, reader = operator_start(h)
+    if changed in selection:
+        selection[changed] = "ef" * 32
+    else:
+        override[changed] = "ef" * 32
+    gate = h.reopen(operator_start_overrides=(override,), operator_selection=reader)
+    with pytest.raises(ValueError, match="operator request start"):
+        await gate.check(key)
+    assert gate.journal.get("operator_request_start", key) is None
+
+
+def test_operator_start_optional_configuration_preserves_legacy_bytes(rest):
+    before = canonical_json_bytes(rest.gate.config)
+    assert b"operator_start_overrides" not in before
+    assert canonical_json_bytes(RequestStartConfig.model_validate_json(before)) == before
+    _, override, _, selection = operator_start(rest)
+    with pytest.raises(ValueError, match="unique cohort ordering"):
+        rest.reopen(operator_start_overrides=(override, override), operator_selection=selection)
 
 
 async def test_target_or_partial_history_cannot_start_rest(rest):
