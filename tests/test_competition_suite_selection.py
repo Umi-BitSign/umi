@@ -10,6 +10,7 @@ from umi.competition_suite_selection import (
     SuiteCandidateInventory,
     SuiteExclusions,
     SuiteSelectionCounts,
+    canonical_dataset_identity,
     reference_identities,
     select_future_suite,
 )
@@ -423,11 +424,83 @@ def test_legacy_standalone_selection_keeps_exact_uncategorized_bytes(case):
     entry = case.inventory.cases[0]
     assert b"fingerspelling_category" not in canonical_json_bytes(entry)
     assert b"fingerspelling_category_minimums" not in canonical_json_bytes(case.counts)
+    assert b"maximum_cases_per_dataset" not in canonical_json_bytes(case.counts)
     raw = canonical_json_bytes(case.counts)
     assert canonical_json_bytes(SuiteSelectionCounts.model_validate_json(raw)) == raw
     _, report = select(case)
     assert "selected_fingerspelling_categories" not in report
+    assert "selected_dataset_totals" not in report
     assert all("fingerspelling_category" not in row for row in report["selected_provenance"])
+
+
+def test_global_dataset_quota_counts_versions_and_both_tasks_together(case):
+    c = case
+    shared = c.inventory.cases[3].model_copy(
+        update={"dataset": "  \uff26\uff33board  ", "dataset_version": "another-split"}
+    )
+    inventory = c.inventory.model_copy(
+        update={"cases": (*c.inventory.cases[:3], shared, *c.inventory.cases[4:])}
+    )
+    counts = c.counts.model_copy(update={"maximum_cases_per_dataset": 2})
+    suite, report = select(c, inventory=inventory, counts=counts)
+    assert len(suite.cases) == 6
+    assert report["selected_dataset_totals"] == {"asl-stem": 2, "chicagofswild": 2, "fsboard": 2}
+    assert report["selected_training_exposure"] == {"known_public": 6}
+    assert report["unknown_or_public_exposure_is_not_verified_holdout"]
+    assert all(
+        row["training_exclusion_evidence_sha256"] is None for row in report["selected_provenance"]
+    )
+    original = {entry.case.case_id: entry for entry in inventory.cases}
+    assert all(
+        row["dataset"] == original[row["case_id"]].dataset
+        and row["dataset_version"] == original[row["case_id"]].dataset_version
+        for row in report["selected_provenance"]
+    )
+
+
+def test_global_quota_replaces_cross_task_overflow_with_another_source(case):
+    c = case
+    values = tuple(
+        entry.model_copy(update={"dataset": "Shared", "dataset_version": f"split-{i}"})
+        if i in {0, 3, 4}
+        else entry
+        for i, entry in enumerate(c.inventory.cases)
+    )
+    extras = (
+        candidate(
+            9,
+            "Clouds gather over the distant valley",
+            dataset="OtherSource",
+            signer=9,
+            topic="Weather",
+        ),
+    )
+    inventory = c.inventory.model_copy(update={"cases": (*values, *extras)})
+    counts = c.counts.model_copy(update={"maximum_cases_per_dataset": 2})
+    suite, report = select(c, inventory=inventory, counts=counts)
+    assert len(suite.cases) == 6
+    assert report["selected_dataset_totals"]["shared"] == 2
+    assert report["selected_dataset_totals"]["othersource"] == 1
+
+
+def test_global_quota_refuses_insufficient_pool_with_counted_capacity(case):
+    counts = case.counts.model_copy(update={"maximum_cases_per_dataset": 1})
+    with pytest.raises(ValueError, match="available_slots=4, required_cases=6"):
+        select(case, counts=counts)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.0, "2"])
+def test_global_dataset_quota_requires_a_positive_explicit_integer(case, value):
+    with pytest.raises(ValueError):
+        SuiteSelectionCounts.model_validate(
+            case.counts.model_dump() | {"maximum_cases_per_dataset": value}
+        )
+
+
+def test_canonical_dataset_identity_preserves_source_grouping():
+    assert canonical_dataset_identity("  Full \uff23orpus   Name ") == "full corpus name"
+    with pytest.raises(ValueError, match="must not be empty"):
+        canonical_dataset_identity(" \t")
 
 
 def test_four_category_quota_minimums_must_fit_and_cannot_be_zero_or_missing(case):

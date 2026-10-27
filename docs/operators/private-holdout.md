@@ -60,10 +60,11 @@ Provide the dataset privately to the evaluation operators, with:
 - Source permissions covering the proposed evaluation, evaluator access and any
   later evidence disclosure. Do not put consent records or personal details in
   the public repository.
-- A recorded evaluation split excluded from baseline/candidate training,
-  fine-tuning and model selection. Disclose known overlap and unknown upstream
-  exposure. A new random split of data already used to train Michael's model
-  would not establish unseen performance for that model.
+- Recorded training exposure and any documented exclusion from training,
+  fine-tuning or model selection. Public and unknown-exposure sources are
+  permitted for C7 and later; exclusion from a particular miner's training and
+  independently private recordings are not prerequisites. A new random split
+  of previously trained-on data must not be described as unseen.
 - Recording and signer grouping where available, so overlapping clips from one
   recording are kept together and signer overlap can be reported. Keep exact
   duplicates and known near-duplicates out of competing splits. Do not claim
@@ -126,6 +127,16 @@ unknown metadata cannot fill a known-coverage requirement. The default requires
 two continuous corpora, two known signers in each task and two continuous topics.
 It prefers balanced datasets and less represented known signers/topics, and
 refuses unmet quotas instead of duplicating cases or relaxing exclusions.
+For new C7+ adoption candidates, set `maximum_cases_per_dataset: 2`. This is a
+global source limit across both tasks: every source contributes at most two
+selected cases, including all of its splits and versions. A value of one is
+also supported. Use one stable corpus name in `dataset`; put train/dev/test,
+release and partition details in `dataset_version`. Case, Unicode-width and
+whitespace variants share one quota. Provenance review must resolve other aliases
+for the same corpus; partitions and renamed copies are not independent datasets.
+The private selection report includes `selected_dataset_totals`. If the inventory
+cannot fill the requested counts within the cap, selection reports the available
+quota capacity or unfilled task; add qualified sources instead of relaxing the cap.
 Set `maximum_continuous_dataset_share_bps` and
 `maximum_fingerspelling_dataset_share_bps` when a task has multiple independent
 sources. These are per-task upper bounds; selection refuses a pool that cannot
@@ -138,17 +149,19 @@ For C7 and later, adoption also requires at least two fingerspelling sources,
 with no more than 75% of fingerspelling cases from one source. This requirement
 must be met together with the four fingerspelling categories; a missing source
 holds adoption until real labeled media is available.
-Every scored case in each task must carry documented evidence that the
-recordings were excluded from model training. Set
+New `umi-evaluation-suite-adoption-candidate/2` candidates do not require
+documented training-exclusion quotas. Keep public recordings labeled
+`known_public` and unknown exposure labeled `unknown`; neither becomes a proven
+unseen holdout because its evaluation selection is private. Optional
 `minimum_training_excluded_fingerspelling` and
-`minimum_training_excluded_continuous` in the counts input to the full case count
-for each task. Selection checks the quota while choosing cases, and adoption refuses
-a C7+ candidate that declares a lower quota. A digest alone is only an evidence
-identity; operators must establish the underlying source access and training
-exclusion before declaring a candidate `documented_training_excluded`. Public or
-unknown-exposure recordings can still support diagnostics, but cannot fill this
-scored-suite quota. Existing signed cohort
-clocks and suites remain unchanged until a separately authenticated adoption.
+`minimum_training_excluded_continuous` quotas remain available when justified by
+actual evidence. A digest alone is only an evidence identity; establish the
+underlying exclusion before declaring `documented_training_excluded`.
+Historical candidate `/1` retains its original full training-exclusion rule for
+C7+ and its exact bytes for replay; do not relabel a retained candidate to change
+its meaning. Omitted global caps retain historical standalone selection behavior.
+Existing signed cohort clocks and suites remain unchanged until a separately
+authenticated adoption.
 
 Native suite adoption also requires explicit fingerspelling coverage of sentences,
 names, addresses and numbers. Tag each candidate with `fingerspelling_category`
@@ -165,7 +178,9 @@ Adoptable cases also require a known signer and a retained reference/interval QA
 record identified by `reference_qa_sha256`. Strict selection defaults to
 `require_qualified_cases: true` and `distinct_signer_per_case: true`, keeping
 signers separate across selected tasks. Include known training/development signer
-groups and previous selected suites in later exclusion inputs. Acquisition-only
+exposure in provenance, and previous selected source/signer groups in later
+exclusion inputs. Training exposure alone does not disqualify a source under
+candidate `/2`; separately designated overlap exclusions still apply. Acquisition-only
 planning may retain unknown rows explicitly, but the native adoption reviewer
 refuses relaxed selection settings or missing QA/signer identities. Source rows
 without signer identity need additional verified information before adoption.
@@ -204,7 +219,12 @@ cutoff. Once intake closes, another suite amendment is refused. In-progress and
 completed evaluations, including C6, retain their original suite and results.
 
 Configure `evaluation_suite_adoption_candidates` on the owner and every selected
-reviewer. Each candidate names its exact suite, selection report, inventory,
+reviewer with schema `umi-evaluation-suite-adoption-candidate/2`, the default for
+new candidate configuration. This version enforces the global one-or-two-case
+source cap for C7+ while retaining independent reference/media QA, known signers,
+topics, task shares and fingerspelling categories. Install its compatibility
+reader on all selected owners/reviewers before selecting the candidate. Each
+candidate names its exact suite, selection report, inventory,
 exclusions and selection-key files; private videos and reference-QA evidence;
 the pinned ffmpeg/ffprobe binaries and hashes; and a durable per-owner
 verification directory. `verification_owner_hotkey` must match the actual owner
