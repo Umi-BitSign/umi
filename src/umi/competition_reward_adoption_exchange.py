@@ -30,6 +30,7 @@ from .competition_evidence_codec import MAX_EVIDENCE_BYTES, MAX_METADATA_BYTES, 
 from .competition_reward_adoption import MAX_REWARD_DECISIONS, RewardAutomaticRelease
 from .competition_reward_coverage_service import StandingRewardCoverageService
 from .competition_reward_decisions import MAX_DECISION_BYTES, SignedRewardControlDecision
+from .competition_reward_exchange_delivery import publish_exchange_cursor
 from .competition_reward_transition_controls import (
     RewardTransitionControlReader,
     SignedRewardTransitionApproval,
@@ -255,7 +256,9 @@ class RewardAdoptionReviewExchange:
             ):
                 if (control_evidence, control_metadata) != publication[5:]:
                     raise ValueError("adoption original bytes changed after request publication")
-                return self._read_request(path, slot)
+                retained = self._read_request(path, slot)
+                self._publish_cursor(proposal)
+                return retained
             request = RewardAdoptionReviewRequest(
                 schema="umi-reward-adoption-review-request/1",
                 intent=intent,
@@ -282,7 +285,17 @@ class RewardAdoptionReviewExchange:
                 control_evidence,
                 control_metadata,
             )
+            self._publish_cursor(proposal)
             return request
+
+    def _publish_cursor(self, proposal):
+        publish_exchange_cursor(
+            self.outbox,
+            series=self.series,
+            proposer=self.proposer,
+            position=proposal.revision,
+            cohort=proposal.cohort_sha256,
+        )
 
     def request(self, cohort, revision):
         slot = self._slot(cohort, revision)

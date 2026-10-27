@@ -40,6 +40,8 @@ seeds = [
     # including package delivery, before any held reward row can be released.
     "competition_reward_adoption_handoff",
     "competition_reward_adoption_delivery",
+    "competition_reward_exchange_delivery",
+    "competition_reward_hold_mirror_cli",
     "competition_reward_transition_signing",
     "competition_reward_coordinator",
     "competition_reward_admission_runner",

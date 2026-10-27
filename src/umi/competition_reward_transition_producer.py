@@ -284,14 +284,27 @@ class StandingRewardTransitionProducer:
                     operator_approval=approval,
                 )
             )
+            peer_reviewed = False
             for evaluator in reader.policy.evaluators:
                 if identity(evaluator.hotkey) == self.signer.journal.signer:
                     continue
-                try:
-                    vote = await self.exchange.vote_port(evaluator.hotkey)(request)
-                except FileNotFoundError:
-                    continue
-                await self.signer.collect(slot, vote)
+                vote = await run_owned_thread(self.signer.journal.vote, slot, evaluator.hotkey)
+                if vote is None:
+                    try:
+                        vote = await self.exchange.vote_port(evaluator.hotkey)(request)
+                    except FileNotFoundError:
+                        continue
+                    if identity(vote.hotkey) != identity(evaluator.hotkey):
+                        raise ValueError("reward transition peer vote changed its evaluator")
+                    await self.signer.collect(slot, vote)
+                peer_reviewed = True
+            # A one-group policy can have several native reviewers. Its local
+            # signature still meets the historical certificate quorum, but a
+            # new producer publication must retain a distinct configured peer's
+            # review. Reuse that durable vote after interruption or delivery loss.
+            if not peer_reviewed:
+                progress.emit("waiting")
+                return RewardTransitionProgress("adoption_quorum_pending", current)
             try:
                 await self.signer.certify(slot)
             except RewardQuorumPending:

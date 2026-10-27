@@ -39,8 +39,11 @@ their original interpretation; the new release is a separately signed decision.
 
 Configure `reward_transition` on the coordinator and independent reviewers with
 `admission_config`, `settlement_config`, and `operator_approval_directory`.
-The first two paths name the existing root-owned admission and settlement
-configurations; their existing progression holds remain authoritative. The
+The first two paths name root-owned mirrors of the configurations selected by
+the running admission and settlement owners, maintained by the lifecycle hooks
+below. Promote mutable or account-owned service configs to immutable root-owned
+0444 files through their supported handoff before enabling these mirrors. Their
+existing progression holds remain authoritative. The
 approval directory must be root owned and protected from other writers. These
 owners also require `reward_adoption_feed` and its configured replication path.
 Keep private review envelopes within the installed transport and parser bounds:
@@ -103,6 +106,49 @@ repair; they do not reset a consumer to an empty frontier. Unchanged file
 identities reuse their accepted selection without payload reads, and checkpoints
 retain each signed revision once. A feed transports existing approval; it neither
 signs an adoption nor overrides cohort holds.
+
+### Bounded request and vote transport
+
+Run the native exchange delivery adapter alongside package delivery. Select the
+actual coordinator and reviewer boots, their two reciprocal outbox/inbox routes,
+and a dedicated durable transport state directory. Keep the existing generic
+artifact copier frozen if it has been deliberately frozen; the exchange adapter
+does not need its proof, model, journal or historical tree routes. On a shared
+host, bind the signed adoption feed's parent directory directly into consumers;
+do not send its mutable file through an immutable artifact copier.
+
+Each proposer publishes a small `transport/<series>/decision.json` cursor and
+one `transport/<series>/adoption-<cohort>.json` cursor per active successor after
+retaining the exact immutable request. Separate cursors prevent normal decision
+and adoption publishers from overwriting each other's progress. Delivery derives
+only the current request and configured independent peer vote paths. Ordinary
+requests carry their complete signed predecessor prefix, allowing a reviewer to
+catch up without transporting every historical request. Completed adoptions are
+excluded using the authenticated feed. Cursors grant no signing authority: the
+recipient still performs native request validation and independent review.
+
+Upgrading an existing owner requires no directory inventory or proof replay:
+its next ordinary publication or adoption retry exports the exact retained
+request's cursor, including the adoption publisher's in-memory reuse path.
+Missing cursors before first export mean no selected request yet. Once accepted,
+a removed, malformed or rolled-back cursor is an explicit transport repair hold.
+Restore it through that same publisher's exact retry; do not erase the transport
+frontier or copy private signing journals. Preserve the adapter's selection and
+immutable-copy receipts across restarts and upgrades. Unchanged selection uses
+filesystem identities, and unchanged delivered payloads reuse the copier's
+durable comparison results. The adapter also retains inode, size, modification
+time and change time for both files; a changed identity invalidates only that
+file's comparison, even if its size and modification time were preserved. These
+receipts attest transport only.
+Native publications are immutable and use atomic installation. In-place mutation
+that preserves every stat field, including change time within one filesystem
+clock tick, cannot be detected by metadata-only reuse and is unsupported. Native
+recipients independently authenticate the original request and vote bytes.
+
+Discovery reports counted cursor progress and elapsed time; copy progress and
+ETA cover the two selected routes and their actual bytes. A missing peer vote
+is pending independent review, not completed quorum. Transport health alone
+does not confirm native acceptance, adoption or a finalized weight row.
 
 If an already selected early release omitted the cohort age attestation, obtain
 the cohort-start timestamp at the plan's signed `not_before_block` and a fresh
@@ -188,6 +234,53 @@ broader historical umask is not a reason to broaden access or reset its contents
 Use the existing authenticated remote proof transport for cross-account or remote
 delivery; do not broaden permissions or share private signer state. The optional
 selection changes no signed format, native proof semantics or historical clocks.
+
+### Authoritative progression-hold mirrors
+
+Services may select a new immutable config path on every supported upgrade.
+Keep `reward_transition.admission_config` and `settlement_config` pointed at
+stable mirror paths, with the mirror parent directory mounted read-only into
+reward consumers. Binding an individual file inode would hide atomic updates.
+Install one root-owned canonical 0444 owner file per logical role:
+
+```json
+{"role":"settlement","schema":"umi-reward-hold-mirror/1","service_user":"umi-validator-uid54","target":"/var/lib/umi/reward-holds/settlement.json","unit":"umi-c5-primary-settlement-uid54.service"}
+```
+
+Use `role: "admission"` and the actual admission unit for its corresponding
+owner file. Create the mirror directory root-owned and protected from other
+writers. Configured units and paths are explicit; the helper does not discover
+or enable unrelated services. Render the drop-in for the selected installed
+interpreter and immutable source release:
+
+```sh
+sudo /path/to/installed/python -I -B -c "import runpy,sys;sys.path.insert(0,'/opt/umi/selected-release/src');runpy.run_module('umi.competition_reward_hold_mirror_cli',run_name='__main__')" drop-in --config /etc/umi/reward-holds/settlement-owner.json --python /path/to/installed/python --source-directory /opt/umi/selected-release/src
+```
+
+The command and generated hooks explicitly select the immutable source before
+importing UMI. Use `-m umi.competition_reward_hold_mirror_cli` and omit
+`--source-directory` only when UMI is installed in the selected interpreter. Inspect and
+install the output as a persistent drop-in on the named unit through its
+supported handoff. Rendering performs no install, daemon reload or restart.
+Preserve this drop-in and its durable source dependency during later upgrades.
+
+The three privileged hooks invalidate the visible mirror before startup,
+publish it after startup, and invalidate it after stop. Missing or failed
+publication stops new reward transitions. The publisher reads structured
+system-manager `ExecStart`, matches the actual process, service account and
+cgroup, and copies only its exact bounded, single-link, root-owned 0444 config.
+It supports module entry points, installed console scripts and existing
+`runpy` wrappers with either literal `sys.argv` or trailing arguments. A config
+changed after the owner started requires the supported owner restart; a stale
+process cannot advertise newly edited bytes as its loaded configuration.
+
+For an already running, qualified owner, the same command with `publish`
+instead of `drop-in` seeds the mirror without restarting the service. Both
+roles must be published before enabling reward-transition consumers. Publication
+brackets the copy with process/config identity checks and removes the mirror
+on failure. Successful source checks remain in bounded root-owned receipts:
+unchanged refreshes do not reread config payloads, and startup reuses unchanged
+validation. Hooks report counted stages, elapsed time and a scoped planning ETA.
 
 ## Work progress and ETA logs
 

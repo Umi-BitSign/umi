@@ -26,6 +26,7 @@ from .competition_reward_decisions import (
     reward_decision_capacity,
     verify_reward_decision_proposal,
 )
+from .competition_reward_exchange_delivery import publish_exchange_cursor
 from .competition_reward_signing import RewardDecisionSigner
 from .concurrency import run_owned_thread
 from .open_competition import Signature, digest, identity, verify_signature
@@ -115,6 +116,12 @@ class RewardReviewExchange:
                 self._request_path(self.outbox, body.sequence),
                 request,
                 maximum_bytes=self.maximum_bytes,
+            )
+            publish_exchange_cursor(
+                self.outbox,
+                series=self.series,
+                proposer=self.proposer,
+                position=body.sequence,
             )
 
     def request(self, sequence: int) -> RewardReviewRequest:

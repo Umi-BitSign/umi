@@ -29,6 +29,7 @@ from umi.competition_reward_transition_timing import REWARD_TRANSITION_WAIT_MS
 from umi.open_competition import digest, sign_object
 from umi.protocol import canonical_json_bytes
 
+from . import test_competition_reward_decisions as decision_fixtures
 from .test_competition_reward_adoption_feed import initial, owner
 from .test_competition_reward_decisions import signatures, signed
 from .test_competition_reward_transition_native import historical_control
@@ -38,9 +39,37 @@ from .test_competition_reward_transition_review import control as control
 from .test_competition_reward_transition_review import live_case as live_case
 from .test_competition_reward_transition_review import manifest_case as manifest_case
 from .test_competition_reward_transition_review import opportunity_case as opportunity_case
-from .test_competition_reward_transition_review import policy as policy
+from .test_competition_reward_transition_review import policy as inherited_policy
 from .test_competition_reward_transition_review import series_case as series_case
 from .test_open_competition import wallet
+
+base_policy = inherited_policy
+
+
+@pytest.fixture
+def policy(base_policy, request, monkeypatch):
+    if getattr(request, "param", None) != "one_group":
+        return base_policy
+    # Match the installed topology before creating its signed series, control
+    # history and adoption. Historical quorum counts groups, not signer count.
+    monkeypatch.setattr(
+        decision_fixtures,
+        "signatures",
+        lambda body, names=("Charlie", "Dave"): signatures(body, names=("Charlie",)),
+    )
+    return type(base_policy).model_validate_json(
+        canonical_json_bytes(
+            base_policy.model_copy(
+                update={
+                    "required_evaluator_groups": 1,
+                    "evaluators": tuple(
+                        evaluator.model_copy(update={"control_group": "umi-operated"})
+                        for evaluator in base_policy.evaluators
+                    ),
+                }
+            )
+        )
+    )
 
 
 @pytest.fixture
@@ -69,7 +98,9 @@ async def producer_case(live_case, tmp_path, monkeypatch):
     )
     c.feed_initial = RewardAdoptionSelection(
         schema="umi-standing-reward-adoption-selection/1",
-        adoptions=(SignedRewardModelAdoption(adoption=body, signatures=signatures(body)),),
+        adoptions=(
+            SignedRewardModelAdoption(adoption=body, signatures=decision_fixtures.signatures(body)),
+        ),
     )
     state = SimpleNamespace(
         approved=True,
@@ -363,6 +394,90 @@ async def test_quorum_retry_and_restart_reuse_same_original_intent_and_signature
     )
     assert len({canonical_json_bytes(r.proposal) for r in c.requests}) == 1
     assert len({r.evidence for r in c.requests}) == len({r.metadata for r in c.requests}) == 1
+
+
+@pytest.mark.parametrize("policy", ["one_group"], indirect=True)
+@pytest.mark.parametrize("approved", [False, True])
+async def test_one_group_local_vote_waits_for_distinct_peer(producer_case, approved):
+    c = producer_case
+    c.approved, c.peer_ready = approved, False
+    assert c.c.policy.required_evaluator_groups == 1
+    assert {e.control_group for e in c.c.policy.evaluators} == {"umi-operated"}
+    original_selection = canonical_json_bytes(c.feed.selected)
+
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "adoption_quorum_pending"
+    original = c.producer._original
+    slot = c.signer.journal.slot(original.proposal)
+    assert c.signer.journal.vote(slot, wallet("Charlie").hotkey.ss58_address) is not None
+    assert c.signer.journal.vote(slot, wallet("Dave").hotkey.ss58_address) is None
+    assert c.signer.journal.journal.get("adoption_certificate", slot) is None
+    assert canonical_json_bytes(c.feed.selected) == original_selection
+
+    c.reopen()
+    c.advance()
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "adoption_quorum_pending"
+    assert len(c.signatures) == 1
+    c.peer_ready = True
+    c.advance()
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "selected"
+    assert c.producer._original == original
+    selected = c.feed.selected.latest(c.cohort)
+    assert selected.adoption == original.proposal
+    # Keep the established one-signature-per-control-group certificate format.
+    assert len(selected.signatures) == 1
+    assert c.signer.journal.vote(slot, wallet("Dave").hotkey.ss58_address) is not None
+    assert len(c.signatures) == 1
+
+
+@pytest.mark.parametrize("policy", ["one_group", "two_groups"], indirect=True)
+async def test_retained_peer_vote_survives_restart_without_transport(producer_case, monkeypatch):
+    c = producer_case
+    certify = c.signer.certify
+
+    async def hold_after_certificate(slot):
+        result = await certify(slot)
+        c.held = True
+        return result
+
+    monkeypatch.setattr(c.signer, "certify", hold_after_certificate)
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "progression_held"
+    original = c.producer._original
+    slot = c.signer.journal.slot(original.proposal)
+    peer_vote = c.signer.journal.vote(slot, wallet("Dave").hotkey.ss58_address)
+    assert peer_vote is not None
+    assert c.feed.selected.latest(c.cohort).adoption.early_release is None
+
+    c.reopen()
+    c.advance()
+    c.held = c.peer_ready = False
+
+    def repeated_transport(_):
+        raise AssertionError("retained peer vote must not be fetched again")
+
+    monkeypatch.setattr(c.producer.exchange, "vote_port", repeated_transport)
+    assert (await c.producer.step(c.cohort, c.prefix)).status == "selected"
+    assert c.producer._original == original
+    assert c.feed.selected.latest(c.cohort).adoption == original.proposal
+    assert c.signer.journal.vote(slot, wallet("Dave").hotkey.ss58_address) == peer_vote
+    assert len(c.signatures) == 1
+
+
+@pytest.mark.parametrize("policy", ["one_group"], indirect=True)
+async def test_peer_transport_cannot_substitute_local_vote(producer_case, monkeypatch):
+    c = producer_case
+
+    def local_vote_port(_):
+        async def vote(request):
+            return sign_object(request.proposal, wallet("Charlie"))
+
+        return vote
+
+    monkeypatch.setattr(c.producer.exchange, "vote_port", local_vote_port)
+    with pytest.raises(ValueError, match="peer vote changed its evaluator"):
+        await c.producer.step(c.cohort, c.prefix)
+    slot = c.signer.journal.slot(c.producer._original.proposal)
+    assert c.signer.journal.vote(slot, wallet("Dave").hotkey.ss58_address) is None
+    assert c.feed.selected.latest(c.cohort).adoption.early_release is None
 
 
 async def test_missing_original_with_signed_intent_requires_repair(producer_case, tmp_path):
