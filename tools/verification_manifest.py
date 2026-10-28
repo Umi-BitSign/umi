@@ -126,6 +126,11 @@ for name, version in sorted(current_external.items()):
 body = {
     "schema": "umi-native-verification-dependencies/1",
     "abi": "umi-native-request-verification/1",
+    "extensions": {
+        "archived_execution_shared_incumbent_v2": "umi-native-shared-incumbent/2",
+        "shared_incumbent_source_terminal_v2": "umi-native-shared-incumbent/2",
+        "shared_incumbent_source_participant_v2": "umi-native-shared-incumbent/2",
+    },
     "compatibility_basis": (
         "Native signed closure, endpoint ancestry/content, execution, paid-work, restart, "
         "interruption and reward lifecycle fixture parity; source manifest alone does not "

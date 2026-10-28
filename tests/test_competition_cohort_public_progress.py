@@ -420,6 +420,8 @@ def test_execution_counts_are_separate_from_certification_and_current_native_wor
             total=103,
             percent=100 * 3 / 103,
             exported_executions=94,
+            exported_inferences=64,
+            reused_incumbent_observations=30,
             exported_comparisons=40,
             projected_executions=1236,
             eta_seconds=None,
@@ -429,6 +431,8 @@ def test_execution_counts_are_separate_from_certification_and_current_native_wor
     result = state.snapshot(C)
     assert result["stage"] == "model_evaluation" and result["completed"] == 3
     assert result["exported_executions"] == 94
+    assert result["exported_inferences"] == 64
+    assert result["reused_incumbent_observations"] == 30
     assert result["overall_percent"] is None and result["overall_eta_seconds"] is None
     for old_stage in (
         "model_acceptance_export",

@@ -321,9 +321,19 @@ def test_remote_compact_transport_multiple_parts(tmp_path):
             self.data[path or "objects/" + sha] = raw
             return {"content_sha256": sha}
 
-        def put_many(self, objects):
-            for raw in objects.values():
-                self.put_bytes(raw)
+        def put_many(self, objects, *, report=None):
+            from umi.competition_transport_verification import TransferProgress
+
+            with TransferProgress(
+                "proof_graph_replication",
+                sum(map(len, objects.values())),
+                report,
+                total_operations=len(objects),
+            ) as progress:
+                for raw in objects.values():
+                    self.put_bytes(raw)
+                    progress.advance(len(raw))
+                    progress.advance_operations(1)
 
         def reference_for_path(self, path):
             return None  # This byte-only fixture has no durable receipt owner.

@@ -470,3 +470,23 @@ async def test_background_progress_and_forecast_accounting_continue_during_block
             await running
     with closing(ForecastLedger(h.root / "forecast-accounting")) as restored:
         assert restored.records(meter.forecast.scope) == records
+
+
+def test_shared_incumbent_metadata_distinguishes_reused_observations_and_actual_inferences(
+    exported,
+):
+    h = exported
+    key = h.order()
+    archive = h.obj(dict(schema="umi-request-execution-archive/2", steps=["99" * 32] * 6))
+    terminal = h.obj(dict(terminal=dict(execution_archive_sha256=archive)))
+    h.save(f"terminals/{key}/{identity(E1)}.json", dict(sha256=terminal))
+    meter = ExecutionExportProgress(h.root, h.roster)
+    first = meter.sample()
+    assert first["exported_executions"] == 6
+    assert first["exported_inferences"] == 3
+    assert first["reused_incumbent_observations"] == 3
+    restored = ExecutionExportProgress(h.root, h.roster)
+    restarted = restored.sample()
+    assert restarted["exported_inferences"] == 3
+    assert restarted["reused_incumbent_observations"] == 3
+    assert restored.read_bytes == 0

@@ -7,7 +7,10 @@ from typing import Literal
 from pydantic import Field
 
 from .competition_cohort_endpoint_archive import read_endpoint_object
-from .competition_cohort_request_partial import PartialRequestManifest, review_partial_request
+from .competition_cohort_request_partial import (
+    parse_partial_request_manifest,
+    review_partial_request,
+)
 from .competition_execution import ExecutionBoundary
 from .concurrency import run_owned_thread, wait_for_owned
 from .open_competition import Signature, digest, identity, verify_signature
@@ -86,9 +89,7 @@ def review_request_inventory(
     ) != identity(assignment.delivery.receipt.evaluator_hotkey):
         raise ValueError("request inventory changed its original evaluator or assignment")
     verify_signature(body, signed.signature)
-    manifest = PartialRequestManifest.model_validate_json(
-        read_endpoint_object(objects, body.manifest_sha256)
-    )
+    manifest = parse_partial_request_manifest(read_endpoint_object(objects, body.manifest_sha256))
     return assignment, manifest, signed
 
 

@@ -32,9 +32,9 @@ from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_request_inventory import RequestInventory, read_request_inventory
 from .competition_cohort_request_partial import (
     MAX_PARTIAL_ITEMS,
-    PartialRequestManifest,
     collect_partial_request,
     collect_partial_request_with_inputs,
+    parse_partial_request_manifest,
     review_partial_request,
 )
 from .competition_cohort_request_reuse import (
@@ -184,7 +184,7 @@ class RequestCompletionFiles:
             return None
         try:
             ref = read(directory / latest, _Reference, maximum_bytes=1024)
-            manifest = PartialRequestManifest.model_validate_json(
+            manifest = parse_partial_request_manifest(
                 read_endpoint_object(self.objects, ref.sha256)
             )
         except FileNotFoundError:
@@ -493,7 +493,7 @@ class RequestCompletionFiles:
             if latest is None:
                 raise FileNotFoundError("original evaluator partial inventory is not delivered")
             ref = read(directory / latest, _Reference, maximum_bytes=1024)
-            manifest = PartialRequestManifest.model_validate_json(
+            manifest = parse_partial_request_manifest(
                 read_endpoint_object(self.objects, ref.sha256)
             )
             assignment = CohortExecutionAssignment.model_validate_json(
@@ -525,14 +525,15 @@ class RequestCompletionFiles:
             ):
                 raise FileNotFoundError("completed request awaits original terminal delivery")
             assignment, job = owner.assignment_and_job(slot)
+            shared = owner.paired_incumbent_reuse(job)
             for index in range(step_count(job)):
-                if owner.step(job, index, db=db) is None:
+                if owner.step(job, index, db=db, shared=shared or False) is None:
                     attempt = owner.head(job, index, db=db)
                     if attempt is not None and owner.result(job, attempt, db=db) is not None:
                         raise FileNotFoundError(
                             "completed execution awaits its original finish observation"
                         )
-            manifest = collect_partial_request(owner, slot, collected)
+            manifest = collect_partial_request(owner, slot, collected, shared=shared or False)
             key = collected.retain(manifest)
             review_partial_request(
                 key,
@@ -598,7 +599,7 @@ class RequestCompletionFiles:
         assignment = CohortExecutionAssignment.model_validate_json(
             collected(body.assignment_sha256)
         )
-        manifest = PartialRequestManifest.model_validate_json(collected(body.manifest_sha256))
+        manifest = parse_partial_request_manifest(collected(body.manifest_sha256))
         reviewed = review_partial_request(
             body.manifest_sha256,
             collected,
@@ -676,7 +677,7 @@ class RequestCompletionFiles:
                 raise FileNotFoundError("post-cutoff evaluator inventory is not delivered")
             ref = read(directory / latest, _Reference, maximum_bytes=1024)
             signed = read_request_inventory(ref.sha256, self.objects)
-            manifest = PartialRequestManifest.model_validate_json(
+            manifest = parse_partial_request_manifest(
                 read_endpoint_object(self.objects, signed.inventory.manifest_sha256)
             )
             assignment = CohortExecutionAssignment.model_validate_json(

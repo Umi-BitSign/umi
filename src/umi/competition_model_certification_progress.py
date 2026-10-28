@@ -12,6 +12,14 @@ class ModelCertificationProgress:
         self.lock = RLock()
         self.holds = OrderedDict()
         self.samples = {}
+        self.owner_cohort = None
+        self.owner_stage = None
+        self.waiting_since = {}
+
+    def acceptance_owner(self, cohort, stage):
+        """Record the existing serial worker; never inspect its journal here."""
+        with self.lock:
+            self.owner_cohort, self.owner_stage = cohort, stage
 
     def operation(self, cohort, submission, stage, *, error_type=None):
         key = (cohort, submission)
@@ -50,13 +58,21 @@ class ModelCertificationProgress:
             ]
             regressed = done < prior["high"]
             remaining = total - done
+            waiting = bool(remaining and self.owner_cohort and self.owner_cohort != cohort)
+            if waiting:
+                waiting_since = self.waiting_since.setdefault(cohort, now)
+            else:
+                waiting_since = now
+                self.waiting_since.pop(cohort, None)
             rate = delta / elapsed if delta > 0 and elapsed > 0 else None
             idle = remaining > 0 and now - prior["last_progress"] > 300
             eta = (
                 0
                 if not remaining
                 else (
-                    remaining / rate if rate and not holds and not regressed and not idle else None
+                    remaining / rate
+                    if rate and not holds and not regressed and not idle and not waiting
+                    else None
                 )
             )
             # A replacement roster has no comparable completion rate yet. Show
@@ -68,7 +84,12 @@ class ModelCertificationProgress:
                     max(0, 30 * remaining - elapsed),
                     max(0, 1200 * remaining - elapsed),
                 ]
-                if remaining and eta is None and not holds and not regressed and not idle
+                if remaining
+                and eta is None
+                and not holds
+                and not regressed
+                and not idle
+                and not waiting
                 else None
             )
             basis = (
@@ -78,6 +99,8 @@ class ModelCertificationProgress:
                 if regressed
                 else "blocked_acceptance_stage"
                 if holds
+                else "waiting_for_acceptance_owner"
+                if waiting
                 else "certificate_completion_idle"
                 if idle
                 else "measured_current_roster_certificate_throughput"
@@ -106,14 +129,21 @@ class ModelCertificationProgress:
                     + "preparation, evaluation and activation remain separate"
                 ),
                 eta_assumptions=(
-                    "remaining models have comparable cost; "
+                    "another cohort owns the serial acceptance worker; queue delay is unmeasured"
+                    if waiting
+                    else "remaining models have comparable cost; "
                     "no unresolved holds, new roster replacements or cross-cohort queue wait"
                 ),
+                acceptance_owner_cohort_sha256=self.owner_cohort,
+                acceptance_owner_stage=self.owner_stage,
+                acceptance_queue_wait_seconds=max(0, now - waiting_since) if waiting else 0,
+                acceptance_queue_eta_scope="dispatch_wait_only; not certification completion",
+                reason_code="waiting_for_acceptance_owner" if waiting else None,
                 estimated_finish_unix_ms=None if eta is None else int((time.time() + eta) * 1000),
                 blocked_count=len(holds),
                 blocked=holds,
                 repair_required=regressed,
-                stalled_or_retrying=bool(holds) or regressed or idle,
+                stalled_or_retrying=bool(holds) or regressed or idle or waiting,
                 rate_scope="this observer process and unchanged selected roster",
                 certification_authority=False,
             )

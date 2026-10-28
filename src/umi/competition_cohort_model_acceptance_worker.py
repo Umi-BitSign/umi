@@ -33,6 +33,7 @@ from .protocol import canonical_json_bytes
 
 _LOG = logging.getLogger("umi.competition.progress")
 _PROVIDER_RETRY_OTHER_ATTEMPTS = 3
+_PRIORITY_ATTEMPTS = 4
 _ACCEPTANCE_STAGE_PLANNING_SECONDS = {
     "retained_lookup": (0, 15),
     "input_readiness": (0, 60),
@@ -45,6 +46,13 @@ _ACCEPTANCE_STAGE_PLANNING_SECONDS = {
     "publication": (0, 60),
     "export": (0, 60),
 }
+
+
+def cohort_sequence_priority(plans, bindings):
+    """Scheduling metadata only; progression holds and signed plans stay intact."""
+    known = {binding.cohort_sha256 for binding in bindings}
+    selected = (digest(plan) for plan in sorted(plans, key=lambda plan: plan.sequence))
+    return tuple(cohort for cohort in selected if cohort in known)
 
 
 class ModelAcceptanceWorker:
@@ -67,6 +75,7 @@ class ModelAcceptanceWorker:
         self.inputs, self.output, self.batch_size = inputs, output, batch_size
         self.cursors = {}
         self._fair_start = 0
+        self._priority_attempts = 0
         self._priority_offsets = {}
         self._provider_retries = {}
         self._stage_durations = defaultdict(lambda: deque(maxlen=16))
@@ -97,6 +106,7 @@ class ModelAcceptanceWorker:
         # Stage identity is public digest metadata; exception text can contain
         # private review documents and must never enter these diagnostics.
         started = time.monotonic()
+        self.owner.intake.model_certification_progress.acceptance_owner(cohort, stage)
         samples = tuple(self._stage_durations[stage])
         initial_low, initial_high = _ACCEPTANCE_STAGE_PLANNING_SECONDS[stage]
         if len(samples) >= 5:
@@ -432,7 +442,11 @@ class ModelAcceptanceWorker:
         # cohort by many large model transfers. Give every pending cohort one
         # attempt per pass and rotate the first cohort between passes.
         rotated = (*bindings[self._fair_start :], *bindings[: self._fair_start])
-        self._fair_start = (self._fair_start + 1) % len(bindings)
+        preferred = next(
+            (cohort for cohort in self.priority_cohorts if priority_entries.get(cohort)), None
+        )
+        if preferred is None:
+            self._priority_attempts = 0
         ordered = (
             sorted(
                 rotated,
@@ -444,12 +458,33 @@ class ModelAcceptanceWorker:
             if urgent
             else bindings
         )
+        priority_dispatch = preferred is not None
+        if priority_dispatch:
+            # One complete native attempt is the scheduling boundary. Revisit
+            # pending work after it; never interrupt a live review or transfer.
+            # Holds govern progression, not whether intake can be certified.
+            if self._priority_attempts < _PRIORITY_ATTEMPTS:
+                selected = next(b for b in bindings if b.cohort_sha256 == preferred)
+                self._priority_attempts += 1
+            else:
+                background = tuple(b for b in rotated if b.cohort_sha256 != preferred)
+                selected = next(
+                    (b for b in background if priority_entries.get(b.cohort_sha256)),
+                    background[0]
+                    if background
+                    else next(b for b in bindings if b.cohort_sha256 == preferred),
+                )
+                self._priority_attempts = 0
+                self._fair_start = (bindings.index(selected) + 1) % len(bindings)
+            ordered = (selected,)
+        else:
+            self._fair_start = (self._fair_start + 1) % len(bindings)
         for binding in ordered:
             cohort = binding.cohort_sha256
             priority = priority_entries.get(cohort)
             batch = self.batch_size if not urgent or priority else 1
             try:
-                if contended and priority:
+                if (contended or priority_dispatch) and priority:
                     # Pending latest work already identifies the selected
                     # submission. Avoid a second ledger scan and leave the
                     # export cursor for the ordinary catch-up pass.
@@ -478,7 +513,10 @@ class ModelAcceptanceWorker:
                         )
                     work = dict((*priority, *entries))
                 for key, sub in work.items():
+                    diagnostics = getattr(self.owner.intake, "model_certification_progress", None)
                     try:
+                        if diagnostics is not None:
+                            diagnostics.acceptance_owner(cohort, "dispatch")
                         with work_heartbeats():
                             await self._one(cohort, sub)
                         ready += 1
@@ -489,12 +527,16 @@ class ModelAcceptanceWorker:
                                     0, self._priority_offsets.get(cohort, 0) - 1
                                 )
                             self._provider_retries.pop(cohort, None)
-                        elif deferred and contended and priority:
+                        elif deferred and (contended or priority_dispatch) and priority:
                             self._provider_retries[cohort] = (deferred[0], deferred[1] + 1)
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
                         error_type = type(error).__name__
-                        if contended and priority:
+                        if cohort == preferred:
+                            # An unavailable oldest item must not waste a whole
+                            # priority quantum before another cohort can run.
+                            self._priority_attempts = _PRIORITY_ATTEMPTS
+                        if (contended or priority_dispatch) and priority:
                             deferred = self._provider_retries.get(cohort)
                             if provider_retry_due.get(cohort) and deferred and key == deferred[0]:
                                 # The retry came from the queue head. Its
@@ -518,6 +560,9 @@ class ModelAcceptanceWorker:
                                     self._provider_retries[cohort] = (deferred[0], deferred[1] + 1)
                                 elif isinstance(error, RegistrationProviderTimeout):
                                     self._provider_retries[cohort] = (key, 0)
+                    finally:
+                        if diagnostics is not None:
+                            diagnostics.acceptance_owner(None, None)
                 if scanned_entries:
                     self.cursors[cohort] = entries[-1][0] if len(entries) == batch else ""
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -530,7 +575,7 @@ class ModelAcceptanceWorker:
             "last_error_type": error_type,
             "pending_latest_cohorts": [
                 binding.cohort_sha256
-                for binding in ordered
+                for binding in (bindings if priority_dispatch else ordered)
                 if priority_entries.get(binding.cohort_sha256)
             ],
             "fair_rotation_next": self._fair_start,

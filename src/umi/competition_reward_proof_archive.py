@@ -62,8 +62,9 @@ Kind = Literal["history", "endpoint", "interval", "registration"]
 class _RemotePublicationBatch:
     """Borrow bounded immutable objects across fields before the frame barrier."""
 
-    def __init__(self, remote):
+    def __init__(self, remote, *, progress=None):
         self.remote, self.objects, self.nbytes = remote, {}, 0
+        self.progress = progress
 
     def retain(self, raw, *, sha=None):
         checked_size(len(raw), MAX_PROOF_OBJECT_BYTES)
@@ -84,7 +85,25 @@ class _RemotePublicationBatch:
         if self.objects:
             # The existing store owns eight workers, its aggregate active-byte
             # budget and each durable completion. No frame is published here.
-            self.remote.put_many(self.objects)
+            if self.progress is None:
+                self.remote.put_many(self.objects)
+            else:
+                # Forward the store's existing durable counts. Enqueueing bytes
+                # or receiving an unretained response is never completion.
+                child = self.progress.child_report()
+                counted = {"native_operations": 0, "restored_operations": 0}
+
+                def report(event):
+                    for name, previous in counted.items():
+                        current = event[name]
+                        if current > previous:
+                            self.progress.advance(
+                                current - previous, restored=name == "restored_operations"
+                            )
+                            counted[name] = current
+                    child(event)
+
+                self.remote.put_many(self.objects, report=report)
             self.objects, self.nbytes = {}, 0
 
 
@@ -652,6 +671,13 @@ class RewardProofArchive:
             raise ValueError("reward archive field count exceeds its bound")
         refs = {}
         recipes = []
+        object_sizes = {}
+
+        def expected_object(sha, size):
+            if sha in object_sizes and object_sizes[sha] != size:
+                raise ValueError("encoded transport object length differs")
+            object_sizes[sha] = size
+
         for name, parts in fields.items():
             if (
                 type(parts) is not tuple
@@ -667,14 +693,14 @@ class RewardProofArchive:
                 segments = inspect_recipe(recipe, expanded_bytes=size, kind="proof")
                 total += size
                 checked_size(total, MAX_FIELD_BYTES)
-                refs[name].append(
-                    _Part(
-                        sha256=sha,
-                        expanded_bytes=size,
-                        recipe_sha256=hashlib.sha256(recipe).hexdigest(),
-                    )
-                )
-                recipes.append((recipe, segments))
+                recipe_sha = hashlib.sha256(recipe).hexdigest()
+                refs[name].append(_Part(sha256=sha, expanded_bytes=size, recipe_sha256=recipe_sha))
+                # Count the complete graph during its required metadata pass.
+                # Do not read, decode, hash or probe any payload for telemetry.
+                expected_object(recipe_sha, len(recipe))
+                for _, object_sha, object_size in segments:
+                    expected_object(object_sha, object_size)
+                recipes.append((recipe_sha, recipe, segments))
             refs[name] = tuple(refs[name])
         frame = _Frame(
             schema="umi-reward-proof-frame/1", kind=kind, key=key, context=context, fields=refs
@@ -689,32 +715,47 @@ class RewardProofArchive:
         # completed frame or an interrupted transfer. The timer still includes
         # this call's bounded compatibility preparation on successful exports.
         with progress, self._directory_scope():
-            retained = {}
-            publication = None if self.remote is None else _RemotePublicationBatch(self.remote)
+            # This scope excludes the final frame barrier, which remains in
+            # proof_archive_export. Reused completions never inflate its rate.
+            with TransferProgress(
+                "proof_archive_objects",
+                len(object_sizes),
+                progress.child_report(),
+                unit="objects",
+                planning_unit_seconds=(0.01, 60),
+            ) as objects_progress:
+                retained = set()
+                publication = (
+                    None
+                    if self.remote is None
+                    else _RemotePublicationBatch(self.remote, progress=objects_progress)
+                )
 
-            def retain(raw):
-                if self.remote is None:
-                    return self._retain_bytes(raw)
-                return publication.retain(raw)
-
-            for recipe, segments in recipes:
-                for _, sha, size in segments:
+                def retain(sha, size, obtain):
                     if sha in retained:
-                        if retained[sha] != size:
-                            raise ValueError("encoded transport object length differs")
-                        continue
+                        return
                     if self._published_object_present(sha, size):
-                        retained[sha] = size
-                        continue
-                    raw = resolve(sha, size)
+                        retained.add(sha)
+                        objects_progress.advance(1, restored=True)
+                        return
+                    raw = obtain()
                     if type(raw) is not bytes or len(raw) != size:
                         raise ValueError("encoded transport object size differs")
-                    if retain(raw) != sha:
+                    actual = (
+                        self._retain_bytes(raw) if publication is None else publication.retain(raw)
+                    )
+                    if actual != sha:
                         raise ValueError("encoded transport object digest differs")
-                    retained[sha] = size
-                retain(recipe)
-            if publication is not None:
-                publication.flush()
+                    retained.add(sha)
+                    if publication is None:
+                        objects_progress.advance(1)
+
+                for recipe_sha, recipe, segments in recipes:
+                    for _, sha, size in segments:
+                        retain(sha, size, lambda sha=sha, size=size: resolve(sha, size))
+                    retain(recipe_sha, len(recipe), lambda recipe=recipe: recipe)
+                if publication is not None:
+                    publication.flush()
             if self.remote is None:
                 if self.physical_budget is not None:
                     self.physical_budget.check(self.root, MAX_FRAME_BYTES)

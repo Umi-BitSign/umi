@@ -32,6 +32,8 @@ _COUNTS = (
     "completed",
     "total",
     "exported_executions",
+    "exported_inferences",
+    "reused_incumbent_observations",
     "exported_comparisons",
     "delivered_orders",
     "delivered_order_executions",
@@ -127,7 +129,12 @@ class ExecutionExportProgress:
                     raise ValueError("execution progress repeats a saved step")
                 if any(type(i) is not int or not 0 <= i < 4096 for i in indices):
                     raise ValueError("execution progress step index is invalid")
-                value = indices
+                value = (
+                    dict(indices=indices, reused=sum(index % 2 for index in indices))
+                    if value.get("schema")
+                    in {"umi-cohort-partial-request/2", "umi-request-execution-archive/2"}
+                    else indices
+                )
         self.facts[key] = dict(stamp=stamp, value=value)
         return value
 
@@ -194,7 +201,7 @@ class ExecutionExportProgress:
         return self._object(self._fact(ref, "reference"), "partial")
 
     def _sample(self):
-        completed = executions = comparisons = orders = delivered_total = 0
+        completed = executions = comparisons = orders = delivered_total = reused = 0
         profiles = set()
         producers = set()
         for submission in self.selected:
@@ -232,9 +239,15 @@ class ExecutionExportProgress:
                 else:
                     archive = self._object(terminal, "terminal")
                     indices = self._object(archive, "archive")
-                    if len(indices) != expected:
+                    if (
+                        len(indices["indices"] if isinstance(indices, dict) else indices)
+                        != expected
+                    ):
                         raise ValueError("execution progress terminal has incomplete steps")
                     sealed += 1
+                if isinstance(indices, dict):
+                    reused += indices["reused"]
+                    indices = indices["indices"]
                 if any(i >= expected for i in indices):
                     raise ValueError("execution progress exceeds its original order")
                 executions += len(indices)
@@ -252,6 +265,8 @@ class ExecutionExportProgress:
             total=len(self.selected),
             percent=round(100 * completed / len(self.selected), 3) if self.selected else None,
             exported_executions=executions,
+            exported_inferences=executions - reused,
+            reused_incumbent_observations=reused,
             exported_comparisons=comparisons,
             delivered_orders=orders,
             delivered_order_executions=delivered_total,

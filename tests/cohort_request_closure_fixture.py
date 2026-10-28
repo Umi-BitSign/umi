@@ -84,7 +84,7 @@ def endpoint_inputs(original, scenario, miner_name):
     scenario["endpoints"] = tuple(results)
 
 
-async def closure_fixture(original, tmp_path, *, prepared=None):
+async def closure_fixture(original, tmp_path, *, prepared=None, shared_incumbents=False):
     b = make_round(original, include_outcomes=False) if prepared is None else prepared
     opened = next(
         i for i, item in enumerate(b["history"].transitions) if item.transition.phase == "requests"
@@ -109,8 +109,14 @@ async def closure_fixture(original, tmp_path, *, prepared=None):
     for s in b["scenarios"]:
         s["history"] = b["history"]
         first = s["artifacts"][0].job
+        shared_model = shared_incumbents and first.mode == "paired_model"
         body = RecoverableEvaluationOrder(
-            schema="umi-recoverable-evaluation-order/1",
+            schema=(
+                "umi-recoverable-evaluation-order/2"
+                if shared_model
+                else "umi-recoverable-evaluation-order/1"
+            ),
+            incumbent_observation_mode="first_reserved_per_scope/1" if shared_model else None,
             **{
                 k: getattr(first, k)
                 for k in (
@@ -150,7 +156,8 @@ async def closure_fixture(original, tmp_path, *, prepared=None):
             )
             cfg = CohortExecutionConfig(
                 schema="umi-cohort-execution-config/1",
-                directory=str(tmp_path / (digest(order) + name)),
+                directory=str(tmp_path / (name if shared_incumbents else digest(order) + name)),
+                share_paired_incumbent=shared_incumbents,
                 policy_sha256=digest(b["policy"]),
                 signer=evaluator,
                 cohorts=(
@@ -163,7 +170,21 @@ async def closure_fixture(original, tmp_path, *, prepared=None):
             owner = CohortExecutionJournal(cfg, b["policy"])
             job = owner.retain(assignment, source, 1500)
             slot = order_slot(order.order)
+            if shared_incumbents:
+                owner.reuse_incumbent(
+                    slot, job, boundary(1500 if owner._incumbent_source(job) is None else 1550)
+                )
+            borrowed = owner.paired_incumbent_reuse(job)
             for index, step in enumerate(evidence.steps):
+                if borrowed is not None:
+                    if index % 2:
+                        continue
+                    step = step.model_copy(
+                        update={
+                            "started": boundary(1550 + index),
+                            "finished": boundary(1551 + index),
+                        }
+                    )
                 attempt = owner.begin(job, index, source, step.started)
                 owner.observe(job, attempt, step.execution)
                 owner.finish(job, attempt, step.finished)

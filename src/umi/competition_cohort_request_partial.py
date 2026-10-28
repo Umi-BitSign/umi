@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Literal, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from .competition_cohort_attempt_worker import EndpointAttemptSuccessor
 from .competition_cohort_endpoint import (
@@ -33,7 +33,7 @@ from .competition_cohort_endpoint_selection import (
     selection_slot,
 )
 from .competition_cohort_endpoint_terminal import EndpointTerminalCase
-from .competition_cohort_execution import _ordered
+from .competition_cohort_execution import _ordered, paired_incumbent_scope
 from .competition_cohort_execution_journal import (
     CohortExecutionAssignment,
     CohortExecutionJournal,
@@ -44,6 +44,15 @@ from .competition_cohort_order_queue import check_delivery_receipt
 from .competition_cohort_order_signer import order_slot
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder, recoverable_order_job
 from .competition_cohort_recovery import verify_recovery_quorum
+from .competition_cohort_request_terminal import (
+    RequestExecutionArchive,
+    SharedIncumbentArchiveSource,
+    SignedRequestTerminal,
+    parse_request_execution_archive,
+    read_shared_incumbent_source,
+    retained_shared_incumbent_source,
+)
+from .competition_evaluation_runtime import prepared_runtime_authorization
 from .competition_execution import ExecutionStep
 from .competition_runner import validate_case_execution
 from .config import Limits
@@ -57,6 +66,8 @@ MAX_PARTIAL_ITEMS = 8192
 
 class _PartialObjectCollector(Protocol):
     def retain(self, value: StrictProtocolModel) -> str: ...
+
+    def __call__(self, key: str) -> bytes: ...
 
 
 class PartialExecutionStep(StrictProtocolModel):
@@ -101,6 +112,20 @@ class PartialRequestManifest(StrictProtocolModel):
         if self.item_count > MAX_PARTIAL_ITEMS:
             raise ValueError("partial request inventory exceeds its bound")
         return self
+
+
+class SharedPartialRequestManifest(PartialRequestManifest):
+    schema_: Literal["umi-cohort-partial-request/2"] = Field(alias="schema")
+    incumbent_source: SharedIncumbentArchiveSource
+
+
+_PARTIAL_MANIFEST = TypeAdapter(
+    Annotated[PartialRequestManifest | SharedPartialRequestManifest, Field(discriminator="schema_")]
+)
+
+
+def parse_partial_request_manifest(raw):
+    return _PARTIAL_MANIFEST.validate_json(raw)
 
 
 def _review_selection(selected, assignment, objects, policy, case_id, opened, closed):
@@ -150,7 +175,7 @@ def review_partial_request(
     completed_by_block: int,
 ) -> CohortExecutionAssignment:
     """Replay partial originals; never infer completion, eligibility or absence."""
-    manifest = PartialRequestManifest.model_validate_json(read_endpoint_object(objects, refsha))
+    manifest = parse_partial_request_manifest(read_endpoint_object(objects, refsha))
     assignment = CohortExecutionAssignment.model_validate_json(
         read_endpoint_object(objects, manifest.assignment_sha256)
     )
@@ -168,6 +193,43 @@ def review_partial_request(
     job = recoverable_order_job(order, evaluator)
     width = 2 if job.mode == "paired_model" else 1
     previous = None
+    source = None
+    authorization = None
+    if isinstance(manifest, SharedPartialRequestManifest):
+        if job.incumbent_observation_mode is None:
+            raise ValueError("partial shared incumbent lacks a prospective signed order capability")
+        binding = manifest.incumbent_source
+        source, _assignment, _outputs = read_shared_incumbent_source(
+            binding.terminal_sha256,
+            objects,
+            policy,
+            started_after=opened_at_block,
+            finished_by=completed_by_block,
+        )
+        if paired_incumbent_scope(job) != paired_incumbent_scope(source.job) or digest(
+            job
+        ) == digest(source.job):
+            raise ValueError("partial shared incumbent changed its original scope")
+        _ordered(
+            binding.source_reserved_at,
+            None,
+            started_after=opened_at_block,
+            finished_by=completed_by_block,
+        )
+        _ordered(
+            source.steps[0].started,
+            binding.source_reserved_at,
+            started_after=opened_at_block,
+            finished_by=completed_by_block,
+        )
+        _ordered(
+            binding.reuse_observed_at,
+            source.steps[-1].finished,
+            started_after=opened_at_block,
+            finished_by=completed_by_block,
+        )
+        previous = binding.reuse_observed_at
+        authorization = prepared_runtime_authorization(job.round, policy)
     for ref in manifest.steps:
         if ref.index >= step_count(job):
             raise ValueError("partial execution step is outside its original assignment")
@@ -187,7 +249,14 @@ def review_partial_request(
             or step.execution.runtime_sha256 != digest(job.runtime)
         ):
             raise ValueError("partial execution changed its original step, model or input")
-        validate_case_execution(step.execution, policy)
+        if source is not None and ref.index % 2:
+            if step != source.steps[ref.index]:
+                raise ValueError("partial shared incumbent changed its original observation")
+            continue
+        if source is None:
+            validate_case_execution(step.execution, policy)
+        else:
+            validate_case_execution(step.execution, policy, runtime_authorization=authorization)
         for boundary in (step.started, step.finished):
             _ordered(
                 boundary, previous, started_after=opened_at_block, finished_by=completed_by_block
@@ -267,16 +336,21 @@ def review_partial_request(
 
 
 def collect_partial_request(
-    owner: CohortExecutionJournal, slot: str, collected: _PartialObjectCollector
+    owner: CohortExecutionJournal,
+    slot: str,
+    collected: _PartialObjectCollector,
+    *,
+    shared=None,
 ) -> PartialRequestManifest:
     """Owning-service reads of immutable originals; no journal writes or RPC."""
-    return collect_partial_request_with_inputs(owner, slot, collected)[0]
+    return collect_partial_request_with_inputs(owner, slot, collected, shared=shared)[0]
 
 
-def collect_partial_request_with_inputs(owner, slot, collected):
+def collect_partial_request_with_inputs(owner, slot, collected, *, shared=None):
     """Return the same collection and its already-read native assignment/job."""
     assignment, job = owner.assignment_and_job(slot)
-    evidence = owner.evidence(slot)
+    shared_source = owner.paired_incumbent_reuse(job) if shared is None else shared
+    evidence = owner.evidence(slot) if job.mode != "paired_model" else None
     if evidence is not None:
         steps = list(enumerate(evidence.steps))
     else:
@@ -284,7 +358,8 @@ def collect_partial_request_with_inputs(owner, slot, collected):
             steps = [
                 (index, step)
                 for index in range(step_count(job))
-                if (step := owner.step(job, index, db=db)) is not None
+                if (step := owner.step(job, index, db=db, shared=shared_source or False))
+                is not None
             ]
 
     def retained_review(selected, case_id):
@@ -384,8 +459,24 @@ def collect_partial_request_with_inputs(owner, slot, collected):
                     )
                 break
     collected.retain(assignment.certificate)
-    manifest = PartialRequestManifest(
-        schema="umi-cohort-partial-request/1",
+    shared = retained_shared_incumbent_source(owner, job, shared=shared_source or False)
+    if shared is not None:
+        original = SignedRequestTerminal.model_validate_json(
+            read_endpoint_object(collected, shared.terminal_sha256)
+        )
+        archive = parse_request_execution_archive(
+            read_endpoint_object(collected, original.terminal.execution_archive_sha256)
+        )
+        if type(archive) is not RequestExecutionArchive:
+            raise ValueError("partial shared incumbent source must be an original archive")
+        # Retain every original object without another semantic validation pass.
+        # Native review below owns verification and its reusable dependencies.
+        collected(original.terminal.assignment_sha256)
+        for key in archive.steps:
+            collected(key)
+    model = PartialRequestManifest if shared is None else SharedPartialRequestManifest
+    manifest = model(
+        schema="umi-cohort-partial-request/1" if shared is None else "umi-cohort-partial-request/2",
         assignment_sha256=collected.retain(assignment),
         steps=tuple(
             PartialExecutionStep(index=index, sha256=collected.retain(step))
@@ -393,5 +484,6 @@ def collect_partial_request_with_inputs(owner, slot, collected):
         ),
         cases=tuple(sorted(cases, key=lambda value: value.case_id)),
         responses=tuple(sorted(responses, key=lambda value: value.case_id)),
+        **({} if shared is None else {"incumbent_source": shared}),
     )
     return manifest, assignment, job

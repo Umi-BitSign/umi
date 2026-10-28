@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, model_validator
 
 from .competition_public_results_directory import atomic_write
 from .competition_verification_rules import runtime_identity
@@ -81,6 +81,38 @@ class PartialExportCheckpoint(StrictProtocolModel):
         return self
 
 
+class SharedSourceRecord(StrictProtocolModel):
+    kind: Literal[
+        "incumbent_source",
+        "incumbent_source_selection",
+        "incumbent_reuse",
+        "assignment",
+        "step",
+        "request_terminal",
+    ]
+    key: Hex32
+    sha256: Hex32
+
+
+class SharedPartialExportCheckpoint(PartialExportCheckpoint):
+    schema_: Literal["umi-private-model-partial-export/2"] = Field(alias="schema")
+    source_records: Annotated[tuple[SharedSourceRecord, ...], Field(min_length=6, max_length=4101)]
+
+
+PARTIAL_EXPORT_CHECKPOINT = TypeAdapter(
+    Annotated[
+        PartialExportCheckpoint | SharedPartialExportCheckpoint,
+        Field(discriminator="schema_"),
+    ]
+)
+
+
+class _CheckpointReader:
+    @staticmethod
+    def model_validate_json(raw):
+        return PARTIAL_EXPORT_CHECKPOINT.validate_json(raw)
+
+
 class ModelPartialExportCheckpoints:
     def __init__(self, root):
         self.root = Path(root) / ".model-partial-export"
@@ -103,7 +135,7 @@ class ModelPartialExportCheckpoints:
         try:
             value = read_private_model(
                 self.root / (key + ".json"),
-                PartialExportCheckpoint,
+                _CheckpointReader,
                 maximum_bytes=MAX_CHECKPOINT_BYTES,
             ).checked()
         except FileNotFoundError:

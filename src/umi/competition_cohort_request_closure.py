@@ -24,12 +24,21 @@ from .competition_cohort_orders import (
     verify_recoverable_order,
 )
 from .competition_cohort_request_inventory import read_request_inventory, review_request_inventory
-from .competition_cohort_request_partial import PartialRequestManifest
+from .competition_cohort_request_partial import (
+    SharedPartialRequestManifest,
+    parse_partial_request_manifest,
+)
 from .competition_cohort_request_progress import (
     certified_request_prefix,
 )
 from .competition_cohort_request_tail import RequestTailObservation, review_request_tail
-from .competition_cohort_request_terminal import SignedRequestTerminal, read_request_terminal
+from .competition_cohort_request_terminal import (
+    SharedRequestExecutionArchive,
+    SignedRequestTerminal,
+    parse_request_execution_archive,
+    read_request_terminal,
+    review_shared_incumbent_participant,
+)
 from .competition_cohort_roster import (
     RecoverableRosterEvidence,
     verify_recoverable_roster_membership,
@@ -208,9 +217,18 @@ def _review_request_participant(
                     "partial request repeats an evaluator or changes its original participant"
                 )
             partial_evaluators.add(who)
-            manifest = PartialRequestManifest.model_validate_json(
-                read_endpoint_object(objects, key)
-            )
+            manifest = parse_partial_request_manifest(read_endpoint_object(objects, key))
+            if isinstance(manifest, SharedPartialRequestManifest):
+                review_shared_incumbent_participant(
+                    manifest.incumbent_source.terminal_sha256,
+                    objects,
+                    policy,
+                    history,
+                    expected_tip_sha256=expected_tip_sha256,
+                    current_block=current_block,
+                    opened_at_block=opened_at_block,
+                    closed_at_block=closed_at_block,
+                )
             certified_cases = {case.case_id for case in manifest.cases}
             pending_cases = tuple(
                 (
@@ -249,6 +267,20 @@ def _review_request_participant(
             opened_at_block=opened_at_block,
             completed_by_block=closed_at_block,
         )
+        archive = parse_request_execution_archive(
+            read_endpoint_object(objects, signed.terminal.execution_archive_sha256)
+        )
+        if isinstance(archive, SharedRequestExecutionArchive):
+            review_shared_incumbent_participant(
+                archive.incumbent_source.terminal_sha256,
+                objects,
+                policy,
+                history,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+                opened_at_block=opened_at_block,
+                closed_at_block=closed_at_block,
+            )
         if (
             assignment.certificate != order
             or identity(assignment.delivery.receipt.evaluator_hotkey)

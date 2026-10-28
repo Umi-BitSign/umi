@@ -10,14 +10,14 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .canonical_reuse import canonical_json_reuse
 from .competition_cohort_history import verify_cohort_history
 from .competition_cohort_intake import history_tip
 from .competition_cohort_order_http import OrderDeliveryPeer, OrderReviewPeer
 from .competition_cohort_order_queue import CohortOrderQueue, CohortOrderQueueConfig
-from .competition_cohort_order_signer import CohortOrderParticipant
+from .competition_cohort_order_signer import CohortOrderParticipant, order_slot
 from .competition_cohort_order_worker import CohortOrderWorker
 from .competition_cohort_orders import RecoverableEvaluationOrder
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
@@ -38,6 +38,14 @@ class OrderHostConfig(StrictProtocolModel):
     batch_size: Annotated[int, Field(ge=1, le=256)] = 16
     poll_seconds: Annotated[int, Field(ge=1, le=60)] = 5
     operation_timeout_seconds: Annotated[int, Field(ge=1, le=3600)] = 2400
+    share_paired_incumbent: bool = False
+
+    @model_serializer(mode="wrap")
+    def preserve_original_configuration(self, handler):
+        value = handler(self)
+        if not self.share_paired_incumbent:
+            value.pop("share_paired_incumbent", None)
+        return value
 
 
 class _Selection(StrictProtocolModel):
@@ -165,6 +173,30 @@ class CohortOrderHost:
                 cases=cases,
                 evaluators=tuple(k for k in self.queue.config.reviewers if identity(k) != miner),
             )
+            # Preserve every already-selected order, including an incomplete
+            # roster interrupted before the aggregate selection was persisted.
+            slot = order_slot(order)
+            retained = self.queue.journal.get("intent", slot)
+            if retained is not None:
+                previous = self.queue.intent(slot).order
+                ordinary = previous.model_copy(
+                    update={
+                        "schema_": "umi-recoverable-evaluation-order/1",
+                        "incumbent_observation_mode": None,
+                    }
+                )
+                if ordinary != order:
+                    raise ValueError("retained benchmark order changed its original inputs")
+                order = previous
+            elif (
+                self.config.share_paired_incumbent and order.submission.submission.track == "model"
+            ):
+                order = order.model_copy(
+                    update={
+                        "schema_": "umi-recoverable-evaluation-order/2",
+                        "incumbent_observation_mode": "first_reserved_per_scope/1",
+                    }
+                )
             participant = CohortOrderParticipant(
                 consent=record.request.consent,
                 admission=member.admission,

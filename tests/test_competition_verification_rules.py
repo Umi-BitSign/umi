@@ -79,6 +79,7 @@ def test_unrelated_change_preserves_receipts_but_verifier_change_requires_qualif
     manifest = {
         "schema": "umi-native-verification-dependencies/1",
         "abi": rules.VERIFICATION_SEMANTICS,
+        "extensions": rules.VERIFICATION_EXTENSIONS,
         "compatibility_basis": "qualified native fixture parity",
         "sources": {native.name: hashlib.sha256(native.read_bytes()).hexdigest()},
         "external_distributions": {"native-library": ["1.0"]},
@@ -106,6 +107,7 @@ def test_external_version_drift_requires_qualification_without_discarding_comple
     manifest = {
         "schema": "umi-native-verification-dependencies/1",
         "abi": rules.VERIFICATION_SEMANTICS,
+        "extensions": rules.VERIFICATION_EXTENSIONS,
         "compatibility_basis": "qualified native fixture parity",
         "sources": {native.name: hashlib.sha256(native.read_bytes()).hexdigest()},
         "external_distributions": {"native-library": ["1.0"]},
@@ -125,3 +127,15 @@ def test_external_version_drift_requires_qualification_without_discarding_comple
     monkeypatch.setattr(rules, "distribution_version", unavailable)
     with pytest.raises(RuntimeError, match="dependency is unavailable"):
         rules.verify_dependency_manifest(tmp_path, manifest)
+
+
+def test_additive_shared_incumbent_semantics_are_guarded_without_invalidating_legacy_receipts():
+    source = Path(rules.__file__).parent
+    manifest = json.loads((source / "competition_verification_rules.json").read_bytes())
+    assert (
+        rules.verify_dependency_manifest(source, manifest)
+        == hashlib.sha256(b"umi-native-request-verification/1").hexdigest()
+    )
+    manifest["extensions"] = {}
+    with pytest.raises(RuntimeError, match="qualified dependency manifest"):
+        rules.verify_dependency_manifest(source, manifest)

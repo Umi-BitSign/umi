@@ -803,6 +803,18 @@ semantics and checkpoint compatibility are unchanged. Adopt the qualified host
 through the same maintenance path; this internal scheduling change requires no
 miner configuration or follower-image change.
 
+Encoded archive exports report `proof_archive_objects` over all distinct byte
+objects and recipes in the frame. Totals come from the existing recipe metadata
+pass; polling and progress reporting do not read or verify payloads. Completion
+advances only after durable publication or reuse of an authenticated transport
+receipt. Reused objects are reported separately from new publication throughput,
+including after restart. Queued objects are not complete. The final frame barrier
+remains in `proof_archive_export`; a completed object graph alone is not a
+completed frame or native proof acceptance. Both scopes retain elapsed time,
+scoped ETA basis and stalled/retrying status. Install this shared archive code
+through the supported coordinator/reviewer/writer host maintenance path; ordinary
+miner uploads, approved-row followers and original archive formats are unchanged.
+
 For an existing isolated history preparation whose operational allowance is
 too small, use `python -m umi.competition_reward_history_preparation_capacity_cli`.
 This supported transition is retained while deployed preparation directories
@@ -1905,6 +1917,26 @@ files, promotion records, witnesses, record counts or local journal quotas.
 Signed policy, plans, clocks, cutoff evidence and directory bindings remain the
 same. Changing a completion-file budget makes its private verification cache
 miss and requires native replay of the retained originals.
+
+Shared baseline execution is a reader-first upgrade. Keep order-host and
+evaluator `share_paired_incumbent` omitted until every selected order signer,
+request owner, reviewer, settlement and native reward reader can consume `/2`
+orders/jobs and shared execution/archive/partial evidence. The order host obtains
+the ordinary independent quorum on an explicit `first_reserved_per_scope/1`
+sampling choice before dispatch. A config flag or source-maintenance manifest
+alone cannot grant that authority. Existing selected `/1` orders and completed
+work remain exact; an interrupted roster resumes each original selection.
+
+Verify the actual installed release selection for full native consumers before
+enabling new order emission. The upload protocol and model inference entrypoint
+stay compatible; standalone uploaders and followers consuming only approved
+weight rows do not parse this evidence. Existing journal paths, signed cohort
+clocks, runtime authorizations and baseline bundles stay bound to their originals.
+See [recoverable execution](../operators/evaluation.md) for durable source retention,
+repair, progress fields and rollback limits. Disabling new order emission retains
+reading and resumption of selected `/2` jobs; a disabled evaluator holds new `/2`
+work rather than silently choosing independent samples. Do not downgrade a reader
+after shared evidence has been retained. A source merge is not installed adoption.
 
 Before changing services, validate every selected configuration with the target
 runtime, compare the complete path's explicit budgets, and qualify its peak

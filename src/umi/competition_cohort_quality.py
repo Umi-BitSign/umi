@@ -29,8 +29,8 @@ from .competition_cohort_request_closure import (
     verify_certified_request_closure,
 )
 from .competition_cohort_request_terminal import (
-    RequestExecutionArchive,
     SignedRequestTerminal,
+    parse_request_execution_archive,
     replay_archived_execution,
 )
 from .competition_cohort_roster import RecoverableRosterEvidence
@@ -306,7 +306,7 @@ class ClosedQualityReview:
             paired_metric = submission.track == "model" and isinstance(
                 self.history.authority.authority, ModelRewardCohortAuthority
             )
-            archive = RequestExecutionArchive.model_validate_json(
+            archive = parse_request_execution_archive(
                 read_endpoint_object(self.objects, terminal.execution_archive_sha256)
             )
             outputs = replay_archived_execution(

@@ -1820,6 +1820,19 @@ roster marker is published only after every original order is retained. Partial
 selection resumes unchanged; delivery proceeds independently through private
 reviewer HTTP routes and acknowledged evaluator inboxes.
 
+On a fully upgraded installation, set
+`recoverable_service.orders.share_paired_incumbent: true` in the installed owner
+`CompetitionServiceConfig` (the inner recoverable service uses `orders`) and
+`benchmark.execution.share_paired_incumbent: true` in every selected phase
+reviewer. Carry the matching execution configuration into settlement's
+`executions` entries. This durable host selection applies to every configured
+future cohort; preserve it when producing successor controls. It is not a C7-only
+switch. The default omission exists for reader-first rolling upgrades and exact
+old config compatibility, not as the recommended final configuration. The normal
+order quorum then signs the explicit sampling mode for new model orders;
+already-selected `/1` orders stay unchanged. Follow the reader adoption sequence
+and disabled-evaluator behavior in [evaluation](evaluation.md) before enabling it.
+
 Phase review configuration version 5 adds `benchmark`, an
 `umi-cohort-benchmark-host/1` selection with order-signing, inbox and execution
 journals; model/video archives; scratch storage; and completion-export storage.
