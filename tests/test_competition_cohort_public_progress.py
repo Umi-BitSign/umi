@@ -62,6 +62,33 @@ def test_acceptance_planning_range_counts_down_without_external_work(monkeypatch
     assert overdue["stalled_or_retrying"] is True
 
 
+def test_reserved_participation_ages_elapsed_and_withdraws_overdue_eta(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "reserved_participation",
+        dict(
+            cohort_sha256=C,
+            stage="ready_reserved_participation",
+            status="running",
+            completed=0,
+            total=1,
+            elapsed_seconds=5,
+            planning_eta_seconds=[1, 30],
+            eta_scope="ready_reserved_participation_only",
+        ),
+    )
+    now[0] = 20
+    current = state.snapshot(C)["components"]["reserved_participation"]
+    assert current["elapsed_seconds"] == 15
+    assert current["planning_eta_seconds"] == [0, 20]
+    now[0] = 41
+    overdue = state.snapshot(C)["components"]["reserved_participation"]
+    assert overdue["stalled_or_retrying"]
+    assert overdue["planning_eta_seconds"] is None
+
+
 def test_certification_planning_range_counts_down_on_public_reads(monkeypatch):
     now = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
@@ -381,7 +408,7 @@ def test_nested_transfer_remains_current_after_acceptance_heartbeat_ages(monkeyp
 async def test_progress_api_is_available_without_capture_or_database(monkeypatch):
     snapshots = CohortProgressSnapshots()
     monkeypatch.setattr(api, "PUBLIC_COHORT_PROGRESS", snapshots)
-    monkeypatch.setattr(api, "CohortAdmissionQueue", lambda _: None)
+    monkeypatch.setattr(api, "CohortAdmissionQueue", lambda _: SimpleNamespace())
     snapshots.record(
         "certification",
         dict(cohort_sha256=C, completed=92, total=103, percent=100 * 92 / 103, eta_seconds=300),

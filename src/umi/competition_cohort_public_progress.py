@@ -36,6 +36,7 @@ DIRECT_UPLOAD_PROGRESS_FIELDS = (
     "active_object_sha256",
     "active_object_stage",
     "model_sha256",
+    "participation_enqueue_retrying",
 )
 
 _FIELDS = (
@@ -142,6 +143,7 @@ class CohortProgressSnapshots:
             "intake_certification",
             "acceptance",
             "direct_uploads",
+            "reserved_participation",
             "work",
             "request_start",
             "execution",
@@ -242,6 +244,7 @@ class CohortProgressSnapshots:
             "intake_certification",
             "acceptance",
             "direct_uploads",
+            "reserved_participation",
             "work",
             "request_start",
             "execution",
@@ -265,12 +268,17 @@ class CohortProgressSnapshots:
 
                     for worker in value["workers"]:
                         worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
-                if (kind == "acceptance" and value.get("status") == "running") or kind in {
+                if (
+                    kind in {"acceptance", "reserved_participation"}
+                    and value.get("status") == "running"
+                ) or kind in {
                     "certification",
                     "intake_certification",
                 }:
                     if kind == "acceptance":
                         value["elapsed_seconds"] = round(age, 3)
+                    elif kind == "reserved_participation":
+                        value["elapsed_seconds"] = round(value.get("elapsed_seconds", 0) + age, 3)
                     planning = value.get("planning_eta_seconds")
                     if (
                         isinstance(planning, list)

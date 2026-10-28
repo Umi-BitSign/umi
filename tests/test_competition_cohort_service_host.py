@@ -456,7 +456,9 @@ def test_service_startup_rejects_unbound_or_overlapping_selection(
         )
 
 
-@pytest.mark.parametrize("blocked", ["models", "direct_uploads", "legacy_uploads"])
+@pytest.mark.parametrize(
+    "blocked", ["models", "direct_uploads", "legacy_uploads", "reserved_participation"]
+)
 async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
     lifecycle, tmp_path, blocked
 ):
@@ -475,7 +477,16 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
     prepared = await prepare(h)
     entered, release = asyncio.Event(), asyncio.Event()
     thread_entered, thread_release = Event(), Event()
-    calls = {name: 0 for name in ("models", "model_inventory", "direct_uploads", "legacy_uploads")}
+    calls = {
+        name: 0
+        for name in (
+            "models",
+            "model_inventory",
+            "direct_uploads",
+            "legacy_uploads",
+            "reserved_participation",
+        )
+    }
     active = {name: 0 for name in calls}
     peak = {name: 0 for name in calls}
 
@@ -506,6 +517,9 @@ async def test_slow_model_work_does_not_block_uploads_or_native_catalog(
 
     host.uploads = SimpleNamespace(poll_once=legacy)
     host.direct_uploads = SimpleNamespace(poll_once=lambda: asynchronous("direct_uploads"))
+    host.reserved_participation = SimpleNamespace(
+        poll_once=lambda: asynchronous("reserved_participation")
+    )
     host.models = SimpleNamespace(
         poll_once=lambda: asynchronous("models"),
         report_inventory_once=lambda _cohorts: asynchronous("model_inventory"),
@@ -687,7 +701,7 @@ async def test_successor_inventory_keeps_refreshing_while_older_cohort_read_wait
                 successor_repeated.set()
         return {"status": "completed", "completed": 1, "total": 1}
 
-    host._poll_catalogs = host._poll_models = blocked
+    host._poll_registration_pins = host._poll_catalogs = host._poll_models = blocked
     host._poll_model_inventory = inventory
     stop = asyncio.Event()
     task = asyncio.create_task(host._poll(stop))
@@ -702,9 +716,11 @@ async def test_successor_inventory_keeps_refreshing_while_older_cohort_read_wait
         await asyncio.wait_for(task, 5)
 
 
+@pytest.mark.parametrize("selection_changed", [False, True])
 async def test_reconciliation_mutex_contention_retries_without_restarting_owner(
-    lifecycle, tmp_path, caplog
+    lifecycle, tmp_path, caplog, selection_changed
 ):
+    from umi.competition_cohort_direct_model_owner import DirectModelSelectionChanged
     from umi.private_files import PrivateStateBusyError
 
     h = lifecycle
@@ -722,6 +738,8 @@ async def test_reconciliation_mutex_contention_retries_without_restarting_owner(
         nonlocal calls
         calls += 1
         if calls == 1:
+            if selection_changed:
+                raise DirectModelSelectionChanged("issued selection changed")
             raise PrivateStateBusyError("round_journal_lock", "a" * 64, 11)
         stop.set()
         return {"status": "resumed_from_checkpoint"}
