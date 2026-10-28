@@ -1376,6 +1376,13 @@ maximum proof-object size, so two maximum objects or more ordinary chunks can
 use the lanes together. Admission reports whether it waits for the byte budget,
 the worker limit or the same key. Receipt mutations and same-key publication are
 serialized.
+When the optional small-object publication route is selected, at most two lanes
+send batches of four objects and retain a connection for their lane's lifetime.
+Larger direct objects overlap those batches within the same eight-object and
+active-byte limits. Unfinished temporary failures use the original direct path
+after active lanes drain; malformed acknowledgements and conflicts still refuse
+the graph. This scheduling change preserves existing receipts and update inputs;
+select the qualified native producer through its supported host update path.
 Recipes and frames are published only after every child object has a durable
 receipt. A failed graph drains its workers and keeps successful receipts for the
 unchanged retry. Existing frame bytes, signed transport selections and timeout

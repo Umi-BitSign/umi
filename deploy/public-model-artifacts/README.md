@@ -114,7 +114,12 @@ before claiming automatic rollout. Rollback selects the original credential
 file and preserves all completed individual receipts.
 
 The native store reserves all batch member keys and bytes under its existing
-global eight-object admission bound. It retains successful per-object receipts
+global eight-object admission bound. It schedules at most two small-object lanes,
+with at most four objects per request, so one request does not occupy all eight
+slots while waiting for the Worker. Each lane reuses its owned connection across
+requests. Larger direct objects can run alongside those lanes under the same
+aggregate object and byte bounds. The route still accepts up to eight objects
+for compatible older producers. It retains successful per-object receipts
 in one atomic journal transaction, even if other items failed. A lost response,
 unavailable route or individual temporary failure invokes visible direct-S3
 recovery only for unfinished objects and disables further batch attempts for
