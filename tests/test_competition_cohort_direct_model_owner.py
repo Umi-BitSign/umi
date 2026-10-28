@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -1252,6 +1253,114 @@ async def test_promotion_copy_drains_failed_wave_before_aborting(receipt_scenari
     assert multipart.active == 0
     assert multipart.started == [1, 2, 3, 4]
     assert progress.completed == 3
+
+
+@pytest.mark.parametrize("blocked_callback", ["load", "save"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_promotion_checkpoint_keeps_loop_responsive_and_owns_cancelled_work(
+    direct, blocked_callback, cancel
+):
+    loop = asyncio.get_running_loop()
+    main_thread = threading.get_ident()
+    entered, heartbeat = asyncio.Event(), asyncio.Event()
+    release, finished = threading.Event(), threading.Event()
+    journal = direct.owner.journal
+    calls, restored = [], []
+    size = 5 * 1024**2
+    payload = SimpleNamespace(total_parts=2, part_size_bytes=size, total_bytes=2 * size)
+
+    def checkpoint_boundary(name, number):
+        assert threading.get_ident() != main_thread
+        if name == blocked_callback and number == 1 and not release.is_set():
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "test must release its blocked native callback"
+
+    def load_part(number):
+        checkpoint_boundary("load", number)
+        raw = journal.get("promotion-test-part", str(number))
+        return None if raw is None else DirectModelUploadPart.model_validate(raw)
+
+    def save_part(part):
+        checkpoint_boundary("save", part.part_number)
+        journal.put("promotion-test-part", str(part.part_number), part.model_dump(mode="json"))
+        if part.part_number == 1:
+            finished.set()
+
+    class MultipartCopy:
+        async def copy_part(self, _, *, part_number, size_bytes, **kwargs):
+            calls.append(part_number)
+            return DirectModelUploadPart(
+                part_number=part_number, size_bytes=size_bytes, etag=f"{part_number:032x}"
+            )
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    multipart, progress = MultipartCopy(), Progress()
+    task = asyncio.create_task(
+        _copy_promotion_parts(
+            multipart,
+            "preserved",
+            "staging",
+            "upload",
+            payload,
+            2,
+            progress,
+            load_part=load_part,
+            save_part=save_part,
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), 1)
+        assert not task.done() and not finished.is_set()
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()  # Neither cancellation abandons the blocked callback.
+    finally:
+        release.set()
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        assert [part.part_number for part in await task] == [1, 2]
+        assert progress.completed == 2
+    if blocked_callback == "save":
+        assert finished.is_set()  # Cancellation returns only after native durable commit.
+
+    reopened = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    journal = reopened.journal
+    saved = {n for n in (1, 2) if journal.get("promotion-test-part", str(n)) is not None}
+    prior_calls = list(calls)
+    progress = Progress()
+    parts = await _copy_promotion_parts(
+        multipart,
+        "preserved",
+        "staging",
+        "upload",
+        payload,
+        2,
+        progress,
+        load_part=load_part,
+        save_part=save_part,
+        restored_progress=lambda: restored.append(True),
+    )
+    assert [part.part_number for part in parts] == [1, 2]
+    assert sorted(calls[len(prior_calls) :]) == [n for n in (1, 2) if n not in saved]
+    assert len(restored) == len(saved)
+    assert progress.completed + len(restored) == 2
 
 
 @pytest.mark.asyncio

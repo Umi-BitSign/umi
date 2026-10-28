@@ -12,7 +12,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -450,11 +450,12 @@ class ServiceWorkQueue:
             raise ValueError("service retention ordinal prefix is incomplete")
         return rows
 
-    def _retention_catalog(self, *, complete_only=False):
+    def _retention_catalog(self, *, complete_only=False, snapshot_db=None):
         pins = self._registration_pins
         context = {"catalog": self.config.catalog_sha256}
-        with pins.snapshot() as db:
-            pins.check_schema(db, capacity=not complete_only)
+        with pins.snapshot() if snapshot_db is None else nullcontext(snapshot_db) as db:
+            if snapshot_db is None:
+                pins.check_schema(db, capacity=not complete_only)
             saved = pins.load(db, "catalog", context)
             if saved is not None:
                 return saved
@@ -497,25 +498,33 @@ class ServiceWorkQueue:
         capacity. Pending metadata defers pruning until the service's independent
         projection owner finishes it.
         """
+        if complete_only:
+            # This path never writes. One native snapshot binds the catalog,
+            # indices, source revisions and completions consistently, including
+            # all journal/schema checks, without reopening it for each helper.
+            with self._registration_pins.snapshot() as db:
+                return self._retained_registration_blocks(complete_only=True, snapshot_db=db)
+        return self._retained_registration_blocks()
+
+    def _retained_registration_blocks(self, *, complete_only=False, snapshot_db=None):
         pins = self._registration_pins
-        with pins.snapshot() as db:
+        with pins.snapshot() if snapshot_db is None else nullcontext(snapshot_db) as db:
             pins.check_schema(db, capacity=not complete_only)
             rows = self._retention_rows(db)
         if not rows:
             return frozenset()
-        catalog = self._retention_catalog(complete_only=complete_only)
+        catalog = self._retention_catalog(complete_only=complete_only, snapshot_db=snapshot_db)
         catalog_key = digest(catalog)
         work_keys = catalog["result"]["work_keys"]
         if len(rows) > len(work_keys):
             raise ValueError("service retention exceeds its committed catalog")
         contexts = [dict(row=list(row), catalog=catalog_key) for row in rows]
-        with pins.snapshot() as db:
-            pins.check_schema(db, capacity=not complete_only)
-            if (
-                self._retention_rows(db) != rows
-                or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
-                != catalog["sources"]
-            ):
+        with pins.snapshot() if snapshot_db is None else nullcontext(snapshot_db) as db:
+            if snapshot_db is None:
+                pins.check_schema(db, capacity=not complete_only)
+            if (snapshot_db is None and self._retention_rows(db) != rows) or pins.sources(
+                db, [(k, i) for k, i, _ in catalog["sources"]]
+            ) != catalog["sources"]:
                 raise RegistrationPinProjectionPending(
                     0, len(rows), "inventory_changed_before_projection"
                 )
@@ -527,7 +536,9 @@ class ServiceWorkQueue:
         if complete_only:
             if completed != len(rows):
                 raise RegistrationPinProjectionPending(completed, len(rows))
-            return self._retained_pin_blocks(rows, catalog, values, complete_only=True)
+            return self._retained_pin_blocks(
+                rows, catalog, values, complete_only=True, snapshot_db=snapshot_db
+            )
         decoded = 0
         started = time.monotonic()
         with TransferProgress(
@@ -608,15 +619,14 @@ class ServiceWorkQueue:
                 progress.advance(1)
             return self._retained_pin_blocks(rows, catalog, values)
 
-    def _retained_pin_blocks(self, rows, catalog, values, *, complete_only=False):
+    def _retained_pin_blocks(self, rows, catalog, values, *, complete_only=False, snapshot_db=None):
         pins = self._registration_pins
-        with pins.snapshot() as db:
-            pins.check_schema(db, capacity=not complete_only)
-            if (
-                self._retention_rows(db) != rows
-                or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
-                != catalog["sources"]
-            ):
+        with pins.snapshot() if snapshot_db is None else nullcontext(snapshot_db) as db:
+            if snapshot_db is None:
+                pins.check_schema(db, capacity=not complete_only)
+            if (snapshot_db is None and self._retention_rows(db) != rows) or pins.sources(
+                db, [(k, i) for k, i, _ in catalog["sources"]]
+            ) != catalog["sources"]:
                 raise RegistrationPinProjectionPending(
                     len(rows), len(rows), "inventory_changed_after_projection"
                 )
