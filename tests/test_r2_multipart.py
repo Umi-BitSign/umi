@@ -422,3 +422,89 @@ async def test_whole_object_copy_omits_range_header():
         at=AT,
     )
     assert part.size_bytes == 20
+
+
+@pytest.mark.parametrize(
+    "failure,attempts,expected_waits",
+    [
+        ("transport", 3, [0.25, 0.5]),
+        ("unavailable", 3, [0.25, 0.5]),
+        ("forbidden", 1, []),
+        ("cancelled", 1, []),
+        ("malformed", 1, []),
+    ],
+)
+async def test_copy_part_retries_only_bounded_transient_failures(
+    monkeypatch, caplog, failure, attempts, expected_waits
+):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        if failure == "transport":
+            raise httpx.RemoteProtocolError("private provider detail", request=request)
+        if failure == "cancelled":
+            raise asyncio.CancelledError
+        if failure == "malformed":
+            return httpx.Response(200, content=b"not XML")
+        return httpx.Response(503 if failure == "unavailable" else 403)
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    exception = (
+        asyncio.CancelledError
+        if failure == "cancelled"
+        else ValueError
+        if failure == "malformed"
+        else OSError
+    )
+    with pytest.raises(exception):
+        await client.copy_part(
+            KEY,
+            source_key="incoming/v2/source/payload",
+            upload_id="provider-id",
+            part_number=2,
+            offset=5 * 1024**2,
+            size_bytes=5 * 1024**2,
+            source_size_bytes=15 * 1024**2,
+            at=AT,
+        )
+    assert len(requests) == attempts and waits == expected_waits
+    assert all(request.url == requests[0].url for request in requests)
+    assert all(request.headers == requests[0].headers for request in requests)
+    assert dict(requests[0].url.params) == {"partNumber": "2", "uploadId": "provider-id"}
+    assert requests[0].headers["x-amz-copy-source-range"] == "bytes=5242880-10485759"
+    assert "private provider detail" not in caplog.text and KEY not in caplog.text
+    if expected_waits:
+        assert '"maximum_attempts":3' in caplog.text
+        assert '"retry_seconds":0.25' in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["create", "complete"])
+async def test_multipart_creation_and_completion_never_retry_lost_response(monkeypatch, operation):
+    requests, waits = [], []
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        raise httpx.RemoteProtocolError("response lost after server success", request=request)
+
+    monkeypatch.setattr(module.asyncio, "sleep", pause)
+    client = R2MultipartClient(signer(), transport=httpx.MockTransport(send))
+    with pytest.raises(OSError, match="transport unavailable"):
+        if operation == "create":
+            await client.create(KEY, at=AT)
+        else:
+            await client.complete(
+                KEY,
+                upload_id="provider-id",
+                parts=(DirectModelUploadPart(part_number=1, size_bytes=7, etag="ab" * 16),),
+                at=AT,
+            )
+    assert len(requests) == 1 and waits == []
+    assert requests[0].method == "POST"

@@ -4267,8 +4267,8 @@ coverage and consumer release first. No automatic eviction is introduced here.
 Native R2 clients reuse bounded HTTP connections during authenticated candidate
 review/export batches, direct review/materialization and the direct-upload
 service's owned lifetime. Each exchange keeps its original signature, response
-limits, generation checks and timeout. No response caching or write retry is
-added. Overlapping scopes share the same client on one event loop; shutdown
+limits, generation checks and timeout. Pooling adds no response caching or retry
+policy. Overlapping scopes share the same client on one event loop; shutdown
 waits for active requests to release their responses before closing it, including
 when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
@@ -4278,9 +4278,15 @@ Direct-object first verification reads adjacent manifest files through bounded
 contiguous ranges of at most 64 MiB, retaining the same per-file checkpoints,
 ordered stream digest and provider-generation checks. Completed byte facts remain
 reusable when read geometry changes. Transient HEAD/GET HTTP429/500/502/503/504
-responses receive at most three attempts with bounded backoff; read retry logs
-include the numeric status and delay, without provider bodies, keys or credentials.
-Mutation requests are never automatically replayed. While released intake has
+responses and transient transport failures receive at most three attempts with
+bounded backoff. Promotion copy-part PUTs use the same bounded retry policy for
+the exact destination, upload ID, part number, source and range: a lost response
+replaces the same server-side part, and progress counts that part only once.
+Retry logs identify the operation's bounded retry policy, numeric status or
+transport error type, and delay without provider bodies, keys or credentials.
+Multipart creation/completion and other mutations remain single-attempt
+operations. Exhausted part retries still drain their wave and abort the upload;
+this does not provide durable multipart resume. While released intake has
 uncertified latest models, held cohorts still advance in smaller batches; they
 regain normal batches after that backlog clears. Progression holds stay intact.
 Standalone requests and independently
