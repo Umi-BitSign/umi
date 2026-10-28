@@ -74,6 +74,16 @@ _FIELDS = (
     "acceptance_owner_stage",
     "acceptance_queue_wait_seconds",
     "acceptance_queue_eta_scope",
+    "selected_cohort_sha256",
+    "queue_wait_seconds",
+    "queue_wait_scope",
+    "objects_pending",
+    "objects_retrying",
+    "objects_ready",
+    "objects_terminal",
+    "objects_total",
+    "object_count_scope",
+    "owner_report_observed_unix_ms",
     "evaluator",
     "role",
     "producer_epoch_sha256",
@@ -110,6 +120,7 @@ class CohortProgressSnapshots:
             "certification",
             "intake_certification",
             "acceptance",
+            "direct_uploads",
             "work",
             "request_start",
             "execution",
@@ -209,6 +220,7 @@ class CohortProgressSnapshots:
             "certification",
             "intake_certification",
             "acceptance",
+            "direct_uploads",
             "work",
             "request_start",
             "execution",
@@ -220,6 +232,13 @@ class CohortProgressSnapshots:
                 observed, value = entry[kind]
                 age = max(0, now - observed)
                 value.update(age_seconds=round(age, 3), stale=age > 120)
+                if kind == "direct_uploads":
+                    field = (
+                        "elapsed_seconds"
+                        if value.get("status") == "running"
+                        else "queue_wait_seconds"
+                    )
+                    value[field] = round(value.get(field, 0) + age, 3)
                 if kind == "execution_workers":
                     from .competition_cohort_execution_work import aged_stage
 

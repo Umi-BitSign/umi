@@ -720,7 +720,12 @@ class ServiceAdmissionHost:
                     sign=sign,
                     policy=policy,
                 )
-            self.direct_uploads = DirectModelUploadOwners(owners)
+            self.direct_uploads = DirectModelUploadOwners(
+                owners,
+                priority_cohorts=cohort_sequence_priority(
+                    c.series.cohorts, [owner.config for owner in owners.values()]
+                ),
+            )
             intake.pending_admission_uploads = DirectAdmissionDrain(self.direct_uploads)
         self.preparation = CohortPreparation(
             CohortAdmissionQueue(intake), promotion, runtime_adoption=c.runtime_adoption

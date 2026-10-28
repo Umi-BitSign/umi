@@ -386,6 +386,21 @@ async def test_progress_api_is_available_without_capture_or_database(monkeypatch
         "certification",
         dict(cohort_sha256=C, completed=92, total=103, percent=100 * 92 / 103, eta_seconds=300),
     )
+    snapshots.record(
+        "direct_uploads",
+        dict(
+            cohort_sha256=C,
+            selected_cohort_sha256=C,
+            status="running",
+            objects_ready=3,
+            objects_pending=1,
+            objects_retrying=2,
+            objects_terminal=1,
+            objects_total=7,
+            object_count_scope="retained_completed_upload_objects_including_replaced_generations",
+            eta_seconds=None,
+        ),
+    )
 
     async def forbidden():
         raise AssertionError("progress must not query finality or owned journals")
@@ -393,7 +408,12 @@ async def test_progress_api_is_available_without_capture_or_database(monkeypatch
     app = FastAPI()
     app.include_router(
         api.cohort_routes(
-            SimpleNamespace(bindings={C: "authority"}), forbidden, maximum_body_bytes=1024
+            SimpleNamespace(
+                bindings={C: "authority"},
+                admission_status=lambda _: {"admission_closed": True, "accepted_uploads": None},
+            ),
+            forbidden,
+            maximum_body_bytes=1024,
         )
     )
     async with httpx.AsyncClient(
@@ -403,6 +423,12 @@ async def test_progress_api_is_available_without_capture_or_database(monkeypatch
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
         assert response.json()["completed"] == 92
         assert response.json()["certification_authority"] is False
+        direct = response.json()["components"]["direct_uploads"]
+        assert direct["selected_cohort_sha256"] == C
+        assert direct["objects_ready"] == 3 and direct["objects_total"] == 7
+        assert direct["objects_pending"] == 1 and direct["objects_retrying"] == 2
+        assert direct["objects_terminal"] == 1 and direct["eta_seconds"] is None
+        assert response.json()["admission"]["accepted_uploads"] is None
         assert (await client.get(f"/v1/competition/cohorts/{'d' * 64}/progress")).status_code == 404
 
 

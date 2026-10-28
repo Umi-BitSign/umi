@@ -63,6 +63,7 @@ from .competition_cohort_model_static_review import (
     verify_standing_review_policy,
 )
 from .competition_cohort_participation import CohortParticipationRequest
+from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
@@ -1504,9 +1505,10 @@ class DirectModelUploadOwner:
 
     async def _poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         _at(now_unix_ms)
-        ready = pending = failed = reviews_ready = reviews_held = 0
+        ready = pending = retrying = failed = reviews_ready = reviews_held = 0
+        completed = terminal = 0
         cleaned = retained_for_cleanup = cleanup_examined = 0
-        last_error = ""
+        last_error = last_retry_error = ""
         examined = 0
         keys = await run_owned_thread(self.journal.keys, "direct-object")
         after = await run_owned_thread(self.journal.poll_cursor)
@@ -1530,14 +1532,17 @@ class DirectModelUploadOwner:
                         reviews_ready += 1
                 except (OSError, ValueError) as error:
                     failed += 1
-                    last_error = type(error).__name__
+                    retrying += 1
+                    last_error = last_retry_error = type(error).__name__
                     continue
             if verified:
                 ready += 1
             if verified and reviewed:
+                completed += 1
                 continue
             review_hold = await run_owned_thread(self._current_review_hold, reservation)
             if verification_hold is not None:
+                terminal += 1
                 failed += 1
                 last_error = verification_hold["reason_code"]
                 try:
@@ -1565,6 +1570,7 @@ class DirectModelUploadOwner:
                     )
                 continue
             if review_hold is not None:
+                terminal += 1
                 reviews_held += 1
                 last_error = review_hold["reason_code"]
                 try:
@@ -1604,6 +1610,7 @@ class DirectModelUploadOwner:
                     await self.verify(reservation_sha256, now_unix_ms=now_unix_ms)
                     ready += 1
                 except ValueError:
+                    terminal += 1
                     reason_code = "direct_model_verification_failed"
                     self.journal.put(
                         "direct-verification-hold",
@@ -1629,12 +1636,15 @@ class DirectModelUploadOwner:
                     continue
                 except OSError as error:
                     failed += 1
-                    last_error = type(error).__name__
+                    retrying += 1
+                    last_error = last_retry_error = type(error).__name__
                     continue
             try:
                 if await self.review(reservation_sha256, now_unix_ms=now_unix_ms) is not None:
                     reviews_ready += 1
+                completed += 1
             except StaticModelReviewHeld as error:
+                terminal += 1
                 reviews_held += 1
                 last_error = error.reason_code
                 try:
@@ -1652,6 +1662,7 @@ class DirectModelUploadOwner:
                     )
                 retained_for_cleanup += 1
             except ValueError:
+                terminal += 1
                 reason_code = "direct_model_review_failed"
                 self.journal.put(
                     "direct-review-hold",
@@ -1678,11 +1689,19 @@ class DirectModelUploadOwner:
                 retained_for_cleanup += 1
             except OSError as error:
                 failed += 1
-                last_error = type(error).__name__
+                retrying += 1
+                last_error = last_retry_error = type(error).__name__
         return {
             "status": "direct_model_upload_poll",
             "objects_verified": ready,
             "objects_pending": pending,
+            "objects_retrying": retrying,
+            "objects_ready": completed,
+            "objects_terminal": terminal,
+            "objects_total": len(keys),
+            "object_count_scope": (
+                "retained_completed_upload_objects_including_replaced_generations"
+            ),
             "objects_attempted": examined,
             "objects_failed": failed,
             "reviews_ready": reviews_ready,
@@ -1690,14 +1709,17 @@ class DirectModelUploadOwner:
             "objects_cleaned": cleaned,
             "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
+            "last_retry_error_type": last_retry_error,
             **await run_owned_thread(self.journal.metadata_snapshot),
         }
 
 
 class DirectModelUploadOwners:
-    """Route multiple signed cohort profiles through one long-lived service."""
+    """Route signed profiles and dispatch one bounded cohort batch per poll."""
 
-    def __init__(self, owners: Mapping[str, DirectModelUploadOwner]):
+    _PRIORITY_POLLS = 4
+
+    def __init__(self, owners: Mapping[str, DirectModelUploadOwner], *, priority_cohorts=()):
         self.owners = dict(owners)
         if (
             not self.owners
@@ -1705,6 +1727,92 @@ class DirectModelUploadOwners:
             or len({id(owner) for owner in self.owners.values()}) != len(self.owners)
         ):
             raise ValueError("direct model owners require unique cohort bindings")
+        self.priority_cohorts = tuple(priority_cohorts)
+        if (
+            len(set(self.priority_cohorts)) != len(self.priority_cohorts)
+            or not set(self.priority_cohorts) <= self.owners.keys()
+        ):
+            raise ValueError("direct model owner priority differs from its cohort bindings")
+        self._poll_mutex = asyncio.Lock()
+        self._priority_polls = 0
+        self._background_next = 0
+        self._reports = {}
+        self._report_observed_unix_ms = {}
+        self._errors = {}
+        started = time.monotonic()
+        self._waiting_since = dict.fromkeys(self.owners, started)
+        self._polls_completed = dict.fromkeys(self.owners, 0)
+
+    def _pending(self, cohort):
+        report = self._reports.get(cohort)
+        return None if report is None else report["objects_pending"] + report["objects_retrying"]
+
+    def _select(self):
+        # Unknown owners get an ordinary poll, never a separate journal scan.
+        preferred = next(
+            (cohort for cohort in self.priority_cohorts if self._pending(cohort) != 0), None
+        )
+        if preferred is not None and self._priority_polls < self._PRIORITY_POLLS:
+            self._priority_polls += 1
+            return preferred, "cohort_sequence_priority"
+        cohorts = tuple(self.owners)
+        rotated = (*cohorts[self._background_next :], *cohorts[: self._background_next])
+        # Idle cohorts must be visited too: cached results cannot reveal a new
+        # submission. Advance before awaiting so interruption cannot monopolize.
+        selected = next((cohort for cohort in rotated if cohort != preferred), rotated[0])
+        self._background_next = (cohorts.index(selected) + 1) % len(cohorts)
+        self._priority_polls = 0
+        return selected, "rotating_background"
+
+    def _publish_scheduling(self, selected=None, started=None):
+        now = time.monotonic()
+        for cohort in self.owners:
+            report = self._reports.get(cohort)
+            PUBLIC_COHORT_PROGRESS.record(
+                "direct_uploads",
+                {
+                    "cohort_sha256": cohort,
+                    "stage": "direct_model_upload_scheduling",
+                    "status": "running" if cohort == selected else "waiting_next_poll",
+                    "selected_cohort_sha256": selected,
+                    "queue_wait_seconds": round(
+                        max(
+                            0,
+                            (started if cohort == selected else now) - self._waiting_since[cohort],
+                        ),
+                        3,
+                    ),
+                    "queue_wait_scope": "since_owner_start_or_last_poll_completion",
+                    "completed": self._polls_completed[cohort],
+                    "total": None,
+                    "unit": "owner_polls",
+                    **{
+                        field: None if report is None else report.get(field)
+                        for field in (
+                            "objects_pending",
+                            "objects_retrying",
+                            "objects_ready",
+                            "objects_terminal",
+                            "objects_total",
+                            "object_count_scope",
+                        )
+                    },
+                    "owner_report_observed_unix_ms": self._report_observed_unix_ms.get(cohort),
+                    "elapsed_seconds": round(now - started, 3) if cohort == selected else 0,
+                    "eta_seconds": None,
+                    "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
+                    "eta_scope": "direct_upload_cohort_queue",
+                    "stalled_or_retrying": bool(
+                        self._errors.get(cohort) or (report and report["objects_retrying"])
+                    ),
+                    "error_type": self._errors.get(cohort)
+                    or (
+                        report.get("last_retry_error_type")
+                        if report and report["objects_retrying"]
+                        else None
+                    ),
+                },
+            )
 
     def require_payload(self, request: CohortParticipationRequest) -> None:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -1745,12 +1853,37 @@ class DirectModelUploadOwners:
         return await owner.promote(publication, now_unix_ms=time.time_ns() // 1_000_000)
 
     async def poll_once(self, *, now_unix_ms: int | None = None) -> dict:
-        current = time.time_ns() // 1_000_000 if now_unix_ms is None else now_unix_ms
-        reports = {}
-        for cohort, owner in self.owners.items():
-            reports[cohort] = await owner.poll_once(now_unix_ms=current)
-        return {
-            "status": "direct_model_upload_owners_polled",
-            "cohorts": reports,
-            "chain_submission_authorized": False,
-        }
+        async with self._poll_mutex:
+            current = time.time_ns() // 1_000_000 if now_unix_ms is None else now_unix_ms
+            cohort, scope = self._select()
+            started = time.monotonic()
+            waited = round(max(0, started - self._waiting_since[cohort]), 3)
+            self._publish_scheduling(cohort, started)
+            try:
+                report = await self.owners[cohort].poll_once(now_unix_ms=current)
+                self._reports[cohort] = report
+                self._report_observed_unix_ms[cohort] = time.time_ns() // 1_000_000
+                self._polls_completed[cohort] += 1
+                self._waiting_since[cohort] = time.monotonic()
+                self._errors.pop(cohort, None)
+            except BaseException as error:
+                # Failed observations become unknown. Retained native cursors
+                # and verification receipts remain authoritative after restart.
+                self._reports.pop(cohort, None)
+                self._report_observed_unix_ms.pop(cohort, None)
+                self._errors[cohort] = type(error).__name__
+                raise
+            finally:
+                self._publish_scheduling()
+            return {
+                "status": "direct_model_upload_owners_polled",
+                "cohorts": {cohort: report},
+                "selected_cohort_sha256": cohort,
+                "selection_scope": scope,
+                "queue_wait_seconds": waited,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "eta_seconds": None,
+                "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
+                "stalled_or_retrying": bool(report["objects_retrying"]),
+                "chain_submission_authorized": False,
+            }

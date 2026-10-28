@@ -3687,6 +3687,33 @@ reusable. The existing poll interval and provider retry pacing still apply;
 counts. Terminal holds do not consume verification slots. Rejected-object cleanup
 retains its separate `cleanup_batch_size` limit.
 
+The multi-cohort owner dispatches one cohort batch per poll. It uses signed cohort
+sequence order to prioritize the earliest cohort with unfinished or unobserved
+work for up to four turns, then gives one turn to a rotating background cohort.
+Background rotation includes completed and idle cohorts so later arrivals are
+discovered. Selection reuses each owner's ordinary poll result; it adds no journal
+prescan. `objects_retrying` counts unresolved verification, review or review-file
+readiness failures, separately from deferred `objects_pending` and terminal holds.
+One batch remains the scheduling boundary; live verification is not interrupted.
+The bound is in dispatches, not seconds, because a full model read can be slow.
+
+The cache-only progress API's `direct_uploads` component exposes the selected
+cohort, completed owner polls, upload counts from the last observation and its
+`owner_report_observed_unix_ms`. `queue_wait_seconds` means time since service
+startup or that owner's last completed poll, not a miner's admission latency.
+Waiting time and active-poll elapsed time age without RPC or journal reads; queue
+ETA remains unknown. Scheduling hints restart as unknown, while the durable
+reservation cursor and completed verification/review receipts are reused.
+The `objects_total` denominator covers retained completed-upload objects, including
+replaced generations. `objects_ready`, `objects_pending`, `objects_retrying` and
+`objects_terminal` partition that inventory into ready verification/review,
+batch-deferred work, unresolved retries/repairs and terminal holds. These are not
+latest-per-hotkey or cutoff-eligible admission counts, and do not include incomplete
+multipart uploads. Unobserved counts are unknown; no overall completion percentage
+is inferred from them.
+`last_retry_error_type` preserves the retry cause separately from a later terminal
+hold or cleanup diagnostic in `last_error_type`.
+
 The intake host installs a fixed 64-byte scheduling cursor in the existing private
 direct-upload journal and includes that reservation in metadata capacity reporting.
 Older journals initialize it without changing signed records or completed verdicts;
