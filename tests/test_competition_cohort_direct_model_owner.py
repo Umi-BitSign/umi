@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from umi.competition_cohort_direct_model_owner import (
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
+    DirectModelUploadOwners,
     DirectModelUploadPending,
     _copy_promotion_parts,
 )
@@ -688,6 +689,17 @@ async def complete_poll_uploads(direct):
     return sorted(reservations)
 
 
+def assert_poll_inventory(report, *, ready, pending, retrying, terminal, total):
+    assert report["objects_ready"] == ready
+    assert report["objects_pending"] == pending
+    assert report["objects_retrying"] == retrying
+    assert report["objects_terminal"] == terminal
+    assert report["objects_total"] == total == ready + pending + retrying + terminal
+    assert report["object_count_scope"] == (
+        "retained_completed_upload_objects_including_replaced_generations"
+    )
+
+
 @pytest.mark.asyncio
 async def test_poll_rotates_transient_verification_failures_across_restart(direct, monkeypatch):
     keys = await complete_poll_uploads(direct)
@@ -705,8 +717,12 @@ async def test_poll_rotates_transient_verification_failures_across_restart(direc
         monkeypatch.setattr(owner, "verify", unreliable)
 
     inject_transient_failures(direct.owner)
-    first = await direct.owner.poll_once(now_unix_ms=1_800_000_011_000)
+    cohort = direct.owner.config.cohort_sha256
+    manager = DirectModelUploadOwners({cohort: direct.owner}, priority_cohorts=(cohort,))
+    first = (await manager.poll_once(now_unix_ms=1_800_000_011_000))["cohorts"][cohort]
     assert first["objects_failed"] == 2 and first["objects_pending"] == 1
+    assert first["objects_retrying"] == 2
+    assert_poll_inventory(first, ready=0, pending=1, retrying=2, terminal=0, total=3)
     assert calls == keys[:2]
     resumed = DirectModelUploadOwner(
         direct.owner.config,
@@ -715,15 +731,44 @@ async def test_poll_rotates_transient_verification_failures_across_restart(direc
         sign=direct.owner.sign,
     )
     inject_transient_failures(resumed)
-    second = await resumed.poll_once(now_unix_ms=1_800_000_012_000)
+    manager = DirectModelUploadOwners({cohort: resumed}, priority_cohorts=(cohort,))
+    second = (await manager.poll_once(now_unix_ms=1_800_000_012_000))["cohorts"][cohort]
     assert second["objects_verified"] == 1
+    assert_poll_inventory(second, ready=1, pending=1, retrying=1, terminal=0, total=3)
     assert calls == [*keys[:2], keys[2], keys[0]]
     reads = direct.multipart.read_calls
-    third = await resumed.poll_once(now_unix_ms=1_800_000_013_000)
+    third = (await manager.poll_once(now_unix_ms=1_800_000_013_000))["cohorts"][cohort]
     assert third["objects_verified"] == 1
     assert calls[-2:] == [keys[1], keys[0]]
     assert direct.multipart.read_calls == reads, "completed payload must not be reverified"
     assert all(resumed.journal.get("direct-verification-hold", key) is None for key in keys)
+
+
+@pytest.mark.asyncio
+async def test_poll_reports_retry_cause_separately_from_later_terminal_hold(direct, monkeypatch):
+    from umi import competition_cohort_direct_model_owner as module
+    from umi.competition_cohort_public_progress import CohortProgressSnapshots
+
+    keys = await complete_poll_uploads(direct)
+
+    async def mixed_failure(key, **kwargs):
+        if key == keys[0]:
+            raise OSError("temporary provider failure")
+        assert key == keys[1]
+        raise ValueError("terminal content failure")
+
+    monkeypatch.setattr(direct.owner, "verify", mixed_failure)
+    snapshots = CohortProgressSnapshots()
+    monkeypatch.setattr(module, "PUBLIC_COHORT_PROGRESS", snapshots)
+    cohort = direct.owner.config.cohort_sha256
+    manager = DirectModelUploadOwners({cohort: direct.owner}, priority_cohorts=(cohort,))
+    report = (await manager.poll_once(now_unix_ms=1_800_000_011_000))["cohorts"][cohort]
+    assert_poll_inventory(report, ready=0, pending=1, retrying=1, terminal=1, total=3)
+    assert report["last_error_type"] == "direct_model_verification_failed"
+    assert report["last_retry_error_type"] == "OSError"
+    public = snapshots.snapshot(cohort)["components"]["direct_uploads"]
+    assert public["stalled_or_retrying"] is True
+    assert public["error_type"] == "OSError"
 
 
 @pytest.mark.asyncio
@@ -771,6 +816,9 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
     assert first["objects_failed"] == 1
     assert first["last_error_type"] == "direct_model_verification_failed"
     assert second["objects_failed"] == 1
+    assert first["objects_retrying"] == second["objects_retrying"] == 0
+    assert_poll_inventory(first, ready=0, pending=0, retrying=0, terminal=1, total=1)
+    assert_poll_inventory(second, ready=0, pending=0, retrying=0, terminal=1, total=1)
     assert second["last_error_type"] == "direct_model_verification_failed"
     assert reads_after_failure > 0
     assert direct.multipart.read_calls == reads_after_failure
@@ -841,6 +889,8 @@ async def test_poll_rotates_transient_review_failures_reusing_verification(
     monkeypatch.setattr(direct.owner, "review", unreliable_review)
     first = await direct.owner.poll_once(now_unix_ms=1_800_000_011_000)
     assert first["objects_verified"] == 2 and first["objects_failed"] == 2
+    assert first["objects_retrying"] == 2
+    assert_poll_inventory(first, ready=0, pending=1, retrying=2, terminal=0, total=3)
     assert calls == keys[:2]
     resumed = DirectModelUploadOwner(
         config,
@@ -923,6 +973,7 @@ async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop
     path.unlink()
     damaged = await resumed.poll_once(now_unix_ms=1_800_000_014_000)
     assert damaged["objects_failed"] == 1 and damaged["reviews_ready"] == 0
+    assert_poll_inventory(damaged, ready=0, pending=0, retrying=1, terminal=0, total=1)
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1142,8 @@ async def test_promotion_copy_bounds_parallel_parts_and_preserves_completion_ord
 
 @pytest.mark.asyncio
 async def test_promotion_copy_retries_lost_reply_in_same_slot_without_duplicate_progress(
-    monkeypatch, receipt_scenario,
+    monkeypatch,
+    receipt_scenario,
 ):
     from umi import r2_multipart
 
