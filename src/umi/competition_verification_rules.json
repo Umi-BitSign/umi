@@ -116,7 +116,7 @@
     "competition_cohort_miner_startup.py": "7511a633c1530da5c378b54ac74e8ff95314c11fda2c3c0c8438284271666c4d",
     "competition_cohort_model_acceptance.py": "e1041735ba601edc0b54d1de32b75e23aeb601589d6a22307661fabee6cd2358",
     "competition_cohort_model_acceptance_store.py": "687420c1231faa3d38601dbfe64487ea6c9f530362d7cf79a45a4ffe6c92e6a8",
-    "competition_cohort_model_acceptance_worker.py": "be8c83cc5eb2b8d9cd65229c241a48a43da325ee6e017095e8aa8a70862b52fc",
+    "competition_cohort_model_acceptance_worker.py": "47f28a4dfa3d723b11225bd0e990e63d2c9da8653952a57bda914281fe4891b5",
     "competition_cohort_model_award.py": "ad1f9dcabf3c4fb17658dfd63fefb26a2be8456993983cc022bb482824f72264",
     "competition_cohort_model_client.py": "02274793f84d645f35df899fa78449f849d451ecbfa03c7720a93684e4287551",
     "competition_cohort_model_delivery_api.py": "f00cfc20c592bd62098dbebf60e7267fb4d85611e6ad22cb77702f620083eeba",

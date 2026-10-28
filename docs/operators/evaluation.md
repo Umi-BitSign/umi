@@ -570,12 +570,20 @@ it a second time; its native participation and certificate review remain require
 
 Intake work prioritizes the earliest unfinished cohort even while its automatic
 progression is held. Under contention, up to four oldest-cohort attempts are followed
-by one background opportunity, with later cohorts rotating fairly. Current
+by one background opportunity, with later cohorts rotating fairly. A pending
+review consumes only its own attempt when the bounded pending page identifies
+another submission from that cohort; it does not give away the remaining attempts.
+A blocked singleton yields early rather than retrying the same item for the whole
+priority quantum. The pending scan includes one successor record even for a
+processing batch of one, without adding a second query. Current
 verification or promotion drains at its existing safe item boundary; a priority
 change never interrupts a full-object hash or repeats completed work. Cached
 public progress names the owner and stage currently using the worker and the
 cohort waiting for it. Queue-wait ETA remains unknown until there is a measured
-basis; API polling only reads this cached state.
+basis; API polling only reads this cached state. Scheduling-only maintenance
+selects the admission owner's source through its supported service handoff; it
+changes no miner upload, reviewer attestation or signed execution format. Rebind
+an armed timed cohort transition to the installed owner source before rearming it.
 
 Paid scheduling pages omit work with a retained terminal before reconstructing
 its admission. This presence check only avoids redispatch: full queue reads,
