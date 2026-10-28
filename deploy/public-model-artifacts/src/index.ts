@@ -1,4 +1,5 @@
 import { HEAD_BATCH_PATH, serveMetadata, type MetadataBindings } from "./r2-heads";
+import { PUBLISH_BATCH_PATH, serveProofPublications, type ProofPublicationBindings } from "./proof-publications";
 
 type Artifact = Readonly<{
   path: string;
@@ -47,7 +48,7 @@ const SECURITY_HEADERS = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 };
 
-type Bindings = Env & MetadataBindings;
+type Bindings = Env & MetadataBindings & ProofPublicationBindings;
 type ByteRange = Readonly<{ offset: number; length: number }>;
 
 function absent(status = 404, headers: HeadersInit = {}): Response {
@@ -179,6 +180,7 @@ export async function serve(
     return absent();
   }
   if (url.pathname === HEAD_BATCH_PATH) return serveMetadata(request, env);
+  if (url.pathname === PUBLISH_BATCH_PATH) return serveProofPublications(request, env);
   if (!["GET", "HEAD"].includes(request.method)) return absent();
   if (url.pathname === "/v1/index.json") {
     if (request.headers.has("Range")) return absent(416);

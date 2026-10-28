@@ -494,6 +494,16 @@ hosts before adopting these optional fields; original configurations serialize
 without them and keep their signed bytes. Do not restart an active old owner
 merely to install this optimization before its current activation work finishes.
 
+Proof producers can select the [authenticated publication batch
+transport](../../deploy/public-model-artifacts/README.md#private-proof-publication-transport)
+to send up to eight small immutable objects in one frontend exchange. Each
+object keeps its original R2 key, bytes and durable receipt, and existing readers
+remain compatible. Frame publication still follows the complete member barrier.
+The supported selection preserves old credential files and uses the normal
+miner/validator host update path. Batch request counts, per-item results and
+explicit direct-transport fallback accompany ordinary progress and ETA; request
+reduction alone does not establish a history-throughput improvement.
+
 
 Historical ancestry recovery verifies bounded batches. When a batch retains
 verified links but has not reached its fixed target, the ordinary coordinator

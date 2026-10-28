@@ -152,6 +152,8 @@ def test_retained_local_frames_reduce_requests_without_changing_bytes(
     from umi.competition_evidence_codec import encode_evidence_for_reuse
     from umi.protocol import canonical_json_bytes
 
+    from .test_r2_proof_publish_batch import BatchServer
+
     frames = [
         canonical_json_bytes(
             {
@@ -168,20 +170,26 @@ def test_retained_local_frames_reduce_requests_without_changing_bytes(
         for n in range(2)
     ]
     costs, published = {}, {}
-    for mode, threshold in (("head_first", 0), ("tiny_put_first", 4096)):
+    for mode, threshold in (
+        ("head_first", 0),
+        ("tiny_put_first", 4096),
+        ("batch_tiny_put_first", 4096),
+    ):
         monkeypatch.setattr(r2_evidence, "_PUT_FIRST_MAX_BYTES", threshold)
         root = tmp_path / mode
         original = RewardProofArchive(root / "archive")
         for number, raw in enumerate(frames):
             original.write("history", f"{number:064x}", context={}, fields={"proof": raw})
         retained = {path: path.read_bytes() for path in original.root.rglob("*.json")}
-        server = EvidenceServer()
+        server = BatchServer() if mode == "batch_tiny_put_first" else EvidenceServer()
         remote = store(root / "index", server)
         selected = RewardProofArchive(original.root, remote=remote, legacy_read_through=True)
         costs[mode] = []
         for number, raw in enumerate(frames):
             key = f"{number:064x}"
             server.calls.clear()
+            if isinstance(server, BatchServer):
+                server.batches.clear()
             before = sum(map(len, server.objects.values()))
             selected.write(
                 "history",
@@ -200,6 +208,11 @@ def test_retained_local_frames_reduce_requests_without_changing_bytes(
                         for method, path in server.calls
                     ),
                     "new_durable_bytes": sum(map(len, server.objects.values())) - before,
+                    "batch_frontend_requests": len(server.batches)
+                    if isinstance(server, BatchServer)
+                    else 0,
+                    "frontend_requests": len(server.calls)
+                    + (len(server.batches) if isinstance(server, BatchServer) else 0),
                 }
             )
             assert (
@@ -218,10 +231,15 @@ def test_retained_local_frames_reduce_requests_without_changing_bytes(
         # completed graph publications never need another remote request.
         assert [method for method, _ in server.calls] == ["HEAD", "GET"] * len(frames)
         assert all("/frames/" in path for _, path in server.calls)
-    assert published["head_first"] == published["tiny_put_first"]
+    assert (
+        published["head_first"] == published["tiny_put_first"] == published["batch_tiny_put_first"]
+    )
     for before, after in zip(costs["head_first"], costs["tiny_put_first"], strict=True):
         assert before["put_requests"] == after["put_requests"]
         assert before["new_durable_bytes"] == after["new_durable_bytes"]
         assert before["head_requests"] - after["head_requests"] == after["tiny_put_requests"]
         assert after["tiny_put_requests"] >= 38
+    for direct, batched in zip(costs["tiny_put_first"], costs["batch_tiny_put_first"], strict=True):
+        assert direct["new_durable_bytes"] == batched["new_durable_bytes"]
+        assert batched["frontend_requests"] < direct["frontend_requests"] / 2
     record_property("retained_frame_transport_costs", json.dumps(costs, sort_keys=True))

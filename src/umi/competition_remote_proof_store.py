@@ -26,6 +26,12 @@ from .open_competition import digest
 from .private_files import Directory
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .r2_evidence import EvidenceObjectHead, R2EvidenceClient, r2_evidence_connection_scope
+from .r2_publish_batch import (
+    MAX_PUBLISH_OBJECT_BYTES,
+    MAX_PUBLISH_OBJECTS,
+    R2ProofPublishBatch,
+    R2PublishBatchUnavailable,
+)
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 PROOF_PUBLICATION_WORKERS = 8
@@ -322,6 +328,14 @@ class RemoteProofStore:
         self._publication_condition = Condition(self._lock)
         self._publishing_keys: set[str] = set()
         self._publishing_bytes = 0
+        self._publish_batch = (
+            R2ProofPublishBatch(client)
+            if isinstance(client, R2EvidenceClient)
+            and client.signer.credentials.proof_publish_batch_origin is not None
+            and not config.read_only
+            else None
+        )
+        self._publish_batch_failure = None
 
     def _key(self, path: str) -> str:
         key = self.config.prefix + "/" + path
@@ -570,14 +584,26 @@ class RemoteProofStore:
 
     @contextmanager
     def _publication_slot(self, key, size, progress):
+        with self._publication_slots({key: size}, progress):
+            yield
+
+    @contextmanager
+    def _publication_slots(self, sizes, progress):
         # Two maximum supported objects or eight ordinary smaller objects can
         # share the bounded active-byte window. Admission waits, never drops.
+        size = sum(sizes.values())
+        if (
+            not sizes
+            or len(sizes) > PROOF_PUBLICATION_WORKERS
+            or size > MAX_ACTIVE_PROOF_PUBLICATION_BYTES
+        ):
+            raise ValueError("proof publication admission exceeds aggregate bounds")
         waited = False
         with self._publication_condition:
             while True:
-                if key in self._publishing_keys:
+                if self._publishing_keys.intersection(sizes):
                     reason = "proof_publication_same_key_wait"
-                elif len(self._publishing_keys) >= PROOF_PUBLICATION_WORKERS:
+                elif len(self._publishing_keys) + len(sizes) > PROOF_PUBLICATION_WORKERS:
                     reason = "proof_publication_worker_limit_wait"
                 elif self._publishing_bytes + size > MAX_ACTIVE_PROOF_PUBLICATION_BYTES:
                     reason = "proof_publication_byte_budget_wait"
@@ -586,7 +612,7 @@ class RemoteProofStore:
                 progress.emit("waiting", reason=reason)
                 waited = True
                 self._publication_condition.wait(timeout=1)
-            self._publishing_keys.add(key)
+            self._publishing_keys.update(sizes)
             self._publishing_bytes += size
         if waited:
             progress.emit("running", reason="proof_publication_admitted")
@@ -594,9 +620,115 @@ class RemoteProofStore:
             yield
         finally:
             with self._publication_condition:
-                self._publishing_keys.remove(key)
+                self._publishing_keys.difference_update(sizes)
                 self._publishing_bytes -= size
                 self._publication_condition.notify_all()
+
+    def _batch_publications(self, pending, progress):
+        """Retain exact per-item receipts, including success before a partial failure."""
+        remaining = []
+        small = [(sha, raw) for sha, raw in pending if len(raw) <= MAX_PUBLISH_OBJECT_BYTES]
+        remaining.extend((sha, raw) for sha, raw in pending if len(raw) > MAX_PUBLISH_OBJECT_BYTES)
+        limit = min(MAX_PUBLISH_OBJECTS, PROOF_PUBLICATION_WORKERS)
+        for offset in range(0, len(small), limit):
+            selected = small[offset : offset + limit]
+            if self._publish_batch_failure is not None:
+                remaining.extend(selected)
+                continue
+            with TransferProgress(
+                "proof_publication_batch",
+                len(selected),
+                unit="objects",
+                total_operations=1,
+                planning_unit_seconds=(0.01, 60),
+            ) as batch:
+                sizes = {self._key("objects/" + sha): len(raw) for sha, raw in selected}
+                with self._publication_slots(sizes, batch):
+                    # Another graph may have disabled the route while this
+                    # batch waited for the same global admission budget.
+                    if self._publish_batch_failure is not None:
+                        remaining.extend(selected)
+                        batch.emit("retrying", reason=self._publish_batch_failure)
+                        continue
+                    objects = {}
+                    with self._lock:
+                        for sha, raw in selected:
+                            key = self._key("objects/" + sha)
+                            prior = self._retained(key)
+                            if prior is not None:
+                                self.validate_reference(
+                                    prior.model_dump(mode="json", by_alias=True)
+                                )
+                                if (prior.content_sha256, prior.size_bytes) != (
+                                    hashlib.sha256(raw).hexdigest(),
+                                    len(raw),
+                                ):
+                                    raise ValueError(
+                                        "immutable proof index conflicts with its original bytes"
+                                    )
+                                progress.advance(len(raw), restored=True)
+                                progress.advance_operations(1, restored=True)
+                                batch.advance(1, restored=True)
+                            else:
+                                objects[key] = raw
+                    if not objects:
+                        batch.advance_operations(1, restored=True)
+                        continue
+                    try:
+                        results = self._publish_batch.publish(objects)
+                    except R2PublishBatchUnavailable as error:
+                        self._publish_batch_failure = error.reason_code
+                        batch.emit("retrying", reason=error.reason_code)
+                        remaining.extend(
+                            (key.rsplit("/", 1)[1], raw) for key, raw in objects.items()
+                        )
+                        continue
+                    batch.advance_operations(1)
+                    completed = [
+                        (self._reference(key, head), objects[key])
+                        for key, head in results.items()
+                        if isinstance(head, EvidenceObjectHead)
+                    ]
+                    with self._lock:
+                        # One atomic metadata transaction retains each existing /1
+                        # receipt separately. No batch receipt substitutes for it.
+                        records = []
+                        for reference, _raw in completed:
+                            ident = hashlib.sha256(reference.key.encode()).hexdigest()
+                            records.extend(
+                                (
+                                    (_COMPLETION_KIND, ident, reference),
+                                    ("remote_proof_object", ident, reference),
+                                )
+                            )
+                        if records:
+                            self.journal.put_many(records)
+                        for reference, raw in completed:
+                            cache_key = digest(reference)
+                            if cache_key not in self._cache:
+                                try:
+                                    self._space(len(raw))
+                                except OSError:
+                                    pass
+                                else:
+                                    self._cache[cache_key] = raw
+                                    self._bytes += len(raw)
+                    for _reference, raw in completed:
+                        progress.advance(len(raw))
+                        progress.advance_operations(1)
+                        batch.advance(1)
+                    if any(value == 409 for value in results.values()):
+                        raise ValueError("immutable R2 evidence object conflicts with publication")
+                    failed = [
+                        (key.rsplit("/", 1)[1], objects[key])
+                        for key, value in results.items()
+                        if value == 503
+                    ]
+                    if failed:
+                        self._publish_batch_failure = "r2_publish_batch_item_unavailable"
+                        batch.emit("retrying", reason=self._publish_batch_failure)
+                        remaining.extend(failed)
+        return remaining
 
     def put_many(self, objects: Mapping[str, bytes]) -> None:
         """Publish one encoder-owned graph before its recipe/frame can be exposed.
@@ -614,6 +746,8 @@ class RemoteProofStore:
             if type(raw) is not bytes or not 0 < len(raw) <= MAX_PROOF_OBJECT_BYTES:
                 raise ValueError("remote proof object exceeds its original byte bound")
         stop = Event()
+        fallback = None
+        fallback_keys = set()
 
         def publish_lane(lane):
             try:
@@ -628,6 +762,8 @@ class RemoteProofStore:
                             )
                         progress.advance(len(raw), restored=restored)
                         progress.advance_operations(1, restored=restored)
+                        if sha in fallback_keys:
+                            fallback.advance(1, restored=restored)
             except BaseException:
                 stop.set()
                 raise
@@ -644,18 +780,36 @@ class RemoteProofStore:
             pending = self._pending_publications(objects, progress)
             if not pending:
                 return
+            if self._publish_batch is not None:
+                pending = self._batch_publications(pending, progress)
+                if not pending:
+                    return
+                if self._publish_batch_failure is not None:
+                    fallback_keys = {
+                        sha for sha, raw in pending if len(raw) <= MAX_PUBLISH_OBJECT_BYTES
+                    }
+                    if fallback_keys:
+                        fallback = TransferProgress(
+                            "proof_publication_fallback",
+                            len(fallback_keys),
+                            unit="objects",
+                            planning_unit_seconds=(0.01, 60),
+                        )
             lanes = [[] for _ in range(min(PROOF_PUBLICATION_WORKERS, len(pending)))]
             for number, item in enumerate(pending):
                 lanes[number % len(lanes)].append(item)
-            if len(lanes) == 1:
-                publish_lane(lanes[0])
-                return
-            with ThreadPoolExecutor(
-                max_workers=len(lanes), thread_name_prefix="umi-proof-publish"
-            ) as pool:
-                futures = [pool.submit(publish_lane, lane) for lane in lanes]
-                for future in futures:
-                    future.result()
+            with fallback if fallback is not None else nullcontext():
+                if fallback is not None:
+                    fallback.emit("retrying", reason=self._publish_batch_failure)
+                if len(lanes) == 1:
+                    publish_lane(lanes[0])
+                    return
+                with ThreadPoolExecutor(
+                    max_workers=len(lanes), thread_name_prefix="umi-proof-publish"
+                ) as pool:
+                    futures = [pool.submit(publish_lane, lane) for lane in lanes]
+                    for future in futures:
+                        future.result()
 
     def _pending_publications(self, objects, progress):
         owner = self.receipt_source or self.journal

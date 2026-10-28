@@ -57,12 +57,15 @@ class R2Credentials:
     access_key_id: str
     secret_access_key: str = field(repr=False)
     metadata_batch_origin: str | None = field(default=None, repr=False)
+    proof_publish_batch_origin: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if self.metadata_batch_origin is not None:
-            if type(self.metadata_batch_origin) is not str:
+        for selected_origin in (self.metadata_batch_origin, self.proof_publish_batch_origin):
+            if selected_origin is None:
+                continue
+            if type(selected_origin) is not str:
                 raise ValueError("R2 metadata batch origin differs")
-            origin = urlsplit(self.metadata_batch_origin)
+            origin = urlsplit(selected_origin)
             if (
                 origin.scheme != "https"
                 or not origin.hostname
@@ -137,12 +140,17 @@ def load_r2_credentials(path: Path) -> LoadedR2Credentials:
             "SECRET_ACCESS_KEY",
             "DEFAULT_ENDPOINT",
         }
-        if set(values) not in (required, required | {"METADATA_BATCH_ORIGIN"}):
+        if (
+            not required
+            <= set(values)
+            <= required | {"METADATA_BATCH_ORIGIN", "PROOF_PUBLISH_BATCH_ORIGIN"}
+        ):
             raise ValueError("R2 credentials file differs")
         credentials = R2Credentials(
             values["ACCESS_KEY_ID"],
             values["SECRET_ACCESS_KEY"],
             values.get("METADATA_BATCH_ORIGIN"),
+            values.get("PROOF_PUBLISH_BATCH_ORIGIN"),
         )
         # Reuse the signer parser for the exact account endpoint requirement.
         R2SigV4(values["DEFAULT_ENDPOINT"], "validation-bucket", credentials)

@@ -2,7 +2,8 @@
 
 This Worker's public routes serve only the comparator model bundle and pinned
 offline runtime listed in its static catalog. The private `umi-model-artifacts`
-bucket remains private. The Worker has no upload, mutation or listing route.
+bucket remains private. Public routes provide no upload, mutation or listing
+capability. The separately authenticated private transports are documented below.
 
 Each artifact URL includes its model or runtime identity. The discovery index
 also publishes the archive SHA-256 and exact byte length. Clients must verify
@@ -71,3 +72,61 @@ counts, elapsed time and ETA cover both routes; fallback reasons are redacted an
 reported as retrying. Qualify exact same-key parity against direct S3 before
 selecting the optional transport. Health or successful public artifact reads alone
 do not establish the private route's authentication or bucket binding.
+
+## Private proof publication transport
+
+`POST /v1/internal/r2/proof-publications` optionally batches up to eight original
+proof objects of at most 4 KiB each. It stores the same bytes at the same R2
+content-addressed keys using conditional creation. Objects are not packed or
+re-encoded. Existing direct-S3 readers, frames, native verification results and
+`umi-r2-proof-reference/1` receipts remain compatible. Larger objects and final
+frames keep their existing direct transport; a frame is published only after
+every member has its own durable acknowledgement.
+
+The `PROOF_EVIDENCE` binding selects the private `umi-cohort-evidence` bucket.
+`PROOF_ENDPOINT` and `PROOF_BUCKET` must match that actual binding. Configure
+`PROOF_PUBLICATION_KEYS_JSON` through Wrangler's secret interface, outside Git.
+It maps an authorized native S3 access ID to an object containing:
+
+- `key`: hex `HMAC-SHA256(secret_access_key, "umi-r2-proof-publication-key/1")`.
+- `prefixes`: exact writable proof-store prefixes, without a trailing slash.
+
+This is separate write authority: metadata-reader keys do not authorize writes.
+The Worker permits only `<prefix>/objects/<original-sha256>`, checks the request
+nonce, clock, endpoint, bucket and content identity, and conditionally writes at
+most six objects concurrently. It returns an ordered result per object. An
+existing object is accepted only with its exact original size, ETag and SHA
+metadata; conflicting objects are never overwritten. Requests and responses
+are bounded to 64 KiB, uncached, and contain no native proof-acceptance claim.
+Without the secret, the route remains disabled.
+
+Deploy the compatible Worker and select the updated native producer through
+the supported host maintenance/update path. Then select
+`PROOF_PUBLISH_BATCH_ORIGIN=https://artifacts.umi.vision` in a new private
+credential export for that producer. Preserve the original file for older
+supported consumers; older credential loaders reject unknown fields. This
+optional transport does not change the native account, bucket, prefix, journal
+binding, signed cohort inputs or clocks. Coordinator, reviewer, settlement and
+writer producers use the common proof store; miners and validators without the
+option continue direct S3 and can read the same resulting objects. Publish the
+compatible source selection through the normal miner/validator update paths
+before claiming automatic rollout. Rollback selects the original credential
+file and preserves all completed individual receipts.
+
+The native store reserves all batch member keys and bytes under its existing
+global eight-object admission bound. It retains successful per-object receipts
+in one atomic journal transaction, even if other items failed. A lost response,
+unavailable route or individual temporary failure invokes visible direct-S3
+recovery only for unfinished objects and disables further batch attempts for
+that owner process. Original conditional-write recovery handles ambiguous PUTs.
+Malformed acknowledgements and conflicts refuse the operation; they do not take
+a permissive fallback. Completed receipts survive restart and cache eviction.
+
+`proof_publication_batch` and `proof_publication_fallback` expose counted work,
+elapsed time, ETA basis and retry state. Redacted
+`umi-r2-proof-publication-exchange/1` events additionally count actual frontend
+request attempts/responses, HTTP status, and acknowledged, conflicting,
+unavailable, unknown and fallback objects. These counts distinguish network
+exchanges from graph/object scopes. Batching reduces frontend request count;
+the Worker still makes individual R2 operations. Measure installed throughput
+and fallback counts before revising the history forecast.
