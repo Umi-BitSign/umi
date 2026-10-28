@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from .canonical_reuse import canonical_json_reuse
-from .competition_assignment_reuse import AssignmentVerificationReuse, assignment_reuse_key
+from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
 from .competition_cohort_endpoint_archive import JournalEndpointObjects
 from .competition_cohort_evaluation import RecoverableEvaluationRound
@@ -49,7 +50,9 @@ from .competition_cohort_service_work import (
     verify_service_claim,
 )
 from .competition_execution import execution_boundary
+from .competition_registration_pins import RegistrationPinProjectionPending, RegistrationPins
 from .competition_round_journal import FinalizedHeadRegression, RecordReservation, RoundJournal
+from .competition_transport_verification import TransferProgress
 from .host_memory_request_bounds import check_stage_json
 from .open_competition import CompetitionPolicy, SignedSubmission, digest
 from .private_files import Directory, read_private_model
@@ -88,13 +91,18 @@ class ServiceWorkQueueConfig(StrictProtocolModel):
 
 
 class ServiceWorkQueue:
-    def __init__(self, config: ServiceWorkQueueConfig, policy: CompetitionPolicy):
+    def __init__(
+        self,
+        config: ServiceWorkQueueConfig,
+        policy: CompetitionPolicy,
+        *,
+        repair_registration_pins_reason=None,
+    ):
         self.config = ServiceWorkQueueConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
         if self.config.policy_sha256 != digest(self.policy):
             raise ValueError("service queue policy binding differs")
         self._parsed_records = AssignmentVerificationReuse(maximum_entries=1024)
-        self._retention_projection = AssignmentVerificationReuse(maximum_entries=1)
         self.journal = RoundJournal(
             Path(self.config.directory),
             self.config.model_dump(
@@ -114,6 +122,15 @@ class ServiceWorkQueue:
                 "(ordinal INTEGER PRIMARY KEY, claim_key TEXT UNIQUE NOT NULL, "
                 "admission TEXT UNIQUE NOT NULL)"
             )
+        self._registration_pins = RegistrationPins(
+            self.journal,
+            {
+                "policy": digest(self.policy),
+                "catalog": self.config.catalog_sha256,
+                "terms": self.config.service_terms_sha256,
+            },
+            repair_reason=repair_registration_pins_reason,
+        )
 
     def _decoded_record(self, kind, key, model, db=None):
         # The native read checks current conflicts, bounds and canonical bytes.
@@ -242,18 +259,21 @@ class ServiceWorkQueue:
                         if isinstance(body, ServiceWorkCatalog)
                         else (("service_catalog_round", digest(body), digest(round_)),)
                     ),
-                )
+                ),
+                index=self._registration_pins._capacity,
             )
 
-    def _raw_admission(self, ordinal, db, *, catalog=None):
+    def _raw_admission(self, ordinal, db, *, catalog=None, work_key=None):
         row = db.execute(
             "SELECT claim_key,admission FROM service_claims WHERE ordinal=?", (ordinal,)
         ).fetchone()
         if row is None:
             raise FileNotFoundError("accepted service claim index is incomplete")
-        if catalog is None:
-            catalog = self._catalog(db)[0].catalog
-        work = service_work_key(catalog, ordinal)
+        if work_key is None:
+            if catalog is None:
+                catalog = self._catalog(db)[0].catalog
+            work_key = service_work_key(catalog, ordinal)
+        work = work_key
         value = self._decoded_record("service_admission", work, ServiceWorkAdmission, db)
         if value is None:
             raise FileNotFoundError("accepted service admission is missing")
@@ -417,72 +437,178 @@ class ServiceWorkQueue:
                 ]
             return tuple(self._read(row[0], db) for row in rows)
 
+    def _retention_rows(self, db):
+        rows = db.execute(
+            "SELECT ordinal,claim_key,admission FROM service_claims ORDER BY ordinal"
+        ).fetchall()
+        bodies = db.execute(
+            "SELECT count(*) FROM records WHERE kind='service_admission'"
+        ).fetchone()[0]
+        if len(rows) != bodies or len(rows) > 8192:
+            raise ValueError("service retention index does not cover original admissions")
+        if any(row[0] != ordinal for ordinal, row in enumerate(rows, 1)):
+            raise ValueError("service retention ordinal prefix is incomplete")
+        return rows
+
+    def _retention_catalog(self):
+        pins = self._registration_pins
+        context = {"catalog": self.config.catalog_sha256}
+        with pins.snapshot() as db:
+            pins.check_schema(db)
+            saved = pins.load(db, "catalog", context)
+            if saved is not None:
+                return saved
+            with TransferProgress(
+                "registration_pin_catalog", 1, unit="catalogs", planning_unit_seconds=(0.01, 30)
+            ) as progress:
+                signed, round_ = self._catalog(db)
+                body = signed.catalog
+                keys = [
+                    ("service_catalog", self.config.catalog_sha256),
+                    ("service_round", digest(round_)),
+                ]
+                if not isinstance(body, ServiceWorkCatalog):
+                    keys.append(("service_catalog_round", self.config.catalog_sha256))
+                saved = pins.make(
+                    db,
+                    keys,
+                    context,
+                    {
+                        "work_keys": [
+                            service_work_key(body, ordinal)
+                            for ordinal in range(1, len(body.work) + 1)
+                        ],
+                    },
+                )
+                progress.advance(1)
+        pins.remember("catalog", saved, lambda db: None)
+        return saved
+
     def retained_registration_blocks(self) -> frozenset[int]:
-        """Pin original proof inputs, without reviewing or authorizing service work.
+        """Pin proofs using durable per-original facts and fresh mutation identities.
 
-        Registration persistence calls this while owning its database. Keep
-        this projection local to the queue; full history and signature review
-        remains required by lookup, assignment, entries and sealing. Reuse the
-        checked projection only for unchanged records, indices and bindings.
+        Each completed catalog/admission is read once, including across restarts.
+        SQL triggers invalidate changed originals; small live indices and conflict
+        holds remain fresh. No result authorizes admission, execution or rewards.
         """
-        with canonical_json_reuse(), self.journal.read_transaction() as db:
-            rows = db.execute(
-                "SELECT ordinal,claim_key,admission FROM service_claims ORDER BY ordinal"
-            ).fetchall()
-            bodies = db.execute(
-                "SELECT count(*) FROM records WHERE kind='service_admission'"
-            ).fetchone()[0]
-            if len(rows) != bodies or len(rows) > 8192:
-                raise ValueError("service retention index does not cover original admissions")
-            if not rows:
-                return frozenset()
-            catalog = self._catalog(db)[0].catalog
-
-            def records():
-                for ordinal, (stored_ordinal, _, _) in enumerate(rows, 1):
-                    if stored_ordinal != ordinal:
-                        raise ValueError("service retention ordinal prefix is incomplete")
-                    raw = self.journal.get_raw(
-                        "service_admission", service_work_key(catalog, ordinal), db=db
+        pins = self._registration_pins
+        with pins.snapshot() as db:
+            pins.check_schema(db)
+            rows = self._retention_rows(db)
+        if not rows:
+            return frozenset()
+        catalog = self._retention_catalog()
+        catalog_key = digest(catalog)
+        work_keys = catalog["result"]["work_keys"]
+        if len(rows) > len(work_keys):
+            raise ValueError("service retention exceeds its committed catalog")
+        contexts = [dict(row=list(row), catalog=catalog_key) for row in rows]
+        with pins.snapshot() as db:
+            pins.check_schema(db)
+            if (
+                self._retention_rows(db) != rows
+                or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
+                != catalog["sources"]
+            ):
+                raise RegistrationPinProjectionPending(
+                    0, len(rows), "inventory_changed_before_projection"
+                )
+            values = [
+                pins.load(db, str(row[0]), context)
+                for row, context in zip(rows, contexts, strict=True)
+            ]
+        decoded = 0
+        started = time.monotonic()
+        with TransferProgress(
+            "registration_pin_projection",
+            len(rows),
+            unit="admissions",
+            planning_unit_seconds=(0.001, 1),
+        ) as progress:
+            for index, (row, context) in enumerate(zip(rows, contexts, strict=True)):
+                if values[index] is not None:
+                    progress.advance(1, restored=True)
+                    continue
+                if decoded >= 8 or (decoded and time.monotonic() - started >= 5):
+                    progress.emit("waiting", reason="bounded_registration_pin_projection")
+                    raise RegistrationPinProjectionPending(
+                        sum(v is not None for v in values), len(values)
                     )
-                    if raw is None:
-                        raise FileNotFoundError("accepted service admission is missing")
-                    yield raw
+                with pins.snapshot() as db:
+                    pins.check_schema(db)
+                    if (
+                        pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
+                        != catalog["sources"]
+                    ):
+                        raise RegistrationPinProjectionPending(index, len(rows), "catalog_changed")
+                    value = self._raw_admission(row[0], db, work_key=work_keys[index])
+                    if (
+                        value.catalog_sha256 != self.config.catalog_sha256
+                        or value.claim.claim.catalog_sha256 != self.config.catalog_sha256
+                        or value.observation.snapshot_sha256 != digest(value.registration)
+                        or value.observation.block != value.registration.block
+                        or value.observation.block_hash != value.registration.block_hash
+                        or value.registration.network != self.policy.network
+                        or value.registration.netuid != self.policy.netuid
+                    ):
+                        raise ValueError("service retention changed original registration bindings")
+                    values[index] = pins.make(
+                        db,
+                        [
+                            *((k, i) for k, i, _ in catalog["sources"]),
+                            ("service_admission", work_keys[index]),
+                        ],
+                        context,
+                        {
+                            "block": value.observation.block,
+                            "predecessor": value.predecessor_sha256,
+                        },
+                    )
 
-            # Stream current native reads into a small fingerprint. No complete
-            # claim tree is copied on a hit; conflict holds, canonical bytes and
-            # owner indices still come from this same fresh read snapshot.
-            key = (
-                assignment_reuse_key(
-                    self.journal, "registration_retention", records(), self.config, self.policy, {}
-                ),
-                tuple(rows),
-            )
-            cached = self._retention_projection.lookup("blocks", key)
-            if cached is not None:
-                return frozenset(cached)
+                def unchanged(db, expected=row, completed=index):
+                    current = db.execute(
+                        "SELECT ordinal,claim_key,admission FROM service_claims WHERE ordinal=?",
+                        (expected[0],),
+                    ).fetchone()
+                    if current != expected:
+                        raise RegistrationPinProjectionPending(
+                            completed, len(rows), "index_changed_during_projection"
+                        )
+
+                # Every successful item commits before the next original is read.
+                pins.remember(str(row[0]), values[index], unchanged)
+                decoded += 1
+                progress.advance(1)
+            with pins.snapshot() as db:
+                pins.check_schema(db)
+                if (
+                    self._retention_rows(db) != rows
+                    or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
+                    != catalog["sources"]
+                ):
+                    raise RegistrationPinProjectionPending(
+                        len(rows), len(rows), "inventory_changed_after_projection"
+                    )
+                for value in values:
+                    keys = [(k, i) for k, i, _ in value["sources"]]
+                    if pins.sources(db, keys) != value["sources"]:
+                        raise RegistrationPinProjectionPending(
+                            len(rows), len(rows), "source_changed_after_projection"
+                        )
             blocks = set()
             previous = None
-            for ordinal, _, _ in rows:
-                value = self._raw_admission(ordinal, db, catalog=catalog)
+            for row, value in zip(rows, values, strict=True):
+                result = value["result"]
+                block = result["block"]
                 if (
-                    value.catalog_sha256 != self.config.catalog_sha256
-                    or value.claim.claim.catalog_sha256 != self.config.catalog_sha256
-                    or value.predecessor_sha256 != (None if previous is None else digest(previous))
-                    or value.observation.snapshot_sha256 != digest(value.registration)
-                    or value.observation.block != value.registration.block
-                    or value.observation.block_hash != value.registration.block_hash
-                    or value.registration.network != self.policy.network
-                    or value.registration.netuid != self.policy.netuid
-                    or (
-                        previous is not None
-                        and value.observation.block < previous.observation.block
-                    )
+                    type(block) is not int
+                    or not 0 <= block <= 2**53 - 1
+                    or result["predecessor"] != (None if previous is None else previous[1])
+                    or (previous is not None and block < previous[0])
                 ):
                     raise ValueError("service retention changed original registration bindings")
-                blocks.add(value.observation.block)
-                previous = value
-            self._retention_projection.remember("blocks", key, tuple(sorted(blocks)))
+                blocks.add(block)
+                previous = (block, row[2])
             return frozenset(blocks)
 
     def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:

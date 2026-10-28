@@ -388,7 +388,7 @@ def test_unchanged_retention_reuses_projection_but_new_claims_are_pinned(queue_c
     )
     read.reset_mock()
     assert c.queue.retained_registration_blocks() == frozenset({400, 401})
-    assert read.call_count == 2
+    assert read.call_count == 1
     read.reset_mock()
     assert c.queue.retained_registration_blocks() == frozenset({400, 401})
     read.assert_not_called()
@@ -583,7 +583,11 @@ def test_stopped_queue_transfer_preserves_original_namespace_and_claims(queue_ca
     # Production must separately fence the old host before copying state.
     Path(c.cfg.directory).rename(saved)
     shutil.copytree(saved, c.cfg.directory)
-    c.queue = ServiceWorkQueue(c.cfg, c.h.batch["policy"])
+    # A stopped transfer retains all signed work, while the new file identity
+    # explicitly repairs the local derived pin namespace before owner startup.
+    c.queue = ServiceWorkQueue(
+        c.cfg, c.h.batch["policy"], repair_registration_pins_reason="stopped owner transfer"
+    )
     assert c.queue.lookup(inputs(c)[0]) == first
     assert admit(c, "Bob").ordinal == 2
 
@@ -945,3 +949,459 @@ def test_retained_record_reuse_does_not_cache_claim_index(queue_case):
         )
     with c.queue.journal.read_transaction() as db, pytest.raises(ValueError, match="index differs"):
         c.queue._raw_admission(accepted.ordinal, db)
+
+
+def test_pin_restart_never_rereads_unchanged_originals(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    restarted = ServiceWorkQueue(c.cfg, c.queue.policy)
+    original = restarted.journal._record
+
+    def metadata_only(db, kind, key):
+        assert kind not in {
+            "service_admission",
+            "service_catalog",
+            "service_round",
+            "service_catalog_round",
+        }, "unchanged original was reread"
+        return original(db, kind, key)
+
+    monkeypatch.setattr(restarted.journal, "_record", metadata_only)
+    assert restarted.retained_registration_blocks() == frozenset({400})
+    assert restarted.retained_registration_blocks() == frozenset({400})
+
+
+def test_pin_changed_same_length_original_invalidates_only_that_item(queue_case, monkeypatch):
+    c = queue_case
+    first, second = admit(c), admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    changed_claim = second.claim.model_copy(
+        update={
+            "signature": sign_object(second.claim.claim, wallet("Alice")),
+        }
+    )
+    changed = second.model_copy(update={"claim": changed_claim})
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_admission' AND id=?",
+            (canonical_json_bytes(changed), second.work_sha256),
+        )
+        db.execute("UPDATE service_claims SET admission=? WHERE ordinal=2", (digest(changed),))
+    reads = Mock(wraps=c.queue._raw_admission)
+    monkeypatch.setattr(c.queue, "_raw_admission", reads)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    assert [call.args[0] for call in reads.call_args_list] == [2]
+    reads.reset_mock()
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    reads.assert_not_called()
+    assert first.observation.block == 400
+
+
+@pytest.mark.parametrize("queue_case", [12], indirect=True)
+def test_pin_bounded_first_pass_resumes_across_restart(queue_case, monkeypatch):
+    from umi.competition_registration_pins import RegistrationPinProjectionPending
+
+    c = queue_case
+    for nonce in range(1, 13):
+        admit(c, "Alice", nonce)
+    with pytest.raises(RegistrationPinProjectionPending) as pending:
+        c.queue.retained_registration_blocks()
+    assert 1 <= pending.value.completed <= 8 and pending.value.total == 12
+    completed = pending.value.completed
+    restarted = ServiceWorkQueue(c.cfg, c.queue.policy)
+    reads = Mock(wraps=restarted._raw_admission)
+    monkeypatch.setattr(restarted, "_raw_admission", reads)
+    while True:
+        try:
+            assert restarted.retained_registration_blocks() == frozenset({400})
+            break
+        except RegistrationPinProjectionPending:
+            continue
+    assert [call.args[0] for call in reads.call_args_list] == list(range(completed + 1, 13))
+
+
+@pytest.mark.parametrize("damage", ["index", "result", "source_trigger", "inode"])
+def test_pin_explicit_repair_preserves_signed_records_and_unchanged_results(
+    queue_case, monkeypatch, damage
+):
+    from umi.competition_registration_pins import RegistrationPinRepairRequired
+
+    c = queue_case
+    admit(c)
+    admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.read_transaction() as db:
+        originals = db.execute(
+            "SELECT kind,id,body FROM records WHERE kind NOT GLOB 'registration_pin_*'"
+        ).fetchall()
+    with c.queue.journal.transaction() as db:
+        if damage == "index":
+            db.execute("DELETE FROM registration_pin_index")
+        elif damage == "result":
+            db.execute(
+                "DELETE FROM records WHERE kind='registration_pin_result' AND id IN "
+                "(SELECT result FROM registration_pin_index WHERE id=?)",
+                (digest([c.queue._registration_pins.owner, "2"]),),
+            )
+        elif damage == "source_trigger":
+            db.execute("DROP TRIGGER registration_pin_source_update")
+    if damage == "inode":
+        replacement = c.queue.journal.path.with_suffix(".replacement")
+        shutil.copy2(c.queue.journal.path, replacement)
+        replacement.replace(c.queue.journal.path)
+    with pytest.raises(RegistrationPinRepairRequired):
+        c.queue.retained_registration_blocks()
+    repaired = ServiceWorkQueue(
+        c.cfg, c.queue.policy, repair_registration_pins_reason="test retained metadata recovery"
+    )
+    reads = Mock(wraps=repaired._raw_admission)
+    monkeypatch.setattr(repaired, "_raw_admission", reads)
+    assert repaired.retained_registration_blocks() == frozenset({400})
+    assert reads.call_count == (0 if damage == "index" else 1 if damage == "result" else 2)
+    with repaired.journal.read_transaction() as db:
+        assert (
+            db.execute(
+                "SELECT kind,id,body FROM records WHERE kind NOT GLOB 'registration_pin_*'"
+            ).fetchall()
+            == originals
+        )
+    restarted = ServiceWorkQueue(c.cfg, c.queue.policy)
+    monkeypatch.setattr(restarted, "_raw_admission", Mock(side_effect=AssertionError("repeat")))
+    assert restarted.retained_registration_blocks() == frozenset({400})
+
+
+def test_pin_catalog_change_between_batch_and_item_cannot_relabel_stale_projection(
+    queue_case, monkeypatch
+):
+    import time
+
+    from umi import competition_cohort_service_queue as module
+
+    c = queue_case
+    admit(c)
+    # Retain the catalog before the race; no admission projection exists yet.
+    c.queue._retention_catalog()
+    changed = c.catalog.model_copy(
+        update={"catalog": c.catalog.catalog.model_copy(update={"issued_at_block": 401})}
+    )
+    mutated = False
+
+    def mutate_after_batch_snapshot():
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            with c.queue.journal.transaction() as db:
+                db.execute(
+                    "UPDATE records SET body=? WHERE kind='service_catalog' AND id=?",
+                    (canonical_json_bytes(changed), c.cfg.catalog_sha256),
+                )
+        return time.monotonic()
+
+    # This clock read occurs after the initial receipt/token snapshot has closed,
+    # just before the first per-admission snapshot. Avoid a synthetic nested
+    # writer on a still-open SQLite reader.
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=mutate_after_batch_snapshot))
+    with pytest.raises((OSError, ValueError)):
+        c.queue.retained_registration_blocks()
+    assert mutated
+    with c.queue.journal.read_transaction() as db:
+        slot = digest([c.queue._registration_pins.owner, "1"])
+        assert (
+            db.execute("SELECT result FROM registration_pin_index WHERE id=?", (slot,)).fetchone()
+            is None
+        )
+    # Restoring the exact original still advances its identity. Only that fresh
+    # checked catalog may be used to resume and publish the admission projection.
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_catalog' AND id=?",
+            (canonical_json_bytes(c.catalog), c.cfg.catalog_sha256),
+        )
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+
+
+def test_pin_repair_never_copies_a_conflict_held_completed_result(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.read_transaction() as db:
+        slot = digest([c.queue._registration_pins.owner, "2"])
+        result_key = db.execute(
+            "SELECT result FROM registration_pin_index WHERE id=?", (slot,)
+        ).fetchone()[0]
+        prior = c.queue.journal.get("registration_pin_result", result_key, db=db)
+    with pytest.raises(ValueError, match="conflict"):
+        c.queue.journal.put("registration_pin_result", result_key, {**prior, "changed": True})
+    with pytest.raises(ValueError):
+        c.queue.retained_registration_blocks()
+    repaired = ServiceWorkQueue(
+        c.cfg, c.queue.policy, repair_registration_pins_reason="repair conflict-held local result"
+    )
+    reads = Mock(wraps=repaired._raw_admission)
+    monkeypatch.setattr(repaired, "_raw_admission", reads)
+    assert repaired.retained_registration_blocks() == frozenset({400})
+    assert [call.args[0] for call in reads.call_args_list] == [2]
+    with repaired.journal.read_transaction() as db:
+        assert db.execute("SELECT 1 FROM holds WHERE id=?", (result_key,)).fetchone() == (1,)
+
+
+@pytest.mark.parametrize("damage", ["missing", "negative_revision", "text_revision", "presence"])
+def test_pin_source_ledger_row_damage_has_a_complete_explicit_repair(
+    queue_case, monkeypatch, damage
+):
+    from umi.competition_registration_pins import RegistrationPinRepairRequired
+
+    c = queue_case
+    admit(c)
+    second = admit(c, "Bob", 2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.transaction() as db:
+        if damage == "missing":
+            db.execute(
+                "DELETE FROM registration_pin_sources WHERE kind='service_admission' AND id=?",
+                (second.work_sha256,),
+            )
+        else:
+            column, value = (
+                ("present", 0)
+                if damage == "presence"
+                else ("revision", -1 if damage == "negative_revision" else "damaged")
+            )
+            db.execute(
+                f"UPDATE registration_pin_sources SET {column}=? "
+                "WHERE kind='service_admission' AND id=?",
+                (value, second.work_sha256),
+            )
+    with pytest.raises(RegistrationPinRepairRequired):
+        c.queue.retained_registration_blocks()
+    repaired = ServiceWorkQueue(
+        c.cfg, c.queue.policy, repair_registration_pins_reason="repair damaged source ledger row"
+    )
+    reads = Mock(wraps=repaired._raw_admission)
+    monkeypatch.setattr(repaired, "_raw_admission", reads)
+    assert repaired.retained_registration_blocks() == frozenset({400})
+    assert [call.args[0] for call in reads.call_args_list] == [2]
+    reads.reset_mock()
+    assert repaired.retained_registration_blocks() == frozenset({400})
+    reads.assert_not_called()
+
+
+@pytest.mark.parametrize("limit", ["records", "bytes"])
+def test_pin_source_metadata_is_charged_before_reserved_journal_commit(
+    queue_case, monkeypatch, limit
+):
+    c = queue_case
+    admit(c)
+    journal = c.queue.journal
+    with journal.read_transaction() as db:
+        assert journal._version(db) == 2
+        count, size, _ = journal._capacity(db)
+    body = {"unused_source": True}
+    # The original alone fits. Its new source identity must be charged in this
+    # same commit, before the journal can report success.
+    if limit == "records":
+        monkeypatch.setattr(type(journal), "maximum_records", property(lambda _: count + 1))
+    else:
+        monkeypatch.setattr(journal, "maximum_bytes", size + len(canonical_json_bytes(body)))
+    with pytest.raises(ValueError, match="capacity exhausted"):
+        journal.put("service_round", "metadata-capacity-probe", body)
+    with journal.read_transaction() as db:
+        assert journal.get("service_round", "metadata-capacity-probe", db=db) is None
+        assert (
+            db.execute(
+                "SELECT 1 FROM registration_pin_sources WHERE id='metadata-capacity-probe'"
+            ).fetchone()
+            is None
+        )
+        assert journal._capacity(db)[:2] == (count, size)
+
+
+def test_pin_source_tombstone_remains_charged_after_original_deletion(queue_case):
+    c = queue_case
+    admit(c)
+    journal = c.queue.journal
+    with journal.read_transaction() as db:
+        assert journal._version(db) == 2
+        before_count, before_size, _ = journal._capacity(db)
+    journal.put("service_round", "tombstone-capacity-probe", {"unused_source": True})
+    with journal.transaction() as db:
+        db.execute(
+            "DELETE FROM records WHERE kind='service_round' AND id='tombstone-capacity-probe'"
+        )
+    with journal.read_transaction() as db:
+        assert db.execute(
+            "SELECT revision,present FROM registration_pin_sources "
+            "WHERE kind='service_round' AND id='tombstone-capacity-probe'"
+        ).fetchone() == (2, 0)
+        count, size, _ = journal._capacity(db)
+        assert count == before_count + 1
+        assert size == before_size + len("service_round") + len("tombstone-capacity-probe") + 2
+
+
+def test_pin_initial_catalog_source_metadata_cannot_exceed_legacy_capacity(
+    queue_case, tmp_path, monkeypatch
+):
+    c = queue_case
+    queue = ServiceWorkQueue(
+        c.cfg.model_copy(update={"directory": str(tmp_path / "uninstalled-queue")}), c.queue.policy
+    )
+    # Prepare unrelated history at its normal allowance; the installation below
+    # must only add its two new originals and their two source identity rows.
+    remember_order_history(
+        queue.journal,
+        {c.catalog.catalog.cohort_sha256: c.catalog.catalog.authority_sha256},
+        queue.policy,
+        c.h.source,
+        400,
+    )
+    with queue.journal.read_transaction() as db:
+        assert queue.journal._version(db) == 0
+        original_count = queue.journal._record_capacity(db)[0]
+        before_sources = db.execute(
+            "SELECT kind,id,revision,present FROM registration_pin_sources"
+        ).fetchall()
+        assert not before_sources
+    # Legacy put_many's original-record allowance can fit catalog and round;
+    # the complete allowance cannot also fit the new identity metadata.
+    monkeypatch.setattr(
+        type(queue.journal), "maximum_records", property(lambda _: original_count + 2)
+    )
+    with pytest.raises(ValueError, match="capacity exhausted"):
+        queue.install(
+            c.catalog,
+            c.round,
+            c.h.source,
+            capture(),
+            expected_tip_sha256=history_tip(c.h.source.history),
+        )
+    with queue.journal.read_transaction() as db:
+        assert queue.journal.get("service_catalog", c.cfg.catalog_sha256, db=db) is None
+        assert queue.journal.get("service_round", digest(c.round), db=db) is None
+        assert (
+            db.execute("SELECT kind,id,revision,present FROM registration_pin_sources").fetchall()
+            == before_sources
+        )
+        assert queue.journal._record_capacity(db)[0] == original_count
+
+
+def test_pin_explicit_repair_is_idempotent(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.transaction() as db:
+        db.execute("DELETE FROM registration_pin_index")
+    repaired = ServiceWorkQueue(c.cfg, c.queue.policy, repair_registration_pins_reason="lost index")
+    with repaired.journal.read_transaction() as db:
+        before = db.execute("SELECT count(*) FROM records").fetchone()
+    again = ServiceWorkQueue(c.cfg, c.queue.policy, repair_registration_pins_reason="lost index")
+    assert again._registration_pins.owner == repaired._registration_pins.owner
+    with again.journal.read_transaction() as db:
+        assert db.execute("SELECT count(*) FROM records").fetchone() == before
+    monkeypatch.setattr(again, "_raw_admission", Mock(side_effect=AssertionError("repeat")))
+    assert again.retained_registration_blocks() == frozenset({400})
+
+
+def test_pin_older_journal_migrates_metadata_without_reading_originals(queue_case, monkeypatch):
+    c = queue_case
+    admit(c)
+    with c.queue.journal.transaction() as db:
+        for name in c.queue._registration_pins.triggers:
+            db.execute("DROP TRIGGER " + name)
+        for table in (
+            "registration_pin_sources",
+            "registration_pin_index",
+            "registration_pin_state",
+        ):
+            db.execute("DROP TABLE " + table)
+        db.execute("DELETE FROM records WHERE kind GLOB 'registration_pin_*'")
+    original = c.queue.journal.__class__._record
+    reads = []
+
+    def observe(self, db, kind, key):
+        if kind in {
+            "service_catalog",
+            "service_round",
+            "service_catalog_round",
+            "service_admission",
+        }:
+            reads.append(kind)
+        return original(self, db, kind, key)
+
+    monkeypatch.setattr(c.queue.journal.__class__, "_record", observe)
+    migrated = ServiceWorkQueue(c.cfg, c.queue.policy)
+    assert not reads
+    assert migrated.retained_registration_blocks() == frozenset({400})
+    assert reads.count("service_admission") == 1
+    reads.clear()
+    assert migrated.retained_registration_blocks() == frozenset({400})
+    assert not reads
+
+
+def test_pin_repair_cli_returns_success(queue_case, tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+
+    from umi.competition_registration_pins_cli import main
+
+    c = queue_case
+    config, policy = tmp_path / "queue-config.json", tmp_path / "policy.json"
+    for path, value in ((config, c.cfg), (policy, c.queue.policy)):
+        path.write_bytes(canonical_json_bytes(value))
+        path.chmod(0o600)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repair",
+            "--queue-config",
+            str(config),
+            "--policy",
+            str(policy),
+            "--reason",
+            "confirm completed repair",
+        ],
+    )
+    assert main() == 0
+    assert json.loads(capsys.readouterr().out)["native_projection_resumes_in_owner"] is True
+
+
+def test_pin_checkpoint_contention_never_waits_at_writer_gate(queue_case):
+    from umi.private_files import PrivateStateBusyError
+
+    c = queue_case
+    admit(c)
+    # Resolve the catalog once. The next callback needs an admission checkpoint.
+    c.queue._retention_catalog()
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        c.queue.journal._transaction_lock,
+        pytest.raises(PrivateStateBusyError),
+    ):
+        pool.submit(c.queue.retained_registration_blocks).result(timeout=2)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+
+
+@pytest.mark.parametrize("damage", ["installed_marker", "index_schema"])
+def test_pin_repair_reconstructs_missing_marker_or_changed_index_schema(
+    queue_case, monkeypatch, damage
+):
+    from umi.competition_registration_pins import RegistrationPinRepairRequired
+
+    c = queue_case
+    admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.transaction() as db:
+        if damage == "installed_marker":
+            db.execute("DELETE FROM records WHERE kind='registration_pin_installed'")
+        else:
+            db.execute("ALTER TABLE registration_pin_index ADD COLUMN extra TEXT")
+    with pytest.raises(RegistrationPinRepairRequired):
+        c.queue.retained_registration_blocks()
+    repaired = ServiceWorkQueue(
+        c.cfg, c.queue.policy, repair_registration_pins_reason="restore pin metadata"
+    )
+    monkeypatch.setattr(repaired, "_raw_admission", Mock(side_effect=AssertionError("repeat")))
+    assert repaired.retained_registration_blocks() == frozenset({400})

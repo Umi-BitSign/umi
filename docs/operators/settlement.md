@@ -14,6 +14,55 @@
 
 Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
 
+## Registration capture retention
+
+The admission owner keeps already verified registration captures while intake
+preservation or service-work metadata is busy. Intake pins use a read snapshot
+outside the admission writer gate. Service-work pins persist one small result per
+original catalog/admission, bound to the private journal owner, policy, verifier
+semantics, current conflict holds and SQL source revisions. An unchanged poll or
+restart reads those facts and indices, without reading or hashing the original
+admission bodies again. Catalog changes invalidate its dependent results; a
+changed admission invalidates only that admission.
+
+The first use on an older supported journal creates a metadata source index.
+Projection then checkpoints each completed original, processing at most eight
+new admissions or five seconds between completed items per refresh. Logs expose
+`registration_pin_source_migration`, `registration_pin_catalog` and
+`registration_pin_projection` counts, elapsed time and the measured ETA or an
+explicit planning range. Changed inputs resume only the affected work. A busy
+snapshot, unfinished projection or damaged completion record emits
+`registration_retention_pruning_deferred`; the capture is saved and all earlier
+captures are retained. Unknown pins still count against the working-cache budget.
+That state defers reclamation, not proof verification, admission or a capacity
+limit. A damaged completion is an explicit repair state, never an ordinary miss.
+
+For damaged pin metadata or an intentionally restored journal file, stop the
+queue owner cooperatively and run its selected Python host as the same service
+account. Read the selected source directory from the current supervisor selection;
+the explicit source argument also supports installed signed hosts with an overlay:
+
+```sh
+python -I -B -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from umi.competition_registration_pins_cli import main; raise SystemExit(main())' /path/to/selected/source/src --queue-config /path/to/service-queue.json --policy /path/to/policy.json --reason 'Explain the exact retained metadata repair'
+```
+
+The repair preserves original signed records, holds and capacity reservations.
+It retains a bounded audit of the prior metadata, restores intact completion
+facts without rereading payloads, and rebuilds only affected source metadata when
+its owner and mutation fences are intact. A changed storage identity or damaged
+mutation fences requires a counted first pass over the affected originals after
+the owner resumes. Repeating a completed repair reuses its selected namespace.
+Repair reports metadata completion separately from the remaining native
+projection; it grants no registration, execution or reward authority. General
+journal corruption, including native v2 capability fences, remains a native
+restore/repair error; this command cannot bypass those fences.
+
+This is an owner-local metadata change. Deploy through the admission supervisor's
+selected qualified host and preserve its existing queue directories. Existing
+miner/client messages, validator proofs, signed cohorts, automatic release
+selection and C6 reward evidence keep their formats; no miner or validator
+reinstallation is required for this local retention projection.
+
 ## Operator early reward release
 
 The normal standing reward path waits for the predecessor's signed minimum

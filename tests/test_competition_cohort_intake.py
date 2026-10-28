@@ -716,3 +716,30 @@ def test_participation_decode_reuse_preserves_input_bound(participation_decode_o
     with pytest.raises(ValueError, match="byte bound"):
         module.read_participation(bad)
     assert not calls
+
+
+def test_registration_pins_do_not_wait_for_intake_writer_gate(intake, scenario):
+    from concurrent.futures import ThreadPoolExecutor
+
+    intake.retain(request_for(scenario), capture_at(210))
+    with ThreadPoolExecutor(max_workers=1) as pool, intake._process_lock.hold():
+        assert pool.submit(intake.retained_registration_blocks).result(timeout=2) == frozenset(
+            {210}
+        )
+
+
+def test_registration_pins_report_real_sqlite_contention(intake, scenario):
+    import sqlite3
+
+    from umi.private_files import PrivateStateBusyError
+
+    intake.retain(request_for(scenario), capture_at(210))
+    db = sqlite3.connect(intake.directory / "intake.sqlite3", isolation_level=None)
+    try:
+        db.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(PrivateStateBusyError):
+            intake.retained_registration_blocks()
+    finally:
+        db.rollback()
+        db.close()
+    assert intake.retained_registration_blocks() == frozenset({210})

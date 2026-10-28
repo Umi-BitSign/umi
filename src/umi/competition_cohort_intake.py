@@ -64,6 +64,7 @@ from .competition_store import AdmissionCapacity, AdmissionCapacityError
 from .concurrency import run_owned_thread
 from .host_memory_request_bounds import check_stage_json, stage_count
 from .open_competition import CompetitionPolicy, digest, identity
+from .private_files import PrivateStateBusyError
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 from .thread_gate import ThreadGate
 
@@ -350,7 +351,7 @@ class CohortIntake:
                 os.close(lease)
 
     @contextmanager
-    def _history_connection(self):
+    def _history_connection(self, *, wait=True):
         # Owner-authenticated history must remain readable while admission,
         # model preservation or another history caller owns the write gate.
         # SQLite's snapshot keeps the selected history and its inputs together.
@@ -361,7 +362,12 @@ class CohortIntake:
             with (
                 canonical_json_reuse(),
                 closing(
-                    sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+                    sqlite3.connect(
+                        path.as_uri() + "?mode=ro",
+                        uri=True,
+                        isolation_level=None,
+                        timeout=5 if wait else 0,
+                    )
                 ) as db,
             ):
                 current, held = path.lstat(), os.fstat(descriptor)
@@ -379,6 +385,15 @@ class CohortIntake:
                     current = path.lstat()
                     if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                         raise ValueError("cohort intake file changed during the operation")
+        except sqlite3.OperationalError as error:
+            if not wait and getattr(error, "sqlite_errorcode", None) in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                raise PrivateStateBusyError(
+                    "cohort_intake_snapshot", digest(str(self.directory)), error.sqlite_errorcode
+                ) from error
+            raise
         finally:
             os.close(descriptor)
 
@@ -1017,7 +1032,10 @@ class CohortIntake:
             return result
 
     def retained_registration_blocks(self) -> frozenset[int]:
-        with self._connection() as (db, _):
+        # Pin metadata has no writer work. A published-history/acceptance writer
+        # must not make a verified registration capture wait at its ThreadGate.
+        # Real snapshot contention defers pruning, never the capture itself.
+        with self._history_connection(wait=False) as (db, _):
             prepared = []
             for table in ("cohort_prepared_rounds", "cohort_preparation_progress"):
                 if db.execute(
