@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -257,6 +258,7 @@ class DirectModelUploadOwner:
         policy: CompetitionPolicy | None = None,
         new_attempt_id: AttemptId | None = None,
         repair_attempt_index: bool = False,
+        repair_poll_cursor: bool = False,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         if not callable(authorize) or not callable(sign):
@@ -267,6 +269,7 @@ class DirectModelUploadOwner:
         self._mutex = asyncio.Lock()
         self._verification_mutex = asyncio.Lock()
         self._promotion_mutex = asyncio.Lock()
+        self._poll_mutex = asyncio.Lock()
         c = self.config
         roots = [Path(c.directory)]
         if c.admission_reviews_directory is not None:
@@ -300,6 +303,7 @@ class DirectModelUploadOwner:
             repair_attempt_index=repair_attempt_index,
             maximum_bytes=c.maximum_metadata_bytes,
         )
+        self.journal.initialize_poll_cursor(repair=repair_poll_cursor)
 
     def _request(self, request: CohortParticipationRequest) -> tuple[str, object]:
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
@@ -1495,12 +1499,19 @@ class DirectModelUploadOwner:
     async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
 
+        async with self._poll_mutex:
+            return await self._poll_once(now_unix_ms=now_unix_ms)
+
+    async def _poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
         _at(now_unix_ms)
         ready = pending = failed = reviews_ready = reviews_held = 0
         cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = ""
         examined = 0
         keys = await run_owned_thread(self.journal.keys, "direct-object")
+        after = await run_owned_thread(self.journal.poll_cursor)
+        split = bisect_right(keys, after)
+        keys = keys[split:] + keys[:split]
         for reservation_sha256 in keys:
             verified, reservation, verification_hold = await run_owned_thread(
                 self._poll_input, reservation_sha256
@@ -1584,6 +1595,10 @@ class DirectModelUploadOwner:
                 pending += 1
                 continue
             examined += 1
+            # Persist before remote work so transient failure or interruption
+            # yields to the next unfinished object, including after restart.
+            # Skipped completed/held/tail entries never move this cursor.
+            await run_owned_thread(self.journal.advance_poll_cursor, reservation_sha256)
             if not verified:
                 try:
                     await self.verify(reservation_sha256, now_unix_ms=now_unix_ms)
@@ -1668,6 +1683,7 @@ class DirectModelUploadOwner:
             "status": "direct_model_upload_poll",
             "objects_verified": ready,
             "objects_pending": pending,
+            "objects_attempted": examined,
             "objects_failed": failed,
             "reviews_ready": reviews_ready,
             "reviews_held": reviews_held,

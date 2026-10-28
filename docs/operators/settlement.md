@@ -3629,6 +3629,27 @@ entire stream, every declared file, and the license/provenance documents. A
 model cannot enter participation or artifact acceptance before those checks and
 the standing review complete.
 
+The direct owner processes at most `verification_batch_size` unfinished uploads
+per poll, in serial rotation. It checkpoints each selected reservation before
+verification or review, so transient provider failures and interrupted polls yield
+to later uploads after restart. Successful verification and review receipts remain
+reusable. The existing poll interval and provider retry pacing still apply;
+`objects_attempted` reports the consumed slots alongside pending, failed and ready
+counts. Terminal holds do not consume verification slots. Rejected-object cleanup
+retains its separate `cleanup_batch_size` limit.
+
+The intake host installs a fixed 64-byte scheduling cursor in the existing private
+direct-upload journal and includes that reservation in metadata capacity reporting.
+Older journals initialize it without changing signed records or completed verdicts;
+repeated upgrades retain its position. Damaged cursor rows or schema are explicit
+repair holds. The service-owned maintenance path can select `repair_poll_cursor=True`
+when constructing `DirectModelUploadOwner` to reset only scheduling order, with
+counted repair progress; it preserves every completed verdict and signed record.
+This is an intake-owner scheduling update: miner upload messages and validator review,
+certification and reward evidence remain compatible. Select the updated admission
+host through its supported preserving update path; a miner/client update alone
+does not change the owner's poll behavior.
+
 Retained completion metadata is a signed intent, not a completed-object verdict.
 If provider completion fails and both the multipart generation and object are
 absent, completion returns HTTP503 with

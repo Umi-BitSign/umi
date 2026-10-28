@@ -78,6 +78,65 @@ def test_legacy_migration_retains_all_original_bytes_and_latest_generation(tmp_p
     assert repeated.latest_attempt(UPLOAD) == intent(2)
 
 
+def test_poll_cursor_upgrade_and_restart_preserve_records_and_bound_capacity(tmp_path):
+    legacy = native_legacy(tmp_path / "journal")
+    before = records(legacy)
+    current = open_current(legacy.root)
+    size = current.metadata_snapshot()["metadata_bytes"]
+    current.initialize_poll_cursor()
+    assert current.poll_cursor() == ""
+    assert current.metadata_snapshot()["metadata_bytes"] == size + 64
+    current.advance_poll_cursor("12" * 32)
+    current.advance_poll_cursor("34" * 32)
+    repeated = open_current(legacy.root)
+    repeated.initialize_poll_cursor()
+    assert repeated.poll_cursor() == "34" * 32
+    assert records(repeated) == before
+    assert repeated.metadata_snapshot()["metadata_bytes"] == size + 64
+    reader = open_current(legacy.root, existing_only=True, read_only=True)
+    assert reader.latest_attempt(UPLOAD) == intent(2)
+    assert reader.poll_cursor() == "34" * 32
+
+
+@pytest.mark.parametrize(
+    "damage", ["invalid_key", "oversized_key", "missing_row", "changed_schema"]
+)
+def test_poll_cursor_damage_is_explicit_and_never_replaces_evidence(tmp_path, damage):
+    current = open_current(native_legacy(tmp_path / "journal").root)
+    current.initialize_poll_cursor()
+    before = records(current)
+    with current.transaction() as db:
+        if damage == "invalid_key":
+            db.execute("UPDATE direct_upload_poll_cursor SET after_key='invalid'")
+        elif damage == "oversized_key":
+            db.execute("UPDATE direct_upload_poll_cursor SET after_key=?", ("a" * 1024**2,))
+        elif damage == "missing_row":
+            db.execute("DELETE FROM direct_upload_poll_cursor")
+        else:
+            db.execute("ALTER TABLE direct_upload_poll_cursor ADD COLUMN extra TEXT")
+    with pytest.raises(DirectModelAttemptRepairRequired, match=r"poll cursor.*repair"):
+        current.poll_cursor()
+    with pytest.raises(DirectModelAttemptRepairRequired, match=r"poll cursor.*repair"):
+        open_current(current.root).initialize_poll_cursor()
+    assert records(current) == before
+    current.initialize_poll_cursor(repair=True)
+    assert current.poll_cursor() == "" and records(current) == before
+    assert open_current(current.root).poll_cursor() == ""
+
+
+def test_poll_cursor_allocation_preserves_metadata_limit(tmp_path, monkeypatch):
+    current = open_current(native_legacy(tmp_path / "journal").root)
+    size = current.metadata_snapshot()["metadata_bytes"]
+    monkeypatch.setattr(current, "maximum_bytes", size + 63)
+    with pytest.raises(DirectModelMetadataCapacityPending):
+        current.initialize_poll_cursor()
+    assert current.metadata_snapshot()["metadata_bytes"] == size
+    monkeypatch.setattr(current, "maximum_bytes", size + 64)
+    current.initialize_poll_cursor()
+    current.advance_poll_cursor("12" * 32)
+    assert current.metadata_snapshot()["remaining_metadata_bytes"] == 0
+
+
 def test_retry_history_has_no_upload_times_attempt_count_ceiling(tmp_path, monkeypatch):
     current = open_current(tmp_path / "journal")
     current.retain_request(UPLOAD, {"signed": "request"}, {"signed": "payload"})
