@@ -118,6 +118,13 @@ This reports stage progress, not your model's quality score. A null ETA includes
 its reason; certification and scoring are separate stages. Artifact review runs
 during intake, including for replacements, and completed work resumes after
 restart rather than waiting until intake closes.
+When you reserve a newer model submission sequence, the owner skips expensive
+source verification and static review for the older sequence. A completed old
+upload reports `direct_model_submission_superseded` in `hold_reason_code`; supported
+model clients stop retrying that request and show the reason. Continue the newer
+exact signed request. Provider multipart-generation retries of that same request
+retain its original admission eligibility. This does not delete signed history
+or claim the replaced payload passed verification.
 After a replacement changes the latest-submission roster, certification has no
 comparable completion rate yet. Until the first certificate in that roster,
 `planning_eta_seconds` gives a labeled 30–1,200-second range per remaining

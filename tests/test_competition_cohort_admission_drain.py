@@ -173,6 +173,21 @@ def test_terminal_upload_hold_resolves_without_rechecking_metadata(drain_case):
     assert owner.status_reads == 1
 
 
+@pytest.mark.parametrize(
+    "reason", ["direct_model_submission_superseded", "direct_model_reservation_after_cutoff"]
+)
+def test_advisory_scheduling_hold_never_becomes_durable_drain_failure(drain_case, reason):
+    owner, db, request, deadline = drain_case
+    owner.add(request, hold=reason)
+    drain = DirectAdmissionDrain({deadline.cohort_sha256: owner})
+    report = drain(deadline.cohort_sha256, db, deadline)
+    assert report["pending"] == 1 and report["failed_resolved"] == 0
+    _admit(db, _replacement(request))
+    final = drain(deadline.cohort_sha256, db, deadline)
+    assert final["pending"] == 0 and final["superseded"] == 1
+    assert final["failed_resolved"] == 0
+
+
 def test_reservations_at_cutoff_are_not_added_to_drain(drain_case):
     owner, db, request, deadline = drain_case
     owner.add(request, DEADLINE_MS)

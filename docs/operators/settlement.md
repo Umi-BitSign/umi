@@ -37,7 +37,11 @@ block checks share the same validated view. A concurrent change is visible to
 the next collection; completed results are never reused across different snapshots
 without their current source and conflict checks. It
 never builds a missing catalog, rereads an unprojected admission, or waits for
-the background task. Logs expose
+the background task. A bounded metadata check detects unfinished inventories
+before loading the per-admission result bodies; this negative readiness check
+can only defer pruning. Once metadata is complete, the existing canonical-body,
+source, context and conflict validation still determines the retained blocks.
+Logs expose
 `registration_pin_source_migration`, `registration_pin_catalog` and
 `registration_pin_projection` counts, elapsed time and the measured ETA or an
 explicit planning range; `registration_pin_decode` and
@@ -3691,14 +3695,39 @@ entire stream, every declared file, and the license/provenance documents. A
 model cannot enter participation or artifact acceptance before those checks and
 the standing review complete.
 
-The direct owner processes at most `verification_batch_size` unfinished uploads
-per poll, in serial rotation. It checkpoints each selected reservation before
+Before any source hash or static review, the direct owner selects the latest
+actually issued, authenticated model submission sequence for each hotkey in the
+cohort. Selection and the accepted-upload drain share the same bounded metadata
+selection rules: the earliest issued provider reservation preserves
+eligibility, including a later provider-generation retry, and retained timely
+authorization permits issuance after the cutoff. An unsigned provider intent
+cannot supersede an issued upload. Equal-sequence siblings remain visible for
+native admission to resolve; scheduling does not choose an arbitrary winner.
+
+The direct owner processes at most `verification_batch_size` unfinished selected
+uploads per poll, in serial rotation. It checkpoints each selected reservation before
 verification or review, so transient provider failures and interrupted polls yield
 to later uploads after restart. Successful verification and review receipts remain
 reusable. The existing poll interval and provider retry pacing still apply;
 `objects_attempted` reports the consumed slots alongside pending, failed and ready
 counts. Terminal holds do not consume verification slots. Rejected-object cleanup
 retains its separate `cleanup_batch_size` limit.
+Replaced requests report `direct_model_submission_superseded` through the existing
+status `hold_reason_code`; ineligible late reservations report
+`direct_model_reservation_after_cutoff`. These are scheduling dispositions, not
+verified payloads or rejected-model cleanup instructions. Original R2 objects,
+signed reservations, completed verification and historical acceptance bindings
+remain intact. Exact historical consumers can still require their verified object.
+Terminal scheduling hints are reconstructed by the first ordinary poll after
+restart, without another payload check.
+
+Each next item checks the native immutable request/reservation and conflict fence.
+The exact retained deadline identity is also fenced without a roster scan.
+Changed inputs end payload dispatch for that poll and set
+`selection_refresh_required`; the next poll rebuilds the projection once. This
+prevents a replacement arriving during a long hash from leaving obsolete queued
+hashes running. An in-progress hash may finish and its successful receipt is reused.
+No per-object roster scan, additional admission gate or source rebuild is required.
 
 The multi-cohort owner dispatches one cohort batch per poll. It uses signed cohort
 sequence order to prioritize the earliest cohort with unfinished or unobserved
@@ -3737,6 +3766,19 @@ its disposition is known. A completed poll has no unclassified remainder. These 
 latest-per-hotkey or cutoff-eligible admission counts, and do not include incomplete
 multipart uploads. Unobserved counts are unknown; no overall completion percentage
 is inferred from them.
+`objects_selected`, `objects_superseded` and `objects_ineligible` separately partition
+that completed-object inventory using the current poll's selection. Superseded and
+ineligible entries count as terminal, not ready. Mere supersession does not count
+as a model failure; independently retained rejection holds keep their original
+failure reporting and bounded cleanup authority. Scheduling-only hints never
+resolve a retained admission-drain obligation. The same projection
+reports `selected_objects_pending_verification`, `selected_source_bytes_total`
+and `selected_source_bytes_remaining`, excluding source verifications already
+completed or terminally held. Remaining bytes decrease when a source finishes;
+the active transfer has its own finer byte progress. These totals exclude incomplete
+multipart uploads and remaining static review, promotion and certification, so they
+are not an end-to-end completion forecast. A changed-selection flag means the
+snapshot must refresh before its denominator can be used for forecasting.
 `active_object_position` is one-based within the current rotated poll; it is not
 an admission rank or a promise of miner wait time. `active_object_sha256` identifies
 the retained reservation; `model_sha256` and `active_object_stage` identify its

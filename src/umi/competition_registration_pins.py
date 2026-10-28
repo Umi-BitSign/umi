@@ -522,6 +522,86 @@ class RegistrationPins:
             return None
         return value
 
+    def require_complete_metadata(self, db, slots):
+        """Refuse cold pruning without reading completed result bodies.
+
+        This is only a negative readiness check. Presence never authorizes a
+        retained block: a complete inventory still goes through load(), with
+        its canonical bytes, current sources, semantics and context checks.
+        The independent projection owner keeps its full validation/repair path.
+        """
+        expected = [(digest([self.owner, slot]), source) for slot, source in slots]
+        marker = canonical_json_bytes(self.marker)
+        present = 0
+        # Two bindings per admission plus the small canonical marker; remain
+        # below older supported SQLite's 999-variable limit as well.
+        for offset in range(0, len(expected), 256):
+            batch = expected[offset : offset + 256]
+            rows = db.execute(
+                "WITH expected(slot,source) AS (VALUES "
+                + ",".join("(?,?)" for _ in batch)
+                + ") SELECT i.id,c.id,"
+                "CASE WHEN length(c.body)=? THEN c.body=? ELSE 0 END,"
+                "r.id,length(r.body),hc.id,hr.id,s.revision,s.present,a.id,ha.id "
+                "FROM expected e "
+                "LEFT JOIN registration_pin_index i ON i.id=e.slot "
+                "LEFT JOIN records c ON c.kind='registration_pin_completed' AND c.id=e.slot "
+                "LEFT JOIN records r ON r.kind='registration_pin_result' AND r.id=i.result "
+                "LEFT JOIN holds hc ON hc.id=e.slot "
+                "LEFT JOIN holds hr ON hr.id=i.result "
+                "LEFT JOIN registration_pin_sources s "
+                "ON s.kind='service_admission' AND s.id=e.source "
+                "LEFT JOIN records a ON a.kind='service_admission' AND a.id=e.source "
+                "LEFT JOIN holds ha ON ha.id=e.source",
+                (*[value for pair in batch for value in pair], len(marker), marker),
+            ).fetchall()
+            for (
+                index,
+                completed,
+                marker_matches,
+                body,
+                size,
+                held,
+                result_held,
+                revision,
+                source_present,
+                original,
+                source_held,
+            ) in rows:
+                if held or result_held:
+                    raise RegistrationPinRepairRequired(
+                        "registration pin metadata invalid or conflict held"
+                    )
+                if index is None:
+                    if completed is not None:
+                        raise RegistrationPinRepairRequired(
+                            "completed registration pin index is missing"
+                        )
+                    continue
+                if completed is None or marker_matches != 1:
+                    raise RegistrationPinRepairRequired(
+                        "registration pin completion marker changed"
+                    )
+                if body is None or type(size) is not int or size <= 0:
+                    raise RegistrationPinRepairRequired(
+                        "completed registration pin result is damaged"
+                    )
+                if original is None or source_present != 1 or source_held:
+                    raise RegistrationPinRepairRequired(
+                        "registration pin source missing or conflict held"
+                    )
+                if type(revision) is not int or revision < 0:
+                    raise RegistrationPinRepairRequired("registration pin source revision changed")
+                present += 1
+        if present != len(expected):
+            # These are retained metadata entries, not freshly validated pins.
+            # The reason distinguishes this count from the full projection pass.
+            raise RegistrationPinProjectionPending(
+                present,
+                len(expected),
+                "projection_metadata_incomplete" if present else "bounded_projection",
+            )
+
     def make(self, db, keys, context, result):
         return dict(
             schema=ABI,

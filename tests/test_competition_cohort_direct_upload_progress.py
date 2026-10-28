@@ -93,9 +93,9 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
     original_read, original_keys = direct.multipart.read_range, direct.owner.journal.keys
     scans = []
 
-    def keys_once(kind):
+    def keys_once(kind, **kwargs):
         scans.append(kind)
-        return original_keys(kind)
+        return original_keys(kind, **kwargs)
 
     async def blocked(*args, **kwargs):
         assert PUBLIC_COHORT_SCOPE.get() == cohort
@@ -110,7 +110,7 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
     task = asyncio.create_task(manager.poll_once(now_unix_ms=NOW))
     try:
         await reached(task, entered)
-        assert scans == ["direct-object"]
+        assert scans == ["direct-request", "direct-object"]
         assert manager._reports == {} and manager._pending(cohort) is None
         assert direct.multipart.read_calls == 0
         async with httpx.AsyncClient(
@@ -122,6 +122,13 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
                 body = response.json()
                 observed = body["components"]["direct_uploads"]
                 assert observed["objects_total"] == 3
+                assert observed["objects_selected"] == 3
+                assert observed["objects_superseded"] == observed["objects_ineligible"] == 0
+                assert observed["selected_objects_pending_verification"] == 3
+                assert observed["selected_source_bytes_remaining"] == (
+                    3 * direct.payload.payload.total_bytes
+                )
+                assert observed["selection_refresh_required"] is False
                 assert observed["objects_classified"] == 0
                 assert observed["objects_unclassified"] == 3
                 assert observed["object_count_status"] == "partial"
@@ -139,7 +146,7 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
                 assert work["eta_basis"].startswith("planning_")
                 assert body["admission"]["accepted_uploads"] is None
                 assert body["certification_authority"] is False
-        assert scans == ["direct-object"] and direct.multipart.read_calls == 0
+        assert scans == ["direct-request", "direct-object"] and direct.multipart.read_calls == 0
     finally:
         release.set()
         await task
@@ -150,7 +157,7 @@ async def test_blocked_first_read_publishes_denominator_and_native_work_to_cache
     assert final["active_object_position"] is None and final["model_sha256"] is None
     assert manager._pending(cohort) == 1 and manager._progress_reports == {}
     assert PUBLIC_COHORT_SCOPE.get() is None
-    assert scans == ["direct-object"]
+    assert scans == ["direct-request", "direct-object"]
 
 
 async def test_partial_inventory_never_replaces_scheduler_report_and_restart_rebuilds_once(
@@ -291,7 +298,7 @@ async def test_empty_and_failed_inventory_have_distinct_truthful_status(
     assert empty["objects_total"] == empty["objects_classified"] == 0
     assert empty["object_count_status"] == "complete"
 
-    def broken(_):
+    def broken(_, **kwargs):
         raise ValueError("damaged native metadata")
 
     monkeypatch.setattr(direct.owner.journal, "keys", broken)

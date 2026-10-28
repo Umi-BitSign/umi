@@ -16,6 +16,7 @@ import secrets
 import time
 from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -30,6 +31,7 @@ from .competition_cohort_direct_model_attempts import (
 from .competition_cohort_direct_model_attempts import (
     DirectModelUploadIntent as _DirectModelUploadIntent,
 )
+from .competition_cohort_direct_model_selection import select_issued_model_uploads
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadObject,
@@ -285,12 +287,20 @@ class DirectModelUploadOwner:
         new_attempt_id: AttemptId | None = None,
         repair_attempt_index: bool = False,
         repair_poll_cursor: bool = False,
+        selection_context=None,
+        selection_authority=None,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         if not callable(authorize) or not callable(sign):
             raise ValueError("direct upload owner requires authorization and signing")
         self.multipart, self.authorize, self.sign = multipart, authorize, sign
         self.policy = policy
+        self.selection_context = selection_context
+        self.selection_authority = selection_authority
+        # Diagnostics only; admission and signed historical consumers continue
+        # to use their exact retained artifacts. Refreshed before each poll.
+        self._selection_holds = {}
+        self._selection_hold_fence = None
         self.new_attempt_id = new_attempt_id or (lambda: secrets.token_hex(32))
         self._mutex = asyncio.Lock()
         self._verification_mutex = asyncio.Lock()
@@ -791,12 +801,15 @@ class DirectModelUploadOwner:
         review_hold = self._current_review_hold(reservation)
         hold = verification_hold if verification_hold is not None else review_hold
         hold_reason_code = None if hold is None else hold.get("reason_code")
+        complete = self.journal.get("direct-object", reservation_sha256) is not None
+        if complete and hold_reason_code is None and self._selection_hint_current():
+            hold_reason_code = self._selection_holds.get(body.payload.upload_sha256)
         return DirectModelUploadStatus(
             schema="umi-direct-model-upload-status/1",
             upload_sha256=body.payload.upload_sha256,
             model_sha256=body.payload.model_sha256,
             reservation=reservation,
-            object_complete=self.journal.get("direct-object", reservation_sha256) is not None,
+            object_complete=complete,
             payload_verified=verification is not None,
             verification=verification,
             hold_reason_code=hold_reason_code,
@@ -848,14 +861,18 @@ class DirectModelUploadOwner:
             if review.model_sha256 != submission.model_revision:
                 raise ValueError("direct model review differs from its request")
 
-    def admission_reservation(self, request):
+    def admission_reservation(self, request, *, db=None):
         """Return original retained issuer evidence, even after a provider restart."""
+        if db is None:
+            with self.journal.read_transaction() as db:
+                self.journal._check_original_counts(self.journal._record_capacity(db)[2])
+                return self.admission_reservation(request, db=db)
         upload_sha256, _ = self._request(request)
-        if self.journal.get("direct-request", upload_sha256) != request.model_dump(
+        if self.journal.get("direct-request", upload_sha256, db=db) != request.model_dump(
             mode="json", by_alias=True
         ):
             raise DirectModelUploadPending("exact direct reservation is unavailable")
-        current = self._latest_attempt(upload_sha256)
+        current = self.journal._latest_attempt(upload_sha256, db)
         if current is None:
             raise DirectModelUploadPending("original direct reservation is incomplete")
         # Each generation retains both an index and intent, together exceeding
@@ -868,15 +885,22 @@ class DirectModelUploadOwner:
         # the earliest actually issued generation, not merely generation one.
         for generation in range(1, current.generation + 1):
             index = self.journal.get(
-                "direct-attempt-index", attempt_index_key(upload_sha256, generation)
+                "direct-attempt-index", attempt_index_key(upload_sha256, generation), db=db
             )
             if index is None:
                 raise DirectModelUploadPending("original direct reservation needs repair")
-            raw = self.journal.get("direct-reservation", index["attempt_id"])
+            raw = self.journal.get("direct-reservation", index["attempt_id"], db=db)
             if raw is not None:
-                return SignedDirectModelUploadReservation.model_validate_json(
+                signed = SignedDirectModelUploadReservation.model_validate_json(
                     canonical_json_bytes(raw)
                 )
+                if (
+                    signed.reservation.attempt_id != index["attempt_id"]
+                    or signed.reservation.generation != generation
+                    or identity(signed.signature.hotkey) != identity(self.config.owner_hotkey)
+                ):
+                    raise ValueError("original direct reservation issuer identity differs")
+                return signed
         raise DirectModelUploadPending("original direct reservation is incomplete")
 
     def review_artifact(
@@ -1520,9 +1544,86 @@ class DirectModelUploadOwner:
             raise ValueError("rejected object cleanup intent changed")
         return now_unix_ms >= intent.retain_until_unix_ms
 
-    def _poll_input(self, reservation_sha256):
-        """One fresh, fenced snapshot; no connection escapes its owned thread."""
+    def _poll_projection(self):
+        """Select issued requests before hashing; count source bytes once."""
+        cohort = self.config.cohort_sha256
+        context = (
+            nullcontext((None, frozenset()))
+            if self.selection_context is None
+            else self.selection_context(cohort)
+        )
+        with context as (deadline, permitted), self.journal.read_transaction() as db:
+            selection = select_issued_model_uploads(
+                self, cohort, deadline=deadline, permitted=permitted, db=db
+            )
+            keys = self.journal.keys("direct-object", db=db)
+            holds = {
+                upload: "direct_model_submission_superseded" for upload in selection.superseded
+            } | {upload: "direct_model_reservation_after_cutoff" for upload in selection.ineligible}
+            selected = pending = superseded = ineligible = source_bytes = remaining_bytes = 0
+            pending_sources = {}
+            for key in keys:
+                reservation = self._reservation_by_digest(key, db=db).reservation
+                upload = reservation.payload.upload_sha256
+                if upload not in selection.issued:
+                    raise ValueError("completed upload lacks its original issued request")
+                if upload in selection.superseded:
+                    superseded += 1
+                elif upload in selection.ineligible:
+                    ineligible += 1
+                else:
+                    selected += 1
+                    source_bytes += reservation.payload.total_bytes
+                    if (
+                        self.journal.get("direct-verification", key, db=db) is None
+                        and self.journal.get("direct-verification-hold", key, db=db) is None
+                    ):
+                        pending += 1
+                        remaining_bytes += reservation.payload.total_bytes
+                        pending_sources[key] = reservation.payload.total_bytes
+            return (
+                keys,
+                holds,
+                (self.journal.selection_fence(db), None if deadline is None else digest(deadline)),
+                {
+                    "objects_selected": selected,
+                    "objects_superseded": superseded,
+                    "objects_ineligible": ineligible,
+                    "selected_objects_pending_verification": pending,
+                    "selected_source_bytes_total": source_bytes,
+                    "selected_source_bytes_remaining": remaining_bytes,
+                    "selection_count_scope": "latest_eligible_issued_per_hotkey_poll_snapshot",
+                    "selection_refresh_required": False,
+                },
+                pending_sources,
+            )
+
+    def _selection_authority_current(self, selection_fence):
+        return self.selection_authority is None or (
+            self.selection_authority(self.config.cohort_sha256) == selection_fence[1]
+        )
+
+    def _selection_hint_current(self):
+        fence = self._selection_hold_fence
+        if (
+            not self._selection_holds
+            or fence is None
+            or not self._selection_authority_current(fence)
+        ):
+            return False
         with self.journal.read_transaction() as db:
+            return self.journal.selection_fence(db) == fence[0]
+
+    def _poll_input(self, reservation_sha256, selection_fence=None):
+        """One fresh, fenced snapshot; no connection escapes its owned thread."""
+        if selection_fence is not None and not self._selection_authority_current(selection_fence):
+            return None
+        with self.journal.read_transaction() as db:
+            if (
+                selection_fence is not None
+                and self.journal.selection_fence(db) != selection_fence[0]
+            ):
+                return None
             verified = (
                 self.journal.get("direct-verification", reservation_sha256, db=db) is not None
             )
@@ -1547,7 +1648,25 @@ class DirectModelUploadOwner:
         cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = last_retry_error = ""
         examined = 0
-        keys = await run_owned_thread(self.journal.keys, "direct-object")
+        # Clear stale diagnostic hints if projection repair fails. They never
+        # authorize admission or replace signed historical verification.
+        self._selection_holds = {}
+        self._selection_hold_fence = None
+        (
+            keys,
+            selection_holds,
+            selection_fence,
+            selection_counts,
+            pending_sources,
+        ) = await run_owned_thread(self._poll_projection)
+        self._selection_holds = selection_holds
+        self._selection_hold_fence = selection_fence
+
+        def source_finished(key):
+            size = pending_sources.pop(key, None)
+            if size is not None:
+                selection_counts["selected_objects_pending_verification"] -= 1
+                selection_counts["selected_source_bytes_remaining"] -= size
 
         def publish(position=None, reservation=None, model=None, stage="metadata_inventory"):
             if report is None:
@@ -1572,6 +1691,7 @@ class DirectModelUploadOwner:
                     "model_sha256": model,
                     "active_object_stage": stage,
                     "last_retry_error_type": last_retry_error,
+                    **selection_counts,
                 }
             )
 
@@ -1583,13 +1703,29 @@ class DirectModelUploadOwner:
         keys = keys[split:] + keys[:split]
         for position, reservation_sha256 in enumerate(keys, 1):
             publish(position, reservation_sha256)
-            verified, reservation, verification_hold = await run_owned_thread(
-                self._poll_input, reservation_sha256
-            )
+            item = await run_owned_thread(self._poll_input, reservation_sha256, selection_fence)
+            if item is None:
+                # New authenticated issuance can supersede queued requests.
+                # Finish this cheap inventory and rebuild once next poll; never
+                # start another payload against the stale selection. A running
+                # SHA is allowed to complete and its receipt remains reusable.
+                selection_counts["selection_refresh_required"] = True
+                pending += len(keys) - position + 1
+                break
+            verified, reservation, verification_hold = item
+            if verified or verification_hold is not None:
+                source_finished(reservation_sha256)
             model_sha256 = reservation.reservation.payload.model_sha256
             publish(position, reservation_sha256, model_sha256)
+            excluded = reservation.reservation.payload.upload_sha256 in selection_holds
+            review_hold = None
+            if excluded:
+                review_hold = await run_owned_thread(self._current_review_hold, reservation)
+                if verification_hold is None and review_hold is None:
+                    terminal += 1
+                    continue
             reviewed = self.config.standing_review_policy is None
-            if self.config.admission_reviews_directory is not None:
+            if not excluded and self.config.admission_reviews_directory is not None:
                 try:
                     reviewed = await run_owned_thread(
                         reviewed_file_ready,
@@ -1606,10 +1742,11 @@ class DirectModelUploadOwner:
                     continue
             if verified:
                 ready += 1
-            if verified and reviewed:
+            if not excluded and verified and reviewed:
                 completed += 1
                 continue
-            review_hold = await run_owned_thread(self._current_review_hold, reservation)
+            if not excluded:
+                review_hold = await run_owned_thread(self._current_review_hold, reservation)
             if verification_hold is not None:
                 terminal += 1
                 failed += 1
@@ -1639,6 +1776,7 @@ class DirectModelUploadOwner:
                     )
                 continue
             if review_hold is not None:
+                source_finished(reservation_sha256)
                 terminal += 1
                 reviews_held += 1
                 last_error = review_hold["reason_code"]
@@ -1679,8 +1817,10 @@ class DirectModelUploadOwner:
                     publish(position, reservation_sha256, model_sha256, "source_verification")
                     await self.verify(reservation_sha256, now_unix_ms=now_unix_ms)
                     ready += 1
+                    source_finished(reservation_sha256)
                 except ValueError:
                     terminal += 1
+                    source_finished(reservation_sha256)
                     reason_code = "direct_model_verification_failed"
                     self.journal.put(
                         "direct-verification-hold",
@@ -1782,6 +1922,7 @@ class DirectModelUploadOwner:
             "objects_retained_for_cleanup": retained_for_cleanup,
             "last_error_type": last_error,
             "last_retry_error_type": last_retry_error,
+            **selection_counts,
             **await run_owned_thread(self.journal.metadata_snapshot),
         }
         if report is not None:

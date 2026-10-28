@@ -724,6 +724,8 @@ class ServiceAdmissionHost:
                     authorize=authorize,
                     sign=sign,
                     policy=policy,
+                    selection_context=intake.direct_upload_selection_context,
+                    selection_authority=intake.direct_upload_selection_authority,
                 )
             self.direct_uploads = DirectModelUploadOwners(
                 owners,

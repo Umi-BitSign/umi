@@ -528,6 +528,10 @@ class ServiceWorkQueue:
                 raise RegistrationPinProjectionPending(
                     0, len(rows), "inventory_changed_before_projection"
                 )
+            if complete_only:
+                pins.require_complete_metadata(
+                    db, [(str(row[0]), work_keys[index]) for index, row in enumerate(rows)]
+                )
             values = [
                 pins.load(db, str(row[0]), context)
                 for row, context in zip(rows, contexts, strict=True)
