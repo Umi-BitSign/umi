@@ -146,7 +146,8 @@ def validate_revision_clearance(
         != activation_effective_block(
             series, original, writes.get(digest(original), -delay), reward_adoptions
         )
-        or facts.drained_at_block != (
+        or facts.drained_at_block
+        != (
             facts.through_block
             if facts.first_block > facts.through_block
             else facts.suspension_committed_at_block + delay
@@ -202,7 +203,9 @@ class NativeRewardRevisionReviewer:
             # block. This lower bound is enough to prove the old selection has
             # never been effective at the target, without waiting for mortality.
             first = activation_effective_block(
-                series, original, original.observed_at_block,
+                series,
+                original,
+                original.observed_at_block,
                 self.coverage.preparation.reader.reward_adoptions,
             )
         self._drain(committed, through, first=first)

@@ -589,14 +589,18 @@ async def test_boot_registration_fallback_reads_retained_legacy_original_after_r
     from .test_competition_cohort_settlement_proofs import _legacy_proof_recipe
 
     observation = ExecutionBoundary(
-        source="verifier_attested_finality", block=123,
-        block_hash="0x" + "aa" * 32, state_root="0x" + "bb" * 32,
-        snapshot_sha256="cc" * 32, evidence_sha256="dd" * 32,
+        source="verifier_attested_finality",
+        block=123,
+        block_hash="0x" + "aa" * 32,
+        state_root="0x" + "bb" * 32,
+        snapshot_sha256="cc" * 32,
+        evidence_sha256="dd" * 32,
     )
     archive = RewardProofArchive(Path(selected.config.proof_import_directory))
     archive.root.mkdir(mode=0o700)
     archive.write(
-        "registration", digest(observation),
+        "registration",
+        digest(observation),
         context=observation.model_dump(mode="json", by_alias=True),
         fields={"proof": b"original-registration", "metadata": b"original-metadata"},
     )
@@ -622,7 +626,8 @@ async def test_boot_registration_fallback_reads_retained_legacy_original_after_r
     async with boot.phase_review_app(selected.config):
         if fault is None:
             assert await callbacks[-1](observation) == (
-                b"original-registration", b"original-metadata"
+                b"original-registration",
+                b"original-metadata",
             )
             assert path.read_bytes() == frame
         else:
