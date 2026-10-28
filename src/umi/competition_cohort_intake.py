@@ -289,6 +289,47 @@ class CohortIntake:
             state = self._model_delivery_states.get(cohort)
             return None if state is None else state[2]
 
+    @contextmanager
+    def direct_upload_selection_context(self, cohort):
+        """Reuse retained admission authority with the owner's next snapshot.
+
+        No history replay or source verification. The native intake fence keeps
+        new authorization from racing the direct owner's bounded projection.
+        Permits are append-only and committed before the owner retains an
+        authorized request or issues its reservation. Later new permits cannot
+        affect a projected upload without advancing the owner's request/issued
+        counters; deadlines are checked independently by their exact identity.
+        """
+        self._allowed(cohort)
+        with self.fenced_read_snapshot() as (db, _):
+            deadline = retained_deadline(db, cohort)
+            permitted = (
+                frozenset()
+                if deadline is None
+                else frozenset(
+                    row[0]
+                    for row in db.execute(
+                        "SELECT request FROM cohort_admission_reservations "
+                        "WHERE cohort=? AND admitted_ms<? LIMIT ?",
+                        (
+                            cohort,
+                            deadline.close_new_admissions_at_unix_ms,
+                            self.capacity.maximum_records + 1,
+                        ),
+                    )
+                )
+            )
+            if len(permitted) > self.capacity.maximum_records:
+                raise ValueError("admission authorization selection exceeds its metadata bound")
+            yield deadline, permitted
+
+    def direct_upload_selection_authority(self, cohort):
+        """Bounded authority identity, without roster/payload reads or replay."""
+        self._allowed(cohort)
+        with self._history_connection() as (db, _):
+            deadline = retained_deadline(db, cohort)
+            return None if deadline is None else digest(deadline)
+
     def _directory(self):
         info = self.directory.lstat()
         if (

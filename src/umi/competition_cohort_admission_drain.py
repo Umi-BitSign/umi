@@ -6,20 +6,15 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from .competition_cohort_direct_model_owner import DirectModelUploadPending
-from .competition_cohort_participation import CohortParticipationRequest
-from .open_competition import digest, identity
+from .competition_cohort_direct_model_selection import (
+    SCHEDULING_HOLD_REASONS,
+    IssuedModelUpload,
+    select_issued_model_uploads,
+)
+from .open_competition import digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
 _MAX_BYTES = 2 * 1024**2
-
-
-class _Admission(StrictProtocolModel):
-    upload: Hex32
-    consent: Hex32
-    hotkey: Hex32
-    sequence: Annotated[int, Field(ge=0)]
-    created_ms: Annotated[int, Field(ge=0)]
 
 
 class _Drain(StrictProtocolModel):
@@ -27,7 +22,7 @@ class _Drain(StrictProtocolModel):
     cohort_sha256: Hex32
     deadline_sha256: Hex32
     owner_sha256: Hex32
-    selected: Annotated[tuple[_Admission, ...], Field(max_length=4096)]
+    selected: Annotated[tuple[IssuedModelUpload, ...], Field(max_length=4096)]
     started_ms: Annotated[int, Field(ge=0)]
     resolved: dict[
         Hex32, Literal["admitted", "superseded_by_admitted_sequence", "terminal_failure"]
@@ -50,12 +45,6 @@ class DirectAdmissionDrain:
         self._table_ready = False
 
     def _snapshot(self, cohort, db, owner, deadline):
-        cutoff = (
-            deadline.legacy_reservations_before_unix_ms or deadline.close_new_admissions_at_unix_ms
-        )
-        uploads = owner.journal.keys("direct-request")
-        if len(uploads) > owner.config.maximum_uploads:
-            raise ValueError("retained upload count exceeds its configured metadata bound")
         permitted = {
             row[0]
             for row in db.execute(
@@ -64,52 +53,9 @@ class DirectAdmissionDrain:
                 (cohort, deadline.close_new_admissions_at_unix_ms),
             )
         }
-        latest = {}
-        for upload in uploads:
-            request = CohortParticipationRequest.model_validate_json(
-                canonical_json_bytes(owner.journal.get("direct-request", upload))
-            )
-            sub = request.signed_submission.submission
-            if (
-                digest(request) != upload
-                or request.consent.consent.cohort_sha256 != cohort
-                or sub.track != "model"
-            ):
-                raise ValueError("retained upload request differs from its cohort identity")
-            try:
-                issued = owner.admission_reservation(request).reservation
-            except DirectModelUploadPending as error:
-                if str(error) != "original direct reservation is incomplete":
-                    raise ValueError("issued upload reservation metadata needs repair") from error
-                # A native authorization or unsigned provider intent is not an
-                # acknowledged upload. It never freezes cohort membership.
-                continue
-            if (
-                issued.cohort_sha256 != cohort
-                or issued.payload.upload_sha256 != upload
-                or issued.payload.model_sha256 != sub.model_revision
-                or identity(issued.hotkey) != identity(sub.hotkey)
-            ):
-                raise ValueError("issued upload reservation identity differs")
-            if issued.created_at_unix_ms >= cutoff and upload not in permitted:
-                continue
-            item = _Admission(
-                upload=upload,
-                consent=digest(request.consent.consent),
-                hotkey=identity(sub.hotkey),
-                sequence=sub.sequence,
-                created_ms=issued.created_at_unix_ms,
-            )
-            prior = latest.get(item.hotkey, [])
-            if not prior or item.sequence > prior[0].sequence:
-                latest[item.hotkey] = [item]
-            elif item.sequence == prior[0].sequence:
-                prior.append(item)
-        selected = tuple(
-            sorted(
-                (item for items in latest.values() for item in items), key=lambda item: item.upload
-            )
-        )
+        selected = select_issued_model_uploads(
+            owner, cohort, deadline=deadline, permitted=permitted
+        ).selected
         return _Drain(
             schema="umi-direct-admission-drain-snapshot/1",
             cohort_sha256=cohort,
@@ -213,7 +159,10 @@ class DirectAdmissionDrain:
                 status = owner.status(digest(reservation.reservation))
                 if status.upload_sha256 != item.upload:
                     raise ValueError("current retained upload status identity differs")
-                if status.hold_reason_code is not None:
+                if (
+                    status.hold_reason_code is not None
+                    and status.hold_reason_code not in SCHEDULING_HOLD_REASONS
+                ):
                     resolved[item.upload] = "terminal_failure"
             if resolved != state.resolved:
                 state = state.model_copy(update={"resolved": resolved})

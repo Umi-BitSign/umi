@@ -120,6 +120,28 @@ class DirectModelAttemptJournal(RoundJournal):
         # bounds retained history. Request enumeration remains separately bounded.
         return self.maximum_bytes
 
+    def keys(self, kind, *, db=None):
+        """Borrow one owner snapshot for the bounded scheduling projection."""
+        if db is None:
+            return super().keys(kind)
+        rows = db.execute(
+            "SELECT id FROM records WHERE kind=? ORDER BY id LIMIT ?",
+            (kind, self.maximum_rounds + 1),
+        ).fetchall()
+        if len(rows) > self.maximum_rounds:
+            raise ValueError("round journal record limit")
+        return [row[0] for row in rows]
+
+    def selection_fence(self, db):
+        """Native immutable-input additions/holds; independent of payload work."""
+        _, _, kinds = self._record_capacity(db)
+        self._check_original_counts(kinds)
+        return (
+            kinds.get("direct-request", 0),
+            kinds.get("direct-reservation", 0),
+            db.execute("SELECT COUNT(*) FROM holds").fetchone()[0],
+        )
+
     def _journal_version(self):
         with self.read_transaction() as db:
             return db.execute("PRAGMA user_version").fetchone()[0]

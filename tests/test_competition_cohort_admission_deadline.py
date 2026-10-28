@@ -95,6 +95,29 @@ def test_reserved_exact_request_finishes_after_deadline_and_restart(intake, scen
         restarted.retain(request_for(scenario, sequence=2), capture_at(230))
 
 
+def test_direct_selection_reuses_retained_deadline_and_authorization_without_replay(
+    intake, scenario, monkeypatch
+):
+    from umi.competition_cohort_recovery_store import CohortRecoveryStore
+
+    owner = selected(intake, scenario)
+    request = request_for(scenario)
+    cohort = request.consent.consent.cohort_sha256
+    clock(monkeypatch, DEADLINE_MS - 1)
+    with owner._connection() as (db, store):
+        owner.require_new_admission(db, store.published_history(cohort), request)
+    restarted = CohortIntake(intake.config, intake.policy)
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("selection must not replay signed cohort history")
+
+    monkeypatch.setattr(CohortRecoveryStore, "published_history", no_replay)
+    clock(monkeypatch, DEADLINE_MS + 1)
+    with restarted.direct_upload_selection_context(cohort) as (deadline, permitted):
+        assert deadline == selection_for(intake, scenario)
+        assert permitted == {digest(request)}
+
+
 @pytest.mark.parametrize("offset", [0, 1])
 def test_new_delivery_reservation_cannot_create_late_permit(intake, scenario, monkeypatch, offset):
     owner = selected(intake, scenario)
