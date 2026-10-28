@@ -15,7 +15,6 @@ import secrets
 import time
 from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -63,11 +62,11 @@ from .competition_cohort_model_static_review import (
     verify_standing_review_policy,
 )
 from .competition_cohort_participation import CohortParticipationRequest
+from .competition_cohort_promotion_copy import verified_promotion_copy
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
-from .competition_work_progress import WorkProgress
 from .concurrency import run_owned_thread
 from .open_competition import CompetitionPolicy, Hotkey, Signature, digest, identity
 from .private_files import (
@@ -199,6 +198,10 @@ async def _copy_promotion_parts(
     payload,
     copy_width,
     progress,
+    *,
+    load_part=None,
+    save_part=None,
+    restored_progress=None,
 ) -> tuple[DirectModelUploadPart, ...]:
     """Copy independent R2 parts in bounded waves, then return provider order."""
 
@@ -208,6 +211,15 @@ async def _copy_promotion_parts(
     offset = 0
 
     async def copy_one(part_number, part_offset, part_size):
+        retained = None if load_part is None else load_part(part_number)
+        if retained is not None:
+            if retained.part_number != part_number or retained.size_bytes != part_size:
+                raise ValueError("direct model retained promotion part differs")
+            if restored_progress is None:
+                progress.advance()
+            else:
+                restored_progress()
+            return retained
         part = await multipart.copy_part(
             destination_key,
             source_key=source_key,
@@ -223,6 +235,8 @@ async def _copy_promotion_parts(
             or part.size_bytes != part_size
         ):
             raise ValueError("direct model promotion part differs")
+        if save_part is not None:
+            save_part(part)
         progress.advance()
         return part
 
@@ -233,7 +247,7 @@ async def _copy_promotion_parts(
             requests.append((part_number, offset, size))
             offset += size
         # Preserve ownership until all in-flight requests settle. A failed
-        # request then leaves no local task racing the caller's multipart abort.
+        # request then leaves no local task racing the caller's next retry.
         copied = await asyncio.gather(
             *(copy_one(*request) for request in requests), return_exceptions=True
         )
@@ -1087,6 +1101,7 @@ class DirectModelUploadOwner:
         payload: DirectModelPayload,
         *,
         expected_head: R2ObjectHead | None = None,
+        object_role: str = "source",
     ) -> R2ObjectHead:
         _, head = await verify_remote_model(
             self.multipart,
@@ -1096,6 +1111,7 @@ class DirectModelUploadOwner:
             root=Path(self.config.directory) / "byte-verification",
             context=self._byte_context(),
             expected_head=expected_head,
+            object_role=object_role,
         )
         return head
 
@@ -1230,11 +1246,23 @@ class DirectModelUploadOwner:
         )
         if (
             attempt.object_key != source_key
+            or attempt.cohort_sha256 != body.cohort_sha256
+            or attempt.upload_sha256 != payload.upload_sha256
+            or attempt.payload_declaration_sha256 != digest(payload)
+            or attempt.attempt_id != body.attempt_id
+            or attempt.generation != body.generation
             or body.object_key_sha256 != sha256_hex(source_key.encode())
+            or completed.reservation_sha256 != reservation_sha256
+            or completed.generation != body.generation
             or completed.object_key_sha256 != body.object_key_sha256
             or verification.reservation_sha256 != reservation_sha256
+            or verification.generation != body.generation
+            or verification.object_key_sha256 != body.object_key_sha256
+            or verification.upload_sha256 != payload.upload_sha256
+            or verification.model_sha256 != payload.model_sha256
             or verification.payload_sha256 != payload.payload_sha256
             or verification.total_bytes != payload.total_bytes
+            or verification.file_count != payload.file_count
         ):
             raise ValueError("direct model promotion source binding differs")
         return acceptance, bundle, payload, reservation_sha256, source_key, completed
@@ -1320,6 +1348,15 @@ class DirectModelUploadOwner:
                     retained.provider_etag,
                 ):
                     raise ValueError("preserved direct model changed after promotion")
+                require_remote_model_bytes(
+                    self.multipart,
+                    preserved_key,
+                    bundle,
+                    payload,
+                    root=Path(self.config.directory) / "byte-verification",
+                    context=self._byte_context(),
+                    head=head,
+                )
                 source_head = await self.multipart.head(source_key)
                 if source_head is not None:
                     if (source_head.size_bytes, source_head.etag) != (
@@ -1339,43 +1376,28 @@ class DirectModelUploadOwner:
             ):
                 raise ValueError("direct model staging source changed before promotion")
             preserved_head = await self.multipart.head(preserved_key)
-            if preserved_head is None:
-                upload_id = await self.multipart.create(preserved_key)
-                try:
-                    # S3 multipart parts are independent. Bound server-side copy
-                    # concurrency by the signed delivery profile, then submit
-                    # the returned parts in their original order. Each batch
-                    # drains before failure handling aborts the upload.
-                    copy_width = min(4, self.config.delivery.maximum_concurrent_parts)
-                    with WorkProgress(
-                        "model_promotion_copy",
-                        payload.total_parts,
-                        unit="parts",
-                        cohort=acceptance.cohort_sha256,
-                    ) as progress:
-                        parts = await _copy_promotion_parts(
-                            self.multipart,
-                            preserved_key,
-                            source_key,
-                            upload_id,
-                            payload,
-                            copy_width,
-                            progress,
-                        )
-                    provider_etag = await self.multipart.complete(
-                        preserved_key, upload_id=upload_id, parts=parts
-                    )
-                except BaseException:
-                    with suppress(OSError, ValueError):
-                        await self.multipart.abort(preserved_key, upload_id=upload_id)
-                    raise
-                preserved_head = R2ObjectHead(size_bytes=payload.total_bytes, etag=provider_etag)
-            verified_head = await self._verify_object(
-                preserved_key,
+            verified_head = await verified_promotion_copy(
+                self,
+                acceptance,
                 bundle,
                 payload,
-                expected_head=preserved_head,
+                reservation_sha256,
+                source_key,
+                preserved_key,
+                source_head,
+                preserved_head,
+                _copy_promotion_parts,
             )
+            if verified_head is None:
+                # Old destinations have no retained copy lineage. Reuse an
+                # existing byte completion, or perform their one native pass.
+                verified_head = await self._verify_object(
+                    preserved_key,
+                    bundle,
+                    payload,
+                    expected_head=preserved_head,
+                    object_role="preserved",
+                )
             receipt = DirectModelPromotion(
                 schema="umi-direct-model-promotion/1",
                 acceptance_sha256=acceptance_sha256,

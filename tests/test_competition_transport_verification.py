@@ -9,6 +9,43 @@ from umi.competition_cohort_public_progress import EXECUTION_JOB_SCOPE, executio
 from umi.private_files import PrivateStateBusyError
 
 
+def test_transfer_diagnostic_identity_propagates_without_changing_byte_binding(tmp_path):
+    events = []
+    identity = {
+        "source_object_key_sha256": "a" * 64,
+        "model_sha256": "b" * 64,
+        "object_role": "source",
+    }
+    with transport.TransferProgress("model", 10, events.append, identity=identity) as parent:
+        with transport.ByteCheckpoints(tmp_path / "state", {"same": "binding"}, parent) as saved:
+            saved.remember("object", {"etag": "same"}, "c" * 64)
+            context = saved.context
+        with transport.TransferProgress("response", 10, parent.child_report()) as child:
+            child.advance(5)
+            assert parent.child["source_object_key_sha256"] == "a" * 64
+        parent.advance(10)
+    assert all(all(event[key] == value for key, value in identity.items()) for event in events)
+    with transport.ByteCheckpoints(
+        tmp_path / "state", {"same": "binding"}, transport.TransferProgress("model", 10)
+    ) as saved:
+        assert saved.context == context
+        assert saved.load("object", {"etag": "same"}) == "c" * 64
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"object_key": "private/key"},
+        {"object_role": "anything"},
+        {"model_sha256": "invalid"},
+        {"source_object_key_sha256": "A" * 64},
+    ],
+)
+def test_transfer_diagnostic_identity_is_allowlisted(identity):
+    with pytest.raises(ValueError, match="diagnostic"):
+        transport.TransferProgress("model", 1, identity=identity)
+
+
 def test_transfer_monitor_keeps_job_and_work_identity_after_scope_exit():
     events = []
     with execution_job_scope("a" * 64):

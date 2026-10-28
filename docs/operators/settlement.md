@@ -4327,8 +4327,24 @@ replaces the same server-side part, and progress counts that part only once.
 Retry logs identify the operation's bounded retry policy, numeric status or
 transport error type, and delay without provider bodies, keys or credentials.
 Multipart creation/completion and other mutations remain single-attempt
-operations. Exhausted part retries still drain their wave and abort the upload;
-this does not provide durable multipart resume. While released intake has
+operations. Promotion keeps its exact upload ID and completed copy-part receipts
+across exhausted retries and restarts; every failed wave drains before returning.
+For a new destination, the owner retains an ordered copy manifest before completion
+and a copy proof before publishing ordinary destination byte facts. This reuses the
+completed source verification without streaming the destination again. It requires
+the unique completed owner attempt, original signed completion parts, current
+source HEAD, matching copy-part receipts and source/destination generation fences.
+R2's multipart ETag identifies that retained copy lineage; it never substitutes for
+the source SHA256 check. R2 does not support UploadPartCopy source conditions, so
+this path depends on owner-issued attempt keys never being overwritten after
+completion, not on a provider object lock. Old destinations without copy lineage
+retain their one native verification or existing completed byte result. Damaged or
+changed lineage requires explicit repair. Source cleanup follows durable promotion
+and destination byte facts; independent reviewers retain their own verification.
+The private copy journal and byte-verification directories must survive upgrades.
+Copy progress distinguishes native and restored parts; remote byte progress identifies
+the object by key SHA256, model SHA256 and source/preserved role without logging keys.
+While released intake has
 uncertified latest models, held cohorts still advance in smaller batches; they
 regain normal batches after that backlog clears. Progression holds stay intact.
 Standalone requests and independently
@@ -4468,9 +4484,12 @@ absent, fences the old generation and issues the next retained generation; the
 miner then resumes from its unchanged local bundle without operator action.
 Retain completed incoming objects until a
 content-addressed preserved object and its acceptance or rejection evidence are
-durable. Accepted objects are copied entirely inside R2, fully read back, and
-their incoming source is deleted only after a private promotion receipt is
-durable. Terminally rejected objects receive a durable cleanup intent and stay
+durable. Accepted objects are copied entirely inside R2. New owner-created copies
+reuse the verified immutable source through the retained copy proof above;
+older destinations receive native byte verification when no completed result exists.
+The incoming source is deleted only after both the private promotion receipt and
+destination byte completion are durable. Terminally rejected objects receive a
+durable cleanup intent and stay
 available for the configured rejection-review interval. The owner then deletes
 only the exact bound incoming key, verifies absence and retains the signed
 request, hold and cleanup receipt. Cleanup is bounded per poll and retries after

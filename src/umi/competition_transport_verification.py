@@ -107,9 +107,28 @@ class TransferProgress:
         total_operations=None,
         planning_unit_seconds=(1.0, 300.0),
         idle_stall_seconds=None,
+        identity=None,
     ):
         self.stage, self.total, self.report = stage, total, report
         self.unit = unit
+        # Diagnostic identity only. Never include it in byte receipt bindings.
+        parent = _CURRENT.get()
+        self.identity = dict(parent.identity) if parent is not None else {}
+        if identity is not None:
+            for key, value in identity.items():
+                if key in {"source_object_key_sha256", "model_sha256"}:
+                    if (
+                        not isinstance(value, str)
+                        or len(value) != 64
+                        or any(c not in "0123456789abcdef" for c in value)
+                    ):
+                        raise ValueError("transfer diagnostic digest differs")
+                elif key == "object_role":
+                    if value not in {"source", "preserved", "copy_proof"}:
+                        raise ValueError("transfer diagnostic object role differs")
+                else:
+                    raise ValueError("transfer diagnostic identity field differs")
+                self.identity[key] = value
         if total_operations is not None and (
             type(total_operations) is not int or total_operations < 0
         ):
@@ -239,6 +258,7 @@ class TransferProgress:
 
         def report(event):
             with self.lock, suppress(Exception):
+                event = {**self.identity, **event}
                 # Keep the child's own stage, rate and terminal visible.
                 if self.report is None:
                     _LOG.info(json.dumps(event, separators=(",", ":")))
@@ -271,6 +291,9 @@ class TransferProgress:
                         "eta_seconds",
                         "planning_eta_seconds",
                         "eta_basis",
+                        "source_object_key_sha256",
+                        "model_sha256",
+                        "object_role",
                     )
                 }
                 state = event.get("status")
@@ -426,6 +449,7 @@ class TransferProgress:
                     else:
                         eta, planning, basis = None, None, "required_child_scope_incomplete"
             event = {
+                **self.identity,
                 "schema": "umi-transport-work-progress/1",
                 "pid": os.getpid(),
                 "work_id": self.public_work_id,
