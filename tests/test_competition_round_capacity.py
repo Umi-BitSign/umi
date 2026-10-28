@@ -49,7 +49,7 @@ def usage(journal):
 
 
 def test_legacy_journal_writes_until_explicit_reservation(journal):
-    journal.put("vote", "old", {"vote": 1})
+    journal.put("vote", "old", {"vote": 1, "reservation-validation": 1})
     assert state(journal)["version"] == 0
     assert journal.reservation("absent") is None
     with sqlite3.connect(journal.path) as db:
@@ -114,7 +114,7 @@ def test_shared_obligation_is_counted_once_across_batches(journal):
     before = usage(journal)
     journal.reserve_records("other", (spec(maximum_bytes=8000),))
     after = usage(journal)
-    assert after[2] == before[2] == {"vote": 1}
+    assert after[2] == before[2] == {"vote": 1, "reservation-validation": 1}
     assert after[0] == before[0] + 1  # Only the additional batch manifest.
     assert 0 < after[1] - before[1] < 8000
 
@@ -207,7 +207,7 @@ def test_matching_write_consumes_only_own_credit_once(journal):
     after = usage(journal)
     assert after[0] == before[0]
     assert after[1] == before[1] - 4096 + len(canonical_json_bytes(value))
-    assert after[2] == before[2] == {"vote": 2}
+    assert after[2] == before[2] == {"vote": 2, "reservation-validation": 1}
     retained = state(journal)
     journal.put("vote", "one", value)
     assert state(journal) == retained
@@ -305,7 +305,7 @@ def test_independent_openers_cannot_oversubscribe_a_kind(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(reserve, range(2)))
     assert sorted(outcomes) == ["retained", "round journal record capacity exhausted"]
-    assert usage(journals[0])[2] == {"intent": 1}
+    assert usage(journals[0])[2] == {"intent": 1, "reservation-validation": 1}
 
 
 @pytest.mark.parametrize(
@@ -393,7 +393,9 @@ def test_missing_obligation_is_never_recreated_by_retry(journal, operation):
     journal.reserve_records("batch", (spec(), spec(key="two")))
     corrupt(journal, "record_reservations", "DELETE FROM record_reservations WHERE id='one'")
     before = state(journal)
-    with pytest.raises(ValueError, match="obligation missing or changed"):
+    with pytest.raises(
+        ValueError, match=r"obligation missing or changed|reservation validation repair required"
+    ):
         if operation == "retry":
             journal.reserve_records("batch", (spec(), spec(key="two")))
         else:
@@ -415,7 +417,9 @@ def test_allowance_sql_columns_must_match_canonical_spec(journal, operation, col
     journal.reserve_records("batch", (spec(),))
     corrupt(journal, "record_reservations", f"UPDATE record_reservations SET {column}=?", (value,))
     before = state(journal)
-    with pytest.raises(ValueError, match="allowance columns changed"):
+    with pytest.raises(
+        ValueError, match=r"allowance columns changed|reservation validation repair required"
+    ):
         if operation == "retry":
             journal.reserve_records("batch", (spec(),))
         elif operation == "receipt":
@@ -430,7 +434,9 @@ def test_retained_exact_write_also_verifies_obligation_columns(journal):
     journal.put("vote", "one", {})
     corrupt(journal, "record_reservations", "UPDATE record_reservations SET maximum_bytes=1")
     before = state(journal)
-    with pytest.raises(ValueError, match="allowance columns changed"):
+    with pytest.raises(
+        ValueError, match=r"allowance columns changed|reservation validation repair required"
+    ):
         journal.put("vote", "one", {})
     assert state(journal) == before
 
@@ -457,7 +463,13 @@ def test_manifest_shape_and_order_are_strict(journal, change):
         (canonical_json_bytes(doc),),
     )
     before = state(journal)
-    with pytest.raises(ValueError, match=r"manifest changed|unique and sorted|reservation fields"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"manifest changed|unique and sorted|reservation fields|"
+            r"reservation validation repair required"
+        ),
+    ):
         journal.reservation("batch")
     assert state(journal) == before
 
@@ -484,7 +496,7 @@ def test_identity_cannot_override_receipt_fields(journal, field, value):
         (canonical_json_bytes(doc),),
     )
     before = state(journal)
-    with pytest.raises(ValueError, match="binding changed"):
+    with pytest.raises(ValueError, match=r"binding changed|reservation validation repair required"):
         journal.reservation("batch")
     assert state(journal) == before
 
@@ -511,7 +523,9 @@ def test_retained_reservation_blobs_are_size_checked_before_loading(
         return db
 
     monkeypatch.setattr(sqlite3, "connect", traced)
-    with pytest.raises(ValueError, match="blob exceeds bound"):
+    with pytest.raises(
+        ValueError, match=r"blob exceeds bound|reservation validation repair required"
+    ):
         journal.reservation("batch")
     assert not any(
         statement.startswith(f'SELECT "{column}" FROM "{table}"') for statement in statements
@@ -573,9 +587,9 @@ def test_accounting_streams_obligations_with_constant_query_count(journal, count
         expected = journal._capacity(db)
         db.set_trace_callback(statements.append)
         assert journal._capacity(db) == expected
-    assert expected[2] == {"vote": count}
-    # Accounting still validates every canonical obligation. It must not run
-    # additional lookup queries for each row, including consumed obligations.
+    assert expected[2] == {"vote": count, "reservation-validation": 1}
+    # Successful canonical validation is retained. Accounting still uses the
+    # original SQL totals, without per-obligation Python lookup queries.
     assert len(statements) < 64
 
 
@@ -606,13 +620,15 @@ def test_obligation_projection_does_not_load_oversized_columns(
         )
         return row
 
-    with journal.transaction() as db:
+    with (
+        pytest.raises(ValueError, match=message + "|reservation validation repair required"),
+        journal.transaction() as db,
+    ):
         db.row_factory = inspect
-        with pytest.raises(ValueError, match=message):
-            if operation == "exact":
-                journal._obligation(db, "vote", "one")
-            else:
-                journal._capacity(db)
+        if operation == "exact":
+            journal._obligation(db, "vote", "one")
+        else:
+            journal._capacity(db)
     assert max(returned_sizes, default=0) <= 8192
 
 

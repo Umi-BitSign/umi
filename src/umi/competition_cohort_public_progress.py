@@ -13,6 +13,23 @@ from contextvars import ContextVar
 from copy import deepcopy
 from threading import RLock
 
+DIRECT_UPLOAD_PROGRESS_FIELDS = (
+    "objects_pending",
+    "objects_retrying",
+    "objects_ready",
+    "objects_terminal",
+    "objects_total",
+    "objects_classified",
+    "objects_unclassified",
+    "object_count_status",
+    "object_count_scope",
+    "active_object_position",
+    "active_object_position_scope",
+    "active_object_sha256",
+    "active_object_stage",
+    "model_sha256",
+)
+
 _FIELDS = (
     "phase",
     "stage",
@@ -68,7 +85,6 @@ _FIELDS = (
     "rate_probe_timeouts",
     "released_local_bytes",
     "reason_code",
-    "model_sha256",
     "operation",
     "acceptance_owner_cohort_sha256",
     "acceptance_owner_stage",
@@ -77,12 +93,9 @@ _FIELDS = (
     "selected_cohort_sha256",
     "queue_wait_seconds",
     "queue_wait_scope",
-    "objects_pending",
-    "objects_retrying",
-    "objects_ready",
-    "objects_terminal",
-    "objects_total",
-    "object_count_scope",
+    *DIRECT_UPLOAD_PROGRESS_FIELDS,
+    "source_object_key_sha256",
+    "object_role",
     "owner_report_observed_unix_ms",
     "evaluator",
     "role",

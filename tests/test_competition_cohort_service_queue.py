@@ -1499,3 +1499,26 @@ def test_pin_new_item_logs_decode_and_checkpoint_without_charging_reuse(queue_ca
     c.queue.retained_registration_blocks(complete_only=True)
     assert not any("registration_pin_decode" in r.getMessage() for r in caplog.records)
     assert not any("registration_pin_checkpoint" in r.getMessage() for r in caplog.records)
+
+
+def test_pin_checkpoint_reuses_unchanged_v2_reservation_validation(queue_case, monkeypatch):
+    from umi.competition_round_journal import RecordReservation, RoundJournal
+
+    c = queue_case
+    admit(c)
+    c.queue.journal.reserve_records(
+        "checkpoint-reuse-fixture",
+        (RecordReservation("future", str(index), 64) for index in range(200)),
+    )
+    decoded = []
+    original = RoundJournal._decode_obligation
+
+    def observe(cls, row):
+        decoded.append(row[1])
+        return original(row)
+
+    monkeypatch.setattr(RoundJournal, "_decode_obligation", classmethod(observe))
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    assert decoded == []
+    assert c.queue.retained_registration_blocks(complete_only=True) == frozenset({400})
+    assert decoded == []
