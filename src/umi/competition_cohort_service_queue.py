@@ -149,6 +149,11 @@ class ServiceWorkQueue:
         return value
 
     def _catalog(self, db=None):
+        if db is None:
+            # Catalog, optional round alias and prepared round share their fresh
+            # conflict/schema checks and cannot come from different snapshots.
+            with self.journal.read_transaction() as db:
+                return self._catalog(db)
         key = self.config.catalog_sha256
         signed = self._decoded_record("service_catalog", key, SignedServiceWorkCatalog, db)
         if signed is None:

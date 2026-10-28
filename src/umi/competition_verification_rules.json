@@ -239,7 +239,7 @@
     "competition_cohort_service_partial.py": "c76c929dd0912e6d1af7167babacf51ba7f4916201a8b31090ad920295f5077c",
     "competition_cohort_service_peers.py": "19986af56b9b7462d761fea6b1602a72ba0036a70ac31106ebe4aa2f29a41d0c",
     "competition_cohort_service_quality.py": "db70519e4ce46e951e0db45681f9c8122300d1ddea64787df2f39b12b9395e61",
-    "competition_cohort_service_queue.py": "05fbac932e416b9e711d382e04d7e5c08cc5fcebecedc4b24a5dfb73ecad3773",
+    "competition_cohort_service_queue.py": "7037fb0a964346bc93ac07cdcfb0230687a006f62e0e3954eff90de69688eb08",
     "competition_cohort_service_reference.py": "31fb7b4128fbf7015813e897c2517d367954fc1c3f116a0b59097979feda92e5",
     "competition_cohort_service_requests.py": "5f35976351428681723657e464929385c476e32247dd3db3d7130d8e5934d601",
     "competition_cohort_service_review.py": "7708e2bca12278ee325b230ee4d3c191e74af4e0b3ca9ac6d00fca8b95a69580",
