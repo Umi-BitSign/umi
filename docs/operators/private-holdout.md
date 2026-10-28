@@ -169,7 +169,11 @@ and bind that same category in its reference-QA record. Set
 `fingerspelling_category_minimums` in the counts input, for example
 `{"sentence":1,"name":1,"address":1,"number":1}`; each minimum must be positive
 and their sum must fit the requested fingerspelling count. Selection reserves
-enough remaining slots to meet every category even in a larger pool. It refuses
+enough remaining slots within each corpus's limits to meet every category, even
+in a larger pool. For example, when one corpus supplies the only address and
+number cases, its two-case allowance remains available for those categories
+while another corpus supplies names and sentences. Feasible choices retain the
+existing deterministic ranking and all overlap exclusions. Selection refuses
 a shortage instead of relabeling examples. Older standalone preparation inputs
 may omit category quotas and retain their original bytes; they cannot authorize
 native adoption until the explicit four-category requirements are supplied.
