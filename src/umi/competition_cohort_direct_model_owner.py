@@ -1719,7 +1719,13 @@ class DirectModelUploadOwners:
 
     _PRIORITY_POLLS = 4
 
-    def __init__(self, owners: Mapping[str, DirectModelUploadOwner], *, priority_cohorts=()):
+    def __init__(
+        self,
+        owners: Mapping[str, DirectModelUploadOwner],
+        *,
+        priority_cohorts=(),
+        intake_phase: Callable[[str], str | None] | None = None,
+    ):
         self.owners = dict(owners)
         if (
             not self.owners
@@ -1728,6 +1734,7 @@ class DirectModelUploadOwners:
         ):
             raise ValueError("direct model owners require unique cohort bindings")
         self.priority_cohorts = tuple(priority_cohorts)
+        self.intake_phase = intake_phase
         if (
             len(set(self.priority_cohorts)) != len(self.priority_cohorts)
             or not set(self.priority_cohorts) <= self.owners.keys()
@@ -1749,9 +1756,16 @@ class DirectModelUploadOwners:
 
     def _select(self):
         # Unknown owners get an ordinary poll, never a separate journal scan.
-        preferred = next(
-            (cohort for cohort in self.priority_cohorts if self._pending(cohort) != 0), None
-        )
+        candidates = [cohort for cohort in self.priority_cohorts if self._pending(cohort) != 0]
+        phases = {
+            cohort: None if self.intake_phase is None else self.intake_phase(cohort)
+            for cohort in candidates
+        }
+        # Admission cutoff still allows accepted uploads to finish. Only the
+        # authenticated native phase demotes historical work, never wall time.
+        preferred = next((cohort for cohort in candidates if phases[cohort] == "intake"), None)
+        if preferred is None:
+            preferred = next((cohort for cohort in candidates if phases[cohort] is None), None)
         if preferred is not None and self._priority_polls < self._PRIORITY_POLLS:
             self._priority_polls += 1
             return preferred, "cohort_sequence_priority"

@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import closing, contextmanager
 from functools import partial
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Literal
 
 from pydantic import Field, model_serializer, model_validator
@@ -207,6 +208,8 @@ class CohortIntake:
         self._admission_drain_progress = {}
         self._admission_deadlines = {}
         self.pending_admission_uploads = None
+        self._model_delivery_states = {}
+        self._model_delivery_state_lock = Lock()
         self._read_only = read_only
         self.config = CohortIntakeConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -263,6 +266,28 @@ class CohortIntake:
             "eta_scope": "new_admissions_only",
             "stalled_or_retrying": False,
         }
+
+    def _remember_model_delivery_state(self, state):
+        """Remember already authenticated state after its native fence succeeds."""
+        cohort = state.cohort_sha256
+        self._allowed(cohort)
+        if state.authority_sha256 != self.bindings[cohort]:
+            raise ValueError("model delivery phase has another cohort authority")
+        selected = (state.sequence, state.tip_sha256, state.phase)
+        with self._model_delivery_state_lock:
+            old = self._model_delivery_states.get(cohort)
+            if old is not None:
+                if old[0] > selected[0]:
+                    return
+                if old[0] == selected[0] and old != selected:
+                    raise ValueError("model delivery phase conflicts with its authenticated tip")
+            self._model_delivery_states[cohort] = selected
+
+    def model_delivery_phase(self, cohort):
+        """Scheduling hint only: no database, history replay, RPC or deadline gate."""
+        with self._model_delivery_state_lock:
+            state = self._model_delivery_states.get(cohort)
+            return None if state is None else state[2]
 
     def _directory(self):
         info = self.directory.lstat()
@@ -570,7 +595,8 @@ class CohortIntake:
             # Native phase observation refuses missing inputs in the meantime.
             for evidence in decision_inputs or ():
                 store.retain_source(cohort, evidence)
-            return state
+        self._remember_model_delivery_state(state)
+        return state
 
     def pending_policy_adoption(self, cohort: str) -> CohortRecoveryTransition | None:
         """Recover either native policy reservation without inventing new bytes."""

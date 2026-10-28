@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 
 from umi.competition_cohort_api import cohort_routes
+from umi.competition_cohort_intake import CohortIntake
 from umi.competition_cohort_model_acceptance_store import CohortModelAcceptances
 from umi.competition_cohort_model_transport import prepare_model_delivery_adoption
 from umi.competition_cohort_model_upload import (
@@ -82,6 +83,66 @@ class Payloads:
 
     def review_artifact(self, request):
         return ("direct", request)
+
+
+def test_startup_phase_hint_reuses_authenticated_delivery_and_survives_late_reads(
+    delivery, monkeypatch
+):
+    h = delivery
+    assert h.intake.model_delivery_phase(h.cohort) == "intake"  # Native publication hook.
+    restarted = CohortIntake(h.intake.config, h.intake.policy, eligible_tracks=h.intake.tracks)
+    assert restarted.model_delivery_phase(h.cohort) is None
+    plan = h.intake.history(h.cohort).plan
+    _startup_model_delivery(restarted, plan)
+    assert restarted.model_delivery_phase(h.cohort) == "intake"
+    restarted._admission_deadlines[h.cohort] = SimpleNamespace(close_new_admissions_at_unix_ms=0)
+    assert restarted.admission_status(h.cohort)["new_admissions_open"] is False
+    assert restarted.model_delivery_phase(h.cohort) == "intake"
+    with restarted._connection(prefer_history=True) as (_, store):
+        old, _ = store.status(h.cohort)
+    later = old.model_copy(
+        update={"sequence": old.sequence + 1, "tip_sha256": "ab" * 32, "phase": "reference_reveal"}
+    )
+    restarted._remember_model_delivery_state(later)
+    restarted._remember_model_delivery_state(old)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cached scheduling must not open native history")
+
+    monkeypatch.setattr(restarted, "_connection", forbidden)
+    assert restarted.model_delivery_phase(h.cohort) == "reference_reveal"
+
+
+@pytest.mark.parametrize("failure", ["authentication", "final_fence", "publication_fence"])
+def test_failed_transport_observation_cannot_populate_phase_hint(delivery, monkeypatch, failure):
+    from contextlib import contextmanager
+
+    from umi import competition_cohort_model_upload as module
+
+    h = delivery
+    restarted = CohortIntake(h.intake.config, h.intake.policy, eligible_tracks=h.intake.tracks)
+    if failure == "authentication":
+
+        def fail(*args, **kwargs):
+            raise ValueError("authentication failed")
+
+        monkeypatch.setattr(module, "authenticated_model_delivery", fail)
+    else:
+        connection = restarted._connection
+
+        @contextmanager
+        def failed_fence(*args, **kwargs):
+            with connection(*args, **kwargs) as value:
+                yield value
+            raise ValueError("final fence failed")
+
+        monkeypatch.setattr(restarted, "_connection", failed_fence)
+    with pytest.raises(ValueError, match="failed"):
+        if failure == "publication_fence":
+            restarted.publish(h.intake.history(h.cohort), capture_at(210))
+        else:
+            owned_model_delivery(restarted, h.cohort)
+    assert restarted.model_delivery_phase(h.cohort) is None
 
 
 def test_new_transport_requires_committed_owner_history_and_fresh_finality(delivery):

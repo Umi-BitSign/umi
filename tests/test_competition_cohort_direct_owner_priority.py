@@ -59,6 +59,33 @@ async def test_sequence_priority_and_background_discovery_are_bounded():
     assert calls == [A, A, A, A, C, A, A, A, A, B]
 
 
+@pytest.mark.parametrize("historical_phase", ["reference_reveal", "complete", "revoked"])
+async def test_historical_c6_yields_first_turn_to_intake_c7_before_any_owner_poll(
+    historical_phase,
+):
+    calls = []
+    owners = {c: Owner(c, calls) for c in (A, B, C)}
+    phases = {A: historical_phase, B: "intake"}  # Future C is still unknown.
+    manager = DirectModelUploadOwners(owners, priority_cohorts=(A, B, C), intake_phase=phases.get)
+    for _ in range(10):
+        await manager.poll_once()
+    assert calls == [B, B, B, B, A, B, B, B, B, C]
+    phases[B] = "preparation"
+    await manager.poll_once()
+    assert calls[-1] == C
+
+
+async def test_unknown_earlier_cohort_cannot_preempt_known_intake():
+    calls = []
+    manager = DirectModelUploadOwners(
+        {c: Owner(c, calls) for c in (A, B)},
+        priority_cohorts=(A, B),
+        intake_phase={B: "intake"}.get,
+    )
+    await manager.poll_once()
+    assert calls == [B]
+
+
 async def test_completed_and_terminal_owners_yield_but_new_work_is_discovered():
     calls = []
     owners = {c: Owner(c, calls) for c in (A, B, C)}

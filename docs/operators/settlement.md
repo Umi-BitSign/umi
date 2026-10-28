@@ -3690,6 +3690,12 @@ retains its separate `cleanup_batch_size` limit.
 The multi-cohort owner dispatches one cohort batch per poll. It uses signed cohort
 sequence order to prioritize the earliest cohort with unfinished or unobserved
 work for up to four turns, then gives one turn to a rotating background cohort.
+Known native intake phases take priority over unknown future cohorts. Cohorts
+already in later phases, complete or revoked receive background turns. The phase
+hint reuses ordinary authenticated startup transport selection and successful
+history publication, with monotonic sequence/tip tracking; scheduling performs no
+history reads or replay. Closing new admissions at the operator deadline does not
+demote a cohort still in intake, whose accepted uploads may finish.
 Background rotation includes completed and idle cohorts so later arrivals are
 discovered. Selection reuses each owner's ordinary poll result; it adds no journal
 prescan. `objects_retrying` counts unresolved verification, review or review-file
@@ -4997,6 +5003,10 @@ Derived metadata uses the existing intake capacity allowance. Logs expose
 `intake_seal_acceptances` and explicit repair stages with counts, elapsed time and
 an ETA basis. These estimates cover the current verification stage, not challenge
 completion or reward activation.
+Successful reuse of a full seal emits one `cohort_intake_seal_reuse` event with
+`status=reused`, cohort, recovery tip, dependency context, completed/total 1/1,
+measured elapsed time and ETA 0 with basis `retained_verified_result`. It does not
+emit a success event for each consent or certificate or reread original bodies.
 
 Missing or damaged completed metadata is a repair state, not a cache miss. To
 repair the exact retained seal, use the selected Python/source as the service

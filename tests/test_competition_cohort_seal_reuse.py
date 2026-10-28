@@ -1,3 +1,5 @@
+import json
+import logging
 from contextlib import contextmanager
 
 import pytest
@@ -19,10 +21,14 @@ def prepared(intake, scenario):
     return seal, seal.cohort_sha256, seal.recovery_tip_sha256
 
 
-def test_creation_restart_and_cache_hit_never_read_original_bodies(intake, scenario, monkeypatch):
+def test_creation_restart_and_cache_hit_never_read_original_bodies(
+    intake, scenario, monkeypatch, caplog
+):
     import umi.competition_cohort_seal_reuse as reuse
 
     seal, cohort, tip = prepared(intake, scenario)
+    caplog.set_level(logging.INFO, logger=reuse.__name__)
+    caplog.clear()
 
     def unexpected(*args, **kwargs):
         raise AssertionError("completed original work repeated")
@@ -51,6 +57,19 @@ def test_creation_restart_and_cache_hit_never_read_original_bodies(intake, scena
             and "body" in q
             and ("FROM cohort_consents" in q or "FROM cohort_model_acceptances" in q)
         ]
+    events = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.name == reuse.__name__
+        and record.getMessage().startswith("cohort_intake_seal_reuse ")
+    ]
+    assert len(events) == 4
+    for event in events:
+        assert event["cohort_sha256"] == cohort and event["recovery_tip_sha256"] == tip
+        assert len(event["dependency_context_sha256"]) == 64
+        assert event["status"] == "reused" and event["completed"] == event["total"] == 1
+        assert event["elapsed_seconds"] >= 0 and event["eta_seconds"] == 0
+        assert event["eta_basis"] == "retained_verified_result"
 
 
 @pytest.mark.parametrize("damage", ["missing", "bytes", "completion"])
