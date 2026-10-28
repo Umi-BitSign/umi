@@ -314,7 +314,12 @@ async def test_admitted_source_release_never_erases_an_unrelated_source_mutation
             return value
 
         monkeypatch.setattr(h.reader.remote_sources, "source_token", changed)
-    with pytest.raises(HistoryCheckpointRepairRequired, match=r"admission.*(changed|release)"):
+    reason = (
+        "folded history changed during exact source externalization"
+        if when == "inside_alias_transaction"
+        else r"admission.*(changed|release)"
+    )
+    with pytest.raises(HistoryCheckpointRepairRequired, match=reason):
         h.reader.remote_sources.externalize(kind, key)
     with h.reader.journal.read_transaction() as db:
         assert h.reader.journal.get_raw(kind, key, db=db) == raw

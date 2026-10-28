@@ -2190,7 +2190,8 @@ async def test_native_coverage_retention_retries_and_offline_restart(
         with journal.journal.transaction() as db:
             return db.execute(
                 "SELECT COUNT(*),SUM(LENGTH(body)) FROM records WHERE kind NOT IN "
-                "('coverage_verified','coverage_verified_done','coverage_checkpoint_owner')"
+                "('coverage_verified','coverage_verified_done','coverage_checkpoint_owner',"
+                "'coverage_credit_owner')"
             ).fetchone()
 
     # Capacity errors and interrupted transactions preserve atomicity. No
