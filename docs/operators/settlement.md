@@ -1186,18 +1186,23 @@ bytes, owner binding and journal inode stay intact. Old runtimes and reservation
 layout changes refuse this capability; keep its completed ledger with the index.
 A missing receipt is damaged completed state, not permission to import it again.
 
-A successful single-part conditional PUT with the exact expected ETag completes
-publication without another HEAD. Its Content-MD5 and signed SHA metadata bind
-the original payload. A 412 response or missing ETag still requires exact HEAD
-verification; an explicit mismatched ETag fails without a receipt. Lost-acknowledgement
-retries first inspect the existing generation, avoiding another upload. Completed
-local receipts remain reusable without remote I/O.
+Tiny evidence objects (at most 4 KiB) start with a conditional PUT; larger objects
+retain HEAD-first publication. An exact expected single-part ETag completes
+publication without another HEAD. Content-MD5 and signed SHA metadata bind the
+original payload. A 412 response or missing ETag still requires exact HEAD
+verification; an explicit mismatched ETag fails without a receipt. A tiny upload
+without a retained acknowledgement may resend at most 4 KiB in a conditional
+attempt before reading the existing generation; it never overwrites it. Larger
+objects retain HEAD-first recovery. Completed local receipts avoid remote I/O.
+Owned publisher lanes reuse their HTTP client across requests.
 
 For a new remote frame, already prepared proof encodings combine adjacent
 segments smaller than 4 KiB into literal objects while retaining larger shared
 objects. The original `/1` decoder, expanded proof identity and native verification
 remain unchanged. Existing destination frames retain their exact recipes, and
-local archives keep their existing representation. This reduces tiny-object
+local archives keep their existing representation. Retained local frames also
+keep their recipes when exported, so their request reduction comes from tiny
+conditional PUTs rather than coalescing. Coalescing reduces tiny-object
 requests but can increase stored bytes when small objects are shared across
 frames; compare newly uploaded bytes as well as throughput. Large prepared object
 identities are reused without rehashing, while newly joined partial slices need
