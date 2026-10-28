@@ -503,6 +503,141 @@ def test_canonical_dataset_identity_preserves_source_grouping():
         canonical_dataset_identity(" \t")
 
 
+def category_bottleneck(c):
+    from umi.competition_suite_selection import FingerspellingCategoryMinimums
+
+    values = tuple(
+        candidate(i, text, task="fingerspelling", dataset=dataset, signer=i).model_copy(
+            update={"fingerspelling_category": category}
+        )
+        for i, text, dataset, category in (
+            (200, "We can visit the observatory tomorrow", "PrimaryFS", "sentence"),
+            (201, "Nadia", "PrimaryFS", "name"),
+            (202, "72 Beech Street", "PrimaryFS", "address"),
+            (203, "681-294-5073", "PrimaryFS", "number"),
+            (210, "The garden gate is open", "SecondaryFS", "sentence"),
+            (211, "Kieran", "SecondaryFS", "name"),
+        )
+    )
+    inventory = c.inventory.model_copy(update={"cases": (*values, *c.inventory.cases[3:])})
+    counts = c.counts.model_copy(update={
+        "fingerspelling": 4,
+        "minimum_fingerspelling_datasets": 2,
+        "minimum_fingerspelling_signers": 4,
+        "maximum_fingerspelling_dataset_share_bps": 7500,
+        "maximum_cases_per_dataset": 2,
+        "fingerspelling_category_minimums": FingerspellingCategoryMinimums(
+            sentence=1, name=1, address=1, number=1
+        ),
+    })
+    return inventory, counts
+
+
+@pytest.mark.parametrize("key", [bytes(range(32)), bytes(32), b"\xff" * 32])
+def test_category_reservation_preserves_the_only_address_and_number_source(case, key):
+    inventory, counts = category_bottleneck(case)
+    suite, report = select_future_suite(
+        inventory, case.exclusions, counts, case.policy, selection_key=key
+    )
+    expected = {f"{i:064x}" for i in (202, 203, 210, 211)}
+    assert {c.case_id for c in suite.cases if c.stratum == "fingerspelling"} == expected
+    assert report["selected_dataset_totals"]["primaryfs"] == 2
+    assert report["selected_dataset_totals"]["secondaryfs"] == 2
+    assert report["selected_fingerspelling_categories"] == {
+        "address": 1, "name": 1, "number": 1, "sentence": 1,
+    }
+    reversed_inventory = inventory.model_copy(update={"cases": tuple(reversed(inventory.cases))})
+    assert select_future_suite(
+        reversed_inventory, case.exclusions, counts, case.policy, selection_key=key
+    )[0] == suite
+
+
+def test_category_reservation_counts_canonical_corpora_not_versions(case):
+    inventory, counts = category_bottleneck(case)
+    values = tuple(
+        row.model_copy(update={"dataset": "  \uff30RIMARYfs  ", "dataset_version": "other-split"})
+        if row.case.case_id == f"{202:064x}" else row
+        for row in inventory.cases
+    )
+    suite, report = select(
+        case, inventory=inventory.model_copy(update={"cases": values}), counts=counts
+    )
+    assert {c.case_id for c in suite.cases if c.stratum == "fingerspelling"} == {
+        f"{i:064x}" for i in (202, 203, 210, 211)
+    }
+    assert report["selected_dataset_totals"]["primaryfs"] == 2
+
+
+@pytest.mark.parametrize("overlap", ["source", "signer", "reference", "near_reference"])
+def test_category_capacity_does_not_rescue_an_excluded_required_case(case, overlap):
+    inventory, counts = category_bottleneck(case)
+    required_id = 210 if overlap == "near_reference" else 202
+    required = next(row for row in inventory.cases if row.case.case_id == f"{required_id:064x}")
+    updates = {
+        "source": {"source_group_sha256s": (required.source_group_sha256,)},
+        "signer": {"signer_group_sha256s": (required.signer_group_sha256,)},
+        "reference": {"references": ("72BEECHSTREET",)},
+        "near_reference": {"references": ("The garden gate is open today",)},
+    }
+    with pytest.raises(ValueError, match=r"dataset quota|disjoint diversity"):
+        select(case, inventory=inventory, counts=counts,
+               exclusions=case.exclusions.model_copy(update=updates[overlap]))
+
+
+def test_category_reservation_also_honors_task_share_without_global_cap(case):
+    inventory, counts = category_bottleneck(case)
+    counts = counts.model_copy(update={
+        "maximum_cases_per_dataset": None, "maximum_fingerspelling_dataset_share_bps": 5000,
+    })
+    suite, _ = select(case, inventory=inventory, counts=counts)
+    assert {c.case_id for c in suite.cases if c.stratum == "fingerspelling"} == {
+        f"{i:064x}" for i in (202, 203, 210, 211)
+    }
+
+
+def test_category_capacity_refuses_joint_shortage_even_when_each_category_exists(case):
+    inventory, counts = category_bottleneck(case)
+    # Two exclusive categories compete for one corpus slot. Other corpora
+    # provide ample total capacity, but cannot satisfy this joint demand.
+    values = tuple(
+        row.model_copy(update={"dataset": "SharedExclusive"})
+        if row.fingerspelling_category in {"address", "number"}
+        else row.model_copy(update={"dataset": "Independent" + row.case.case_id})
+        for row in inventory.cases
+    )
+    counts = counts.model_copy(update={"maximum_cases_per_dataset": 1})
+    with pytest.raises(ValueError, match="disjoint diversity"):
+        select(case, inventory=inventory.model_copy(update={"cases": values}), counts=counts)
+
+
+def test_capacity_filter_uses_corpus_category_counts_without_per_choice_rescans():
+    from collections import Counter
+
+    from umi.competition_suite_selection import _category_capacity_choices
+
+    class Once(list):
+        def __iter__(self):
+            self.iterations += 1
+            assert self.iterations == 1, "candidate pool rescanned per tentative choice"
+            return super().__iter__()
+
+    categories = ("sentence", "name", "address", "number")
+    rows = Once(
+        candidate(i, str(i), task="fingerspelling", dataset="Corpus" + str(i % 16), signer=i)
+        .model_copy(update={"fingerspelling_category": categories[i % 4]})
+        for i in range(1000, 2024)
+    )
+    rows.iterations = 0
+    keys = {
+        row.case.case_id: canonical_dataset_identity(row.dataset) for row in list.__iter__(rows)
+    }
+    allowed = _category_capacity_choices(
+        rows, keys, Counter(), Counter(),
+        {"sentence": 1, "name": 1, "address": 1, "number": 1}, 2, 2, 3,
+    )
+    assert len(allowed) == 16 and rows.iterations == 1
+
+
 def test_four_category_quota_minimums_must_fit_and_cannot_be_zero_or_missing(case):
     from umi.competition_suite_selection import FingerspellingCategoryMinimums
 

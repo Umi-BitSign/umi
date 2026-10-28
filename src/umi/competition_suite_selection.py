@@ -224,6 +224,82 @@ class _SentenceExclusions:
         )
 
 
+def _category_capacity_choices(
+    candidates: list[SuiteCandidate],
+    dataset_keys: dict[str, str],
+    dataset_counts: Counter,
+    total_dataset_counts: Counter,
+    deficits: dict[str, int],
+    maximum_per_dataset: int,
+    whole_suite_cap: int | None,
+    remaining_slots: int,
+) -> set[tuple[str, str]]:
+    """Preserve category capacity without changing feasible greedy rankings.
+
+    For the four categories, the 15 Hall/min-cut inequalities are equivalent
+    to assigning their remaining demands to corpus slots. Build capacities
+    once and evaluate each (corpus, category) choice with a constant-size
+    delta, rather than rescanning candidates or searching permutations.
+
+    This checks category/corpus resources, not arbitrary conflicts between
+    future pairs. Normal source, signer and reference checks still apply at
+    every selection step and must never be relaxed to fill a quota.
+    """
+    categories = tuple(deficits)
+    category_index = {category: i for i, category in enumerate(categories)}
+    offered: dict[str, list[int]] = {}
+    for candidate in candidates:
+        dataset = dataset_keys[candidate.case.case_id]
+        values = offered.setdefault(dataset, [0] * len(categories))
+        values[category_index[candidate.fingerspelling_category]] += 1
+    masks = range(1, 1 << len(categories))
+    demands = {
+        mask: sum(deficits[category] for i, category in enumerate(categories) if mask & (1 << i))
+        for mask in masks
+    }
+    limits = {
+        dataset: min(
+            maximum_per_dataset - dataset_counts[dataset],
+            whole_suite_cap - total_dataset_counts[dataset]
+            if whole_suite_cap is not None else maximum_per_dataset,
+        )
+        for dataset in offered
+    }
+    amounts = {
+        dataset: {
+            mask: sum(number for i, number in enumerate(values) if mask & (1 << i))
+            for mask in masks
+        }
+        for dataset, values in offered.items()
+    }
+    capacities = {
+        mask: sum(min(limits[dataset], amounts[dataset][mask]) for dataset in offered)
+        for mask in masks
+    }
+    # Taking any currently eligible case consumes exactly one available slot.
+    if capacities[(1 << len(categories)) - 1] - 1 < remaining_slots:
+        return set()
+    allowed = set()
+    for dataset, values in offered.items():
+        limit = limits[dataset]
+        for i, number in enumerate(values):
+            if not number:
+                continue
+            category = categories[i]
+            for mask in masks:
+                contains = bool(mask & (1 << i))
+                demand = demands[mask] - int(contains and deficits[category] > 0)
+                capacity = (
+                    capacities[mask] - min(limit, amounts[dataset][mask])
+                    + min(limit - 1, amounts[dataset][mask] - int(contains))
+                )
+                if demand > capacity:
+                    break
+            else:
+                allowed.add((dataset, category))
+    return allowed
+
+
 def select_future_suite(
     inventory: SuiteCandidateInventory,
     exclusions: SuiteExclusions,
@@ -338,6 +414,11 @@ def select_future_suite(
                     key: max(0, minimum - category_counts[key])
                     for key, minimum in category_minimums.items()
                 }
+                category_choices = _category_capacity_choices(
+                    [c for c, _, _ in eligible], dataset_keys, dataset_counts,
+                    total_dataset_counts, deficits, maximum_per_dataset, cap,
+                    wanted - index - 1,
+                )
                 if sum(deficits.values()) == wanted - index:
                     eligible = [
                         (c, text, tokens)
@@ -358,6 +439,14 @@ def select_future_suite(
                     item
                     for item in eligible
                     if item[0].training_exposure == "documented_training_excluded"
+                ]
+            if category_minimums:
+                # Keep the original `available` ranking above. Resource checks
+                # use the broad pool, before filters restricting only this pick.
+                eligible = [
+                    item for item in eligible
+                    if (dataset_keys[item[0].case.case_id], item[0].fingerspelling_category)
+                    in category_choices
                 ]
             if not eligible:
                 if cap is not None:
