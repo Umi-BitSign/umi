@@ -59,6 +59,7 @@ from .competition_cohort_model_upload_replay import ContinuedModelUploadPayloads
 from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_preparation_owner import CohortPreparation
+from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
 from .competition_cohort_recovery import (
     ModelRewardCohortAuthority,
     cohort_model_delivery,
@@ -75,6 +76,10 @@ from .competition_execution import ExecutionBoundary, execution_boundary
 from .competition_host_activation import _read_root_control_path
 from .competition_model_byte_store import shared_byte_store_paths, validate_shared_byte_stores
 from .competition_model_cache_space import disjoint
+from .competition_registration_pins import (
+    RegistrationPinProjectionPending,
+    RegistrationPinRepairRequired,
+)
 from .competition_reward_decisions import StandingRewardSeries
 from .competition_reward_manifest import RewardManifest, verify_reward_manifest
 from .competition_reward_service import _stop_task
@@ -815,6 +820,7 @@ class ServiceAdmissionHost:
             ):
                 raise ValueError("configured model reviewers cannot form independent quorum")
         self.queues, self.cohorts = {}, {}
+        self._registration_pin_cursor = 0
         root = Path(c.queue_directory) / digest(c.series)
         for requirement in c.manifest.cohorts:
             for key in requirement.catalog_sha256s:
@@ -915,6 +921,7 @@ class ServiceAdmissionHost:
         models = None if self.models is None else await self._poll_models()
         return {
             **await self._poll_catalogs(),
+            "registration_pins": await self._poll_registration_pins(),
             "model_inventory": inventory,
             "model_acceptance": models,
             "model_delivery": uploads,
@@ -974,11 +981,71 @@ class ServiceAdmissionHost:
             "chain_submission_authorized": False,
         }
 
-    def retained_registration_blocks(self) -> frozenset[int]:
+    def retained_registration_blocks(self, *, complete_only=False) -> frozenset[int]:
         blocks = set()
         for queue in self.queues.values():
-            blocks.update(queue.retained_registration_blocks())
+            blocks.update(queue.retained_registration_blocks(complete_only=complete_only))
         return frozenset(blocks)
+
+    async def _poll_registration_pins(self):
+        """Own one bounded projection pass independently of fresh finality.
+
+        Complete-only collection reads never wait for this worker or use its
+        report as a pruning authority. run_owned_thread drains an in-flight item
+        before cancellation propagates; the managed poll loop cannot overlap
+        another pass or orphan a checkpoint on service shutdown.
+        """
+        started = time.monotonic()
+        keys = tuple(self.queues)
+        report = {
+            "stage": "registration_pin_projection",
+            "status": "complete",
+            "completed": 0,
+            "total": 0,
+            "unit": "queue_projection_passes",
+            "eta_seconds": 0,
+            "eta_basis": "complete",
+            "eta_scope": "selected_service_queue_registration_pins_only",
+            "stalled_or_retrying": False,
+            "repair_required": False,
+            "certification_authority": False,
+        }
+        if keys:
+            key = keys[self._registration_pin_cursor % len(keys)]
+            self._registration_pin_cursor = (self._registration_pin_cursor + 1) % len(keys)
+            report.update(catalog_sha256=key, cohort_sha256=self.cohorts[key])
+            token = PUBLIC_COHORT_SCOPE.set(self.cohorts[key])
+            try:
+                await run_owned_thread(self.queues[key].retained_registration_blocks)
+                report.update(completed=1, total=1)
+            except RegistrationPinProjectionPending as error:
+                report.update(
+                    status="pending",
+                    completed=error.completed,
+                    total=error.total,
+                    unit="admissions",
+                    reason_code=error.reason,
+                    eta_seconds=None,
+                    eta_basis="continuing_durable_projection; item_progress_has_native_rate",
+                    stalled_or_retrying=True,
+                )
+            except RegistrationPinRepairRequired as error:
+                report.update(
+                    status="repair_required",
+                    completed=0,
+                    total=1,
+                    reason_code="registration_pin_metadata_repair_required",
+                    error_type=type(error).__name__,
+                    eta_seconds=None,
+                    eta_basis="blocked_on_explicit_metadata_repair",
+                    stalled_or_retrying=True,
+                    repair_required=True,
+                )
+            finally:
+                PUBLIC_COHORT_SCOPE.reset(token)
+        report["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        report["percent"] = 100 * report["completed"] / report["total"] if report["total"] else 100
+        return report
 
     async def run(self, stop: asyncio.Event) -> None:
         lease = (
@@ -1051,19 +1118,19 @@ class ServiceAdmissionHost:
                 os.close(lease)
 
     async def _poll(self, stop: asyncio.Event) -> None:
-        if requests_stage_policy() is not None:
-            await stop.wait()
-            return
         # Each store has one serial reconciliation owner. Slow model reviews or
         # direct-R2 verification cannot postpone legacy upload finalization or
         # catalog installation. Cancel/drain every owner before closing clients,
         # releasing the direct-upload lease, or returning to service shutdown.
-        callbacks = [("catalogs", self._poll_catalogs)]
-        if self.uploads is not None:
+        callbacks = [("registration_pins", self._poll_registration_pins)]
+        intake_enabled = requests_stage_policy() is None
+        if intake_enabled:
+            callbacks.append(("catalogs", self._poll_catalogs))
+        if intake_enabled and self.uploads is not None:
             callbacks.append(("legacy_uploads", self._poll_legacy_uploads))
-        if self.direct_uploads is not None:
+        if intake_enabled and self.direct_uploads is not None:
             callbacks.append(("direct_uploads", self._poll_direct_uploads))
-        if self.models is not None:
+        if intake_enabled and self.models is not None:
             callbacks.append(("models", self._poll_models))
             cohorts = tuple(binding.cohort_sha256 for binding in self.intake.config.cohorts)
             inventory_owner_count = min(16, len(cohorts))

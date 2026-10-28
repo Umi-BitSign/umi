@@ -450,14 +450,16 @@ class ServiceWorkQueue:
             raise ValueError("service retention ordinal prefix is incomplete")
         return rows
 
-    def _retention_catalog(self):
+    def _retention_catalog(self, *, complete_only=False):
         pins = self._registration_pins
         context = {"catalog": self.config.catalog_sha256}
         with pins.snapshot() as db:
-            pins.check_schema(db)
+            pins.check_schema(db, capacity=not complete_only)
             saved = pins.load(db, "catalog", context)
             if saved is not None:
                 return saved
+            if complete_only:
+                raise RegistrationPinProjectionPending(0, 1, "catalog_projection_pending")
             with TransferProgress(
                 "registration_pin_catalog", 1, unit="catalogs", planning_unit_seconds=(0.01, 30)
             ) as progress:
@@ -484,27 +486,31 @@ class ServiceWorkQueue:
         pins.remember("catalog", saved, lambda db: None)
         return saved
 
-    def retained_registration_blocks(self) -> frozenset[int]:
+    def retained_registration_blocks(self, *, complete_only=False) -> frozenset[int]:
         """Pin proofs using durable per-original facts and fresh mutation identities.
 
         Each completed catalog/admission is read once, including across restarts.
         SQL triggers invalidate changed originals; small live indices and conflict
         holds remain fresh. No result authorizes admission, execution or rewards.
+        Fresh registration collection uses complete_only: it neither builds a
+        catalog nor reads original admissions, writes checkpoints or scans journal
+        capacity. Pending metadata defers pruning until the service's independent
+        projection owner finishes it.
         """
         pins = self._registration_pins
         with pins.snapshot() as db:
-            pins.check_schema(db)
+            pins.check_schema(db, capacity=not complete_only)
             rows = self._retention_rows(db)
         if not rows:
             return frozenset()
-        catalog = self._retention_catalog()
+        catalog = self._retention_catalog(complete_only=complete_only)
         catalog_key = digest(catalog)
         work_keys = catalog["result"]["work_keys"]
         if len(rows) > len(work_keys):
             raise ValueError("service retention exceeds its committed catalog")
         contexts = [dict(row=list(row), catalog=catalog_key) for row in rows]
         with pins.snapshot() as db:
-            pins.check_schema(db)
+            pins.check_schema(db, capacity=not complete_only)
             if (
                 self._retention_rows(db) != rows
                 or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
@@ -517,13 +523,18 @@ class ServiceWorkQueue:
                 pins.load(db, str(row[0]), context)
                 for row, context in zip(rows, contexts, strict=True)
             ]
+        completed = sum(value is not None for value in values)
+        if complete_only:
+            if completed != len(rows):
+                raise RegistrationPinProjectionPending(completed, len(rows))
+            return self._retained_pin_blocks(rows, catalog, values, complete_only=True)
         decoded = 0
         started = time.monotonic()
         with TransferProgress(
             "registration_pin_projection",
             len(rows),
             unit="admissions",
-            planning_unit_seconds=(0.001, 1),
+            planning_unit_seconds=(0.001, 300),
         ) as progress:
             for index, (row, context) in enumerate(zip(rows, contexts, strict=True)):
                 if values[index] is not None:
@@ -535,35 +546,44 @@ class ServiceWorkQueue:
                         sum(v is not None for v in values), len(values)
                     )
                 with pins.snapshot() as db:
-                    pins.check_schema(db)
+                    pins.check_schema(db, capacity=not complete_only)
                     if (
                         pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
                         != catalog["sources"]
                     ):
                         raise RegistrationPinProjectionPending(index, len(rows), "catalog_changed")
-                    value = self._raw_admission(row[0], db, work_key=work_keys[index])
-                    if (
-                        value.catalog_sha256 != self.config.catalog_sha256
-                        or value.claim.claim.catalog_sha256 != self.config.catalog_sha256
-                        or value.observation.snapshot_sha256 != digest(value.registration)
-                        or value.observation.block != value.registration.block
-                        or value.observation.block_hash != value.registration.block_hash
-                        or value.registration.network != self.policy.network
-                        or value.registration.netuid != self.policy.netuid
-                    ):
-                        raise ValueError("service retention changed original registration bindings")
-                    values[index] = pins.make(
-                        db,
-                        [
-                            *((k, i) for k, i, _ in catalog["sources"]),
-                            ("service_admission", work_keys[index]),
-                        ],
-                        context,
-                        {
-                            "block": value.observation.block,
-                            "predecessor": value.predecessor_sha256,
-                        },
-                    )
+                    with TransferProgress(
+                        "registration_pin_decode",
+                        1,
+                        unit="admissions",
+                        planning_unit_seconds=(0.001, 300),
+                    ) as decoding:
+                        value = self._raw_admission(row[0], db, work_key=work_keys[index])
+                        if (
+                            value.catalog_sha256 != self.config.catalog_sha256
+                            or value.claim.claim.catalog_sha256 != self.config.catalog_sha256
+                            or value.observation.snapshot_sha256 != digest(value.registration)
+                            or value.observation.block != value.registration.block
+                            or value.observation.block_hash != value.registration.block_hash
+                            or value.registration.network != self.policy.network
+                            or value.registration.netuid != self.policy.netuid
+                        ):
+                            raise ValueError(
+                                "service retention changed original registration bindings"
+                            )
+                        values[index] = pins.make(
+                            db,
+                            [
+                                *((k, i) for k, i, _ in catalog["sources"]),
+                                ("service_admission", work_keys[index]),
+                            ],
+                            context,
+                            {
+                                "block": value.observation.block,
+                                "predecessor": value.predecessor_sha256,
+                            },
+                        )
+                        decoding.advance(1)
 
                 def unchanged(db, expected=row, completed=index):
                     current = db.execute(
@@ -576,40 +596,51 @@ class ServiceWorkQueue:
                         )
 
                 # Every successful item commits before the next original is read.
-                pins.remember(str(row[0]), values[index], unchanged)
+                with TransferProgress(
+                    "registration_pin_checkpoint",
+                    1,
+                    unit="admissions",
+                    planning_unit_seconds=(0.001, 300),
+                ) as checkpoint:
+                    pins.remember(str(row[0]), values[index], unchanged)
+                    checkpoint.advance(1)
                 decoded += 1
                 progress.advance(1)
-            with pins.snapshot() as db:
-                pins.check_schema(db)
-                if (
-                    self._retention_rows(db) != rows
-                    or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
-                    != catalog["sources"]
-                ):
+            return self._retained_pin_blocks(rows, catalog, values)
+
+    def _retained_pin_blocks(self, rows, catalog, values, *, complete_only=False):
+        pins = self._registration_pins
+        with pins.snapshot() as db:
+            pins.check_schema(db, capacity=not complete_only)
+            if (
+                self._retention_rows(db) != rows
+                or pins.sources(db, [(k, i) for k, i, _ in catalog["sources"]])
+                != catalog["sources"]
+            ):
+                raise RegistrationPinProjectionPending(
+                    len(rows), len(rows), "inventory_changed_after_projection"
+                )
+            for value in values:
+                keys = [(k, i) for k, i, _ in value["sources"]]
+                if pins.sources(db, keys) != value["sources"]:
                     raise RegistrationPinProjectionPending(
-                        len(rows), len(rows), "inventory_changed_after_projection"
+                        len(rows), len(rows), "source_changed_after_projection"
                     )
-                for value in values:
-                    keys = [(k, i) for k, i, _ in value["sources"]]
-                    if pins.sources(db, keys) != value["sources"]:
-                        raise RegistrationPinProjectionPending(
-                            len(rows), len(rows), "source_changed_after_projection"
-                        )
-            blocks = set()
-            previous = None
-            for row, value in zip(rows, values, strict=True):
-                result = value["result"]
-                block = result["block"]
-                if (
-                    type(block) is not int
-                    or not 0 <= block <= 2**53 - 1
-                    or result["predecessor"] != (None if previous is None else previous[1])
-                    or (previous is not None and block < previous[0])
-                ):
-                    raise ValueError("service retention changed original registration bindings")
-                blocks.add(block)
-                previous = (block, row[2])
-            return frozenset(blocks)
+        blocks = set()
+        previous = None
+        for row, value in zip(rows, values, strict=True):
+            result = value["result"]
+            block = result["block"]
+            if (
+                type(block) is not int
+                or not 0 <= block <= 2**53 - 1
+                or result["predecessor"] != (None if previous is None else previous[1])
+                or (previous is not None and block < previous[0])
+            ):
+                raise ValueError("service retention changed original registration bindings")
+            blocks.add(block)
+            previous = (block, row[2])
+        return frozenset(blocks)
 
     def assignment(self, signed: SignedServiceWorkClaim) -> ServiceWorkAssignment:
         """Export an immutable accepted record from one current read snapshot.

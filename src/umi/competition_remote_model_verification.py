@@ -144,6 +144,7 @@ def require_remote_model_bytes(multipart, key, bundle, payload, *, root, context
                 progress.emit("repair_required", reason="remote_model_completion_repair_required")
                 raise OSError("completed remote model byte verification requires repair") from error
             progress.advance(1, restored=True)
+            return result
 
 
 async def verify_remote_model(
@@ -157,6 +158,7 @@ async def verify_remote_model(
     document_paths=(),
     expected_head=None,
     report=None,
+    object_role=None,
 ):
     """Verify once per immutable source/context; retain each completed file check.
 
@@ -164,7 +166,15 @@ async def verify_remote_model(
     the stream again, while completed file checks are reused. A completed object
     needs only current HEAD and compact private metadata across restarts.
     """
-    with TransferProgress("remote_model_verification", payload.total_bytes, report) as progress:
+    identity = {
+        "source_object_key_sha256": hashlib.sha256(key.encode()).hexdigest(),
+        "model_sha256": digest(bundle),
+    }
+    if object_role is not None:
+        identity["object_role"] = object_role
+    with TransferProgress(
+        "remote_model_verification", payload.total_bytes, report, identity=identity
+    ) as progress:
         observed = await multipart.head(key)
         if observed is None:
             raise OSError("direct model object is unavailable")

@@ -26,11 +26,20 @@ admission bodies again. Catalog changes invalidate its dependent results; a
 changed admission invalidates only that admission.
 
 The first use on an older supported journal creates a metadata source index.
-Projection then checkpoints each completed original, processing at most eight
-new admissions or five seconds between completed items per refresh. Logs expose
+The service owns a separate serial reconciliation task that checkpoints each
+completed original, processing at most eight new admissions or five seconds
+between completed items per pass and rotating through configured queues. One
+slow item can exceed that planning budget; shutdown drains the owned operation
+before releasing the service. Fresh registration collection reads only completed
+projection metadata, with current owner, source-mutation and conflict checks. It
+never builds a missing catalog, rereads an unprojected admission, or waits for
+the background task. Logs expose
 `registration_pin_source_migration`, `registration_pin_catalog` and
 `registration_pin_projection` counts, elapsed time and the measured ETA or an
-explicit planning range. Changed inputs resume only the affected work. A busy
+explicit planning range; `registration_pin_decode` and
+`registration_pin_checkpoint` distinguish each new item's read/validation and
+durable write costs. Restored items never contribute to native throughput.
+Changed inputs resume only the affected work. A busy
 snapshot, unfinished projection or damaged completion record emits
 `registration_retention_pruning_deferred`; the capture is saved and all earlier
 captures are retained. Unknown pins still count against the working-cache budget.
@@ -4318,8 +4327,24 @@ replaces the same server-side part, and progress counts that part only once.
 Retry logs identify the operation's bounded retry policy, numeric status or
 transport error type, and delay without provider bodies, keys or credentials.
 Multipart creation/completion and other mutations remain single-attempt
-operations. Exhausted part retries still drain their wave and abort the upload;
-this does not provide durable multipart resume. While released intake has
+operations. Promotion keeps its exact upload ID and completed copy-part receipts
+across exhausted retries and restarts; every failed wave drains before returning.
+For a new destination, the owner retains an ordered copy manifest before completion
+and a copy proof before publishing ordinary destination byte facts. This reuses the
+completed source verification without streaming the destination again. It requires
+the unique completed owner attempt, original signed completion parts, current
+source HEAD, matching copy-part receipts and source/destination generation fences.
+R2's multipart ETag identifies that retained copy lineage; it never substitutes for
+the source SHA256 check. R2 does not support UploadPartCopy source conditions, so
+this path depends on owner-issued attempt keys never being overwritten after
+completion, not on a provider object lock. Old destinations without copy lineage
+retain their one native verification or existing completed byte result. Damaged or
+changed lineage requires explicit repair. Source cleanup follows durable promotion
+and destination byte facts; independent reviewers retain their own verification.
+The private copy journal and byte-verification directories must survive upgrades.
+Copy progress distinguishes native and restored parts; remote byte progress identifies
+the object by key SHA256, model SHA256 and source/preserved role without logging keys.
+While released intake has
 uncertified latest models, held cohorts still advance in smaller batches; they
 regain normal batches after that backlog clears. Progression holds stay intact.
 Standalone requests and independently
@@ -4459,9 +4484,12 @@ absent, fences the old generation and issues the next retained generation; the
 miner then resumes from its unchanged local bundle without operator action.
 Retain completed incoming objects until a
 content-addressed preserved object and its acceptance or rejection evidence are
-durable. Accepted objects are copied entirely inside R2, fully read back, and
-their incoming source is deleted only after a private promotion receipt is
-durable. Terminally rejected objects receive a durable cleanup intent and stay
+durable. Accepted objects are copied entirely inside R2. New owner-created copies
+reuse the verified immutable source through the retained copy proof above;
+older destinations receive native byte verification when no completed result exists.
+The incoming source is deleted only after both the private promotion receipt and
+destination byte completion are durable. Terminally rejected objects receive a
+durable cleanup intent and stay
 available for the configured rejection-review interval. The owner then deletes
 only the exact bound incoming key, verifies absence and retains the signed
 request, hold and cleanup receipt. Cleanup is bounded per poll and retries after

@@ -37,6 +37,7 @@ from umi.competition_cohort_model_acceptance import (
     ModelArtifactAcceptance,
     ModelArtifactReviewInputs,
 )
+from umi.competition_cohort_promotion_copy import multipart_etag
 from umi.competition_cohort_recovery import ModelDeliveryProfile
 from umi.competition_cohort_service_host import CohortModelPayloadRouter
 from umi.open_competition import digest, model_content_digest, sign_object
@@ -93,10 +94,11 @@ class Multipart:
 
     async def complete(self, key, *, upload_id, parts, at=None):
         self.complete_calls.append((key, upload_id, parts, at))
-        self.objects[key] = (self.total_bytes, "completed-etag-1")
+        etag = multipart_etag(parts)
+        self.objects[key] = (self.total_bytes, etag)
         if self.fail_after_complete:
             raise OSError("response lost after completion")
-        return "completed-etag-1"
+        return etag
 
     async def copy_part(
         self,
@@ -608,7 +610,7 @@ async def test_completion_reconciles_lost_provider_response_and_is_idempotent(di
     signed = signed_completion(reservation, direct.payload.payload)
     direct.multipart.fail_after_complete = True
     result = await direct.owner.complete(signed, now_unix_ms=1_800_000_010_000)
-    assert result.provider_etag == "completed-etag-1"
+    assert result.provider_etag == multipart_etag(signed.completion.parts)
     assert len(direct.multipart.complete_calls) == 1
     verified = await direct.owner.verify(result.reservation_sha256, now_unix_ms=1_800_000_012_000)
     assert verified.payload_sha256 == direct.payload.payload.payload_sha256
@@ -1253,7 +1255,7 @@ async def test_promotion_copy_drains_failed_wave_before_aborting(receipt_scenari
 
 
 @pytest.mark.asyncio
-async def test_promotion_copy_failure_aborts_and_retries_original_source(direct, monkeypatch):
+async def test_promotion_copy_failure_retains_and_retries_original_upload(direct, monkeypatch):
     reservation = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000
     )
@@ -1275,14 +1277,16 @@ async def test_promotion_copy_failure_aborts_and_retries_original_source(direct,
     monkeypatch.setattr(direct.multipart, "copy_part", failed_copy)
     with pytest.raises(OSError, match="part copy unavailable"):
         await direct.owner.promote(publication, now_unix_ms=1_800_000_012_000)
-    assert len(direct.multipart.abort_calls) == 1
+    assert len(direct.multipart.abort_calls) == 0
+    creates = len(direct.multipart.create_calls)
     assert len(direct.multipart.complete_calls) == completed_uploads
     assert source_key in direct.multipart.objects
 
     monkeypatch.setattr(direct.multipart, "copy_part", original)
     receipt = await direct.owner.promote(publication, now_unix_ms=1_800_000_013_000)
     assert receipt.model_sha256 == direct.payload.payload.model_sha256
-    assert len(direct.multipart.abort_calls) == 1
+    assert len(direct.multipart.abort_calls) == 0
+    assert len(direct.multipart.create_calls) == creates
 
 
 @pytest.mark.asyncio
@@ -1644,6 +1648,77 @@ async def test_remote_verification_rechecks_only_changed_context(direct, monkeyp
         direct.multipart, key, bundle, payload, root=root, context=context
     )
     assert direct.multipart.read_calls > reads
+
+
+async def test_remote_range_retry_preserves_live_hash_and_completed_restart(
+    direct, tmp_path, monkeypatch
+):
+    from umi import competition_remote_model_verification as remote
+    from umi import r2_multipart as multipart
+
+    bundle = direct.request.signed_submission.submission.model_bundle
+    payload = direct.payload.payload
+    data = direct.multipart.payload_bytes
+    range_bytes = 31
+    assert len(data) > range_bytes * 2
+    calls, waits, failures, events = [], [], [], []
+    real_sleep = asyncio.sleep
+
+    async def pause(seconds):
+        if seconds:
+            waits.append(seconds)
+        else:
+            await real_sleep(0)
+
+    def send(request):
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"Content-Length": str(len(data)), "ETag": "v1"})
+        byte_range = request.headers["Range"]
+        calls.append(byte_range)
+        start, end = (int(value) for value in byte_range.removeprefix("bytes=").split("-"))
+        if start == range_bytes and len(failures) < 5:
+            failures.append(True)
+            return httpx.Response(500)
+        return httpx.Response(
+            206,
+            headers={"Content-Range": f"bytes {start}-{end}/{len(data)}"},
+            content=data[start : end + 1],
+        )
+
+    monkeypatch.setattr(multipart.asyncio, "sleep", pause)
+    monkeypatch.setattr(remote, "MAXIMUM_RANGE_BYTES", range_bytes)
+    arguments = dict(
+        root=tmp_path / "retained-range-retry",
+        context={"cohort": "same-authenticated-owner"},
+        document_paths=(bundle.files[0].path,),
+        report=events.append,
+    )
+    client = multipart.R2MultipartClient(
+        direct.multipart.signer, transport=httpx.MockTransport(send)
+    )
+    async with client.connection_scope():
+        documents, _ = await remote.verify_remote_model(
+            client, "immutable/model/payload", bundle, payload, **arguments
+        )
+    assert waits == [1, 2, 4, 8, 16]
+    expected = [
+        f"bytes={offset}-{min(offset + range_bytes, len(data)) - 1}"
+        for offset in range(0, len(data), range_bytes)
+    ]
+    assert calls == expected[:1] + [expected[1]] * 5 + expected[1:]
+    assert documents[bundle.files[0].path] == data[: bundle.files[0].size_bytes]
+    assert events[-1]["status"] == "completed"
+    assert events[-1]["native_units"] == payload.total_bytes
+    # A fresh client reuses the completed object fact without another range GET.
+    reopened = multipart.R2MultipartClient(
+        direct.multipart.signer, transport=httpx.MockTransport(send)
+    )
+    before = list(calls)
+    restored, _ = await remote.verify_remote_model(
+        reopened, "immutable/model/payload", bundle, payload, **arguments
+    )
+    assert restored == documents and calls == before
+    assert events[-1]["restored_units"] == payload.total_bytes
 
 
 @pytest.mark.parametrize("range_bytes", [1, 17, 64, 4096])

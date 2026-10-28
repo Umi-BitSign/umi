@@ -323,7 +323,11 @@ def _create_intake_app(
                 if cohort_intake is None
                 else cohort_intake.retained_registration_blocks()
             )
-            | (frozenset() if service_host is None else service_host.retained_registration_blocks())
+            | (
+                frozenset()
+                if service_host is None
+                else service_host.retained_registration_blocks(complete_only=True)
+            )
         )
 
     provider_type = (

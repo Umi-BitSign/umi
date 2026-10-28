@@ -3441,8 +3441,35 @@ history are checked; sealing still verifies the complete inventory and current
 registration. Restart gives current candidates a turn immediately while retained
 admission blocks, completion ordinals and signed records remain intact.
 Direct R2 promotion copies independent parts in bounded waves of at most four,
-also capped by the signed delivery profile. The owner drains a failed wave before
-aborting the multipart upload and still verifies the new preserved object.
+also capped by the signed delivery profile. The owner drains a failed wave and
+retains its upload ID and completed parts for retry. New owner-created copies
+reuse verified source bytes through durable copy lineage; old destinations
+without that lineage retain their native verification or completed byte result.
+The source verification and copy-proof requirements are described in the
+[settlement operations guide](../operators/settlement.md).
+
+The shared R2 client's exact range reads retain the caller's unfinished object
+hash through up to six attempts for HTTP 429, 500, 502, 503 or 504 and classified
+network, timeout or remote-protocol failures. Each attempt repeats the same key,
+byte range and validation requirements. Backoff is 1, 2, 4, 8 and 16 seconds
+(31 seconds scheduled total); numeric provider `Retry-After` can extend each
+pause to at most 30 seconds (150 seconds scheduled total). These bounds exclude
+request I/O: the selected client's existing timeouts still apply per operation,
+and a progressing response is not cancelled by a new overall wall deadline.
+This tolerates brief provider outages; it is not a measured throughput gain or
+an overall model-completion ETA. Exhaustion still interrupts the unfinished
+object hash, while completed durable verification remains reusable.
+
+Native `r2_request` logs report attempt counts, elapsed time, the next pause and
+`bounded_same_range_retry` or `same_range_retry_exhausted`. The object key digest
+and byte range identify the failed operation without logging keys, URLs,
+credentials or response bodies. Cancellation, permanent refusals and invalid
+range responses stop immediately. HEAD, multipart metadata queries and exact
+copy-part retries keep their existing three-attempt policy. The shared client
+serves intake verification, preservation verification and supported model-byte
+readers; install it through the selected host's normal authenticated update
+path. No signed format, cohort clock, verification-result ABI or miner request
+changes are required. Independent reviewers retain their own byte verification.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture

@@ -176,7 +176,7 @@ class RegistrationPins:
                 "registration pin metadata invalid or conflict held"
             ) from error
 
-    def check_schema(self, db):
+    def check_schema(self, db, *, capacity=True):
         try:
             if (
                 self._identity() != self.identity
@@ -202,7 +202,8 @@ class RegistrationPins:
             )
             if actual_tables != TABLES:
                 raise RegistrationPinRepairRequired("registration pin metadata schema changed")
-            self._capacity(db)
+            if capacity:
+                self._capacity(db)
         except sqlite3.DatabaseError as error:
             raise RegistrationPinRepairRequired(
                 "registration pin metadata requires repair"
