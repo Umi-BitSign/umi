@@ -59,12 +59,16 @@ async def test_successor_inventory_has_one_independent_pass(
     assert observed["status"] == "completed"
     assert observed["completed"] == observed["total"] == 2
 
-    assert events.index(("report", successor)) < events.index(("work", old))
-    assert events.index(("report", old)) < events.index(("work", old))
     assert events.count(("report", successor)) == 1
     assert events.count(("report", old)) == 1
     assert events.count(("pending", successor)) == 1
     assert events.count(("pending", old)) == 1
+    if configured_priority and successor_pending:
+        assert ("work", old) not in events
+        assert events.index(("report", successor)) < events.index(("work", successor))
+        return
+    assert events.index(("report", successor)) < events.index(("work", old))
+    assert events.index(("report", old)) < events.index(("work", old))
     if successor_pending:
         assert events.index(("work", successor)) < events.index(("work", old))
     else:

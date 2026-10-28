@@ -31,11 +31,9 @@ async def test_one_pending_latest_model_per_cohort_and_rotating_first_cohort(tmp
             scans.append((cohort, after, limit))
             return ()
 
-    # A released earlier cohort may still have a configured priority. Once
-    # several cohorts need acceptance, that hint cannot defeat rotation.
-    worker = ModelAcceptanceWorker(
-        Owner(), None, tmp_path, tmp_path, priority_cohorts=(cohorts[0],)
-    )
+    # Older callers without a selected series chronology retain round-robin
+    # scheduling. The supported service supplies signed sequence order.
+    worker = ModelAcceptanceWorker(Owner(), None, tmp_path, tmp_path)
 
     async def accept(cohort, submission):
         calls.append((cohort, submission))
