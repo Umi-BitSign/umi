@@ -1692,6 +1692,35 @@ nondefault page size. Logical byte, record, reservation and per-call admission
 checks still apply. The allowance is not a disk reservation; monitor free space
 and retain the host's operational storage guards.
 
+Reservation-capable journals retain successful canonical reservation validation
+across restarts and compatible source upgrades. The first mutable open scans the
+existing reservation metadata in bounded, committed chunks; its progress reports
+completed/total records, elapsed time and a measured or labeled planning ETA.
+It does not reread model payloads or native proofs. A retained ceiling and insert
+queue cover older compatible writers, including new rowids below the scan cursor.
+Ordinary writes validate only additions and keep the original SQL capacity
+arithmetic, signed allowances, `user_version=2` and `application_id=0`. The small
+checkpoint tables and installation record are charged to the existing limits.
+
+Public reservation receipts use a nonblocking mutable preflight to retain pending
+successes. When another writer is active or inserts after that preflight, a
+readonly snapshot checks only those pending additions and reports the scope as
+`readonly_pending_not_retained`; it neither waits for the writer nor claims a
+durable result. Explicit readonly legacy inspection performs native validation
+without installing metadata. Public progress polling does not invoke this work.
+
+Missing checkpoint metadata, changed validation dependencies or a changed external
+schema epoch report `reservation validation repair required`, not a cache miss.
+For a stopped owner, the native `RoundJournal` constructor supports
+`repair_reservation_validation=True` with the same original directory and binding.
+That repair discards only derived validation metadata and resumes native validation
+in bounded chunks; it never changes reservation bodies, journals or signed limits.
+An authenticated binding migration can use that flag with its already supported
+`compatible_bindings`; it does not authorize a new binding itself. Core source
+fences must still be intact. Older writers that add unrelated schema need this
+explicit repair; normal writes from older reservation-capable writers remain
+compatible. Do not drop/recreate source fences to bypass a repair refusal.
+
 The admission worker can also prepare rounds automatically. Set its optional
 `preparation` object to select `promotion_directory` and `output_directory`.
 Set `objects_directory` to the benchmark scheduler's configured evidence-object

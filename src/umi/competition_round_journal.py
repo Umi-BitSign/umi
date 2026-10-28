@@ -19,6 +19,36 @@ from pydantic import JsonValue
 
 from .competition_journal_physical_budget import JournalPhysicalBudget
 from .competition_round_plan import RoundPlan, RoundProposal
+from .competition_round_reservation_checkpoint import (
+    MARKER_ID as _VALIDATION_MARKER_ID,
+)
+from .competition_round_reservation_checkpoint import (
+    MARKER_KIND as _VALIDATION_MARKER_KIND,
+)
+from .competition_round_reservation_checkpoint import (
+    PENDING as _VALIDATION_PENDING,
+)
+from .competition_round_reservation_checkpoint import (
+    SCHEMA as _VALIDATION_SCHEMA,
+)
+from .competition_round_reservation_checkpoint import (
+    STATE as _VALIDATION_STATE,
+)
+from .competition_round_reservation_checkpoint import (
+    advance as _advance_reservation_validation,
+)
+from .competition_round_reservation_checkpoint import (
+    authorizer as _reservation_validation_authorizer,
+)
+from .competition_round_reservation_checkpoint import (
+    bind_epoch as _bind_reservation_validation_epoch,
+)
+from .competition_round_reservation_checkpoint import (
+    check as _check_reservation_validation,
+)
+from .competition_round_reservation_checkpoint import (
+    initialize as _initialize_reservation_validation,
+)
 from .competition_round_reservation_reuse import decoded_reservation
 from .competition_round_rpc_migration import has_transport_history, validate_rpc_binding
 from .host_memory_request_bounds import charge_stage_declaration, check_stage_json, stage_limit
@@ -173,6 +203,7 @@ class RoundJournal:
         maximum_record_bytes: int = MAX_BYTES,
         compatible_bindings: Iterable[object] = (),
         repair_record_capacity: bool = False,
+        repair_reservation_validation: bool = False,
         existing_only: bool = False,
         read_only: bool = False,
         physical_budget: JournalPhysicalBudget | None = None,
@@ -184,10 +215,12 @@ class RoundJournal:
             or type(maximum_record_bytes) is not int
             or not 1 <= maximum_record_bytes <= MAX_CONFIGURED_PRIVATE_BYTES
             or type(repair_record_capacity) is not bool
+            or type(repair_reservation_validation) is not bool
             or type(existing_only) is not bool
             or type(read_only) is not bool
             or (read_only and not existing_only)
             or (existing_only and repair_record_capacity)
+            or (existing_only and repair_reservation_validation)
             or (physical_budget is not None and type(physical_budget) is not JournalPhysicalBudget)
         ):
             raise ValueError("round journal requires bounded capacity")
@@ -217,7 +250,10 @@ class RoundJournal:
         for path in (self.path, self.lock_path):
             os.close(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
         self._check_files()
-        with self.transaction(_repair_record_capacity=repair_record_capacity) as db:
+        with self.transaction(
+            _repair_record_capacity=repair_record_capacity,
+            _repair_reservation_validation=repair_reservation_validation,
+        ) as db:
             db.execute("CREATE TABLE IF NOT EXISTS binding (body BLOB NOT NULL)")
             raw = canonical_json_bytes(binding)
             if len(raw) > MAX_BYTES:
@@ -328,6 +364,67 @@ class RoundJournal:
                     "INSERT OR IGNORE INTO round_settlement_index VALUES (?,?,?)",
                     (sequence, *expected),
                 )
+        self._prepare_reservation_validation()
+
+    def _reset_reservation_validation(self, db):
+        """Explicitly discard only derived success metadata, never obligations."""
+        if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+            return
+        for name in _VALIDATION_SCHEMA:
+            category = "TABLE" if name in {_VALIDATION_STATE, _VALIDATION_PENDING} else "TRIGGER"
+            db.execute(f"DROP {category} IF EXISTS {self._identifier(name)}")
+        db.execute(
+            "DELETE FROM records WHERE kind=? AND id=?",
+            (
+                _VALIDATION_MARKER_KIND,
+                _VALIDATION_MARKER_ID,
+            ),
+        )
+
+    def _prepare_reservation_validation(self):
+        # Each bounded batch commits its own successful cursor. Restart and
+        # interruption resume from that cursor, not from the first obligation.
+        with self.read_transaction() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                return
+            state = _check_reservation_validation(self, db)
+            if state is not None and state[7] and state[5] == state[6]:
+                return
+        while True:
+            with self.transaction() as db:
+                _initialize_reservation_validation(self, db)
+                _advance_reservation_validation(self, db, _OBLIGATION_COLUMNS, initial=True)
+                self._check_capacity_totals(db)
+                state = _check_reservation_validation(self, db, trusted_epoch=True)
+                if state[7] and state[5] == state[6]:
+                    return
+
+    def _drain_reservation_validation(self):
+        """Persist old-writer additions before a public readonly receipt.
+
+        Never wait for another owner. If it owns the writer, or inserts after
+        this preflight, the receipt checks only current pending rows in its own
+        snapshot. Ordinary mutable retries therefore retain successful work.
+        """
+        if self.read_only or not self._transaction_lock.acquire(blocking=False):
+            return
+        try:
+            with self.read_transaction() as db:
+                state = _check_reservation_validation(self, db)
+                if state is None or not state[7] or state[5] == state[6]:
+                    return
+            try:
+                with self.transaction(_wait=False) as db:
+                    _advance_reservation_validation(self, db, _OBLIGATION_COLUMNS)
+                    self._check_capacity_totals(db)
+            except sqlite3.OperationalError as error:
+                if getattr(error, "sqlite_errorcode", None) not in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                ):
+                    raise
+        finally:
+            self._transaction_lock.release()
 
     def _validate_existing(self, binding, *, require_clean_rollback=True):
         if type(require_clean_rollback) is not bool or (
@@ -432,7 +529,9 @@ class RoundJournal:
             os.close(descriptor)
 
     @contextmanager
-    def transaction(self, *, _repair_record_capacity=False) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self, *, _repair_record_capacity=False, _repair_reservation_validation=False, _wait=True
+    ) -> Iterator[sqlite3.Connection]:
         """Own one immediate writer transaction through commit, rollback and close.
 
         Callers must not commit, close or retain the supplied connection.
@@ -441,7 +540,7 @@ class RoundJournal:
             raise ValueError("existing source journal is read-only")
         with self._transaction_lock:
             self._check_files()
-            db = sqlite3.connect(self.path, isolation_level=None, timeout=5)
+            db = sqlite3.connect(self.path, isolation_level=None, timeout=5 if _wait else 0)
             try:
                 db.create_function("umi_round_writer_generation", 0, lambda: 2)
                 db.execute("PRAGMA synchronous=FULL")
@@ -456,13 +555,22 @@ class RoundJournal:
                 version = self._version(db)
                 initial_tables = self._table_names(db)
                 if version == 2:
+                    if _repair_reservation_validation:
+                        self._reset_reservation_validation(db)
                     self._fence_tables(db)
                 if not _repair_record_capacity:
                     self._check_record_capacity_schema(db)
+                validation = None
+                if not _repair_reservation_validation:
+                    validation = _check_reservation_validation(self, db)
+                    if validation is not None:
+                        db.set_authorizer(_reservation_validation_authorizer(self))
                 yield db
                 self._check_record_capacity_schema(db)
                 if db.execute("PRAGMA user_version").fetchone()[0] == 2:
                     self._fence_tables(db, new_tables=self._table_names(db) - initial_tables)
+                    if _check_reservation_validation(self, db, trusted_epoch=True) is not None:
+                        _bind_reservation_validation_epoch(db)
                 db.commit()
                 migration, self._capacity_migration = self._capacity_migration, None
                 if migration is not None:
@@ -515,6 +623,7 @@ class RoundJournal:
             if self._version(db) == 2:
                 self._fence_tables(db)
             self._check_record_capacity_schema(db)
+            _check_reservation_validation(self, db)
             yield db
         finally:
             db.close()
@@ -619,6 +728,7 @@ class RoundJournal:
         )
         self._fence_tables(db, new_tables=self._table_names(db))
         db.execute("PRAGMA user_version=2")
+        _initialize_reservation_validation(self, db)
 
     def _binding(self, db):
         body = self._bounded_blob(db, "binding", "body")
@@ -875,14 +985,24 @@ class RoundJournal:
         ).fetchone()
         if invalid:
             raise ValueError("invalid round reservation identity columns")
-        cursor = db.execute(f"SELECT {_OBLIGATION_COLUMNS} FROM record_reservations")
-        try:
-            for offset, row in enumerate(cursor):
-                if offset >= self.maximum_records:
-                    raise ValueError("round reservation batch capacity exhausted")
-                self._decode_obligation(row)
-        finally:
-            cursor.close()
+        if not _advance_reservation_validation(
+            self,
+            db,
+            _OBLIGATION_COLUMNS,
+            readonly=bool(db.execute("PRAGMA query_only").fetchone()[0]),
+        ):
+            cursor = db.execute(f"SELECT {_OBLIGATION_COLUMNS} FROM record_reservations")
+            try:
+                for offset, row in enumerate(cursor):
+                    if offset >= self.maximum_records:
+                        raise ValueError("round reservation batch capacity exhausted")
+                    self._decode_obligation(row)
+            finally:
+                cursor.close()
+        return self._capacity_totals(db)
+
+    def _capacity_totals(self, db):
+        """Original v2 SQL arithmetic, including every validation metadata row."""
         count, used, kinds = self._record_capacity(db)
         pending = (
             " FROM record_reservations o WHERE NOT EXISTS "
@@ -933,6 +1053,12 @@ class RoundJournal:
 
     def _check_capacity(self, db):
         count, used, kinds = self._capacity(db)
+        self._enforce_capacity_totals(count, used, kinds)
+
+    def _check_capacity_totals(self, db):
+        self._enforce_capacity_totals(*self._capacity_totals(db))
+
+    def _enforce_capacity_totals(self, count, used, kinds):
         if any(
             kinds.get(kind, 0) > self.maximum_rounds
             for kind in ("plan", "prepared", "intent", "suite", "certificate")
@@ -1000,6 +1126,7 @@ class RoundJournal:
         # the current batch, obligations, holds and capacity in one committed
         # snapshot instead of reserving SQLite's writer for a retry. A missing
         # batch still takes the writer below and rechecks any concurrent insert.
+        self._drain_reservation_validation()
         with self.read_transaction() as owned:
             if self._version(owned) == 2:
                 old = self._bounded_blob(
@@ -1115,6 +1242,7 @@ class RoundJournal:
         """Recheck durable obligations and return their bound native receipt."""
         if type(batch_id) is not str or not 1 <= len(batch_id.encode()) <= 128:
             raise ValueError("invalid round reservation batch identity")
+        self._drain_reservation_validation()
         with self.read_transaction() as db:
             if db.execute("PRAGMA user_version").fetchone()[0] != 2:
                 return None

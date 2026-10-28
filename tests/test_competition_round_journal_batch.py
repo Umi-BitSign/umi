@@ -66,7 +66,7 @@ def test_capacity_index_migrates_without_changing_records_or_reservations(tmp_pa
         assert db.execute(query.format("INDEXED BY records_capacity_lengths")).fetchall() == (
             db.execute(query.format("NOT INDEXED")).fetchall()
         )
-        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (2,)
+        assert db.execute("SELECT COUNT(*) FROM records").fetchone() == (2 + int(reserved),)
     assert rounds.RoundJournal(root, binding, maximum_rounds=4).get("intent", "a") == {
         "signed": "original bytes"
     }
