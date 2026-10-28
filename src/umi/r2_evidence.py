@@ -145,7 +145,7 @@ class R2EvidenceClient:
             return retained
         # A simultaneous publisher cannot replace another original. The same
         # conditional request is safe after an unacknowledged successful PUT.
-        self._exchange(
+        status, headers, _ = self._exchange(
             "PUT",
             key,
             body=raw,
@@ -157,6 +157,15 @@ class R2EvidenceClient:
             maximum=64 * 1024,
             statuses=(200, 201, 412),
         )
+        if status in {200, 201} and "etag" in headers:
+            # This single-part conditional PUT carried Content-MD5 and the
+            # signed SHA metadata. Its exact ETag acknowledges these original
+            # bytes; a second HEAD adds no publication evidence. Keep the
+            # original HEAD path for a racing writer (412) or an incomplete
+            # acknowledgement. Never turn an explicit mismatch into success.
+            if headers["etag"] not in {expected.etag, '"' + expected.etag + '"'}:
+                raise ValueError("R2 evidence publication acknowledgement differs")
+            return expected
         retained = self.head(key)
         if retained != expected:
             raise ValueError("R2 evidence publication acknowledgement differs")

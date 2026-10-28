@@ -27,7 +27,14 @@ def transport(monkeypatch):
                 if key in objects:
                     return httpx.Response(412)
                 objects[key] = request.content
-                return httpx.Response(200)
+                return httpx.Response(
+                    200,
+                    headers={
+                        "etag": '"'
+                        + hashlib.md5(request.content, usedforsecurity=False).hexdigest()
+                        + '"'
+                    },
+                )
             if key not in objects:
                 return httpx.Response(404)
             raw = objects[key]
@@ -77,7 +84,7 @@ def test_publication_reuses_one_client_and_closes_on_failure(transport):
         assert len(clients) == 1 and not clients[0].is_closed
         raise RuntimeError("interrupted frame")
     assert clients[0].is_closed
-    assert [method for _, method in requests] == ["HEAD", "PUT", "HEAD", "GET"]
+    assert [method for _, method in requests] == ["HEAD", "PUT", "GET"]
     assert client.publish("first", raw, sha) == head
     assert len(clients) == 2 and clients[1].is_closed
     # Scope lifetime never changes immutable conflict or response checking.
@@ -132,14 +139,11 @@ def test_native_proof_frame_uses_bounded_owned_publication_clients(tmp_path, tra
     else:
         target.write("history", key, context={}, fields=fields)
     publishing = {id(c) for c, method in requests if method == "PUT"}
-    if encoded:
-        from umi.competition_remote_proof_store import PROOF_PUBLICATION_WORKERS
+    from umi.competition_remote_proof_store import PROOF_PUBLICATION_WORKERS
 
-        # Independent graph lanes each own one client; the outer owner writes
-        # the frame only after those workers have closed and completed.
-        assert 1 < len(publishing) <= PROOF_PUBLICATION_WORKERS + 1
-    else:
-        assert len(publishing) == 1
+    # Both source encodings use independent bounded graph lanes. The owner
+    # writes the frame only after those workers have closed and completed.
+    assert 1 < len(publishing) <= PROOF_PUBLICATION_WORKERS + 1
     assert all(c.is_closed for c in clients)
     assert target.read("history", key, bounds={name: len(raw) for name, raw in fields.items()}) == (
         {},

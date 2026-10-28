@@ -112,7 +112,7 @@ def test_failed_graph_reuses_completed_objects_after_restart(tmp_path):
                 assert self.completed_good.wait(3)
             response = super().send(request)
             if (
-                request.method == "HEAD"
+                request.method in {"HEAD", "PUT"}
                 and request.url.path.endswith(good)
                 and response.status_code == 200
             ):

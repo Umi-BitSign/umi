@@ -47,7 +47,10 @@ class EvidenceServer:
             if self.lose_put_ack:
                 self.lose_put_ack = False
                 raise httpx.ReadError("lost publication acknowledgement")
-            return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"ETag": '"' + hashlib.md5(raw, usedforsecurity=False).hexdigest() + '"'},
+            )
         raw = self.objects.get(key)
         if raw is None:
             return httpx.Response(404, content=b"missing")
