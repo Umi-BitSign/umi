@@ -114,6 +114,54 @@ def _build_intake_seal_from_participations(
     Admission signatures, history and registration checks still run per record.
     No parsed model or authority decision is retained between operations.
     """
+    return _build_intake_seal_from_projections(
+        history,
+        policy,
+        observation,
+        snapshot,
+        (project_participation(key, retained, history, policy) for key, retained in records),
+        expected_tip_sha256=expected_tip_sha256,
+    )
+
+
+class IntakeParticipationProjection(StrictProtocolModel):
+    """Private facts from one successful native historical participation replay."""
+
+    consent_sha256: Hex32
+    admitted_at_block: int
+    record_sha256: Hex32
+    submission_sha256: Hex32
+    hotkey: Hotkey
+    track: Track
+    sequence: int
+
+
+def project_participation(key, retained, history, policy):
+    admission = replay_participation(retained, history, policy)
+    if key != admission.consent_sha256:
+        raise ValueError("sealed consent identity differs")
+    sub = retained.request.signed_submission.submission
+    return IntakeParticipationProjection(
+        consent_sha256=key,
+        admitted_at_block=admission.admitted_at_block,
+        record_sha256=digest(retained),
+        submission_sha256=digest(sub),
+        hotkey=sub.hotkey,
+        track=sub.track,
+        sequence=sub.sequence,
+    )
+
+
+def _build_intake_seal_from_projections(
+    history,
+    policy,
+    observation,
+    snapshot,
+    records,
+    *,
+    expected_tip_sha256,
+):
+    """Aggregate native verified private facts; never a network admission boundary."""
     view = verify_cohort_history(
         history,
         policy,
@@ -132,33 +180,27 @@ def _build_intake_seal_from_participations(
     previous = ""
     count = 0
     hasher = hashlib.sha256(b"umi-cohort-intake-records-v1\0")
-    for key, retained in records:
-        admission = replay_participation(retained, history, policy)
-        if (
-            key <= previous
-            or key != admission.consent_sha256
-            or admission.admitted_at_block > observation.block
-        ):
+    for record in records:
+        key = record.consent_sha256
+        if key <= previous or record.admitted_at_block > observation.block:
             raise ValueError("sealed consent order, identity or observation differs")
         previous = key
         count += 1
-        record_hash = digest(retained)
-        hasher.update(bytes.fromhex(key) + bytes.fromhex(record_hash))
-        sub = retained.request.signed_submission.submission
-        account = identity(sub.hotkey)
+        hasher.update(bytes.fromhex(key) + bytes.fromhex(record.record_sha256))
+        account = identity(record.hotkey)
         uid = registrations.get(account)
-        if uid is None or uid >= policy.maximum_uids or sub.track not in tracks:
+        if uid is None or uid >= policy.maximum_uids or record.track not in tracks:
             continue
         selection = CohortIntakeSelection(
             consent_sha256=key,
-            submission_sha256=digest(sub),
-            record_sha256=record_hash,
-            hotkey=sub.hotkey,
-            track=sub.track,
-            sequence=sub.sequence,
+            submission_sha256=record.submission_sha256,
+            record_sha256=record.record_sha256,
+            hotkey=record.hotkey,
+            track=record.track,
+            sequence=record.sequence,
             uid=uid,
         )
-        slot = (account, sub.track)
+        slot = (account, record.track)
         prior = selected.get(slot)
         if prior is None or prior.sequence < selection.sequence:
             selected[slot] = selection
