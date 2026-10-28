@@ -220,7 +220,7 @@ async def _copy_promotion_parts(
     offset = 0
 
     async def copy_one(part_number, part_offset, part_size):
-        retained = None if load_part is None else load_part(part_number)
+        retained = None if load_part is None else await run_owned_thread(load_part, part_number)
         if retained is not None:
             if retained.part_number != part_number or retained.size_bytes != part_size:
                 raise ValueError("direct model retained promotion part differs")
@@ -245,7 +245,9 @@ async def _copy_promotion_parts(
         ):
             raise ValueError("direct model promotion part differs")
         if save_part is not None:
-            save_part(part)
+            # Keep native checkpoint I/O off the event loop, while retaining
+            # ownership through its commit even if this copy is cancelled.
+            await run_owned_thread(save_part, part)
         progress.advance()
         return part
 

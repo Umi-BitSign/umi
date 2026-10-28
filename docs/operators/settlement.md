@@ -4351,6 +4351,9 @@ transport error type, and delay without provider bodies, keys or credentials.
 Multipart creation/completion and other mutations remain single-attempt
 operations. Promotion keeps its exact upload ID and completed copy-part receipts
 across exhausted retries and restarts; every failed wave drains before returning.
+Per-part checkpoint reads and commits run in owned threads, keeping the event
+loop responsive. Cancellation drains each active callback before releasing the
+copy wave; a retry reuses any part whose durable commit finished during that drain.
 For a new destination, the owner retains an ordered copy manifest before completion
 and a copy proof before publishing ordinary destination byte facts. This reuses the
 completed source verification without streaming the destination again. It requires
