@@ -5,8 +5,6 @@ result grants no signing/adoption authority. Install its exact export pins in th
 new account-private shared store selection before starting consumers.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging
@@ -46,6 +44,8 @@ from .r2_evidence import R2EvidenceClient
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 
+# Retained runpy launchers do not replace sys.modules["__main__"]. Keep these
+# imported schema annotations eager so they never resolve in the launcher globals.
 class ModelByteStoreExportRequest(StrictProtocolModel):
     schema_: Literal["umi-model-byte-store-export-request/1"] = Field(alias="schema")
     candidate: ModelDeliveryAdoptionCandidateConfig
