@@ -31,6 +31,11 @@ _HEADS_SQL = (
     "generation INTEGER NOT NULL CHECK(TYPEOF(generation)='integer' AND generation>=0), "
     "attempt_id TEXT)"
 )
+_POLL_CURSOR = "direct_upload_poll_cursor"
+_POLL_CURSOR_SQL = (
+    f"CREATE TABLE {_POLL_CURSOR} (id INTEGER PRIMARY KEY CHECK(id=1), "
+    "after_key TEXT NOT NULL)"
+)
 
 
 class DirectModelAttemptRepairRequired(RuntimeError):
@@ -245,8 +250,77 @@ class DirectModelAttemptJournal(RoundJournal):
             f"SELECT COUNT(*),COALESCE(SUM(LENGTH(upload_sha256)+"
             f"LENGTH(CAST(generation AS TEXT))+COALESCE(LENGTH(attempt_id),0)),0) FROM {_HEADS}"
         ).fetchone()
-        if count + heads > self.maximum_records or used + head_bytes > self.maximum_bytes:
+        cursor_bytes = 64 if self._poll_cursor(db) is not None else 0
+        if (
+            count + heads > self.maximum_records
+            or used + head_bytes + cursor_bytes > self.maximum_bytes
+        ):
             raise DirectModelMetadataCapacityPending("direct upload metadata capacity pending")
+
+    def _poll_cursor(self, db):
+        schema = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (_POLL_CURSOR,)
+        ).fetchone()
+        if schema is None:
+            return None  # Original journals have no scheduling cursor.
+        if schema != (_POLL_CURSOR_SQL,):
+            raise DirectModelAttemptRepairRequired("direct upload poll cursor schema needs repair")
+        rows = db.execute(
+            "SELECT id,CASE WHEN TYPEOF(after_key)='text' "
+            "AND LENGTH(CAST(after_key AS BLOB)) IN (0,64) THEN after_key ELSE NULL END "
+            f"FROM {_POLL_CURSOR} LIMIT 2"
+        ).fetchall()
+        if len(rows) != 1 or rows[0][0] != 1:
+            raise DirectModelAttemptRepairRequired("direct upload poll cursor needs repair")
+        after = rows[0][1]
+        if type(after) is not str or (
+            after and (len(after) != 64 or any(c not in "0123456789abcdef" for c in after))
+        ):
+            raise DirectModelAttemptRepairRequired("direct upload poll cursor needs repair")
+        return after
+
+    def initialize_poll_cursor(self, *, repair=False):
+        """Add one bounded scheduling hint, preserving all original signed records."""
+        if type(repair) is not bool or self.existing_only:
+            raise ValueError("direct upload poll cursor initialization requires a writable owner")
+        with self.transaction() as db:
+            if repair or self._poll_cursor(db) is None:
+                stage = (
+                    "direct_upload_poll_cursor_repair"
+                    if repair
+                    else "direct_upload_poll_cursor_install"
+                )
+                with TransferProgress(stage, 1, unit="records") as progress:
+                    if repair:
+                        db.execute(f"DROP TABLE IF EXISTS {_POLL_CURSOR}")
+                    db.execute(_POLL_CURSOR_SQL)
+                    db.execute(f"INSERT INTO {_POLL_CURSOR} VALUES (1,'')")
+                    self._check_attempt_capacity(db)
+                    progress.advance(1)
+
+    def poll_cursor(self):
+        with self.read_transaction() as db:
+            after = self._poll_cursor(db)
+        if after is None:
+            raise DirectModelAttemptRepairRequired("direct upload poll cursor is missing")
+        return after
+
+    def advance_poll_cursor(self, reservation_sha256):
+        """Checkpoint a selected attempt before I/O; this never acknowledges completion."""
+        if (
+            type(reservation_sha256) is not str
+            or len(reservation_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in reservation_sha256)
+        ):
+            raise ValueError("direct upload poll reservation differs")
+        with self.transaction() as db:
+            after = self._poll_cursor(db)
+            if after is None:
+                raise DirectModelAttemptRepairRequired("direct upload poll cursor is missing")
+            if after != reservation_sha256:
+                db.execute(
+                    f"UPDATE {_POLL_CURSOR} SET after_key=? WHERE id=1", (reservation_sha256,)
+                )
 
     def put_many(self, records, *, index=None):
         def bounded(db):
@@ -271,13 +345,16 @@ class DirectModelAttemptJournal(RoundJournal):
                 f"LENGTH(CAST(generation AS TEXT))+COALESCE(LENGTH(attempt_id),0)),0),"
                 f"COALESCE(MAX(generation),0) FROM {_HEADS}"
             ).fetchone()
+            cursor_bytes = 64 if self._poll_cursor(db) is not None else 0
         if requests != kinds.get("direct-request", 0):
             raise DirectModelAttemptRepairRequired("direct upload request heads need repair")
         self._check_original_counts(kinds)
         return {
-            "metadata_bytes": used + head_bytes,
+            "metadata_bytes": used + head_bytes + cursor_bytes,
             "maximum_metadata_bytes": self.maximum_bytes,
-            "remaining_metadata_bytes": max(0, self.maximum_bytes - used - head_bytes),
+            "remaining_metadata_bytes": max(
+                0, self.maximum_bytes - used - head_bytes - cursor_bytes
+            ),
             "retained_uploads": requests,
             "maximum_uploads": self.maximum_rounds,
             "retained_attempts": kinds.get("direct-intent", 0),

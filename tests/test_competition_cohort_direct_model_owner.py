@@ -663,6 +663,94 @@ async def test_verification_rejects_completed_object_replacement(direct):
         await direct.owner.verify(completed.reservation_sha256, now_unix_ms=1_800_000_011_000)
 
 
+async def complete_poll_uploads(direct):
+    reservations = []
+    for offset in range(3):
+        consent = direct.request.consent.consent.model_copy(
+            update={"signed_at_block": direct.request.consent.consent.signed_at_block + offset}
+        )
+        request = direct.request.model_copy(
+            update={
+                "consent": direct.request.consent.model_copy(
+                    update={"consent": consent, "signature": sign_object(consent, wallet("Alice"))}
+                )
+            }
+        )
+        payload = direct.payload.payload.model_copy(update={"upload_sha256": digest(request)})
+        signed = direct.payload.model_copy(
+            update={"payload": payload, "signature": sign_object(payload, wallet("Alice"))}
+        )
+        reservation = await direct.owner.reserve(request, signed, now_unix_ms=1_800_000_000_000)
+        completed = await direct.owner.complete(
+            signed_completion(reservation, payload), now_unix_ms=1_800_000_010_000
+        )
+        reservations.append(completed.reservation_sha256)
+    return sorted(reservations)
+
+
+@pytest.mark.asyncio
+async def test_poll_rotates_transient_verification_failures_across_restart(direct, monkeypatch):
+    keys = await complete_poll_uploads(direct)
+    calls = []
+
+    def inject_transient_failures(owner):
+        verify = owner.verify
+
+        async def unreliable(key, **kwargs):
+            calls.append(key)
+            if key in keys[:2]:
+                raise OSError("provider temporarily unavailable")
+            return await verify(key, **kwargs)
+
+        monkeypatch.setattr(owner, "verify", unreliable)
+
+    inject_transient_failures(direct.owner)
+    first = await direct.owner.poll_once(now_unix_ms=1_800_000_011_000)
+    assert first["objects_failed"] == 2 and first["objects_pending"] == 1
+    assert calls == keys[:2]
+    resumed = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    inject_transient_failures(resumed)
+    second = await resumed.poll_once(now_unix_ms=1_800_000_012_000)
+    assert second["objects_verified"] == 1
+    assert calls == [*keys[:2], keys[2], keys[0]]
+    reads = direct.multipart.read_calls
+    third = await resumed.poll_once(now_unix_ms=1_800_000_013_000)
+    assert third["objects_verified"] == 1
+    assert calls[-2:] == [keys[1], keys[0]]
+    assert direct.multipart.read_calls == reads, "completed payload must not be reverified"
+    assert all(resumed.journal.get("direct-verification-hold", key) is None for key in keys)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_poll_yields_to_later_uploads_after_restart(direct, monkeypatch):
+    keys = await complete_poll_uploads(direct)
+
+    async def interrupted(key, **kwargs):
+        assert key == keys[0]
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(direct.owner, "verify", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await direct.owner.poll_once(now_unix_ms=1_800_000_011_000)
+    resumed = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+    )
+    result = await resumed.poll_once(now_unix_ms=1_800_000_012_000)
+    assert result["objects_verified"] == 2 and result["objects_pending"] == 1
+    assert resumed.journal.get("direct-verification", keys[0]) is None
+    assert all(resumed.journal.get("direct-verification", key) for key in keys[1:])
+    result = await resumed.poll_once(now_unix_ms=1_800_000_013_000)
+    assert result["objects_verified"] == 3 and result["objects_attempted"] == 1
+
+
 @pytest.mark.asyncio
 async def test_poll_retains_terminal_verification_hold_without_rereading(direct):
     reservation = await direct.owner.reserve(
@@ -700,13 +788,7 @@ async def test_poll_retains_terminal_verification_hold_without_rereading(direct)
     )
 
 
-@pytest.mark.asyncio
-async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop(
-    direct, tmp_path, monkeypatch, policy
-):
-    import threading
-
-    from umi import competition_model_review_file as review_file
+def configure_poll_review(direct, tmp_path, policy):
     from umi.competition_cohort_model_static_review import StandingModelReviewPolicy
 
     standing = StandingModelReviewPolicy(
@@ -735,6 +817,65 @@ async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop
         sign=direct.owner.sign,
         policy=policy,
     )
+    return config
+
+
+@pytest.mark.asyncio
+async def test_poll_rotates_transient_review_failures_reusing_verification(
+    direct, tmp_path, monkeypatch, policy
+):
+    config = configure_poll_review(direct, tmp_path, policy)
+    keys = await complete_poll_uploads(direct)
+    calls = []
+
+    async def unreliable_review(key, **kwargs):
+        calls.append(key)
+        if key in keys[:2]:
+            raise OSError("review document temporarily unavailable")
+        return ModelArtifactReviewInputs(
+            model_sha256=direct.payload.payload.model_sha256,
+            rights_evidence={"license": "MIT"},
+            reconstruction_evidence={"complete": True},
+        )
+
+    monkeypatch.setattr(direct.owner, "review", unreliable_review)
+    first = await direct.owner.poll_once(now_unix_ms=1_800_000_011_000)
+    assert first["objects_verified"] == 2 and first["objects_failed"] == 2
+    assert calls == keys[:2]
+    resumed = DirectModelUploadOwner(
+        config,
+        direct.multipart,
+        authorize=direct.owner.authorize,
+        sign=direct.owner.sign,
+        policy=policy,
+    )
+    monkeypatch.setattr(resumed, "review", unreliable_review)
+    verify = resumed.verify
+    verified = []
+
+    async def verify_only_unfinished(key, **kwargs):
+        verified.append(key)
+        assert key == keys[2], "successful verification must survive restart and review retries"
+        return await verify(key, **kwargs)
+
+    monkeypatch.setattr(resumed, "verify", verify_only_unfinished)
+    second = await resumed.poll_once(now_unix_ms=1_800_000_012_000)
+    assert second["reviews_ready"] == 1 and second["objects_attempted"] == 2
+    assert calls == [*keys[:2], keys[2], keys[0]]
+    reads = direct.multipart.read_calls
+    await resumed.poll_once(now_unix_ms=1_800_000_013_000)
+    assert verified == [keys[2]] and direct.multipart.read_calls == reads
+
+
+@pytest.mark.asyncio
+async def test_poll_reuses_review_file_after_restart_without_blocking_event_loop(
+    direct, tmp_path, monkeypatch, policy
+):
+    import threading
+
+    from umi import competition_model_review_file as review_file
+
+    config = configure_poll_review(direct, tmp_path, policy)
     reservation = await direct.owner.reserve(
         direct.request,
         direct.payload,
