@@ -19,6 +19,7 @@ from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_his
 from .competition_cohort_intake import CohortIntakePublisher, history_tip
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_publication_objects import PublicationObjects
+from .competition_cohort_request_binding import retain_request_binding
 from .competition_cohort_request_closure import CohortRequestClosure
 from .competition_cohort_request_phase import (
     NativeRequestProgressSource,
@@ -79,6 +80,21 @@ class CohortRequestSettlementPublisher:
             raise ValueError("request handoff and original stores must be disjoint")
         self.files = SettlementEvidenceFiles(Path(sources.objects_directory))
         self.intake = CohortIntakePublisher(source.intake, capture, decisions)
+        binding = retain_request_binding(
+            source.journal,
+            "request_delivery_binding",
+            source.cohort,
+            {
+                "sources": sources.model_dump(mode="json", by_alias=True),
+                "history_directory": str(self.history_directory),
+            },
+        )
+        # Keep the original typed owner, including legacy deadline fields.
+        # VerificationReuse keys include both value and BaseModel type; a new
+        # normalized dictionary would abandon completed receipt namespaces.
+        verification_sources = SettlementOriginalSources.model_validate_json(
+            canonical_json_bytes(binding["sources"])
+        )
         retained = source.journal.root / "request-publication"
         self.objects = PublicationObjects(source.objects, self.files, retained / "objects")
         self.verification_reuse = source.select_verification(
@@ -88,17 +104,9 @@ class CohortRequestSettlementPublisher:
                     "kind": "request_publication",
                     "journal": self.objects.binding,
                     "cohort": source.cohort,
-                    "sources": sources,
+                    "sources": verification_sources,
                 },
             )
-        )
-        source.journal.put(
-            "request_delivery_binding",
-            source.cohort,
-            {
-                "sources": sources.model_dump(mode="json", by_alias=True),
-                "history_directory": str(self.history_directory),
-            },
         )
 
     @verification_owner_operation

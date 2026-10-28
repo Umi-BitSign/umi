@@ -38,6 +38,7 @@ from .competition_cohort_intake import CohortIntake
 from .competition_cohort_order_signer import CohortOrderHistory
 from .competition_cohort_orders import SignedRecoverableEvaluationOrder
 from .competition_cohort_recovery import StandingCohortRecoveryAuthority
+from .competition_cohort_request_binding import retain_request_binding
 from .competition_cohort_request_closure import (
     CohortRequestClosure,
     PendingRequestClosure,
@@ -201,7 +202,12 @@ class NativeRequestProgressSource:
             "catalogs": keys,
             "transport": scoring_policy_hash(self.transport),
         }
-        self.journal.put("request_phase_binding", self.cohort, binding)
+        binding = retain_request_binding(
+            self.journal, "request_phase_binding", self.cohort, binding
+        )
+        # Native JSON reads return lists. The original verification owner used
+        # a tuple here; preserve that type as well as the exact retained values.
+        binding["catalogs"] = tuple(binding["catalogs"])
         # Builders and the enclosing service closure share this native owner's
         # successful replay. Each participant is checkpointed on the first pass;
         # independent reviewers still select their own verification authority.
