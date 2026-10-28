@@ -558,7 +558,7 @@ async def test_native_publisher_drains_commit_before_cancellation(intake, scenar
 def test_verified_seal_reuse_keeps_private_copies_and_fresh_publication(
     intake, scenario, monkeypatch
 ):
-    import umi.competition_cohort_intake as module
+    import umi.competition_cohort_seal_reuse as module
 
     intake.retain(request_for(scenario), capture_at(210))
     closed, evidence, expected = seal_and_close(intake, scenario)
@@ -568,7 +568,7 @@ def test_verified_seal_reuse_keeps_private_copies_and_fresh_publication(
     def unexpected(*args, **kwargs):
         raise AssertionError("unchanged original seal was reconstructed again")
 
-    monkeypatch.setattr(module, "_build_intake_seal_from_participations", unexpected)
+    monkeypatch.setattr(module, "_build_intake_seal_from_projections", unexpected)
     caller = intake.sealed(cohort, tip)
     object.__setattr__(caller, "selected", ())
     assert intake.sealed(cohort, tip) == expected
@@ -603,20 +603,20 @@ def test_verified_seal_reuse_reconstructs_new_materialization(
 ):
     import shutil
 
-    import umi.competition_cohort_intake as module
+    import umi.competition_cohort_seal_reuse as module
 
     intake.retain(request_for(scenario), capture_at(210))
     _, _, expected = seal_and_close(intake, scenario)
     cohort, tip = expected.cohort_sha256, expected.recovery_tip_sha256
     assert intake.sealed(cohort, tip) == expected
-    original = module._build_intake_seal_from_participations
+    original = module._build_intake_seal_from_projections
     calls = []
 
     def counted(*args, **kwargs):
         calls.append(1)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(module, "_build_intake_seal_from_participations", counted)
+    monkeypatch.setattr(module, "_build_intake_seal_from_projections", counted)
     if change == "restart":
         intake = CohortIntake(intake.config, intake.policy)
     elif change == "database":
@@ -628,8 +628,19 @@ def test_verified_seal_reuse_reconstructs_new_materialization(
     else:
         with intake._connection() as (db, _):
             db.execute("UPDATE cohort_consents SET observed=observed+1")
-    assert intake.sealed(cohort, tip) == expected
-    assert calls == [1]
+    if change == "restart":
+        assert intake.sealed(cohort, tip) == expected
+        assert calls == []
+    elif change == "database":
+        with pytest.raises(module.IntakeSealRepairRequired):
+            intake.sealed(cohort, tip)
+        assert (
+            intake.repair_seal_reuse(cohort, tip, reason="restored original database") == expected
+        )
+        assert calls == [1]
+    else:
+        with pytest.raises(ValueError, match="index differs"):
+            intake.sealed(cohort, tip)
 
 
 def test_verified_seal_reuse_cannot_ignore_new_original_consent(intake, scenario):

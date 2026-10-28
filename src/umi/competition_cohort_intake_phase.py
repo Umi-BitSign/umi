@@ -31,13 +31,12 @@ from .competition_cohort_intake import CohortIntake, cohort_intake_bytes, histor
 from .competition_cohort_intake_seal import (
     CohortIntakeSeal,
     EmptyCohortIntake,
-    _build_intake_seal_from_participations,
 )
 from .competition_cohort_model_acceptance_store import (
     PendingModelArtifacts,
-    model_acceptances_for_seal,
 )
 from .competition_cohort_recovery import CohortRecoveryState
+from .competition_cohort_seal_reuse import IntakeSealReuse
 from .competition_execution import execution_boundary
 from .competition_store import AdmissionCapacityError
 from .open_competition import digest
@@ -216,23 +215,12 @@ class CohortIntakePhaseObserver:
                 # irreversible fence without its availability evidence.
                 try:
                     self.intake.require_admission_uploads_drained(db, history)
-                    seal = _build_intake_seal_from_participations(
+                    reuse = IntakeSealReuse(self.intake, db)
+                    seal = reuse.build(
                         history,
-                        self.intake.policy,
                         observation,
                         capture.snapshot,
-                        (
-                            (key, retained)
-                            for key, _, retained in self.intake._parsed_records(db, history)
-                        ),
-                        expected_tip_sha256=expected_tip_sha256,
-                    )
-                    model_acceptances_for_seal(
-                        db,
-                        seal,
-                        history,
-                        self.intake.policy,
-                        self.intake._records(db, history, track="model"),
+                        expected_tip_sha256,
                         report=self._certification_report,
                     )
                 except (
@@ -291,6 +279,7 @@ class CohortIntakePhaseObserver:
                         "INSERT INTO cohort_intake_service_seals VALUES (?,?,?)",
                         (cohort, expected_tip_sha256, canonical_json_bytes(service)),
                     )
+                    reuse.record_created(history, expected_tip_sha256, seal)
                     db.commit()
                 except BaseException:
                     db.rollback()

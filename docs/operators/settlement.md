@@ -4975,3 +4975,50 @@ transition; confirm actual native phase progression and first execution separate
 This local gate does not change signed phase evidence or miner/validator protocols.
 Select the new owner configuration only with a source supporting the optional
 field; keep the original configuration for an older-owner rollback.
+
+## Durable intake seal verification
+
+The intake owner records each completed consent replay and model certificate
+check, then records the full seal result. These private results bind the actual
+intake file owner, native verifier semantics, policy, authority and exact history
+prefix, plus SQL mutation identities and current source indexes. Unchanged reads,
+restarts and compatible source upgrades reuse them without reading or hashing the
+original consent or certificate bodies. Both the direct seal operation and the
+recurring phase owner retain their first successful work; the latter commits its
+seal result with the original seal and service-observation fence.
+
+Older supported intake ledgers enroll source identities using indexed metadata
+only. Their first required native seal replay checkpoints each original as it
+finishes, so interruption resumes the unfinished items. Original writes by older
+supported readers/writers still advance the installed SQL triggers. This does not
+alter a cohort's signed history, admission conditions or independent review.
+Derived metadata uses the existing intake capacity allowance. Logs expose
+`intake_seal_identity_migration`, `intake_seal_participations`,
+`intake_seal_acceptances` and explicit repair stages with counts, elapsed time and
+an ETA basis. These estimates cover the current verification stage, not challenge
+completion or reward activation.
+
+Missing or damaged completed metadata is a repair state, not a cache miss. To
+repair the exact retained seal, use the selected Python/source as the service
+account with the existing full service configuration and policy. The command preserves
+its selected intake directory, capacity and eligible-track order:
+
+```sh
+python -I -B -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from umi.competition_cohort_seal_reuse_cli import main; raise SystemExit(main())' /path/to/selected/source/src --service-config /path/to/selected-owner.json --policy /path/to/policy.json --cohort COHORT_SHA256 --tip INTAKE_TIP_SHA256 --reason 'Explain the exact retained metadata repair'
+```
+
+The command uses the intake owner's existing fence. It preserves original signed
+rows and retains the repair reason. Intact source identities and completed checks
+are reused; a damaged source row gets a fresh identity and only its dependent
+checks repeat. Damaged mutation fences or a restored database inode invalidate
+the source identities they can no longer establish, so that explicit repair
+requires native verification over those originals. A missing or malformed
+original signed seal cannot be repaired from derived metadata. Repeating a
+completed repair does no native replay. Shared original database corruption still
+requires the supported original-state restoration path.
+
+Select the qualified intake owner source through its existing supervisor update
+path. The recurring phase producer and all local seal consumers use this same
+implementation. Public miner/client messages, independent validator input
+formats and finalized reward rows are unchanged; this owner-local change does
+not require reinstalling miners or independent validators.
