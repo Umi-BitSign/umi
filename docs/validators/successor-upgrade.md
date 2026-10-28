@@ -3441,8 +3441,12 @@ history are checked; sealing still verifies the complete inventory and current
 registration. Restart gives current candidates a turn immediately while retained
 admission blocks, completion ordinals and signed records remain intact.
 Direct R2 promotion copies independent parts in bounded waves of at most four,
-also capped by the signed delivery profile. The owner drains a failed wave before
-aborting the multipart upload and still verifies the new preserved object.
+also capped by the signed delivery profile. The owner drains a failed wave and
+retains its upload ID and completed parts for retry. New owner-created copies
+reuse verified source bytes through durable copy lineage; old destinations
+without that lineage retain their native verification or completed byte result.
+The source verification and copy-proof requirements are described in the
+[settlement operations guide](../operators/settlement.md).
 
 The shared R2 client's exact range reads retain the caller's unfinished object
 hash through up to six attempts for HTTP 429, 500, 502, 503 or 504 and classified
@@ -3465,7 +3469,7 @@ copy-part retries keep their existing three-attempt policy. The shared client
 serves intake verification, preservation verification and supported model-byte
 readers; install it through the selected host's normal authenticated update
 path. No signed format, cohort clock, verification-result ABI or miner request
-changes are required, and destination verification remains mandatory.
+changes are required. Independent reviewers retain their own byte verification.
 
 Paid-service origin confirmation requires the surrounding registration capture
 to reach the collected origin proof's owned block. An age-valid shared capture
