@@ -1522,3 +1522,81 @@ def test_pin_checkpoint_reuses_unchanged_v2_reservation_validation(queue_case, m
     assert decoded == []
     assert c.queue.retained_registration_blocks(complete_only=True) == frozenset({400})
     assert decoded == []
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_complete_pin_query_reuses_one_native_snapshot_after_restart(
+    queue_case, monkeypatch, reserved
+):
+    from umi.competition_round_journal import RecordReservation
+
+    c = queue_case
+    admit(c)
+    if reserved:
+        c.queue.journal.reserve_records("snapshot-fixture", (RecordReservation("future", "a", 64),))
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    restarted = ServiceWorkQueue(c.cfg, c.queue.policy)
+    reads = Mock(wraps=restarted.journal.read_transaction)
+    schema = Mock(wraps=restarted._registration_pins.check_schema)
+    rows = Mock(wraps=restarted._retention_rows)
+    monkeypatch.setattr(restarted.journal, "read_transaction", reads)
+    monkeypatch.setattr(restarted._registration_pins, "check_schema", schema)
+    monkeypatch.setattr(restarted, "_retention_rows", rows)
+    forbidden = Mock(side_effect=AssertionError("complete-only query wrote or decoded originals"))
+    monkeypatch.setattr(restarted.journal, "transaction", forbidden)
+    monkeypatch.setattr(restarted, "_raw_admission", forbidden)
+    assert restarted.retained_registration_blocks(complete_only=True) == frozenset({400})
+    reads.assert_called_once_with(wait=False)
+    assert schema.call_count == rows.call_count == 1
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+@pytest.mark.parametrize("change", ["source_revision", "conflict"])
+def test_complete_pin_query_is_consistent_and_next_snapshot_observes_changes(
+    queue_case, monkeypatch, reserved, change
+):
+    from umi.competition_registration_pins import (
+        RegistrationPinProjectionPending,
+        RegistrationPinRepairRequired,
+    )
+    from umi.competition_round_journal import RecordReservation
+
+    c = queue_case
+    admission = admit(c)
+    if reserved:
+        c.queue.journal.reserve_records("snapshot-fixture", (RecordReservation("future", "a", 64),))
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    # A second native writer may commit after this reader has fixed its view.
+    # The current result must use that one view; the next call must see the change.
+    with sqlite3.connect(c.queue.journal.path) as db:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    pins = c.queue._registration_pins
+    original = pins.load
+    changed = False
+
+    def concurrent_change(db, slot, context):
+        nonlocal changed
+        result = original(db, slot, context)
+        if slot == "catalog" and not changed:
+            changed = True
+            with c.queue.journal.transaction() as writer:
+                if change == "source_revision":
+                    writer.execute(
+                        "UPDATE records SET body=body WHERE kind='service_admission' AND id=?",
+                        (admission.work_sha256,),
+                    )
+                else:
+                    writer.execute("INSERT INTO holds VALUES (?)", (admission.work_sha256,))
+        return result
+
+    monkeypatch.setattr(pins, "load", concurrent_change)
+    assert c.queue.retained_registration_blocks(complete_only=True) == frozenset({400})
+    assert changed
+    expected = (
+        RegistrationPinProjectionPending
+        if change == "source_revision"
+        else RegistrationPinRepairRequired
+    )
+    with pytest.raises(expected):
+        c.queue.retained_registration_blocks(complete_only=True)

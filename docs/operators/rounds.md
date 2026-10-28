@@ -1696,6 +1696,8 @@ Reservation-capable journals retain successful canonical reservation validation
 across restarts and compatible source upgrades. The first mutable open scans the
 existing reservation metadata in bounded, committed chunks; its progress reports
 completed/total records, elapsed time and a measured or labeled planning ETA.
+These events use the host's `umi.competition.progress` logger, including journal
+initialization before the service finishes starting.
 It does not reread model payloads or native proofs. A retained ceiling and insert
 queue cover older compatible writers, including new rowids below the scan cursor.
 Ordinary writes validate only additions and keep the original SQL capacity

@@ -32,6 +32,10 @@ between completed items per pass and rotating through configured queues. One
 slow item can exceed that planning budget; shutdown drains the owned operation
 before releasing the service. Fresh registration collection reads only completed
 projection metadata, with current owner, source-mutation and conflict checks. It
+uses one consistent native read snapshot per queue, so catalog, index and final
+block checks share the same validated view. A concurrent change is visible to
+the next collection; completed results are never reused across different snapshots
+without their current source and conflict checks. It
 never builds a missing catalog, rereads an unprojected admission, or waits for
 the background task. Logs expose
 `registration_pin_source_migration`, `registration_pin_catalog` and
