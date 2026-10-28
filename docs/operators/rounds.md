@@ -1820,8 +1820,9 @@ roster marker is published only after every original order is retained. Partial
 selection resumes unchanged; delivery proceeds independently through private
 reviewer HTTP routes and acknowledged evaluator inboxes.
 
-On a fully upgraded installation, set `orders.share_paired_incumbent: true`
-in the owner service configuration and
+On a fully upgraded installation, set
+`recoverable_service.orders.share_paired_incumbent: true` in the installed owner
+`CompetitionServiceConfig` (the inner recoverable service uses `orders`) and
 `benchmark.execution.share_paired_incumbent: true` in every selected phase
 reviewer. Carry the matching execution configuration into settlement's
 `executions` entries. This durable host selection applies to every configured

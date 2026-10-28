@@ -569,7 +569,7 @@ Model acceptance uses the already decoded indexed intake record without decoding
 it a second time; its native participation and certificate review remain required.
 
 Intake work prioritizes the earliest unfinished cohort even while its automatic
-progression is held. Under contention, four oldest-cohort attempts are followed
+progression is held. Under contention, up to four oldest-cohort attempts are followed
 by one background opportunity, with later cohorts rotating fairly. Current
 verification or promotion drains at its existing safe item boundary; a priority
 change never interrupts a full-object hash or repeats completed work. Cached
@@ -632,8 +632,10 @@ source or fabricate a result.
 
 For recoverable model jobs, first update every selected order signer, evaluator,
 export/request owner, independent reviewer and native settlement/reward reader.
-Then select `share_paired_incumbent: true` in both the order-host and evaluator
-execution configurations through the supported signed host path. The order host
+Then select `recoverable_service.orders.share_paired_incumbent: true` in the
+installed owner configuration and
+`benchmark.execution.share_paired_incumbent: true` in each phase reviewer through
+the supported signed host path. The order host
 issues new `umi-recoverable-evaluation-order/2` bodies with the explicit
 `incumbent_observation_mode: "first_reserved_per_scope/1"` choice. The ordinary
 independent quorum signs that choice together with the exact original round,
