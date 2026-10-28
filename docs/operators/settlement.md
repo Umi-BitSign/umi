@@ -25,6 +25,13 @@ restart reads those facts and indices, without reading or hashing the original
 admission bodies again. Catalog changes invalidate its dependent results; a
 changed admission invalidates only that admission.
 
+Ordinary service-catalog reads also use one native read snapshot for the signed
+catalog, its optional prepared-round alias and the prepared round. Callers with
+an existing transaction lend that snapshot; other callers open and close one
+read transaction. Journal schema checks run once per owned snapshot, while original
+canonical bytes, configured bindings and current conflict holds remain checked.
+Both historical catalog formats and their retained journals need no migration.
+
 The first use on an older supported journal creates a metadata source index.
 The service owns a separate serial reconciliation task that checkpoints each
 completed original, processing at most eight new admissions or five seconds
@@ -49,8 +56,10 @@ explicit planning range; `registration_pin_decode` and
 durable write costs. Restored items never contribute to native throughput.
 Changed inputs resume only the affected work. A busy
 snapshot, unfinished projection or damaged completion record emits
-`registration_retention_pruning_deferred`; the capture is saved and all earlier
-captures are retained. Unknown pins still count against the working-cache budget.
+`registration_retention_pruning_deferred`; pruning is skipped so a successful
+capture commit preserves all earlier captures. This log precedes persistence and
+does not itself prove a commit; cancellation and capacity checks still apply.
+Unknown pins still count against the working-cache budget.
 That state defers reclamation, not proof verification, admission or a capacity
 limit. A damaged completion is an explicit repair state, never an ordinary miss.
 

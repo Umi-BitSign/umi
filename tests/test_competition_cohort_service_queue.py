@@ -3,7 +3,9 @@
 import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -309,6 +311,145 @@ def test_original_catalog_bytes_and_journal_need_no_migration(queue_case):
     c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
     assert c.queue._catalog() == (c.catalog, c.round)
     assert admit(c).ordinal == 1
+
+
+def catalog_case(c, format_):
+    if format_ == 2:
+        c = precommit(c)
+        c.queue.install(
+            c.catalog,
+            c.round,
+            c.h.source,
+            capture(),
+            expected_tip_sha256=history_tip(c.h.source.history),
+        )
+    return c
+
+
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+@pytest.mark.parametrize("format_", [1, 2])
+@pytest.mark.parametrize("reserved", [False, True])
+def test_catalog_owns_one_snapshot_or_borrows_existing_after_restart(
+    queue_case, monkeypatch, format_, reserved
+):
+    from umi.competition_round_journal import RecordReservation
+
+    c = catalog_case(queue_case, format_)
+    if reserved:
+        c.queue.journal.reserve_records("catalog-snapshot", (RecordReservation("future", "a", 64),))
+    with c.queue.journal.read_transaction() as db:
+        assert c.queue.journal._version(db) == (2 if reserved else 0)
+    expected = canonical_json_bytes(c.catalog), canonical_json_bytes(c.round)
+    for restart in (False, True):
+        if restart:
+            c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+        original = c.queue.journal.read_transaction
+        reads = []
+
+        @contextmanager
+        def counted(original=original, reads=reads):
+            with original() as db:
+                reads.append(db)
+                yield db
+
+        monkeypatch.setattr(c.queue.journal, "read_transaction", counted)
+        assert tuple(map(canonical_json_bytes, c.queue._catalog())) == expected
+        assert len(reads) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            reads[0].execute("SELECT 1")
+        with original() as db:
+            assert tuple(map(canonical_json_bytes, c.queue._catalog(db))) == expected
+            assert db.execute("SELECT 1").fetchone() == (1,)
+        assert len(reads) == 1
+
+
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+def test_catalog_concurrent_alias_change_uses_snapshot_then_fresh_failure(queue_case, monkeypatch):
+    c = catalog_case(queue_case, 2)
+    original = c.queue._decoded_record
+    written = Event()
+    future = None
+
+    def change_alias():
+        with c.queue.journal.transaction() as db:
+            db.execute(
+                "UPDATE records SET body=? WHERE kind='service_catalog_round' AND id=?",
+                (canonical_json_bytes("ff" * 32), c.cfg.catalog_sha256),
+            )
+            written.set()  # Commit waits for the current reader to release its snapshot.
+
+    with ThreadPoolExecutor(max_workers=1) as workers:
+
+        def concurrent(kind, *args, **kwargs):
+            nonlocal future
+            value = original(kind, *args, **kwargs)
+            if kind == "service_catalog" and future is None:
+                future = workers.submit(change_alias)
+                assert written.wait(5)
+            return value
+
+        monkeypatch.setattr(c.queue, "_decoded_record", concurrent)
+        assert c.queue._catalog() == (c.catalog, c.round)
+        future.result(timeout=5)
+    with pytest.raises(ValueError, match="round is missing"):
+        c.queue._catalog()
+    c.queue = ServiceWorkQueue(c.cfg, c.queue.policy)
+    with pytest.raises(ValueError, match="round is missing"):
+        c.queue._catalog()
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=? WHERE kind='service_catalog_round' AND id=?",
+            (canonical_json_bytes(digest(c.round)), c.cfg.catalog_sha256),
+        )
+    assert c.queue._catalog() == (c.catalog, c.round)
+
+
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+@pytest.mark.parametrize(
+    "format_,kind,damage,error,match",
+    [
+        (1, "service_catalog", "missing", FileNotFoundError, "not been installed"),
+        (1, "service_round", "missing", ValueError, "round is missing"),
+        (2, "service_catalog_round", "missing", FileNotFoundError, "original prepared round"),
+        (2, "service_catalog_round", "hold", ValueError, "conflict held"),
+        (2, "service_round", "hold", ValueError, "conflict held"),
+        (1, "service_catalog", "canonical", ValueError, "not canonical"),
+        (2, "service_round", "canonical", ValueError, "not canonical"),
+        (2, "service_catalog_round", "canonical", ValueError, "not canonical"),
+        (1, "service_catalog", "binding", ValueError, "configured selection"),
+        (2, "service_round", "binding", ValueError, "content identity"),
+    ],
+)
+def test_catalog_success_never_hides_fresh_damage(queue_case, format_, kind, damage, error, match):
+    c = catalog_case(queue_case, format_)
+    assert c.queue._catalog() == (c.catalog, c.round)
+    key = digest(c.round) if kind == "service_round" else c.cfg.catalog_sha256
+    with c.queue.journal.transaction() as db:
+        if damage == "missing":
+            db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, key))
+        elif damage == "hold":
+            db.execute("INSERT INTO holds VALUES (?)", (key,))
+        else:
+            if damage == "canonical":
+                prior = db.execute(
+                    "SELECT body FROM records WHERE kind=? AND id=?", (kind, key)
+                ).fetchone()[0]
+                body = prior + b" "
+            elif kind == "service_catalog":
+                body = canonical_json_bytes(
+                    c.catalog.model_copy(
+                        update={
+                            "catalog": c.catalog.catalog.model_copy(update={"issued_at_block": 401})
+                        }
+                    )
+                )
+            else:
+                body = canonical_json_bytes(
+                    c.round.model_copy(update={"prepared_at_block": c.round.prepared_at_block + 1})
+                )
+            db.execute("UPDATE records SET body=? WHERE kind=? AND id=?", (body, kind, key))
+    with pytest.raises(error, match=match):
+        c.queue._catalog()
 
 
 def test_catalog_install_accepts_lightweight_owned_finality_height(queue_case):
