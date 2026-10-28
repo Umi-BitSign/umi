@@ -2587,8 +2587,11 @@ per model. Permitted NC-trained models and inherited NC checkpoints use
 `CC-BY-NC-SA-4.0` with fresh consent to the
 [NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). Permissive-only models keep
 their original license and terms. The operator's conditional decision supersedes
-the PDF's universal-NC clause. Neither route changes the signed cohort clocks,
-baseline identity, resource limits or reward rule.
+the original review's universal-NC clause; the current PDF incorporates that
+conditional decision. Its rebuild does not change the historical PDF hash bound
+by the signed supplement and training-rights contract (see the
+[review source and historical binding](../legal/README.md)). Neither route
+changes the signed cohort clocks, baseline identity, resource limits or reward rule.
 
 Use the authenticated model-license adoption carried by a version-2 bundle to
 bind the exact base policy, original terms, cohort authority, minimum sequence,

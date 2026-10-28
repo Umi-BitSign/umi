@@ -1,0 +1,1045 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=24mm,headheight=14pt]{geometry}
+\usepackage{fontspec}
+\setmainfont{texgyrepagella-regular.otf}[BoldFont=texgyrepagella-bold.otf,ItalicFont=texgyrepagella-italic.otf,BoldItalicFont=texgyrepagella-bolditalic.otf]
+\setsansfont{texgyreheros-regular.otf}[BoldFont=texgyreheros-bold.otf]
+\setmonofont{texgyrecursor-regular.otf}[Scale=0.85]
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{enumitem}
+\usepackage{fvextra}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\definecolor{navy}{HTML}{172A46}
+\definecolor{teal}{HTML}{126E78}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=teal,pdftitle={UMI Training Data and Model Licensing Policy},pdfauthor={UMI Inc.},pdfsubject={Conditional model licensing from C7 onward; policy revision October 28, 2026}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt plus 1pt}
+\setlength{\emergencystretch}{3em}
+\setcounter{secnumdepth}{0}
+\setlist{leftmargin=1.6em,itemsep=3pt,topsep=3pt}
+\titleformat{\section}{\Large\sffamily\bfseries\color{navy}}{}{0pt}{}
+\titleformat{\subsection}{\normalsize\sffamily\bfseries\color{navy}}{}{0pt}{}
+\titlespacing*{\section}{0pt}{15pt}{7pt}
+\titlespacing*{\subsection}{0pt}{10pt}{3pt}
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\DefineVerbatimEnvironment{verbatim}{Verbatim}{fontsize=\footnotesize,breaklines=true,breakanywhere=true,breaksymbolleft={},frame=single,framesep=3mm}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily UMI / TRAINING DATA AND MODEL LICENSING}
+\fancyhead[R]{\small\sffamily 28 OCT 2026}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\begin{document}
+{\huge\sffamily\bfseries\color{navy} UMI Training Data and\\[3pt] Model Licensing Policy\par}
+\vspace{4pt}
+Policy updated October 28, 2026 · UMI Inc.
+
+Legal assessment and source records dated October 22, 2026.
+
+From C7 onward, UMI uses two model licensing tracks. A model trained
+with permitted NonCommercial data, including How2Sign, or derived from
+an NC checkpoint must declare that provenance and use CC BY-NC-SA 4.0
+with fresh model-bound NC consent. A model whose training data and
+inherited components support its existing permissive release keeps the
+original contribution terms and declared license. A mixed model that
+uses a permitted NC training source follows the NC track.
+
+\textbf{Already submitted to C7? No changes are required because of this
+update.} Existing submissions under the original terms do not need
+relicensing, re-signing or resubmission. A miner may optionally submit a
+new or replacement NC-trained model while intake is open, using the
+correct declared license and fresh consent. This update does not
+retroactively rewrite accepted artifacts or excuse a false original
+rights declaration.
+
+The same two-track approach applies to C8 and later cohorts. NC training or
+an inherited NC checkpoint selects the NC track; declaring an NC source
+used only for validation or testing does not by itself select that track
+or authorize that evaluation use. Retain the applicable source
+permissions in either case. Both tracks use the same evaluation,
+resource limits, baseline/grace rule and reward formula; a license label
+provides no extra score or allocation. Existing content and
+score-duplicate rules apply across both tracks. The existing baseline
+and earlier certified models retain their own licenses. This revision
+incorporates UMI\textquotesingle s conditional policy decision into the
+October 22 review; the legal authorities and source records below retain
+their stated assessment date.
+
+\section{1. The policy in brief}\label{1-the-policy-in-brief}
+
+The applicable signed contribution terms and authenticated model-license
+adoption select the track for each model. The rules below describe the
+conditional policy; publishing this review does not change a signed
+submission, terms file, cohort clock or historical result.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Both tracks publish their models.} Certified weights are
+  published by UMI on the UMI model repository for anyone to download.
+  There is no private or exclusive track.
+\item
+  \textbf{Choose the license from the model\textquotesingle s actual
+  sources and lineage.} On the NC track, weights, the portable bundle
+  and adapter files carry CC BY-NC-SA 4.0. On the permissive track,
+  retain the existing compatible license and original contribution
+  terms. UMI-authored runtime code stays Apache-2.0; your own inference
+  code may be Apache-2.0 or MIT. A cohort containing an NC model does
+  not make other entries NC.
+\item
+  \textbf{You may train on permitted NonCommercial datasets through the
+  NC track.} Datasets under CC BY-NC 4.0 or CC BY-NC-SA 4.0 with no
+  additional contractual restrictions are permitted, including How2Sign.
+  Section 3 lists the license classes and the rulings for named
+  datasets.
+\item
+  \textbf{You may not train on datasets with bespoke research or access
+  contracts} (for example the Microsoft Research License Terms that
+  govern ASL STEM Wiki) unless UMI has the rights
+  holder\textquotesingle s written permission on file. Section 9 lists
+  the permissions UMI is pursuing.
+\item
+  \textbf{Every submission carries a provenance declaration and a rights
+  warranty} listing each dataset by name, version, URL, license and
+  download route (section 5).
+\item
+  \textbf{Every bundle attributes its sources} in a NOTICE file in the
+  form section 4 specifies, and reproduces each
+  dataset\textquotesingle s responsible-use requests.
+\item
+  \textbf{Awards are retroactive.} Emissions for a cohort are set only
+  after its results are certified and run for a bounded window until the
+  next cohort is certified. Public release under the selected model
+  license is a condition of the award; on the NC track that means CC
+  BY-NC-SA 4.0.
+\item
+  \textbf{NC rights do not authorize commercial deployment.} UMI does
+  not run inference on NC-track models for money, bundle, link, default
+  to or document them in any UMI app, or use them or their outputs to
+  build a product model. Permissive-track models remain governed by
+  their own licenses and original grants; those rights are not narrowed
+  by another entry\textquotesingle s NC license. A
+  user\textquotesingle s use remains subject to the selected
+  model\textquotesingle s license.
+\item
+  \textbf{You delete what you must delete.} Where a
+  dataset\textquotesingle s terms require destruction after use, you
+  destroy your copy and all derived files after training and attest to
+  it.
+\item
+  \textbf{No faces in publicity.} Dataset videos never appear in demos
+  or marketing without blurring where the dataset asks for it, and never
+  where its terms forbid it.
+\end{enumerate}
+
+\section{2. Why NC-track models are non-commercial research
+models}\label{2-why-nc-track-models-are-non-commercial-research-models}
+
+For the NC track, UMI\textquotesingle s cohorts convert paid effort into
+a public good in the same way a university converts salaried effort into
+publications, and the NonCommercial test is applied to that use, not to
+the people who perform it or to the money that funds it. The rules in
+section 1 are the facts that make this true, and each of them maps to a
+reason.
+
+\textbf{The test looks at the use.} The Creative Commons NonCommercial
+element permits any use that is "not primarily intended for or directed
+towards commercial advantage or monetary compensation." Creative Commons
+applies this to the use, not the user: a nonprofit can breach it and a
+company can comply with it, and the courts that have construed it
+(\emph{Great Minds v. FedEx Office}, 2d Cir. 2018; \emph{Great Minds v.
+Office Depot}, 9th Cir. 2019) measure the licensee\textquotesingle s own
+use and ignore paid intermediaries. The salary of the person doing the
+work, the revenue of the institution and the motives of the participants
+are all outside the test. University researchers are paid; universities
+sell tickets and charge tuition; their research use of NC data is
+treated as non-commercial everywhere. The same test cannot invoke pay,
+revenue or motive against UMI.
+
+\textbf{The use is the production of a public research model.} The
+required output on the NC track is a model released to the public under
+CC BY-NC-SA 4.0, certified against a benchmark, with results published.
+That is research output in the ordinary machine-learning sense. Public
+release is the outcome that research licensors want most, and it is more
+than much university research delivers, since much of that is never
+disclosed.
+
+\textbf{The award is recognition, not purchase.} Emissions for a cohort
+are set only after certification, for a bounded window, for a model that
+already exists in public. No buyer acquires the model, nothing is
+exclusive and nothing is transferred. This is retroactive public-goods
+funding, an established grant form. Grants are awarded on expected
+quality, prizes and renewals on delivered quality, so a payment that
+tracks quality is not what distinguishes a grant from a sale; what
+distinguishes them is whether the funder acquires and exploits the
+output or recognises a contribution to the public. UMI acquires nothing.
+
+\textbf{The NC-track output stays non-commercial.} CC BY-NC-SA 4.0 on
+the weights is the downstream condition the NC license itself imposes on
+shared adaptations, and Creative Commons\textquotesingle{} own guidance
+on AI training treats a model shared non-commercially as compliant. UMI
+does not deploy NC-track models commercially, does not put them in its
+app and does not build product models from them, so the public good
+remains a public good after certification.
+
+\textbf{The licensor\textquotesingle s intent is honoured.} Research
+licensors use NC and research-only language to prevent appropriation,
+secrecy and commercial products. A public NC-SA model involves none of
+those. How2Sign\textquotesingle s signers consented to public
+availability for research, and a public research model is what they get;
+the How2Sign site\textquotesingle s "research purposes only" sentence
+sits on top of a CC BY-NC 4.0 grant and describes exactly this outcome.
+
+\textbf{Deployment is the user\textquotesingle s act.} For NC models,
+the UMI app acts as a general-purpose on-device runtime that loads a
+model a user independently supplies; UMI does not supply an NC model or
+a pointer to one. A user who loads an NC model for personal,
+non-commercial use receives the license automatically and makes a
+licensed use; where no one in the chain infringes, there is nothing for
+secondary liability to attach to, and a general-purpose runtime with
+substantial lawful uses is itself lawful. UMI\textquotesingle s model
+publication on this track is non-commercial, and the app never points at
+an NC-track model. This does not revoke the original rights in
+permissive models.
+
+These reasons are only as good as the facts, which is why section 1 is
+written as rules and why section 6 keeps UMI\textquotesingle s own
+conduct inside them.
+
+\section{3. Which datasets you may train
+on}\label{3-which-datasets-you-may-train-on}
+
+A dataset is eligible when the terms attached to the acquired copy
+permit the intended training use and model release, or an applicable
+recorded permission covers them. Permitted NC training sources select
+the NC track and its public CC BY-NC-SA 4.0 release. Sources and
+inherited components that support the existing permissive release retain
+that route. Additional access contracts must be disclosed and cleared;
+an NC label does not override them. Classify by the terms actually
+attached to the copy you download, not by what a paper or a mirror says.
+
+\subsection{CC0, public domain}\label{cc0-public-domain}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} No conditions
+
+\subsection{CC BY 4.0, CC BY 3.0}\label{cc-by-40-cc-by-30}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} Attribution only; carried in NOTICE
+
+\subsection{CC BY-SA 4.0, CC BY-SA 3.0 (FLEURS-ASL, FLORES, Wikipedia
+text)}\label{cc-by-sa-40-cc-by-sa-30-fleurs-asl-flores-wikipedia-text}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} Attribution and ShareAlike; UMI\textquotesingle s recorded
+position is that weights are not an adaptation of the dataset. Preserve
+applicable component licenses. Permissive-only models retain their
+compatible release; mixed models containing permitted NC training
+sources use NC-SA. This is not a general claim that BY-SA adaptations
+may be relicensed NC-SA; section 9 records the requested Google
+confirmation
+
+\subsection{CC BY-NC 4.0, CC BY-NC-SA 4.0
+(How2Sign)}\label{cc-by-nc-40-cc-by-nc-sa-40-how2sign}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} Non-commercial research use and NC-SA release match the
+license\textquotesingle s own conditions
+
+\subsection{Apache-2.0, MIT, BSD, ODC-By,
+CDLA-Permissive}\label{apache-20-mit-bsd-odc-by-cdla-permissive}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} Attribution and notice only
+
+\subsection{CC BY-ND, CC BY-NC-ND, any no-derivatives
+term}\label{cc-by-nd-cc-by-nc-nd-any-no-derivatives-term}
+
+\textbf{Eligible?:} No
+
+\textbf{Why:} Training produces an adaptation on the
+licensor\textquotesingle s own reading
+
+\subsection{Bespoke research or access agreements (Microsoft Research
+License Terms, ELRA end-user licences, click-through academic
+agreements)}\label{bespoke-research-or-access-agreements-microsoft-research-license-terms-elra-end-user-licences-click-through-academic-agreements}
+
+\textbf{Eligible?:} No, unless UMI holds written permission
+
+\textbf{Why:} These are contracts with terms beyond NC, typically no
+distribution of modifications, destruction after use, named-institution
+or named-user limits
+
+\subsection{Scraped video, YouTube, social platforms, unlicensed
+mirrors}\label{scraped-video-youtube-social-platforms-unlicensed-mirrors}
+
+\textbf{Eligible?:} No
+
+\textbf{Why:} No license; platform terms prohibit it; signer consent
+absent
+
+\subsection{UMI consented data (collected through the UMI app under the
+UMI contributor
+consent)}\label{umi-consented-data-collected-through-the-umi-app-under-the-umi-contributor-consent}
+
+\textbf{Eligible?:} Yes
+
+\textbf{Why:} Apply the actual contributor consent and license to the
+selected model track; do not infer broader rights
+
+\textbf{Rulings for named datasets.} These are the datasets miners have
+asked about. Rights-holder permissions are recorded in section 9. The
+specific ChicagoFSWild rulings below record the separate operator
+approval; they do not invent publisher license terms.
+
+\subsection{\texorpdfstring{\href{https://www.kaggle.com/datasets/googleai/fleurs-asl}{FLEURS-ASL}
+(Google Research, CC BY-SA
+4.0)}{FLEURS-ASL (Google Research, CC BY-SA 4.0)}}\label{fleurs-asl-google-research-cc-by-sa-40}
+
+\textbf{Ruling:} Allowed
+
+\textbf{Conditions:} Attribute FLEURS-ASL and FLORES in NOTICE;
+reproduce the Responsible Use requests (blur faces in publicity, no
+reidentification, no deepfakes)
+
+\subsection{\texorpdfstring{\href{https://how2sign.github.io/}{How2Sign}
+(UPC, BSC, CMU, Gallaudet; CC BY-NC
+4.0)}{How2Sign (UPC, BSC, CMU, Gallaudet; CC BY-NC 4.0)}}\label{how2sign-upc-bsc-cmu-gallaudet-cc-by-nc-40}
+
+\textbf{Ruling:} Allowed with conditions
+
+\textbf{Conditions:} Attribute the How2Sign consortium and cite the CVPR
+2021 paper; release under CC BY-NC-SA 4.0; do not redistribute the
+videos, clips, landmarks or English sentences; do not train the How2
+source transcripts into a model intended for any other track
+
+\subsection{\texorpdfstring{\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/}{ASL
+STEM Wiki} (Microsoft, Microsoft Research License
+Terms)}{ASL STEM Wiki (Microsoft, Microsoft Research License Terms)}}\label{asl-stem-wiki-microsoft-microsoft-research-license-terms}
+
+\textbf{Ruling:} Pending permission
+
+\textbf{Conditions:} Not permitted until Microsoft\textquotesingle s
+written confirmation is recorded in section 9; the terms forbid
+distributing modifications and require destruction after use, which the
+NC track does not satisfy on its own
+
+\subsection{2M-Flores-ASL, FSboard, Taskmaster-1 (UMI reference-model
+lineage)}\label{2m-flores-asl-fsboard-taskmaster-1-umi-reference-model-lineage}
+
+\textbf{Ruling:} Allowed
+
+\textbf{Conditions:} Attribute as the reference model\textquotesingle s
+NOTICE does; each is CC BY or CC BY-SA
+
+\subsection{UMI consented data}\label{umi-consented-data}
+
+\textbf{Ruling:} Allowed
+
+\textbf{Conditions:} Attribute as "UMI contributors"; no per-contributor
+identification; retain the actual consent conditions
+
+\subsection{ChicagoFSWild and
+ChicagoFSWild+}\label{chicagofswild-and-chicagofswild}
+
+\textbf{Ruling:} Operator-approved train splits only
+
+\textbf{Conditions:} Disclose use in PROVENANCE; never train on
+dev/test. Retain the actual publisher terms, including absence of an
+explicit license where applicable. This specific approval does not
+authorize other unlicensed sources or override a separate access
+contract
+
+A dataset not listed here is eligible if it falls in a "Yes" class above
+and you record its terms in your provenance declaration. If you are
+unsure which class applies, ask before training; rulings are added to
+this table as they are made.
+
+\section{4. How to license and label your
+bundle}\label{4-how-to-license-and-label-your-bundle}
+
+The bundle carries one license per component and a NOTICE file that lets
+anyone trace every source. A bundle label never widens the rights in the
+training data; it records the rights that exist.
+
+\subsection{NC-track weights, adapters, tokenizer and label
+vocabularies, portable
+bundle}\label{nc-track-weights-adapters-tokenizer-and-label-vocabularies-portable-bundle}
+
+\textbf{License:} CC BY-NC-SA 4.0
+
+\textbf{What the file must say:} \texttt{LICENSE-WEIGHTS} containing the
+CC BY-NC-SA 4.0 legal code or its URL; declared model identifier
+\texttt{CC-BY-NC-SA-4.0}
+
+\subsection{Permissive-track weights and portable
+bundle}\label{permissive-track-weights-and-portable-bundle}
+
+\textbf{License:} Existing compatible declared license
+
+\textbf{What the file must say:} Retain the original component licenses
+and notices; do not replace them with NC-SA merely because the cohort
+also accepts NC models
+
+\subsection{Your inference code and
+configs}\label{your-inference-code-and-configs}
+
+\textbf{License:} Apache-2.0 or MIT
+
+\textbf{What the file must say:} \texttt{LICENSE} for the code
+
+\subsection{UMI runtime and extractor code you
+redistribute}\label{umi-runtime-and-extractor-code-you-redistribute}
+
+\textbf{License:} Apache-2.0 (unchanged)
+
+\textbf{What the file must say:} UMI\textquotesingle s own
+\texttt{LICENSE} and \texttt{THIRD\_PARTY\_NOTICES} retained
+
+\subsection{Model card}\label{model-card}
+
+\textbf{License:} CC BY 4.0
+
+\textbf{What the file must say:} \texttt{MODEL\_CARD.md}
+
+\subsection{NOTICE}\label{notice}
+
+\textbf{License:} n/a
+
+\textbf{What the file must say:} \texttt{NOTICE} as specified below
+
+\textbf{The NOTICE file.} One entry per dataset, in this form, and one
+entry for any base checkpoint you fine-tuned:
+
+\begin{verbatim}
+SOURCE: How2Sign v1.0
+HOLDER: How2Sign consortium (Universitat Politècnica de Catalunya, Barcelona Supercomputing Center, Carnegie Mellon University, Gallaudet University)
+LICENSE: CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/
+URL: https://how2sign.github.io/
+CITE: Duarte et al., "How2Sign: A Large-scale Multimodal Dataset for Continuous American Sign Language," CVPR 2021
+USE: Training data for this model. The dataset itself is not redistributed. The model was trained in part on this source and is released under CC BY-NC-SA 4.0 under UMI's NC-track policy.
+REQUESTS: Research use; no redistribution of videos; no identification of signers.
+\end{verbatim}
+
+For FLEURS-ASL the entry names Google Research, CC BY-SA 4.0, the Kaggle
+URL, the NAACL 2025 paper, and reproduces the Responsible Use paragraph
+(blur faces when publicising examples; no reidentification; no
+deepfakes). For FLORES text used through FLEURS-ASL, name FLORES and CC
+BY-SA 4.0. For Wikipedia-derived text, name Wikipedia and CC BY-SA. For
+UMI consented data, name "UMI contributors" and the UMI contributor
+consent.
+
+\textbf{The model card} states the task, the architecture in one
+paragraph, every contributor-used training and evaluation dataset by
+name and version, each component\textquotesingle s license, any
+memorisation test result and its method, and the cohort and
+certification date when available. NC models additionally state: "This
+is a research model released under CC BY-NC-SA 4.0. It is not a product,
+not an interpreter, and not for commercial use." Permissive models state
+their actual license and intended-use limits instead. This declaration
+concerns the contributor\textquotesingle s own sources; it does not
+request or disclose UMI\textquotesingle s private challenge provenance.
+
+\textbf{Fine-tuning a certified checkpoint.} Any adaptation of a CC
+BY-NC-SA 4.0 cohort checkpoint must be released under CC BY-NC-SA 4.0,
+attribute the checkpoint and its cohort, and inherit its NOTICE entries
+in full.
+
+\section{5. What to submit with a
+model}\label{5-what-to-submit-with-a-model}
+
+For a new or replacement NC submission, include the records below in the
+authenticated bundle and accept the exact selected NC terms with fresh
+model-bound consent. Use the current structured provenance format and
+supported client linked after this list. Existing permissive submissions
+retain their original required format and reader; this revision does not
+impose a retrospective resubmission gate.
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Provenance declaration.} A \texttt{PROVENANCE.json} listing
+  every training, validation and test source and every inherited
+  checkpoint: name, version, canonical URL,
+  license (SPDX identifier where one exists), the route you downloaded
+  it by (direct link, Kaggle, Google Drive, mirror), the date, the
+  archive file names with SHA-256 hashes, and any terms you accepted to
+  obtain it (account terms of service, click-through, request form). A
+  dataset you cannot describe this way is not eligible.
+\item
+  \textbf{Rights warranty.} A signed statement that each listed dataset
+  falls within an applicable permitted license class or named source
+  ruling in section 3, or has the required rights-holder permission
+  recorded in section 9, that any accepted access terms are accurately
+  disclosed and any additional dataset contract has the required
+  recorded permission, that no training video, frame, landmark cache,
+  caption or sentence list is included in the bundle, and that you grant
+  UMI permission to evaluate, preserve, publish and use the exact
+  submission as a research baseline under CC BY-NC-SA 4.0 as specified
+  in the selected NC supplement. This replaces the original
+  commercial-use grant for that model only; permissive models retain
+  their original grants.
+\item
+  \textbf{Memorisation-test reporting.} The original review calls for a
+  regurgitation probe using held-out video from each training source,
+  with per-source verbatim-match rates and longest matched spans. The
+  review does not specify a numeric threshold. UMI must publish the
+  actual probe rule before claiming it is an enforced certification
+  gate. Report any completed probe and its method honestly; a
+  declaration or ordinary benchmark score does not establish that an
+  independent probe passed. This revision neither invents a threshold
+  nor retroactively changes signed scoring rules.
+\item
+  \textbf{Bundle inventory.} A file list with hashes, and a statement
+  that the bundle contains weights, code, configs, model card and
+  notices only.
+\item
+  \textbf{Destruction attestation}, where a dataset\textquotesingle s
+  terms require destruction after use: the date you deleted the dataset
+  and all derived files.
+\item
+  \textbf{NOTICE and model card} as section 4 specifies.
+\end{enumerate}
+
+UMI keeps the declaration, warranty, any test output and inventory with
+the certified checkpoint\textquotesingle s hash for as long as the
+checkpoint is published.
+
+\textbf{Supported submission path.} Use the
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/contributors/models.md}{model
+contribution guide},
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/model-training-provenance.md}{structured
+provenance format},
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/MODEL_CONTRIBUTION_TERMS_NC_V1.md}{NC
+supplement}, and
+\href{https://github.com/Umi-BitSign/umi/blob/main/docs/reference/commands.md\#optional-non-commercial-model-terms}{NC
+client commands}. Update the supported model client before making an NC
+submission; it does not update itself in the background. Authenticate
+the cohort\textquotesingle s selected model-license route, prepare the
+bundle, accept the exact terms hash, and sign both the submission and
+cohort consent. Retain all original artifacts and receipts. No action is
+required for an unchanged existing C7 submission.
+
+\section{6. Certification, awards, and what UMI does with certified
+models}\label{6-certification-awards-and-what-umi-does-with-certified-models}
+
+Both tracks recognize a public model under the same cohort scoring and
+allocation rules. The NC track additionally restricts
+UMI\textquotesingle s use to the research-model rights below; the
+permissive track retains its original contribution grant and compatible
+license.
+
+\textbf{Certification.} A cohort closes on its published date.
+Validators use the selected signed scoring and artifact-review rules for
+each complete submission, with sealed benchmark references and the
+applicable source declaration. Certified models are published with their
+actual license and retained notices. NC models carry the non-commercial
+condition; permissive models retain their original license. The
+memorisation-probe enforcement limit in section 5 remains explicit; this
+document does not claim a deployed probe that has no published rule.
+
+\textbf{Awards.} Incentive weights for a cohort go live only after its
+results are certified and remain live until the next cohort is
+certified. The award is for the certified public model; it is not a fee
+for serving inference, and NC models are not served by UMI or validators
+as a paid service. Public release under the selected model license and
+the applicable signed contribution terms is a condition of the award. On
+the NC track, this requires CC BY-NC-SA 4.0. A later cohort does not
+relicense a previously certified model; any withdrawal or violation is
+handled under the applicable signed terms.
+
+\textbf{What UMI does with certified models.} UMI stores, evaluates and
+publishes models, uses them as baselines and reference points, and cites
+research results under each model\textquotesingle s applicable grant.
+For NC models, UMI does not run paid inference, include or link them in
+an app, set them as defaults, document them for an app, or use them or
+their outputs to build or bootstrap a product model. The general-purpose
+runtime may load an NC model a user independently supplies, subject to
+that model\textquotesingle s license; UMI supplies no NC model or
+pointer through the app. Permissive models retain the uses supported by
+their existing licenses and original grants. Referencing a model as a
+baseline never changes its license.
+
+\textbf{Publicity.} Dataset videos and frames appear in UMI materials
+only where the dataset\textquotesingle s terms and the
+signers\textquotesingle{} consent allow it, with faces blurred where the
+dataset asks. NC-track models are described publicly as research models,
+never as product or app models. Describe permissive models consistently
+with their actual license and permitted use.
+
+\textbf{Takedown.} A rights holder or a signer who objects to a
+certified model may write to UMI; UMI will unpublish the checkpoint and
+stop using it as a baseline while the objection is reviewed, and will
+record the outcome in section 9.
+
+\section{7. Dataset terms on record}\label{7-dataset-terms-on-record}
+
+The table records the license text, access terms, signer consent and
+provenance of each dataset named in section 3, as read from the live
+pages and metadata. It is the reference for the rulings above and is
+updated when a rights holder\textquotesingle s reply is recorded in
+section 9.
+
+\subsection{\texorpdfstring{\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/}{ASL
+STEM Wiki}}{ASL STEM Wiki}}\label{asl-stem-wiki}
+
+\textbf{Rights holder and version:} Microsoft Corporation; v1.0,
+published 15 Oct 2024, ASL\_STEM\_Wiki.zip, 187.4 GB,
+\href{https://www.microsoft.com/en-us/download/details.aspx?id=106253}{Download
+Center}
+
+\textbf{License text in force:}
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/dataset-license/}{Microsoft
+Research License Terms}: use "solely for non-commercial, non-revenue
+generating, research purposes" (s.1); data may be used and modified only
+"consistent with the consent under which the data was provided" and "you
+may not distribute the data or your modifications to the data" (s.1(c));
+no sharing, publishing, distributing or hosting of the Materials
+(s.2(e)); personal data used only for consented purposes, kept in strict
+confidence, never shared, and destroyed "immediately upon the completion
+of your research" (s.3); results may be published if no material or
+substantial portion of the Materials is included (s.5); disputes by
+individual arbitration, King County WA venue (ss.9, 11)
+
+\textbf{Access and acquisition terms:} Direct zip download, no
+click-through on the download page; the project page points to the
+license tab and says commercial use requires contacting
+ASL\_\href{mailto:Citizen@microsoft.com}{\nolinkurl{Citizen@microsoft.com}}
+
+\textbf{Signer consent on record:}
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/consent-form/}{Consent
+form}: data used "primarily to perform research"; "may eventually be
+used to develop and improve our commercial products"
+(Microsoft\textquotesingle s); public dataset release "to help advance
+research"; license of image and likeness to Microsoft "for the research
+project above and in any related services"; collected under IRB
+approval; 37 paid professional interpreters, faces visible
+
+\textbf{Provenance notes:} 64,266 videos of 254 English Wikipedia STEM
+articles; the English text layer is Wikipedia content under CC BY-SA 3.0
+and GFDL
+(\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/datasheet/}{datasheet});
+datasheet says the data "should not be used to develop technology that
+purports to replace sign language interpreters"
+
+\subsection{\texorpdfstring{\href{https://how2sign.github.io/}{How2Sign}}{How2Sign}}\label{how2sign}
+
+\textbf{Rights holder and version:} How2Sign consortium (UPC, BSC, CMU,
+Gallaudet; "©Copyright How2Sign"); v1.0; ELRA catalogue entry ELRA-S0416
+available from 29 Sep 2022; CORA.RDR deposit
+\href{https://b2find.eudat.eu/dataset/99ba11b8-9428-5177-9e25-ccccc296e061}{doi:10.34810/data33}
+v1.0, 2024
+
+\textbf{License text in force:}
+\href{https://creativecommons.org/licenses/by-nc/4.0/}{CC BY-NC 4.0}:
+reproduction, sharing and Adapted Material "for NonCommercial purposes
+only" (s.2(a)(1)); NonCommercial means "not primarily intended for or
+directed towards commercial advantage or monetary compensation"
+(s.1(i)); attribution per s.3(a); rights terminate automatically on
+breach (s.6(a)); no restriction on uses lawful without permission
+(s.8(a)). Site adds: "publicly available for research purposes only" and
+"you may NOT use the material for commercial purposes"
+
+\textbf{Access and acquisition terms:} Google Drive links plus a GitHub
+download script; no click-through or request form on the site; ELRA
+lists the same CC-BY-NC-4.0 licence for academic and commercial users at
+EUR 0 (no commercial licence offered); the CORA.RDR deposit carries
+"custom dataset terms" behind a bot wall, not yet retrieved (section 9)
+
+\textbf{Signer consent on record:}
+\href{https://arxiv.org/pdf/2008.08143v2}{Paper s.3.5}: 11 signers (4
+Deaf, 2 hard of hearing, 5 hearing) signed a consent form "agreeing on
+being recorded and making their data publicly available for research
+purposes"; CMU IRB; faces visible
+
+\textbf{Provenance notes:} \textasciitilde80 hours of ASL translations
+of How2 instructional videos; English sentences come from the
+uploader-provided subtitle track of the How2 source videos; the site
+says "for copyright reasons, we are not allowed to redistribute the How2
+data"
+
+\subsection{\texorpdfstring{\href{https://www.kaggle.com/datasets/googleai/fleurs-asl}{FLEURS-ASL}}{FLEURS-ASL}}\label{fleurs-asl}
+
+\textbf{Rights holder and version:} Google Research; Kaggle dataset
+published 13 Aug 2024, last modified 29 Aug 2024, archive 24.79 GB;
+paper \href{https://aclanthology.org/2025.naacl-long.314/}{NAACL 2025}
+
+\textbf{License text in force:} CC BY-SA 4.0 (Kaggle Croissant metadata:
+license name "CC BY-SA 4.0", creativecommons.org/licenses/by-sa/4.0;
+paper footnote: released "under CC BY-SA 4.0"). Attribution per s.3(a);
+ShareAlike per s.3(b) applies to Adapted Material that is Shared; s.8(a)
+as above
+
+\textbf{Access and acquisition terms:} Kaggle account and Kaggle terms
+of service required to download; no dataset-specific click-through.
+Description adds non-binding "Responsible Use" requests: blur faces when
+publicizing examples, do not reidentify interpreters, do not use
+likenesses for deepfakes
+
+\textbf{Signer consent on record:} 5 paid Certified Deaf Interpreters;
+"all interpreters gave informed consent for the use of this data in
+machine learning" and to publication for ML research by the broader
+community; faces unblurred in the release
+
+\textbf{Provenance notes:} 7.49 hours, 1,749 sentences; the English
+layer is FLORES dev/devtest text (FLORES+ successor is
+\href{https://huggingface.co/datasets/openlanguagedata/flores_plus}{CC
+BY-SA 4.0}), which is why Google chose ShareAlike; the
+\href{https://huggingface.co/datasets/google/fleurs}{FLEURS} speech card
+says CC BY 4.0, an inconsistency that does not affect
+FLEURS-ASL\textquotesingle s own license
+
+\section{8. Legal basis}\label{8-legal-basis}
+
+For the NC track, UMI\textquotesingle s recorded legal position is that
+cohort training on NonCommercial datasets is a licensed non-commercial
+research use; that, independently, the training copies are fair use in
+the United States and text-and-data-mining in the EU; that trained
+weights are not a copy or adaptation of any dataset; and that deployment
+by users in a general-purpose runtime is the users\textquotesingle{} own
+licensed act. The position is stated under United States law as of 22
+October 2026, with EU and UK notes where the result differs, and rests
+on the authorities in the table that follows.
+
+\textbf{I. The NonCommercial test is use-based.} CC BY-NC 4.0 s.1(i)
+defines NonCommercial as "not primarily intended for or directed towards
+commercial advantage or monetary compensation." Creative
+Commons\textquotesingle{} interpretation guidance makes the test turn on
+the use rather than the user; \emph{Great Minds v. FedEx Office}, 886
+F.3d 91 (2d Cir. 2018), and \emph{Great Minds v. Office Depot} (9th Cir.
+2019) measure the licensee\textquotesingle s own use and disregard paid
+intermediaries; Creative Commons\textquotesingle{} guidance on AI
+training (28 May 2025) states that the license applies only where
+copyright permission is required, that NC is satisfied when each
+permission-requiring step is non-commercial, and that a model shared
+non-commercially complies. Section 8(a) of every CC 4.0 license confirms
+that the license imposes no condition on a use that is lawful without
+permission.
+
+\textbf{II. NC-track cohort training is a non-commercial research use.}
+The use on this track is the reproduction of a dataset to train a model
+whose required output is a public model released under CC BY-NC-SA 4.0,
+certified against a benchmark, with published results. The award is
+retroactive, bounded, and recognises a deliverable that already exists
+in public without any transfer or exclusivity, which is the structure of
+retroactive public-goods funding rather than a purchase. The
+miners\textquotesingle{} motives and compensation are outside the test
+for the same reason a researcher\textquotesingle s salary is. The output
+is shared on the terms the NC license itself prescribes for adaptations,
+and the licensor\textquotesingle s purposes in choosing NC, the
+prevention of appropriation, secrecy and commercial products, are served
+by the release. How2Sign\textquotesingle s "research purposes only"
+sentence sits on top of a CC BY-NC 4.0 grant with no assent mechanism
+and describes this outcome.
+
+\textbf{III. The training copies are independently lawful without any
+license.} Intermediate, non-expressive copying to build a functional
+tool is fair use under \emph{Sega v. Accolade} (9th Cir. 1992),
+\emph{Sony v. Connectix} (9th Cir. 2000), \emph{Authors Guild v. Google}
+(2d Cir. 2015) and \emph{Google v. Oracle} (2021), applied to model
+training in \emph{Bartz v. Anthropic} (N.D. Cal. 23 Jun 2025) and
+\emph{Kadrey v. Meta} (N.D. Cal. 25 Jun 2025). The works are thin
+(green-screen linguistic recordings; factual transcripts); the model
+does not substitute for a benchmark corpus; no commercial license is
+offered anywhere for the NC datasets, which the Copyright
+Office\textquotesingle s Part 3 report treats as weighing toward fair
+use; and a public NC release is nonprofit dissemination. \emph{Thomson
+Reuters v. Ross} (3d Cir. 29 Sep 2026) concerned a non-generative tool
+competing directly in a market where licensing was available and
+expressly reserved generative models. In the EU, Art. 4 of Directive
+2019/790 covers the training copies for lawfully accessible content not
+reserved by the rights holder, and Creative Commons\textquotesingle{}
+statement of 17 Dec 2021 confirms that CC licenses are not Art. 4
+reservations.
+
+\textbf{IV. Weights are not a copy or adaptation of the datasets.}
+\emph{Getty Images v. Stability AI} {[}2025{]} EWHC 2863 (Ch) holds that
+a model which stores no copy of the works is not an infringing copy, and
+the Copyright Office confines infringement by weights to retained,
+memorised protectable expression. A landmark-based model that emits
+short English strings retains no video expression; the proposed
+memorisation probe in section 5 is intended to assess this, subject to
+its explicit enforcement limits. Neither a benchmark score nor a license
+declaration proves that a checkpoint retains no protectable expression.
+On this recorded analysis, CC BY-NC-SA 4.0 is UMI\textquotesingle s
+policy choice for a model trained with permitted NC sources or derived
+from an NC checkpoint, rather than a blanket license for all cohort
+models. Permissive models retain their compatible licenses;
+FLEURS-ASL\textquotesingle s ShareAlike, which requires a BY-SA adapter
+license only for adaptations, is addressed by the confirmation UMI is
+seeking from Google Research (section 9).
+
+\textbf{V. Deployment by users is the users\textquotesingle{} licensed
+act.} For NC models, the UMI app acts as a general-purpose on-device
+runtime with substantial lawful uses and loads a model the user
+independently supplies; it ships with no NC model or pointer to one. A
+user who loads a CC BY-NC-SA 4.0 model for personal non-commercial use
+receives the license under s.2(a)(5) and makes a licensed use; absent
+direct infringement there is no secondary liability (\emph{Sony v.
+Universal}; \emph{MGM v. Grokster}), and general-purpose runtimes are
+lawful (\emph{Sony v. Connectix}; \emph{Sony v. Bleem}).
+UMI\textquotesingle s publication of the NC model is non-commercial, and
+section 6 keeps UMI pointers to NC models out of the app. Uses of
+permissive models remain governed by their original licenses and grants.
+
+\textbf{VI. Bespoke contracts are outside this basis.} Datasets governed
+by individual license agreements, such as ASL STEM Wiki under the
+Microsoft Research License Terms, impose obligations (no distribution of
+modifications, destruction after use, use within the data
+subjects\textquotesingle{} consent) that are contractual and do not turn
+on the analysis above. They are eligible only on the rights
+holder\textquotesingle s written permission.
+
+\textbf{Privacy and publicity.} The datasets show
+interpreters\textquotesingle{} faces. A text-output model stores no
+likeness and identifies no one; landmark extraction for translation is
+not biometric identification; in the EU the processing rests on
+legitimate interests under EDPB Opinion 28/2024; dataset videos are used
+in publicity only as section 6 allows.
+
+\textbf{Authorities.} Settled rules are the license texts and the cases
+construing them; the application of fair use, TDM exceptions and the
+status of weights to model training is still being decided, and the
+table records where each authority stood on 22 October 2026.
+
+\subsection{\texorpdfstring{\emph{Bartz v.
+Anthropic}}{Bartz v. Anthropic}}\label{bartz-v-anthropic}
+
+\textbf{Court and date:} N.D. Cal., 23 Jun 2025 (Alsup)
+
+\textbf{What it decided:} Training on lawfully acquired books is
+"exceedingly transformative" fair use; a permanent library of pirated
+copies is not
+
+\textbf{Status on 22 Oct 2026:} Class settlement (USD 1.5 bn) finally
+approved 20 Jul 2026; fair-use ruling never reviewed on appeal; only fee
+appeals pending in the Ninth Circuit
+
+\subsection{\texorpdfstring{\emph{Kadrey v.
+Meta}}{Kadrey v. Meta}}\label{kadrey-v-meta}
+
+\textbf{Court and date:} N.D. Cal., 25 Jun 2025 (Chhabria)
+
+\textbf{What it decided:} Training Llama held highly transformative;
+plaintiffs failed on market harm; market-dilution theory noted as the
+strongest unargued objection
+
+\textbf{Status on 22 Oct 2026:} Distribution claim set for hearing Feb
+2027; interlocutory appeal denied 8 Jul 2026
+
+\subsection{\texorpdfstring{\emph{Thomson Reuters v.
+Ross}}{Thomson Reuters v. Ross}}\label{thomson-reuters-v-ross}
+
+\textbf{Court and date:} 3d Cir., 29 Sep 2026 (precedential), affirming
+D. Del. 11 Feb 2025
+
+\textbf{What it decided:} Fair use rejected for a non-generative
+legal-research AI trained on headnotes: commercial, minimally
+transformative, harm to the licensing market for AI-training data;
+footnote expressly leaves generative AI open
+
+\textbf{Status on 22 Oct 2026:} Rehearing petition deadline extended to
+3 Nov 2026; cert petition signalled
+
+\subsection{US Copyright Office, Copyright and AI Part
+3}\label{us-copyright-office-copyright-and-ai-part-3}
+
+\textbf{Court and date:} Pre-publication report, 9 May 2025
+
+\textbf{What it decided:} Weights can infringe the reproduction and
+derivative-work rights where the model retains substantial protectable
+expression; copying weights infringes only with substantial similarity;
+commerciality turns on substance, not labels; where a licensing market
+exists unlicensed use is disfavored
+
+\textbf{Status on 22 Oct 2026:} Still pre-publication; final version
+promised without substantive change
+
+\subsection{\texorpdfstring{\emph{Getty Images v. Stability
+AI}}{Getty Images v. Stability AI}}\label{getty-images-v-stability-ai}
+
+\textbf{Court and date:} England and Wales High Court, {[}2025{]} EWHC
+2863 (Ch), 4 Nov 2025
+
+\textbf{What it decided:} A trained model that does not store or
+reproduce the works is not an "infringing copy" under CDPA s.27;
+secondary-infringement claim dismissed; primary training claims
+withdrawn because training happened outside the UK
+
+\textbf{Status on 22 Oct 2026:} Permission to appeal the s.27 point
+granted Dec 2025; Court of Appeal date not yet listed
+
+\subsection{\texorpdfstring{\emph{GEMA v.
+OpenAI}}{GEMA v. OpenAI}}\label{gema-v-openai}
+
+\textbf{Court and date:} Landgericht München I, 42 O 14139/24, 11 Nov
+2025
+
+\textbf{What it decided:} Lyrics memorised in model parameters are a
+reproduction; TDM exception covers training in general but not
+memorisation of specific works; outputs infringe
+
+\textbf{Status on 22 Oct 2026:} Appeal lodged Dec 2025 (OLG München 6 U
+3662/25 e), pending
+
+\subsection{\texorpdfstring{\emph{Kneschke v.
+LAION}}{Kneschke v. LAION}}\label{kneschke-v-laion}
+
+\textbf{Court and date:} LG Hamburg 27 Sep 2024; OLG Hamburg 10 Dec 2025
+
+\textbf{What it decided:} Downloading images to build a research dataset
+is TDM under §44b UrhG (Art. 4 DSM) and also §60d (Art. 3) because LAION
+is a non-commercial research organisation; a natural-language
+reservation was not shown to be machine-readable
+
+\textbf{Status on 22 Oct 2026:} BGH I ZR 281/25 heard 3 Sep 2026,
+decision due 17 Dec 2026, CJEU referral signalled
+
+\subsection{\texorpdfstring{\emph{Like Company v. Google},
+C-250/25}{Like Company v. Google, C-250/25}}\label{like-company-v-google-c-25025}
+
+\textbf{Court and date:} CJEU, referred Apr 2025, Grand Chamber hearing
+10 Mar 2026
+
+\textbf{What it decided:} Whether LLM training is a reproduction and
+whether Art. 4 TDM covers it
+
+\textbf{Status on 22 Oct 2026:} AG opinion not confirmed; judgment not
+expected before 2027
+
+\section{9. Pending confirmations}\label{9-pending-confirmations}
+
+UMI puts its characterisation to each rights holder in writing and
+records the reply here. A "Pending permission" ruling in section 3
+becomes "Allowed" or "Not permitted" when the corresponding line is
+updated.
+
+\subsection{\texorpdfstring{Microsoft (ASL STEM Wiki),
+ASL\_\href{mailto:Citizen@microsoft.com}{\nolinkurl{Citizen@microsoft.com}}}{Microsoft (ASL STEM Wiki), ASL\_Citizen@microsoft.com}}\label{microsoft-asl-stem-wiki-asl_citizenmicrosoftcom}
+
+\textbf{What UMI has asked:} Written confirmation that UMI cohort
+training on v1.0, with CC BY-NC-SA 4.0 public release of weights,
+destruction of the dataset and derived files after training, and no
+distribution of modifications, is within the Microsoft Research License
+Terms and the interpreter consent; or a variation permitting it
+
+\textbf{Status:} Request to be sent; ruling stays Pending permission
+until a reply is recorded
+
+\subsection{How2Sign consortium (UPC, BSC, CMU, Gallaudet), via the
+CORA.RDR contact and
+ELDA}\label{how2sign-consortium-upc-bsc-cmu-gallaudet-via-the-corardr-contact-and-elda}
+
+\textbf{What UMI has asked:} Notice of this policy and of
+UMI\textquotesingle s reading that cohort training with CC BY-NC-SA 4.0
+release is a non-commercial research use within CC BY-NC 4.0; request
+for the CORA.RDR custom dataset terms
+
+\textbf{Status:} Notice to be sent; ruling is Allowed with conditions
+and is not contingent on a reply
+
+\subsection{Google Research
+(FLEURS-ASL)}\label{google-research-fleurs-asl}
+
+\textbf{What UMI has asked:} Confirmation that release of a mixed model
+under CC BY-NC-SA 4.0 with attribution to FLEURS-ASL and FLORES is
+acceptable where ShareAlike would otherwise call for CC BY-SA 4.0
+
+\textbf{Status:} Request to be sent; ruling is Allowed and is not
+contingent on a reply
+
+\section{Sources}\label{sources}
+
+Dataset terms (opened 22 Oct 2026):
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/}{ASL
+STEM Wiki project page},
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/dataset-license/}{Microsoft
+Research License Terms},
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/datasheet/}{datasheet},
+\href{https://www.microsoft.com/en-us/research/project/asl-stem-wiki/consent-form/}{consent
+form},
+\href{https://www.microsoft.com/en-us/download/details.aspx?id=106253}{Download
+Center entry}; \href{https://how2sign.github.io/}{How2Sign site},
+\href{https://arxiv.org/pdf/2008.08143v2}{How2Sign paper},
+\href{http://catalog.elra.info/en-us/repository/browse/ELRA-S0416}{ELRA
+catalogue ELRA-S0416},
+\href{https://www.islrn.org/resources/583-408-694-292-6/}{ISLRN record},
+\href{https://b2find.eudat.eu/dataset/99ba11b8-9428-5177-9e25-ccccc296e061}{CORA.RDR
+record via B2FIND};
+\href{https://www.kaggle.com/datasets/googleai/fleurs-asl}{FLEURS-ASL on
+Kaggle} and its Croissant metadata,
+\href{https://aclanthology.org/2025.naacl-long.314.pdf}{FLEURS-ASL
+paper, NAACL 2025}, \href{https://arxiv.org/pdf/2408.13585}{arXiv
+version},
+\href{https://huggingface.co/datasets/openlanguagedata/flores_plus}{FLORES+
+card}, \href{https://huggingface.co/datasets/google/fleurs}{FLEURS
+card}; \href{https://github.com/Umi-BitSign/umi}{UMI subnet repo},
+\href{https://github.com/Umi-BitSign/umi-reference-model}{UMI reference
+model}.
+
+Licenses and Creative Commons:
+\href{https://creativecommons.org/licenses/by-nc/4.0/legalcode}{CC BY-NC
+4.0 legal code},
+\href{https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt}{CC
+BY-SA 4.0 legal code},
+\href{https://creativecommons.org/using-cc-licensed-works-for-ai-training-2/}{Using
+CC-licensed works for AI training} (28 May 2025),
+\href{https://creativecommons.org/faq/\#artificial-intelligence-and-cc-licenses}{CC
+FAQ on AI},
+\href{https://wiki.creativecommons.org/wiki/NonCommercial_interpretation}{NonCommercial
+interpretation},
+\href{https://creativecommons.org/2021/12/17/creative-commons-statement-on-cc-licenses-and-the-ext-and-data-mining-exception-under-article-4-eu-cdsm-directive/}{CC
+statement on Art. 4 opt-outs} (17 Dec 2021).
+
+Authorities: Bartz v. Anthropic, No. 24-cv-05417 (N.D. Cal. 23 Jun 2025;
+final settlement approval 20 Jul 2026); Kadrey v. Meta Platforms (N.D.
+Cal. 25 Jun 2025; §1292(b) denied 8 Jul 2026); Thomson Reuters v. Ross
+Intelligence, No. 25-2153 (3d Cir. 29 Sep 2026), affirming (D. Del. 11
+Feb 2025); US Copyright Office,
+\href{https://www.copyright.gov/ai/}{Copyright and Artificial
+Intelligence, Part 3} (pre-publication, 9 May 2025); Great Minds v.
+FedEx Office, 886 F.3d 91 (2d Cir. 2018); Great Minds v. Office Depot
+(9th Cir. 27 Dec 2019);
+\href{https://caselaw.findlaw.com/us-federal-circuit/1189790.html}{Jacobsen
+v. Katzer}, 535 F.3d 1373 (Fed. Cir. 2008); Zellmer v. Meta Platforms
+(9th Cir. 17 Jun 2024);
+\href{https://caselaw.nationalarchives.gov.uk/ewhc/ch/2025/2863}{Getty
+Images v. Stability AI, {[}2025{]} EWHC 2863 (Ch)} and
+\href{https://ipkitten.blogspot.com/2026/01/permission-to-appeal-granted-in-getty.html}{permission
+to appeal}; GEMA v. OpenAI, LG München I 42 O 14139/24 (11 Nov 2025),
+\href{https://urheber.info/diskurs/openai-legt-berufung-ein}{appeal
+lodged},
+\href{https://www.morganlewis.com/pubs/2026/06/ai-and-copyright-judicial-landscape-in-germany}{overview};
+Kneschke v. LAION,
+\href{https://www.bundesgerichtshof.de/SharedDocs/Pressemitteilungen/DE/2026/2026085.html}{BGH
+press release on the OLG Hamburg decision} and
+\href{https://www.bundesgerichtshof.de/SharedDocs/Termine/DE/Termine/IZR281-25.html}{hearing
+listing I ZR 281/25};
+\href{https://www.stephensonharwood.com/insights/cjeu-to-rule-on-ai-and-copyright-in-a-landmark-case-against-google/}{Like
+Company v. Google, C-250/25}; Directive 2019/790
+\href{https://www.legislation.gov.uk/eudr/2019/790/article/2/data.htm}{Art.
+2},
+\href{https://www.legislation.gov.uk/eudr/2019/790/article/3/data.htm}{Art.
+3},
+\href{https://www.legislation.gov.uk/eudr/2019/790/article/4/data.htm}{Art.
+4};
+\href{https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-53}{AI
+Act Art. 53};
+\href{https://assets.publishing.service.gov.uk/media/69ba692226909a14239612e4/CP2602959_-_Report_on_Copyright_and_Artificial_Intelligence_web.pdf}{UK
+Government Report on Copyright and AI, CP 2602959} (18 Mar 2026);
+\href{https://www.edpb.europa.eu/our-work-tools/our-documents/opinion-board-art-64/opinion-282024-certain-data-protection-aspects_en}{EDPB
+Opinion 28/2024}.
+
+\end{document}
