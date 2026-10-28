@@ -201,6 +201,47 @@ async def test_queue_progress_is_cached_while_selected_owner_is_running(monkeypa
     assert cancelled["stalled_or_retrying"] is True
 
 
+async def test_partial_item_progress_does_not_freshen_another_cohort(monkeypatch):
+    snapshots = CohortProgressSnapshots()
+    monkeypatch.setattr(module, "PUBLIC_COHORT_PROGRESS", snapshots)
+    entered, release, published, finish = (asyncio.Event() for _ in range(4))
+    owners = {c: Owner(c, []) for c in (A, B)}
+
+    async def partial_poll(*, report, **kwargs):
+        entered.set()
+        await release.wait()
+        report(
+            dict(
+                objects_total=3,
+                objects_classified=0,
+                objects_unclassified=3,
+                object_count_status="partial",
+                active_object_position=1,
+                active_object_stage="source_verification",
+                objects_retrying=0,
+            )
+        )
+        published.set()
+        await finish.wait()
+        return dict(objects_pending=1, objects_retrying=0)
+
+    owners[A].poll_once = partial_poll
+    manager = DirectModelUploadOwners(owners, priority_cohorts=(A, B))
+    task = asyncio.create_task(manager.poll_once())
+    try:
+        await entered.wait()
+        other = snapshots.entries[B]["direct_uploads"]
+        release.set()
+        await published.wait()
+        assert snapshots.entries[B]["direct_uploads"] == other
+        assert snapshots.snapshot(A)["components"]["direct_uploads"]["objects_total"] == 3
+        assert manager._reports == {}
+    finally:
+        release.set()
+        finish.set()
+        await task
+
+
 @pytest.mark.parametrize("priority", [(A, A), ("d" * 64,)])
 def test_invalid_priority_binding_is_rejected(priority):
     with pytest.raises(ValueError, match="priority"):

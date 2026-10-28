@@ -3713,19 +3713,37 @@ One batch remains the scheduling boundary; live verification is not interrupted.
 The bound is in dispatches, not seconds, because a full model read can be slow.
 
 The cache-only progress API's `direct_uploads` component exposes the selected
-cohort, completed owner polls, upload counts from the last observation and its
-`owner_report_observed_unix_ms`. `queue_wait_seconds` means time since service
+cohort and completed owner polls. The native owner publishes `objects_total`
+immediately after its existing bounded key enumeration, before any payload read.
+It updates the same snapshot while classifying entries; no second inventory or
+verification pass is needed. `object_count_status` distinguishes `partial`,
+`complete` and `interrupted` observations. `owner_report_observed_unix_ms` remains
+the time of the last completed poll, separate from the snapshot's observation time.
+`queue_wait_seconds` means time since service
 startup or that owner's last completed poll, not a miner's admission latency.
 Waiting time and active-poll elapsed time age without RPC or journal reads; queue
 ETA remains unknown. Scheduling hints restart as unknown, while the durable
 reservation cursor and completed verification/review receipts are reused.
 The `objects_total` denominator covers retained completed-upload objects, including
 replaced generations. `objects_ready`, `objects_pending`, `objects_retrying` and
-`objects_terminal` partition that inventory into ready verification/review,
-batch-deferred work, unresolved retries/repairs and terminal holds. These are not
+`objects_terminal` sum to `objects_classified`: ready verification/review,
+batch-deferred work, unresolved retries/repairs and terminal holds observed so far.
+`objects_unclassified` accounts for the rest, including the active object until
+its disposition is known. A completed poll has no unclassified remainder. These are not
 latest-per-hotkey or cutoff-eligible admission counts, and do not include incomplete
 multipart uploads. Unobserved counts are unknown; no overall completion percentage
 is inferred from them.
+`active_object_position` is one-based within the current rotated poll; it is not
+an admission rank or a promise of miner wait time. `active_object_sha256` identifies
+the retained reservation; `model_sha256` and `active_object_stage` identify its
+current work. Existing native transfer events are bound to that selected cohort,
+so `components.work` supplies measured bytes and the transfer's own ETA without
+polling a provider. Those transfer estimates do not become a whole-queue or
+certification ETA. An interrupted inventory remains explicitly partial diagnostic
+evidence; the scheduler consumes only completed native reports. On restart, the
+cache begins unknown and the same normal loop restores it. The separate
+`admission.accepted_uploads` field still comes from its native cutoff-eligible
+reservation drain snapshot, never from these completed-object counts.
 `last_retry_error_type` preserves the retry cause separately from a later terminal
 hold or cleanup diagnostic in `last_error_type`.
 

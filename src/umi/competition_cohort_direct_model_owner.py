@@ -11,6 +11,7 @@ verification remains required before model admission.
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import time
 from bisect import bisect_right
@@ -63,7 +64,11 @@ from .competition_cohort_model_static_review import (
 )
 from .competition_cohort_participation import CohortParticipationRequest
 from .competition_cohort_promotion_copy import verified_promotion_copy
-from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
+from .competition_cohort_public_progress import (
+    DIRECT_UPLOAD_PROGRESS_FIELDS,
+    PUBLIC_COHORT_PROGRESS,
+    PUBLIC_COHORT_SCOPE,
+)
 from .competition_cohort_recovery import ModelDeliveryProfile
 from .competition_model_review_file import reviewed_file_ready
 from .competition_remote_model_verification import require_remote_model_bytes, verify_remote_model
@@ -77,6 +82,9 @@ from .private_files import (
 )
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes, sha256_hex
 from .r2_multipart import R2MultipartClient, R2ObjectHead
+
+_LOG = logging.getLogger("umi.competition.progress")
+_OBJECT_COUNT_SCOPE = "retained_completed_upload_objects_including_replaced_generations"
 
 
 class DirectModelUploadPending(OSError):
@@ -182,6 +190,7 @@ class _DirectModelRejectedCleanupReceipt(StrictProtocolModel):
 Authorize = Callable[[CohortParticipationRequest], Awaitable[None]]
 Sign = Callable[[StrictProtocolModel], Awaitable[Signature]]
 AttemptId = Callable[[], str]
+PollReport = Callable[[dict[str, object]], None]
 
 
 def _at(unix_ms: int) -> datetime:
@@ -1519,13 +1528,17 @@ class DirectModelUploadOwner:
             hold = self.journal.get("direct-verification-hold", reservation_sha256, db=db)
         return verified, reservation, hold
 
-    async def poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
+    async def poll_once(
+        self, *, now_unix_ms: int, report: PollReport | None = None
+    ) -> dict[str, int | str]:
         """Advance bounded object verification without holding up public requests."""
 
         async with self._poll_mutex:
-            return await self._poll_once(now_unix_ms=now_unix_ms)
+            return await self._poll_once(now_unix_ms=now_unix_ms, report=report)
 
-    async def _poll_once(self, *, now_unix_ms: int) -> dict[str, int | str]:
+    async def _poll_once(
+        self, *, now_unix_ms: int, report: PollReport | None = None
+    ) -> dict[str, int | str]:
         _at(now_unix_ms)
         ready = pending = retrying = failed = reviews_ready = reviews_held = 0
         completed = terminal = 0
@@ -1533,14 +1546,46 @@ class DirectModelUploadOwner:
         last_error = last_retry_error = ""
         examined = 0
         keys = await run_owned_thread(self.journal.keys, "direct-object")
+
+        def publish(position=None, reservation=None, model=None, stage="metadata_inventory"):
+            if report is None:
+                return
+            # These are the existing loop's classified outcomes. The active
+            # item stays unclassified until its native disposition is known.
+            classified = completed + pending + retrying + terminal
+            report(
+                {
+                    "objects_ready": completed,
+                    "objects_pending": pending,
+                    "objects_retrying": retrying,
+                    "objects_terminal": terminal,
+                    "objects_total": len(keys),
+                    "objects_classified": classified,
+                    "objects_unclassified": len(keys) - classified,
+                    "object_count_status": "partial",
+                    "object_count_scope": _OBJECT_COUNT_SCOPE,
+                    "active_object_position": position,
+                    "active_object_position_scope": "current_rotated_owner_poll_not_admission_rank",
+                    "active_object_sha256": reservation,
+                    "model_sha256": model,
+                    "active_object_stage": stage,
+                    "last_retry_error_type": last_retry_error,
+                }
+            )
+
+        # The denominator is already known. Do not wait for a payload stream
+        # or enumerate the same journal again to make it observable.
+        publish()
         after = await run_owned_thread(self.journal.poll_cursor)
         split = bisect_right(keys, after)
         keys = keys[split:] + keys[:split]
-        for reservation_sha256 in keys:
+        for position, reservation_sha256 in enumerate(keys, 1):
+            publish(position, reservation_sha256)
             verified, reservation, verification_hold = await run_owned_thread(
                 self._poll_input, reservation_sha256
             )
             model_sha256 = reservation.reservation.payload.model_sha256
+            publish(position, reservation_sha256, model_sha256)
             reviewed = self.config.standing_review_policy is None
             if self.config.admission_reviews_directory is not None:
                 try:
@@ -1629,6 +1674,7 @@ class DirectModelUploadOwner:
             await run_owned_thread(self.journal.advance_poll_cursor, reservation_sha256)
             if not verified:
                 try:
+                    publish(position, reservation_sha256, model_sha256, "source_verification")
                     await self.verify(reservation_sha256, now_unix_ms=now_unix_ms)
                     ready += 1
                 except ValueError:
@@ -1662,6 +1708,7 @@ class DirectModelUploadOwner:
                     last_error = last_retry_error = type(error).__name__
                     continue
             try:
+                publish(position, reservation_sha256, model_sha256, "static_review")
                 if await self.review(reservation_sha256, now_unix_ms=now_unix_ms) is not None:
                     reviews_ready += 1
                 completed += 1
@@ -1713,7 +1760,7 @@ class DirectModelUploadOwner:
                 failed += 1
                 retrying += 1
                 last_error = last_retry_error = type(error).__name__
-        return {
+        result = {
             "status": "direct_model_upload_poll",
             "objects_verified": ready,
             "objects_pending": pending,
@@ -1721,9 +1768,10 @@ class DirectModelUploadOwner:
             "objects_ready": completed,
             "objects_terminal": terminal,
             "objects_total": len(keys),
-            "object_count_scope": (
-                "retained_completed_upload_objects_including_replaced_generations"
-            ),
+            "objects_classified": completed + pending + retrying + terminal,
+            "objects_unclassified": 0,
+            "object_count_status": "complete",
+            "object_count_scope": _OBJECT_COUNT_SCOPE,
             "objects_attempted": examined,
             "objects_failed": failed,
             "reviews_ready": reviews_ready,
@@ -1734,6 +1782,9 @@ class DirectModelUploadOwner:
             "last_retry_error_type": last_retry_error,
             **await run_owned_thread(self.journal.metadata_snapshot),
         }
+        if report is not None:
+            report(result)
+        return result
 
 
 class DirectModelUploadOwners:
@@ -1766,6 +1817,8 @@ class DirectModelUploadOwners:
         self._priority_polls = 0
         self._background_next = 0
         self._reports = {}
+        # Diagnostic partial snapshots never become scheduler completion facts.
+        self._progress_reports = {}
         self._report_observed_unix_ms = {}
         self._errors = {}
         started = time.monotonic()
@@ -1800,10 +1853,12 @@ class DirectModelUploadOwners:
         self._priority_polls = 0
         return selected, "rotating_background"
 
-    def _publish_scheduling(self, selected=None, started=None):
+    def _publish_scheduling(self, selected=None, started=None, *, only=None):
         now = time.monotonic()
-        for cohort in self.owners:
+        for cohort in self.owners if only is None else (only,):
             report = self._reports.get(cohort)
+            progress = self._progress_reports.get(cohort)
+            visible = progress if progress is not None else report
             PUBLIC_COHORT_PROGRESS.record(
                 "direct_uploads",
                 {
@@ -1823,15 +1878,8 @@ class DirectModelUploadOwners:
                     "total": None,
                     "unit": "owner_polls",
                     **{
-                        field: None if report is None else report.get(field)
-                        for field in (
-                            "objects_pending",
-                            "objects_retrying",
-                            "objects_ready",
-                            "objects_terminal",
-                            "objects_total",
-                            "object_count_scope",
-                        )
+                        field: None if visible is None else visible.get(field)
+                        for field in DIRECT_UPLOAD_PROGRESS_FIELDS
                     },
                     "owner_report_observed_unix_ms": self._report_observed_unix_ms.get(cohort),
                     "elapsed_seconds": round(now - started, 3) if cohort == selected else 0,
@@ -1839,12 +1887,12 @@ class DirectModelUploadOwners:
                     "eta_basis": "owner_poll_duration_and_new_uploads_unknown",
                     "eta_scope": "direct_upload_cohort_queue",
                     "stalled_or_retrying": bool(
-                        self._errors.get(cohort) or (report and report["objects_retrying"])
+                        self._errors.get(cohort) or (visible and visible.get("objects_retrying"))
                     ),
                     "error_type": self._errors.get(cohort)
                     or (
-                        report.get("last_retry_error_type")
-                        if report and report["objects_retrying"]
+                        visible.get("last_retry_error_type")
+                        if visible and visible.get("objects_retrying")
                         else None
                     ),
                 },
@@ -1894,10 +1942,30 @@ class DirectModelUploadOwners:
             cohort, scope = self._select()
             started = time.monotonic()
             waited = round(max(0, started - self._waiting_since[cohort]), 3)
+            self._progress_reports.pop(cohort, None)
             self._publish_scheduling(cohort, started)
+
+            def publish_progress(value):
+                self._progress_reports[cohort] = dict(value)
+                # Current item progress must not refresh unrelated owners'
+                # cached observations or repeat their bookkeeping.
+                self._publish_scheduling(cohort, started, only=cohort)
+                if (
+                    value.get("active_object_position") is None
+                    or value.get("active_object_stage") != "metadata_inventory"
+                ):
+                    _LOG.info(
+                        "direct_model_upload_inventory %s",
+                        canonical_json_bytes({"cohort_sha256": cohort, **value}).decode("ascii"),
+                    )
+
+            token = PUBLIC_COHORT_SCOPE.set(cohort)
             try:
-                report = await self.owners[cohort].poll_once(now_unix_ms=current)
+                report = await self.owners[cohort].poll_once(
+                    now_unix_ms=current, report=publish_progress
+                )
                 self._reports[cohort] = report
+                self._progress_reports.pop(cohort, None)
                 self._report_observed_unix_ms[cohort] = time.time_ns() // 1_000_000
                 self._polls_completed[cohort] += 1
                 self._waiting_since[cohort] = time.monotonic()
@@ -1908,8 +1976,13 @@ class DirectModelUploadOwners:
                 self._reports.pop(cohort, None)
                 self._report_observed_unix_ms.pop(cohort, None)
                 self._errors[cohort] = type(error).__name__
+                if cohort in self._progress_reports:
+                    self._progress_reports[cohort].update(
+                        object_count_status="interrupted", active_object_stage="interrupted"
+                    )
                 raise
             finally:
+                PUBLIC_COHORT_SCOPE.reset(token)
                 self._publish_scheduling()
             return {
                 "status": "direct_model_upload_owners_polled",
