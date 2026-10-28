@@ -31,9 +31,15 @@ async def test_R2_only_roundtrip_repeat_and_native_consumer(backup, tmp_path):
     assert [path for method, path in server.calls if method == "PUT"][-1].endswith(
         remote.snapshot_sha256 + ".json"
     )
+    retained = dict(server.objects)
     server.calls.clear()
     assert replicate_portable_snapshot(local, server.client(), "byte-results/v1/") == remote
-    assert not any(method == "PUT" for method, _ in server.calls)
+    assert server.objects == retained
+    assert all(
+        len(retained[path.removeprefix("/umi-proof-artifacts/")]) <= 4096
+        for method, path in server.calls
+        if method == "PUT"
+    )
     shutil.rmtree(original.root)
     shutil.rmtree(Path(local.directory))
     server.calls.clear()

@@ -635,7 +635,7 @@
     "public_pilot_github_wire.py": "c557921592999c4798df62620ee320b63f6c9558717eb89600b7075229bcece3",
     "public_pilot_upload.py": "9dcd597d1ba604ee2c8202540a8fad922cf1a44fe7a9591ff1076f4138bff465",
     "r2_connection_pool.py": "8a5e00680dca2136b9373207f36e7915899c3b8fb82d116c226b1347dc3c01eb",
-    "r2_evidence.py": "2c15ea9ee77d376ac859a1525802a79cb362c6ec940ce7dcca0b5873c2a18cbe",
+    "r2_evidence.py": "8d80dbb282f772600862eae125f8ba3b704f3ed3cb6632c53929a96092ac6a0b",
     "r2_limits.py": "64588dde9a472c3a7387f1239e25fcd089e5ff6d239aae78ca7231a2571ada2a",
     "r2_metadata_batch.py": "5338c07ba5aca9df3eab32d8f4baa18189722832bbf875a3e26e7be8934c8a6b",
     "r2_multipart.py": "830e2e529f0bfb3f65c50b8ad136ad5706f59d121723374c6b945c7f9e8ef8e1",

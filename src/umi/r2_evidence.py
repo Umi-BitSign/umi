@@ -17,6 +17,10 @@ import httpx
 
 from .r2_sigv4 import R2SigV4
 
+# Bound the retry body cost when a prior successful PUT lost its acknowledgement.
+# Larger objects keep the HEAD-first path so recovery never resends their bytes.
+_PUT_FIRST_MAX_BYTES = 4 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceObjectHead:
@@ -138,11 +142,12 @@ class R2EvidenceClient:
     def _publish(self, key: str, raw: bytes, sha256: str) -> EvidenceObjectHead:
         md5 = hashlib.md5(raw, usedforsecurity=False).digest()
         expected = EvidenceObjectHead(len(raw), md5.hex(), sha256)
-        retained = self.head(key)
-        if retained is not None:
-            if retained != expected:
-                raise ValueError("immutable R2 evidence object conflicts with publication")
-            return retained
+        if len(raw) > _PUT_FIRST_MAX_BYTES:
+            retained = self.head(key)
+            if retained is not None:
+                if retained != expected:
+                    raise ValueError("immutable R2 evidence object conflicts with publication")
+                return retained
         # A simultaneous publisher cannot replace another original. The same
         # conditional request is safe after an unacknowledged successful PUT.
         status, headers, _ = self._exchange(
@@ -168,6 +173,8 @@ class R2EvidenceClient:
             return expected
         retained = self.head(key)
         if retained != expected:
+            if status == 412:
+                raise ValueError("immutable R2 evidence object conflicts with publication")
             raise ValueError("R2 evidence publication acknowledgement differs")
         return retained
 

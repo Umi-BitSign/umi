@@ -68,7 +68,8 @@ def test_gateway_client_channel_and_immutable_retry_consumer():
     store.publish_approval(approval, b"signed approval")
     with pytest.raises(ValueError, match="immutable"):
         store.publish_approval(approval, b"changed")
-    assert sum(r.method == "PUT" and r.url.path[1:] == approval for r in requests) == 1
+    assert sum(r.method == "PUT" and r.url.path[1:] == approval for r in requests) == 3
+    assert objects[approval][0] == b"signed approval"
 
 
 @pytest.mark.parametrize(

@@ -84,7 +84,7 @@ def test_publication_reuses_one_client_and_closes_on_failure(transport):
         assert len(clients) == 1 and not clients[0].is_closed
         raise RuntimeError("interrupted frame")
     assert clients[0].is_closed
-    assert [method for _, method in requests] == ["HEAD", "PUT", "GET"]
+    assert [method for _, method in requests] == ["PUT", "GET"]
     assert client.publish("first", raw, sha) == head
     assert len(clients) == 2 and clients[1].is_closed
     # Scope lifetime never changes immutable conflict or response checking.
