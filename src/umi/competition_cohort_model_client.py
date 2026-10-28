@@ -18,6 +18,7 @@ from .competition_artifacts import _artifact, _directory
 from .competition_client import (
     MAX_SUBMISSION_BYTES,
     CompetitionSubmissionError,
+    intake_rejection,
     validate_intake_origin,
 )
 from .competition_cohort_client import submit_cohort_participation
@@ -198,9 +199,7 @@ async def _exchange(
     async def send():
         async with client.stream(method, path, content=body, headers=headers) as response:
             if response.status_code != 200:
-                raise CompetitionSubmissionError(
-                    "model_upload_rejected", status_code=response.status_code
-                )
+                raise intake_rejection(response, "model_upload_rejected")
             if (
                 response.headers.get("content-type", "").split(";", 1)[0].strip()
                 != "application/json"

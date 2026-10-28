@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
-from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_intake import CohortAdmissionClosed, CohortIntake, history_tip
 from .competition_cohort_intake_records import read_participation
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
 from .competition_cohort_participation_status import participation_status
@@ -158,7 +158,11 @@ def cohort_routes(
     async def progress(cohort: str, response: Response):
         allowed(cohort)
         response.headers["Cache-Control"] = "no-store"
-        return PUBLIC_COHORT_PROGRESS.snapshot(cohort)
+        value = PUBLIC_COHORT_PROGRESS.snapshot(cohort)
+        admission = intake.admission_status(cohort)
+        if admission is not None:
+            value["admission"] = admission
+        return value
 
     @router.get("/v1/competition/cohorts/{cohort}/admissions/{consent}")
     async def admission(cohort: str, consent: str):
@@ -272,7 +276,20 @@ def cohort_routes(
         try:
             if models is not None:
                 await run_owned_thread(models.require_payload, signed)
-            receipt = await run_owned_thread(intake.retain, signed, current)
+            receipt = await run_owned_thread(
+                partial(
+                    intake.retain,
+                    signed,
+                    current,
+                    reservation_provider=getattr(models, "admission_reservation", None),
+                )
+            )
+        except CohortAdmissionClosed as error:
+            raise HTTPException(
+                409,
+                "cohort intake is closed for new submissions",
+                headers={"X-UMI-Reason-Code": "cohort_intake_closed"},
+            ) from error
         except (AdmissionCapacityError, OSError, sqlite3.Error) as error:
             raise HTTPException(503, "cohort intake unavailable; retry unchanged") from error
         except ValueError as error:

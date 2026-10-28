@@ -264,6 +264,152 @@ async def test_reservation_is_durable_idempotent_and_capabilities_are_transient(
 
 
 @pytest.mark.asyncio
+async def test_deadline_preserves_exact_retry_restart_and_original_admission_proof(direct):
+    from umi.competition_cohort_intake import CohortIntakeFenced
+
+    deadline = 1_800_000_001_000
+    now = deadline - 1
+    calls = []
+
+    async def authorize(request):
+        calls.append(request)
+        if now >= deadline:
+            raise CohortIntakeFenced("operator deadline")
+
+    direct.owner.authorize = authorize
+    original = await direct.owner.reserve(direct.request, direct.payload, now_unix_ms=now)
+    now = deadline + 1
+    assert await direct.owner.reserve(direct.request, direct.payload, now_unix_ms=now) == original
+    assert len(calls) == 1
+
+    sub = direct.request.signed_submission.submission.model_copy(update={"sequence": 2})
+    signed = type(direct.request.signed_submission)(
+        submission=sub, signature=sign_object(sub, wallet("Alice"))
+    )
+    consent = direct.request.consent.consent.model_copy(update={"submission_sha256": digest(sub)})
+    replacement = type(direct.request)(
+        signed_submission=signed,
+        consent=type(direct.request.consent)(
+            consent=consent, signature=sign_object(consent, wallet("Alice"))
+        ),
+    )
+    payload = direct.payload.payload.model_copy(update={"upload_sha256": digest(replacement)})
+    signed_payload = type(direct.payload)(
+        schema=direct.payload.schema_,
+        payload=payload,
+        signature=sign_object(payload, wallet("Alice")),
+    )
+    with pytest.raises(CohortIntakeFenced, match="operator deadline"):
+        await direct.owner.reserve(replacement, signed_payload, now_unix_ms=now)
+    assert len(direct.multipart.create_calls) == 1
+
+    direct.multipart.multipart_uploads.clear()
+    now += direct.owner.config.attempt_lease_seconds * 1000
+    request = DirectModelUploadRestartRequest(
+        schema="umi-direct-model-upload-restart-request/1",
+        reservation_sha256=digest(original.reservation),
+        generation=1,
+        reason_code="provider_upload_unavailable",
+    )
+    restart = SignedDirectModelUploadRestartRequest(
+        schema="umi-signed-direct-model-upload-restart-request/1",
+        request=request,
+        signature=sign_object(request, wallet("Alice")),
+    )
+    successor = await direct.owner.restart(restart, now_unix_ms=now)
+    assert successor.reservation.generation == 2
+    assert successor.reservation.created_at_unix_ms >= deadline
+    assert direct.owner.admission_reservation(direct.request) == original
+    restarted = DirectModelUploadOwner(
+        direct.owner.config,
+        direct.multipart,
+        authorize=authorize,
+        sign=direct.owner.sign,
+    )
+    assert restarted.admission_reservation(direct.request) == original
+    completed = await restarted.complete(
+        signed_completion(successor, direct.payload.payload), now_unix_ms=now + 1
+    )
+    assert completed.reservation_sha256 == digest(successor.reservation)
+    assert restarted.admission_reservation(direct.request) == original
+
+
+@pytest.mark.asyncio
+async def test_deadline_http_rejects_new_reservation_but_exact_retry_remains_200(direct):
+    from umi.competition_cohort_intake import CohortAdmissionClosed
+
+    closed = True
+
+    async def authorize(request):
+        if closed:
+            raise CohortAdmissionClosed("operator deadline")
+
+    direct.owner.authorize = authorize
+    app = FastAPI()
+    app.include_router(
+        direct_model_upload_routes(direct.owner, now_unix_ms=lambda: 1_800_000_000_000)
+    )
+    body = DirectModelUploadReservationRequest(
+        schema="umi-direct-model-upload-reservation-request/1",
+        request=direct.request,
+        payload=direct.payload,
+    )
+    path = f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/direct-model-uploads"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://intake.test"
+    ) as client:
+        response = await client.post(
+            path, content=canonical_json_bytes(body), headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 409
+        assert response.headers["X-UMI-Reason-Code"] == "cohort_intake_closed"
+        assert direct.multipart.create_calls == []
+        closed = False
+        accepted = await client.post(
+            path, content=canonical_json_bytes(body), headers={"Content-Type": "application/json"}
+        )
+        assert accepted.status_code == 200
+        closed = True
+        retry = await client.post(
+            path, content=canonical_json_bytes(body), headers={"Content-Type": "application/json"}
+        )
+        assert retry.status_code == 200
+        assert retry.json() == accepted.json()
+
+
+@pytest.mark.asyncio
+async def test_deadline_by_upload_status_recovers_reservation_without_verification(
+    direct, monkeypatch
+):
+    reservation = await direct.owner.reserve(
+        direct.request, direct.payload, now_unix_ms=1_800_000_000_000
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("read-only upload lookup attempted payload work")
+
+    monkeypatch.setattr(direct.owner, "verify", forbidden)
+    monkeypatch.setattr(direct.multipart, "read_range", forbidden)
+    expected = direct.owner.status(digest(reservation.reservation))
+    assert direct.owner.status_by_upload(digest(direct.request)) == expected
+    app = FastAPI()
+    app.include_router(direct_model_upload_routes(direct.owner))
+    path = (
+        f"/v1/competition/cohorts/{direct.owner.config.cohort_sha256}/"
+        "direct-model-uploads/by-upload/"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://intake.test"
+    ) as client:
+        response = await client.get(path + digest(direct.request))
+        assert response.status_code == 200
+        assert response.json() == expected.model_dump(mode="json", by_alias=True)
+        absent = await client.get(path + "ff" * 32)
+        assert absent.status_code == 404
+    assert direct.multipart.read_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_reservation_retry_does_not_scan_other_upload_attempts(direct, monkeypatch):
     signed = await direct.owner.reserve(
         direct.request, direct.payload, now_unix_ms=1_800_000_000_000

@@ -585,6 +585,49 @@ selects the admission owner's source through its supported service handoff; it
 changes no miner upload, reviewer attestation or signed execution format. Rebind
 an armed timed cohort transition to the installed owner source before rearming it.
 
+An announced intake deadline is separate from roster sealing. Configure the
+same `admission_deadlines` selection in every `CohortIntakeConfig` owned by the
+host (public intake, lifecycle input source and order queue). Each selection uses
+`umi-cohort-operator-admission-deadline/1`, the cohort and authority hashes,
+`authorized_history_tip_sha256`, `close_new_admissions_at_unix_ms`, the retained
+operator message `source_sha256`, immutable `operator_plan_sha256`, and reason.
+Use the existing root-owned host configuration and immutable operator decision;
+this local scheduling choice does not need another signing round and does not
+change signed phase targets, coverage or certificate authority. The owner
+retains it separately from the original intake binding. Removing the config
+entry or restarting cannot reopen the retained deadline; changing it is refused.
+
+At the deadline, new upload reservations and unreserved participation return
+HTTP 409 with `X-UMI-Reason-Code: cohort_intake_closed`. Exact existing receipts,
+reservations, parts, completion and signed provider restarts remain usable.
+An upload accepted by an older release can finish preservation and submit its
+first participation after the deadline using its original owner-signed
+reservation; do not replace its signed request. Where a temporary ingress stop
+was applied slightly after the announced time, retain the real applied receipt
+and configure its `legacy_reservations_before_unix_ms` together with
+`ingress_cutoff_receipt_sha256`. This admits only those earlier accepted
+reservations and never moves the deadline for new reservations.
+
+The native owner waits for the accepted pre-deadline reservation inventory to
+finish participation before freezing the roster, in addition to the existing
+model certification checks. An unfinished upload remains visible; elapsed time
+alone is not terminal evidence. Already replaced earlier sequences and retained
+terminal verification/review failures do not hold the latest roster forever.
+`GET /v1/competition/cohorts/<cohort>/progress` includes a cached `admission`
+view with the deadline, whether new admissions are open, and accepted-upload
+progress. Service availability remains separate: the owner must stay available
+to finish accepted uploads while sealing is pending. No polling request starts
+verification, RPC, hashing or database replay.
+
+For a miner who retained only its upload digest, use
+`GET /v1/competition/cohorts/<cohort>/direct-model-uploads/by-upload/<upload_sha256>`.
+It returns the existing typed upload status and latest signed reservation using
+bounded owner metadata, or 404 for an unknown upload. Publish this additive
+read-only route through the existing authenticated origin. Source maintenance
+must update the selected intake owner and dependent Python readers through the
+supported handoff, then verify late unchanged completion and the public status.
+Do not claim adoption from a source commit alone.
+
 Paid scheduling pages omit work with a retained terminal before reconstructing
 its admission. This presence check only avoids redispatch: full queue reads,
 sealing, terminal verification and interrupted-export recovery still authenticate

@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from .competition_artifacts import _artifact, _directory
-from .competition_client import MAX_SUBMISSION_BYTES, CompetitionSubmissionError
+from .competition_client import MAX_SUBMISSION_BYTES, CompetitionSubmissionError, intake_rejection
 from .competition_cohort_direct_model_upload import (
     DirectModelPayload,
     DirectModelUploadCompletion,
@@ -148,9 +148,7 @@ async def _json_exchange(
                     == "model_upload_provider_generation_unavailable"
                 ):
                     raise _ProviderGenerationUnavailable
-                raise CompetitionSubmissionError(
-                    "model_upload_rejected", status_code=response.status_code
-                )
+                raise intake_rejection(response, "model_upload_rejected")
             if (
                 response.headers.get("content-type", "").split(";", 1)[0].strip()
                 != "application/json"

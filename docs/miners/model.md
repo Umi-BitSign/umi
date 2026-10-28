@@ -189,6 +189,22 @@ short-lived, exact-part R2 capabilities from intake and sends model bytes
 directly to the cohort's private object store; intake receives signed metadata,
 part ETags and the original consent rather than the payload bytes.
 Progress goes to stderr; stdout contains the pending-attestation receipt.
+When an announced intake deadline passes, new submissions and replacements are
+closed. An upload already reserved before the cutoff can still finish transfer,
+preservation and its first participation request afterward. Keep retrying that
+same signed request and model; do not generate a replacement just because
+preservation is pending. HTTP 409 with `X-UMI-Reason-Code: cohort_intake_closed`
+means a new request is outside intake. Existing reservations, completion and
+provider-generation recovery continue independently of that deadline.
+
+If only the upload digest is available, fetch
+`/v1/competition/cohorts/<cohort>/direct-model-uploads/by-upload/<upload_sha256>`
+from the intake API. The returned status contains the latest signed reservation,
+`object_complete`, `payload_verified`, and any retained failure reason. An object
+being complete does not mean its preservation/review or participation is
+finished. The cohort `/progress` response distinguishes new-admission closure
+from the accepted uploads and model certifications still draining.
+
 Interrupted connections, throttling and temporary server failures retry
 automatically. After stopping the command or restarting the machine, rerun it
 with the same request, source files and hotkey. Legacy delivery resumes retained
