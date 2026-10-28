@@ -1701,6 +1701,8 @@ queue cover older compatible writers, including new rowids below the scan cursor
 Ordinary writes validate only additions and keep the original SQL capacity
 arithmetic, signed allowances, `user_version=2` and `application_id=0`. The small
 checkpoint tables and installation record are charged to the existing limits.
+Validation counts follow SQLite's integer range; each journal keeps its own
+native capacity limit, including the larger lifetime service-review envelope.
 
 Public reservation receipts use a nonblocking mutable preflight to retain pending
 successes. When another writer is active or inserts after that preflight, a

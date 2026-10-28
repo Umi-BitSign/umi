@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -272,3 +273,53 @@ def test_invalid_legacy_allowance_is_not_checkpointed(tmp_path):
         RoundJournal(journal.root, {}, maximum_rounds=32)
     with sqlite3.connect(journal.path) as db:
         assert not checkpoint.installed(db)
+
+
+class AggregateCountSnapshot:
+    """Scale only aggregate results, keeping real native schema/binding checks.
+
+    A reviewer may have millions of lifetime obligations. Materializing that
+    history in a regression would test SQLite bulk insertion instead of the
+    checkpoint's compatibility with its supported count envelope.
+    """
+
+    def __init__(self, db, count):
+        self.db, self.count = db, count
+
+    def execute(self, sql, *args):
+        if sql == f"SELECT * FROM {checkpoint.STATE} LIMIT 2":
+            state = list(self.db.execute(sql, *args).fetchone())
+            state[5] = state[6] = self.count
+            return SimpleNamespace(fetchall=lambda: [tuple(state)])
+        if sql == "SELECT COUNT(*) FROM record_reservations":
+            return SimpleNamespace(fetchone=lambda: (self.count,))
+        return self.db.execute(sql, *args)
+
+
+@pytest.mark.parametrize("count", [65536 * 80 + 1, 2**53 - 1, 2**63 - 1])
+def test_checkpoint_count_integrity_does_not_shorten_service_review_envelope(
+    tmp_path, monkeypatch, count
+):
+    from umi.competition_cohort_service_review import _ServiceReviewJournal
+
+    journal = _ServiceReviewJournal(tmp_path / "reviewer", {}, maximum_rounds=1)
+    journal.reserve_records("batch", (RecordReservation("vote", "initial", 64),))
+    assert journal.maximum_records > 65536 * 80
+    seen = counter(monkeypatch)
+    with journal.read_transaction() as db:
+        projected = AggregateCountSnapshot(db, count)
+        state = checkpoint.check(journal, projected)
+        assert state[5:7] == (count, count)
+        assert checkpoint.advance(journal, projected, "", readonly=True)
+    assert seen == []
+
+
+@pytest.mark.parametrize("count", [-1, 2**63, True, 1.0])
+def test_checkpoint_still_refuses_invalid_count_integrity(tmp_path, count):
+    journal = RoundJournal(tmp_path / "journal", {})
+    journal.reserve_records("batch", ())
+    with journal.read_transaction() as db, pytest.raises(
+        checkpoint.ReservationValidationRepairRequired,
+        match="checkpoint or validation dependency changed",
+    ):
+        checkpoint.check(journal, AggregateCountSnapshot(db, count))
