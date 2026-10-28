@@ -1186,6 +1186,13 @@ bytes, owner binding and journal inode stay intact. Old runtimes and reservation
 layout changes refuse this capability; keep its completed ledger with the index.
 A missing receipt is damaged completed state, not permission to import it again.
 
+A successful single-part conditional PUT with the exact expected ETag completes
+publication without another HEAD. Its Content-MD5 and signed SHA metadata bind
+the original payload. A 412 response or missing ETag still requires exact HEAD
+verification; an explicit mismatched ETag fails without a receipt. Lost-acknowledgement
+retries first inspect the existing generation, avoiding another upload. Completed
+local receipts remain reusable without remote I/O.
+
 Objects use content-addressed keys. Complete original `/1` frames publish after
 their dependencies using conditional single PUT, SHA metadata and exact single-PUT
 MD5 ETags. Reads pin the acknowledged generation and check bounded bytes. Transport
@@ -3922,6 +3929,12 @@ forget failures. Supported upgrades must preserve the complete
 `generation-owners-v1/` subtree with the native byte store. Portable byte exports
 remain byte facts only and do not replace that owner state.
 
+Installed source launchers may invoke this CLI through its canonical module or
+the retained `runpy.run_module(..., run_name="__main__")` convention. Both resolve
+the request schemas before any initialization effect. During upgrade staging,
+qualify the exact interpreter, source, account and root-controlled request before
+stopping consumers, then retain and reuse that result for unchanged bindings.
+
 On the first selected use, the reader migrates exact native file completions or
 an independently bound legacy settlement seal/snapshot. This is a counted,
 metadata-only migration: original receipt, snapshot, seal and signed acceptance
@@ -3940,6 +3953,12 @@ reward coverage. Network failures, rate limits and quota failures remain retry
 errors and do not invent object damage. Local retirement keeps its existing live
 consumer leases, restore coverage and current availability checks; this feature
 never substitutes an old completion for those requirements.
+
+Redacted retry causes preserve `r2_http_status` for native R2 HTTP failures,
+including nested causes. This bounded numeric status distinguishes authentication
+responses, throttling and server errors without exposing URLs, credentials or
+response bodies. A status alone does not establish account credit exhaustion;
+check the selected provider/account when diagnosing sustained retries.
 
 When ordinary generation metadata capacity is exhausted, the owner retains a
 compact immutable pending event for each affected original object. Unaffected

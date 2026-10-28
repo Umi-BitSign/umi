@@ -2709,10 +2709,13 @@ async def test_installed_coverage_discovers_completes_and_recovers_without_coord
     )
     root = tmp_path / "installed-coverage"
 
-    async def fresh_height(_hotkey):
-        # This is a discovery hint only. Native retained control/eligibility
-        # proof readers establish the actual selection and every interval.
-        return SimpleNamespace(snapshot=SimpleNamespace(block_number=h.end))
+    collect_control = type(h.item.provider).collect_control
+
+    async def fresh_height(hotkey):
+        # Discovery and recent capture both require the selected proof adapter's
+        # owned observation; a bare height is not current finality authority.
+        current_control_finality(h, h.end)
+        return await collect_control(h.item.provider, hotkey)
 
     def setup():
         journal = RewardCoverageJournal(root, rule, expected_rule_sha256=digest(rule))
@@ -2998,10 +3001,13 @@ async def test_coverage_waits_for_both_validators_and_rebuilds_after_outage(
     head, online, slow = h.coverage_first + min(half, 32), True, True
     slow_hotkey = h.item.members[1]
 
-    async def current_height(_):
+    collect_control = type(h.item.provider).collect_control
+
+    async def current_height(hotkey):
         if not online:
             raise ConnectionError("coordinator and current-head discovery unavailable")
-        return SimpleNamespace(snapshot=SimpleNamespace(block_number=head))
+        current_control_finality(h, head)
+        return await collect_control(h.item.provider, hotkey)
 
     original_capture = NativeRewardCoverageSource.capture
 
@@ -4028,7 +4034,13 @@ async def test_recurring_settlement_retries_without_signing_unverified_results(
         z = await h.start("Dave")
         assert await z.tick() == "reviewing"
     elif fault == "missing_proof":
-        files = list(Path(z.config.proof_import_directory).rglob("*.json"))
+        # Both selected archives can supply the exact original. Remove both to
+        # exercise unavailable proof, rather than successful outbox recovery.
+        files = [
+            path
+            for directory in (z.config.proof_import_directory, z.config.proof_export_directory)
+            for path in Path(directory).rglob("*.json")
+        ]
         assert files
         for path in files:
             path.unlink()
@@ -4754,23 +4766,24 @@ async def test_reviewed_automatic_inputs_require_original_replica(
     assert not h.calls
     path.write_bytes(original)
     path.chmod(0o600)
-    # Restoring exact bytes changes their local identity. The supported repair
-    # explicitly rebinds verified state before recurring settlement resumes.
-    from umi.competition_cohort_settlement_inputs import SettlementInputPackage
-    from umi.competition_verification_snapshot import VerificationSnapshotRepairRequired
+    # The owner automatically repairs the restored exact original against its
+    # retained identity. It must neither rebuild nor repeat the repair on retry.
+    repairs = []
+    original_repair = a.verified_packages.repair
 
-    with pytest.raises(VerificationSnapshotRepairRequired):
+    def repair(*args, **kwargs):
+        repairs.append((args, kwargs))
+        return original_repair(*args, **kwargs)
+
+    monkeypatch.setattr(a.verified_packages, "repair", repair)
+    with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
-    a.verified_packages.repair(
-        path,
-        SettlementInputPackage,
-        maximum_bytes=a.config.maximum_package_bytes,
-        expected_sha256=digest(h.c.package),
-        reason="restored original settlement input after " + damage,
-    )
+    assert len(repairs) == 1
+    assert repairs[0][1]["expected_sha256"] == digest(h.c.package)
     h.clock.block += 100000
     with pytest.raises(RuntimeError, match="not ready for attestation"):
         await a.tick()
+    assert len(repairs) == 1
     assert a.package_reference == (
         Path(a.config.inputs_directory) / (a.cohort + ".json"),
         digest(h.c.package),
