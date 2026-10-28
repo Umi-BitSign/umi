@@ -129,7 +129,10 @@ def check(journal, db, *, trusted_epoch=False):
         or binding != dependency(journal, db)
         or any(type(v) is not int for v in (ident, observed, validated, complete, started))
         or any(v is not None and type(v) is not int for v in (ceiling, cursor))
-        or not 0 <= validated <= observed <= 65536 * 80
+        # Count integrity follows SQLite's integer range. Native journal
+        # subclasses enforce their own capacity after validation; service
+        # reviewers can retain more obligations than the ordinary round cap.
+        or not 0 <= validated <= observed <= 2**63 - 1
         or complete not in (0, 1)
         or type(epoch) is not bytes
         or len(epoch) != 8
