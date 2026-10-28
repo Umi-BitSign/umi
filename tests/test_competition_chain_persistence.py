@@ -250,3 +250,35 @@ async def test_collection_queued_before_close_rechecks_closed_after_lock(chain):
         collection.result()
     closing.result()
     assert not retained_rows(provider)
+
+
+@pytest.mark.parametrize("repair", [False, True])
+async def test_pending_or_damaged_pin_metadata_does_not_discard_verified_capture(
+    chain, monkeypatch, caplog, repair
+):
+    from umi.competition_registration_pins import (
+        RegistrationPinProjectionPending,
+        RegistrationPinRepairRequired,
+    )
+
+    provider = chain.provider
+    await provider.collect()
+    before = retained_rows(provider)
+    advance(chain, _HEIGHT + chain.policy.maximum_snapshot_age_blocks + 1)
+    calls = []
+
+    def deferred():
+        calls.append(tuple(chain.rpc.calls))
+        if repair:
+            raise RegistrationPinRepairRequired("explicit repair required")
+        raise RegistrationPinProjectionPending(8, 256)
+
+    monkeypatch.setattr(provider, "_retained_capture_blocks", deferred)
+    result = await provider.collect()
+    assert result.snapshot.block == chain.finality.ref.block_number
+    assert len(calls) == 1 and tuple(chain.rpc.calls) == calls[0]
+    assert retained_rows(provider)[0] == before[0]
+    assert "registration_retention_pruning_deferred" in caplog.text
+    assert (
+        "RegistrationPinRepairRequired" if repair else "RegistrationPinProjectionPending"
+    ) in caplog.text

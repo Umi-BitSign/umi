@@ -31,6 +31,10 @@ from .competition_chain_resources import CompetitionChainResources
 from .competition_historical_blocks import HistoricalRequestBlocks
 from .competition_policy_lineage import admitted_policy_sha256s
 from .competition_proof_rpc import FailoverProofRpc
+from .competition_registration_pins import (
+    RegistrationPinProjectionPending,
+    RegistrationPinRepairRequired,
+)
 from .competition_transport_verification import TransferProgress
 from .concurrency import await_owned_task, run_owned_thread
 from .encoding import account_id32
@@ -1384,8 +1388,16 @@ class FinalizedRegistrationProvider:
                     conservative_retention = False
                     try:
                         retained = self._retained_capture_blocks()
-                    except PrivateStateBusyError as error:
-                        if type(error) is not PrivateStateBusyError:
+                    except (
+                        PrivateStateBusyError,
+                        RegistrationPinProjectionPending,
+                        RegistrationPinRepairRequired,
+                    ) as error:
+                        if type(error) not in (
+                            PrivateStateBusyError,
+                            RegistrationPinProjectionPending,
+                            RegistrationPinRepairRequired,
+                        ):
                             raise
                         # Pin projection is unavailable, not invalid. Preserve
                         # every existing capture and defer only garbage collection.
@@ -1395,7 +1407,15 @@ class FinalizedRegistrationProvider:
                         retained = frozenset(
                             row[0] for row in connection.execute("SELECT block FROM captures")
                         )
-                        _LOGGER.warning("registration_retention_pruning_deferred")
+                        _LOGGER.warning(
+                            "registration_retention_pruning_deferred error_type=%s completed=%s "
+                            "total=%s reason=%s eta_seconds=null eta_basis=awaiting_pin_projection "
+                            "stalled_or_retrying=true capture_reused=true",
+                            type(error).__name__,
+                            getattr(error, "completed", None),
+                            getattr(error, "total", None),
+                            getattr(error, "reason", str(error)),
+                        )
                     if cancelled is not None and cancelled.is_set():
                         raise ValueError("registration persistence cancelled")
                     if not isinstance(retained, frozenset) or any(

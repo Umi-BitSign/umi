@@ -106,9 +106,16 @@ class R2MultipartClient:
         """Reuse connections until all overlapping scopes and requests drain."""
         return self._connections.scope()
 
-    async def _exchange(self, method: str, key: str, **options) -> httpx.Response:
+    async def _exchange(
+        self, method: str, key: str, *, retry_copy_part: bool = False, **options
+    ) -> httpx.Response:
+        if type(retry_copy_part) is not bool or (retry_copy_part and method != "PUT"):
+            raise ValueError("R2 copy-part retry scope differs")
+        # Only copy_part opts a validated same-upload, same-part PUT into retry.
+        # Replacing that exact slot is idempotent even if its reply was lost.
+        maximum_attempts = 3 if method in {"HEAD", "GET"} or retry_copy_part else 1
         started = time.monotonic()
-        for attempt in range(1, 4):
+        for attempt in range(1, maximum_attempts + 1):
             try:
                 return await self._exchange_once(method, key, **options)
             except OSError as error:
@@ -120,9 +127,8 @@ class R2MultipartClient:
                 if status is None and not transport:
                     raise
                 retry = (
-                    method in {"HEAD", "GET"}
-                    and (transport or status in {429, 500, 502, 503, 504})
-                    and attempt < 3
+                    (transport or status in {429, 500, 502, 503, 504})
+                    and attempt < maximum_attempts
                 )
                 retry_after = error.retry_after if isinstance(error, _R2HTTPFailure) else 0
                 delay = max(0.25 * 2 ** (attempt - 1), retry_after) if retry else None
@@ -137,12 +143,16 @@ class R2MultipartClient:
                             if transport
                             else None,
                             attempt=attempt,
-                            maximum_attempts=3 if method in {"HEAD", "GET"} else 1,
+                            maximum_attempts=maximum_attempts,
                             completed=0,
                             total=1,
                             elapsed_seconds=time.monotonic() - started,
                             eta_seconds=None,
-                            eta_basis="bounded_read_retry"
+                            eta_basis=(
+                                "bounded_copy_part_retry"
+                                if retry_copy_part
+                                else "bounded_read_retry"
+                            )
                             if retry
                             else "transport_unavailable"
                             if transport
@@ -282,6 +292,7 @@ class R2MultipartClient:
         response = await self._exchange(
             "PUT",
             destination_key,
+            retry_copy_part=True,
             query=(("partNumber", str(part_number)), ("uploadId", upload_id)),
             signed_headers=signed,
             at=at,

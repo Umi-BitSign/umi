@@ -1090,6 +1090,77 @@ async def test_promotion_copy_bounds_parallel_parts_and_preserves_completion_ord
 
 
 @pytest.mark.asyncio
+async def test_promotion_copy_retries_lost_reply_in_same_slot_without_duplicate_progress(
+    monkeypatch, receipt_scenario,
+):
+    from umi import r2_multipart
+
+    requests, waits, closed = [], [], []
+    slots, attempts = {}, {}
+    size = 5 * 1024**2
+
+    class LostReply(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"<CopyPartResult>"
+            raise httpx.RemoteProtocolError("response lost after server copied part")
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def pause(seconds):
+        waits.append(seconds)
+
+    def send(request):
+        requests.append(request)
+        assert request.method == "PUT"
+        number = int(request.url.params["partNumber"])
+        assert request.url.params["uploadId"] == "existing-upload"
+        assert request.headers["x-amz-copy-source"] == "/umi-model-artifacts/staging"
+        expected_range = f"bytes={(number - 1) * size}-{number * size - 1}"
+        assert request.headers["x-amz-copy-source-range"] == expected_range
+        slot = (request.url.path, request.url.params["uploadId"], number)
+        value = (request.headers["x-amz-copy-source"], expected_range, f"{number:032x}")
+        if slot in slots:
+            assert slots[slot] == value
+        slots[slot] = value  # Server commits before the first part-2 response is lost.
+        attempts[number] = attempts.get(number, 0) + 1
+        if number == 2 and attempts[number] == 1:
+            return httpx.Response(200, stream=LostReply())
+        return httpx.Response(
+            200, content=f'<CopyPartResult><ETag>"{value[2]}"</ETag></CopyPartResult>'.encode()
+        )
+
+    class Progress:
+        completed = 0
+
+        def advance(self):
+            self.completed += 1
+
+    signer = R2SigV4(
+        endpoint="https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+        bucket="umi-model-artifacts",
+        credentials=R2Credentials("0123456789ABCDEF", "secret-access-key-value"),
+    )
+    monkeypatch.setattr(r2_multipart.asyncio, "sleep", pause)
+    client = r2_multipart.R2MultipartClient(signer, transport=httpx.MockTransport(send))
+    payload = SimpleNamespace(total_parts=3, part_size_bytes=size, total_bytes=3 * size)
+    progress = Progress()
+    async with client.connection_scope():
+        parts = await _copy_promotion_parts(
+            client, "preserved", "staging", "existing-upload", payload, 2, progress
+        )
+    assert attempts == {1: 1, 2: 2, 3: 1}
+    assert len(slots) == len(parts) == progress.completed == 3
+    assert len(requests) == 4 and waits == [0.25] and closed == [True]
+    assert [part.part_number for part in parts] == [1, 2, 3]
+    assert [part.etag for part in parts] == [f"{number:032x}" for number in range(1, 4)]
+    retried = [request for request in requests if request.url.params["partNumber"] == "2"]
+    assert retried[0].url == retried[1].url
+    for header in ("x-amz-copy-source", "x-amz-copy-source-range", "x-amz-content-sha256"):
+        assert retried[0].headers[header] == retried[1].headers[header]
+
+
+@pytest.mark.asyncio
 async def test_promotion_copy_drains_failed_wave_before_aborting(receipt_scenario):
     class MultipartCopy:
         def __init__(self):

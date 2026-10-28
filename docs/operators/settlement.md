@@ -14,6 +14,55 @@
 
 Public reporting can use the [cohort results and model download API](../reference/competition-results-api.md). Its publisher reuses retained native metadata and can run separately from settlement and reward owners.
 
+## Registration capture retention
+
+The admission owner keeps already verified registration captures while intake
+preservation or service-work metadata is busy. Intake pins use a read snapshot
+outside the admission writer gate. Service-work pins persist one small result per
+original catalog/admission, bound to the private journal owner, policy, verifier
+semantics, current conflict holds and SQL source revisions. An unchanged poll or
+restart reads those facts and indices, without reading or hashing the original
+admission bodies again. Catalog changes invalidate its dependent results; a
+changed admission invalidates only that admission.
+
+The first use on an older supported journal creates a metadata source index.
+Projection then checkpoints each completed original, processing at most eight
+new admissions or five seconds between completed items per refresh. Logs expose
+`registration_pin_source_migration`, `registration_pin_catalog` and
+`registration_pin_projection` counts, elapsed time and the measured ETA or an
+explicit planning range. Changed inputs resume only the affected work. A busy
+snapshot, unfinished projection or damaged completion record emits
+`registration_retention_pruning_deferred`; the capture is saved and all earlier
+captures are retained. Unknown pins still count against the working-cache budget.
+That state defers reclamation, not proof verification, admission or a capacity
+limit. A damaged completion is an explicit repair state, never an ordinary miss.
+
+For damaged pin metadata or an intentionally restored journal file, stop the
+queue owner cooperatively and run its selected Python host as the same service
+account. Read the selected source directory from the current supervisor selection;
+the explicit source argument also supports installed signed hosts with an overlay:
+
+```sh
+python -I -B -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from umi.competition_registration_pins_cli import main; raise SystemExit(main())' /path/to/selected/source/src --queue-config /path/to/service-queue.json --policy /path/to/policy.json --reason 'Explain the exact retained metadata repair'
+```
+
+The repair preserves original signed records, holds and capacity reservations.
+It retains a bounded audit of the prior metadata, restores intact completion
+facts without rereading payloads, and rebuilds only affected source metadata when
+its owner and mutation fences are intact. A changed storage identity or damaged
+mutation fences requires a counted first pass over the affected originals after
+the owner resumes. Repeating a completed repair reuses its selected namespace.
+Repair reports metadata completion separately from the remaining native
+projection; it grants no registration, execution or reward authority. General
+journal corruption, including native v2 capability fences, remains a native
+restore/repair error; this command cannot bypass those fences.
+
+This is an owner-local metadata change. Deploy through the admission supervisor's
+selected qualified host and preserve its existing queue directories. Existing
+miner/client messages, validator proofs, signed cohorts, automatic release
+selection and C6 reward evidence keep their formats; no miner or validator
+reinstallation is required for this local retention projection.
+
 ## Operator early reward release
 
 The normal standing reward path waits for the predecessor's signed minimum
@@ -4218,8 +4267,8 @@ coverage and consumer release first. No automatic eviction is introduced here.
 Native R2 clients reuse bounded HTTP connections during authenticated candidate
 review/export batches, direct review/materialization and the direct-upload
 service's owned lifetime. Each exchange keeps its original signature, response
-limits, generation checks and timeout. No response caching or write retry is
-added. Overlapping scopes share the same client on one event loop; shutdown
+limits, generation checks and timeout. Pooling adds no response caching or retry
+policy. Overlapping scopes share the same client on one event loop; shutdown
 waits for active requests to release their responses before closing it, including
 when the owner is cancelled repeatedly. Active concurrency stays with the
 existing native caller's allowance; shared pooling adds no independent request
@@ -4229,9 +4278,15 @@ Direct-object first verification reads adjacent manifest files through bounded
 contiguous ranges of at most 64 MiB, retaining the same per-file checkpoints,
 ordered stream digest and provider-generation checks. Completed byte facts remain
 reusable when read geometry changes. Transient HEAD/GET HTTP429/500/502/503/504
-responses receive at most three attempts with bounded backoff; read retry logs
-include the numeric status and delay, without provider bodies, keys or credentials.
-Mutation requests are never automatically replayed. While released intake has
+responses and transient transport failures receive at most three attempts with
+bounded backoff. Promotion copy-part PUTs use the same bounded retry policy for
+the exact destination, upload ID, part number, source and range: a lost response
+replaces the same server-side part, and progress counts that part only once.
+Retry logs identify the operation's bounded retry policy, numeric status or
+transport error type, and delay without provider bodies, keys or credentials.
+Multipart creation/completion and other mutations remain single-attempt
+operations. Exhausted part retries still drain their wave and abort the upload;
+this does not provide durable multipart resume. While released intake has
 uncertified latest models, held cohorts still advance in smaller batches; they
 regain normal batches after that backlog clears. Progression holds stay intact.
 Standalone requests and independently
