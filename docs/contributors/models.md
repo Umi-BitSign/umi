@@ -17,6 +17,14 @@ intake opens governs that cohort. Use the runtime, immutable policy and upload
 route published by live status and cohort history. Do not upload a new artifact
 unless `admission_accepting_new` is true.
 
+For C7 and later, the operator's conditional training-data decisions are described under
+[Training data and research-model licensing](#training-data-and-research-model-licensing).
+Models trained with permitted NonCommercial sources, including How2Sign, must
+declare that use and accept the model-bound NC research terms. Permissive-only
+models retain the original terms and license. Existing submissions and cohort
+clocks are not rewritten. The authenticated model-license adoption and fresh
+contributor consent select the NC route; publication of this guide alone does not.
+
 The [version 2 terms](../MODEL_CONTRIBUTION_TERMS_V2.md) remain necessary for
 records whose signed policy bound them. Their split and promotion rule do not
 define a successor model award. Each submission must use the exact terms named
@@ -159,9 +167,10 @@ uses are supported together. Successful inference, a high score, a valid archive
 hash or an evaluator signature does not answer these questions.
 
 Research-only, non-commercial and unspecified permissions are not automatically
-accepted. For example, CC BY-NC limits uses covered by that license to
-non-commercial purposes; it also warns that other rights can matter.
-See the [CC BY-NC 4.0 terms](https://creativecommons.org/licenses/by-nc/4.0/).
+interchangeable. Apply the published training-data decisions below to the actual
+source and download terms. In particular, How2Sign is allowed under the reviewed
+public non-commercial research model conditions; it does not need a new
+case-by-case permission request merely because its license is CC BY-NC 4.0.
 
 These source categories need case-specific review, not an assumption that all
 resulting weights are either prohibited or unrestricted. Relevant written
@@ -176,6 +185,86 @@ policy and terms, reviewer, decision, reasons and unresolved conditions. The
 underlying evidence must remain available to authorized independent reviewers.
 A hash with no accessible supporting record is insufficient. Publish a decision
 summary without exposing confidential or personal material.
+
+### Training data and research-model licensing
+
+The authoritative [UMI Training Data and Model Licensing Policy](../../UMI%20Rights%20Review%20Sign-Language%20Datasets%20and%20Public%20Model%20Weights.pdf),
+dated October 22, 2026, is the recorded legal assessment for these decisions.
+Its PDF SHA-256 is
+`9f6694015a84f453ef8298afac4fd9c5dedfc741e74eb0ac3b6833f045b83502`.
+Sam selected conditional licensing from C7 onward: permitted NC training data
+or inherited NC checkpoints require the NC route for that model; other models
+retain the original terms. This supersedes the review's universal-NC clause and
+the earlier blanket C8 proposal. This section does not identify sources,
+references or clips used in any cohort evaluation.
+
+For an NC-trained model, the [supplemental terms](../MODEL_CONTRIBUTION_TERMS_NC_V1.md)
+require a **public, non-commercial research-model release under CC BY-NC-SA 4.0**.
+Weights, adapters, tokenizer and label vocabularies, and the portable bundle
+carry that license. Contributor inference code and configuration may use
+Apache-2.0 or MIT; redistributed UMI runtime code retains Apache-2.0 and its
+notices. The model card uses CC BY 4.0. A permissive-only model is not converted
+to NC by sharing a cohort or baseline with an NC model.
+
+| Training source | Recorded decision and conditions |
+| --- | --- |
+| How2Sign | Allowed under the research-model conditions. Attribute the consortium and cite the CVPR 2021 paper in `NOTICE`. Do not redistribute videos, clips, landmarks or English sentences, or train the How2 source transcripts into a model intended for another track. Record the actual acquisition route and any additional terms. The pending consortium notice and request for CORA.RDR terms do not make the documented public-license approval contingent on a reply. |
+| FLEURS-ASL | Allowed. Attribute FLEURS-ASL and FLORES, retain their license notices and reproduce the responsible-use requests: blur faces in publicity, no reidentification and no deepfakes. The review records the position supporting a mixed NC-SA model; the requested Google confirmation does not suspend its ruling. |
+| 2M-Flores-ASL, FSboard and Taskmaster-1 | Allowed. Retain the attribution and license entries from the reference model's `NOTICE`. |
+| UMI consented data | Allowed under the UMI contributor consent. Attribute "UMI contributors" without identifying individual contributors. |
+| ChicagoFSWild and ChicagoFSWild+ | Separately approved by the operator for **train splits only**, disclosed in provenance. Do not train on their dev/test splits. This is the operator's specific training ruling, not a claim that the PDF lists these datasets or supplies a new publisher license. |
+| ASL STEM Wiki | Pending permission. The review explicitly requires Microsoft's written permission to be recorded before training is permitted; the NC research-model label alone does not satisfy its bespoke contract. |
+
+For other sources, classify the terms attached to the copy actually acquired:
+
+| Source license or access class | Training decision under the review |
+| --- | --- |
+| CC0 or public domain; CC BY 3.0/4.0; CC BY-SA 3.0/4.0 | Allowed with the applicable attribution and notices, under the review's stated treatment of mixed-model weights. |
+| CC BY-NC 4.0 or CC BY-NC-SA 4.0, without additional contractual restrictions | Allowed for the documented public NC-SA research-model use. |
+| Apache-2.0, MIT, BSD, ODC-By or CDLA-Permissive | Allowed with the applicable license and notice conditions. |
+| CC BY-ND, CC BY-NC-ND or another no-derivatives term | Not permitted by the review. |
+| Bespoke research/access contracts, including Microsoft Research, ELRA end-user or click-through academic agreements | Require the rights holder's written permission on file; do not treat them as ordinary CC NonCommercial licenses. |
+| Scraped or unlicensed video, social-platform material or unlicensed mirrors | Not permitted by the review. A public URL alone is not a training permission. |
+
+The NC route's reviewed bundle includes `PROVENANCE.json` with every training/development
+source's name, version, canonical URL, license, download route and date, archive
+names/hashes, and any accepted access terms. Include one `NOTICE` entry per
+dataset and base checkpoint, retaining responsible-use requests. Inherit a
+fine-tuned checkpoint's notices and NC-SA license. Also include the model card,
+signed rights warranty, bundle inventory, memorisation-probe results, and any
+required destruction attestation. Do not package training videos, frames,
+landmark caches, captions or sentence lists with the model. Sections 4 and 5 of
+the review contain the exact notice template and declarations. The
+[structured provenance format](../reference/model-training-provenance.md) describes
+the bounded declarations checked by artifact review and their limits.
+
+The NC permission does not authorize UMI commercial deployment, app bundling,
+linking, defaults or model-specific app instructions, or use of cohort models or
+their outputs to bootstrap a product model. UMI may preserve, evaluate and
+publish the research models and use them as research baselines. The review's
+memorisation probe requires a published threshold; the PDF itself does not
+specify a numeric threshold, and the ordinary benchmark score is not a substitute
+for that probe.
+
+#### Authenticated model-license adoption
+
+Publishing the review records the operator's legal basis; it does not change
+existing signed submissions. The conditional route uses a version-2 model
+bundle carrying the authenticated `license_adoption`, binding the original
+policy and terms, cohort authority, NC supplement and training-rights policy.
+Its submission accepts the exact NC supplement hash, and fresh cohort consent
+binds that exact submission. Version-1 bundles and permissive-only submissions
+retain their original readers, license and terms. The original V3/V4 commercial
+grant cannot be silently read as an NC grant.
+
+Check the active cohort's published adoption and supported client before
+preparing an NC upload. Do not change an existing bundle's label to a permissive
+identifier to bypass the NC route. Changed license or document bytes require a
+new manifest, signed submission and cohort consent; retain the original
+artifacts. This additive adoption does not replace the cohort's base policy,
+reward series, clocks, baseline or score formula. Supported miner clients,
+intake, independent reviewers, validator replay and publication must consume the
+same authenticated route before rollout is described as live.
 
 <a id="model-contribution-review--preliminary-review"></a>
 

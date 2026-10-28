@@ -2580,6 +2580,53 @@ documents produce a retained hold reason. An artifact that cannot pass review
 never enters the cohort roster and therefore cannot hold sealing or settlement
 open. Earlier host schemas retain their original behavior for recovery replay.
 
+### Research-model training permissions and terms selection
+
+Apply the [conditional C7+ training-data rulings](../contributors/models.md#training-data-and-research-model-licensing)
+per model. Permitted NC-trained models and inherited NC checkpoints use
+`CC-BY-NC-SA-4.0` with fresh consent to the
+[NC supplement](../MODEL_CONTRIBUTION_TERMS_NC_V1.md). Permissive-only models keep
+their original license and terms. The operator's conditional decision supersedes
+the PDF's universal-NC clause. Neither route changes the signed cohort clocks,
+baseline identity, resource limits or reward rule.
+
+Use the authenticated model-license adoption carried by a version-2 bundle to
+bind the exact base policy, original terms, cohort authority, minimum sequence,
+NC supplement, source-rights policy and retained operator decision. The adoption
+must carry the configured authority signatures. It extends the model route; do
+not replace the whole cohort policy or reward series to add NC models. The
+shared `validate_bundle_policy` reader verifies both original bundles and the
+conditional route. Endpoint, delivery and suite adoptions grant no model rights.
+
+The new submission binds the NC supplement in `accepted_terms_sha256`; fresh
+cohort consent binds that exact submission. The older permissive signature
+cannot authorize an NC model. Changed license or document bytes require a new
+manifest and signatures. Preserve old submissions, acceptances and signed
+evidence; unchanged permissive models keep their original path.
+
+Artifact review checks the authenticated, bounded declaration documents using
+the selected source-rights contract. The
+[provenance format](../reference/model-training-provenance.md) documents required
+records, source decisions and review limits. The caller authenticates each
+document once; the rights classifier reuses those bytes and manifest digests.
+An unselected contributor-supplied permission hash cannot approve a bespoke
+source contract. Newly recorded rights-holder permission requires an
+authenticated source-contract revision, not a local exception.
+
+Select the same route in the supported model client, intake, independent
+reviewers, evaluation/settlement, reward replay and reference publication.
+Verify published release selections and installed readers before claiming live
+adoption. The model client updates when its supported installer is rerun; a
+main-branch commit alone does not update an installed miner. Preserve the
+existing version-1 artifact review and retained completion records.
+
+The standing artifact review reads declared documents; it does not execute the
+rights review's memorisation probe. The PDF gives no numeric threshold for that
+probe. Record the missing threshold and any other unresolved full-policy
+conditions explicitly; do not invent them or equate ordinary quality scoring
+with completion. A documentation or license-selection change must not be
+reported as full adoption of every condition in the PDF.
+
 ## Lost coordinator outcomes
 
 A dispatched claim without a durable response remains uncertain. Never resend it,

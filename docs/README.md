@@ -23,7 +23,7 @@ and policy details.
 | Install or troubleshoot a validator | [Validator supervisor](PERMANENT_VALIDATOR_SUPERVISOR.md) |
 | Upgrade an existing validator host | [State-preserving upgrade](validators/successor-upgrade.md) |
 | Understand the competition and rewards | [Competition overview](OPEN_COMPETITION.md) |
-| Prepare a reproducible model for a contribution round | [Contributor checklist](contributors/models.md), [version 4 terms](MODEL_CONTRIBUTION_TERMS_V4.md), [version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md), and the exact terms named by live policy |
+| Prepare a reproducible model for a contribution round | [Contributor checklist and training-data permissions](contributors/models.md#training-data-and-research-model-licensing), [conditional NC supplement](MODEL_CONTRIBUTION_TERMS_NC_V1.md), [NC provenance format](reference/model-training-provenance.md), [version 4 terms](MODEL_CONTRIBUTION_TERMS_V4.md), [version 3 terms](MODEL_CONTRIBUTION_TERMS_V3.md), and the exact terms named by the authenticated model route |
 
 ## Service operators
 
