@@ -155,12 +155,14 @@ def owned_model_delivery(intake, cohort, *, allow_pending=False):
         state, pending = store.status(cohort)
         if not allow_pending and pending is not None and pending.is_policy_adoption:
             raise OSError("model delivery awaits its reserved policy adoption")
-        return authenticated_model_delivery(
+        delivery = authenticated_model_delivery(
             store.published_history(cohort),
             intake.policy,
             expected_tip_sha256=state.tip_sha256,
             current_block=state.observed_at_block,
         )
+    intake._remember_model_delivery_state(state)
+    return delivery
 
 
 @contextmanager

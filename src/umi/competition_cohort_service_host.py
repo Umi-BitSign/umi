@@ -725,6 +725,7 @@ class ServiceAdmissionHost:
                 priority_cohorts=cohort_sequence_priority(
                     c.series.cohorts, [owner.config for owner in owners.values()]
                 ),
+                intake_phase=intake.model_delivery_phase,
             )
             intake.pending_admission_uploads = DirectAdmissionDrain(self.direct_uploads)
         self.preparation = CohortPreparation(

@@ -8,9 +8,11 @@ Original signed evidence remains authoritative and is never rewritten here.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
+import time
 from contextlib import contextmanager
 
 from pydantic import RootModel
@@ -42,6 +44,7 @@ from .private_files import _write_private_bytes, ensure_private_directory, publi
 from .protocol import canonical_json_bytes
 
 ABI = "umi-intake-seal-reuse/1"
+_LOG = logging.getLogger(__name__)
 SOURCES = {
     "consent": ("cohort_consents", "consent"),
     "acceptance": ("cohort_model_acceptances", "submission"),
@@ -540,9 +543,13 @@ class IntakeSealReuse:
         )
 
     def verify(self, history, tip, seal, *, repair=False):
+        started = time.monotonic()
+        rebuilt = False
         context = self.seal_context(history, tip, seal)
 
         def produce():
+            nonlocal rebuilt
+            rebuilt = True
             result = self.build(history, seal.observation, seal.snapshot, tip, repair=repair)
             if result != seal:
                 raise ValueError("retained intake seal differs from its original records")
@@ -556,7 +563,26 @@ class IntakeSealReuse:
         value = self.result(
             "seal", seal.cohort_sha256, tip, context, produce, repair=repair, validate=validate
         )
-        return CohortIntakeSeal.model_validate_json(canonical_json_bytes(value))
+        result = CohortIntakeSeal.model_validate_json(canonical_json_bytes(value))
+        if not rebuilt:
+            _LOG.info(
+                "cohort_intake_seal_reuse %s",
+                canonical_json_bytes(
+                    {
+                        "cohort_sha256": seal.cohort_sha256,
+                        "recovery_tip_sha256": tip,
+                        "dependency_context_sha256": context,
+                        "status": "reused",
+                        "completed": 1,
+                        "total": 1,
+                        "elapsed_seconds": round(time.monotonic() - started, 6),
+                        "eta_seconds": 0,
+                        "eta_basis": "retained_verified_result",
+                        "stalled_or_retrying": False,
+                    }
+                ).decode("ascii"),
+            )
+        return result
 
     def record_created(self, history, tip, seal):
         self.remember(
