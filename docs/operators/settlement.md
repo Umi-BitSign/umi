@@ -26,11 +26,20 @@ admission bodies again. Catalog changes invalidate its dependent results; a
 changed admission invalidates only that admission.
 
 The first use on an older supported journal creates a metadata source index.
-Projection then checkpoints each completed original, processing at most eight
-new admissions or five seconds between completed items per refresh. Logs expose
+The service owns a separate serial reconciliation task that checkpoints each
+completed original, processing at most eight new admissions or five seconds
+between completed items per pass and rotating through configured queues. One
+slow item can exceed that planning budget; shutdown drains the owned operation
+before releasing the service. Fresh registration collection reads only completed
+projection metadata, with current owner, source-mutation and conflict checks. It
+never builds a missing catalog, rereads an unprojected admission, or waits for
+the background task. Logs expose
 `registration_pin_source_migration`, `registration_pin_catalog` and
 `registration_pin_projection` counts, elapsed time and the measured ETA or an
-explicit planning range. Changed inputs resume only the affected work. A busy
+explicit planning range; `registration_pin_decode` and
+`registration_pin_checkpoint` distinguish each new item's read/validation and
+durable write costs. Restored items never contribute to native throughput.
+Changed inputs resume only the affected work. A busy
 snapshot, unfinished projection or damaged completion record emits
 `registration_retention_pruning_deferred`; the capture is saved and all earlier
 captures are retained. Unknown pins still count against the working-cache budget.

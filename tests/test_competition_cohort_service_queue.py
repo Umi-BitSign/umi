@@ -1405,3 +1405,97 @@ def test_pin_repair_reconstructs_missing_marker_or_changed_index_schema(
     )
     monkeypatch.setattr(repaired, "_raw_admission", Mock(side_effect=AssertionError("repeat")))
     assert repaired.retained_registration_blocks() == frozenset({400})
+
+
+@pytest.mark.parametrize("catalog_ready", [False, True])
+def test_complete_pin_query_never_builds_missing_metadata(queue_case, monkeypatch, catalog_ready):
+    from umi.competition_registration_pins import RegistrationPinProjectionPending
+
+    c = queue_case
+    admit(c)
+    if catalog_ready:
+        c.queue._retention_catalog()
+    forbidden = Mock(side_effect=AssertionError("cold projection in fresh collection"))
+    monkeypatch.setattr(c.queue, "_catalog", forbidden)
+    monkeypatch.setattr(c.queue, "_raw_admission", forbidden)
+    monkeypatch.setattr(c.queue._registration_pins, "remember", forbidden)
+    monkeypatch.setattr(c.queue._registration_pins, "_capacity", forbidden)
+    with pytest.raises(RegistrationPinProjectionPending) as pending:
+        c.queue.retained_registration_blocks(complete_only=True)
+    assert pending.value.completed == 0 and pending.value.total == 1
+    assert pending.value.reason == (
+        "bounded_projection" if catalog_ready else "catalog_projection_pending"
+    )
+    forbidden.assert_not_called()
+
+
+def test_complete_pin_query_reuses_restart_and_refuses_changed_original(queue_case, monkeypatch):
+    from umi.competition_registration_pins import RegistrationPinProjectionPending
+
+    c = queue_case
+    value = admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    restarted = ServiceWorkQueue(c.cfg, c.queue.policy)
+    original = restarted.journal._record
+
+    def metadata_only(db, kind, key):
+        assert kind not in {"service_admission", "service_catalog", "service_round"}
+        return original(db, kind, key)
+
+    monkeypatch.setattr(restarted.journal, "_record", metadata_only)
+    monkeypatch.setattr(restarted._registration_pins, "_capacity", Mock(side_effect=AssertionError))
+    assert restarted.retained_registration_blocks(complete_only=True) == frozenset({400})
+    # A source mutation invalidates the durable completion even with identical
+    # bytes; the collection callback never falls through to the original body.
+    with c.queue.journal.transaction() as db:
+        db.execute(
+            "UPDATE records SET body=body WHERE kind='service_admission' AND id=?",
+            (value.work_sha256,),
+        )
+    with pytest.raises(RegistrationPinProjectionPending) as pending:
+        restarted.retained_registration_blocks(complete_only=True)
+    assert pending.value.completed == 0 and pending.value.total == 1
+
+
+def test_complete_pin_query_refuses_added_admission_and_damaged_completion(queue_case):
+    from umi.competition_registration_pins import (
+        RegistrationPinProjectionPending,
+        RegistrationPinRepairRequired,
+    )
+
+    c = queue_case
+    admit(c)
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    admit(c, "Bob", 2)
+    with pytest.raises(RegistrationPinProjectionPending) as pending:
+        c.queue.retained_registration_blocks(complete_only=True)
+    assert pending.value.completed == 1 and pending.value.total == 2
+    assert c.queue.retained_registration_blocks() == frozenset({400})
+    with c.queue.journal.transaction() as db:
+        db.execute("DELETE FROM registration_pin_index")
+    with pytest.raises(RegistrationPinRepairRequired, match="index is missing"):
+        c.queue.retained_registration_blocks(complete_only=True)
+
+
+def test_pin_new_item_logs_decode_and_checkpoint_without_charging_reuse(queue_case, caplog):
+    import json
+    from contextlib import suppress
+
+    caplog.set_level("INFO", logger="umi.competition.progress")
+    c = queue_case
+    admit(c)
+    c.queue.retained_registration_blocks()
+    records = []
+    for record in caplog.records:
+        with suppress(json.JSONDecodeError):
+            records.append(json.loads(record.getMessage()))
+    for stage in ("registration_pin_decode", "registration_pin_checkpoint"):
+        done = [r for r in records if r.get("stage") == stage and r.get("status") == "completed"]
+        assert len(done) == 1
+        assert done[0]["completed_units"] == done[0]["native_units"] == 1
+        assert done[0]["restored_units"] == 0
+        assert done[0]["elapsed_seconds"] >= 0 and done[0]["eta_seconds"] == 0
+    caplog.clear()
+    c.queue.retained_registration_blocks(complete_only=True)
+    assert not any("registration_pin_decode" in r.getMessage() for r in caplog.records)
+    assert not any("registration_pin_checkpoint" in r.getMessage() for r in caplog.records)

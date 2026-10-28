@@ -593,7 +593,15 @@ async def test_reconciliation_cancellation_drains_owned_upload_thread(lifecycle,
 
 
 @pytest.mark.parametrize(
-    "failed", ["catalogs", "models", "model_inventory_00", "legacy_uploads", "direct_uploads"]
+    "failed",
+    [
+        "registration_pins",
+        "catalogs",
+        "models",
+        "model_inventory_00",
+        "legacy_uploads",
+        "direct_uploads",
+    ],
 )
 async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_path, failed):
     from types import SimpleNamespace
@@ -606,7 +614,14 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
         h.provider.collect,
         h.provider.retained_archive,
     )
-    names = ("catalogs", "models", "model_inventory_00", "legacy_uploads", "direct_uploads")
+    names = (
+        "registration_pins",
+        "catalogs",
+        "models",
+        "model_inventory_00",
+        "legacy_uploads",
+        "direct_uploads",
+    )
     entered = {name: asyncio.Event() for name in names}
     closed = {name: asyncio.Event() for name in names}
 
@@ -623,6 +638,7 @@ async def test_reconciliation_failure_stops_every_other_owner(lifecycle, tmp_pat
 
     host.models = host.uploads = host.direct_uploads = SimpleNamespace()
     for name, method in (
+        ("registration_pins", "_poll_registration_pins"),
         ("catalogs", "_poll_catalogs"),
         ("models", "_poll_models"),
         ("model_inventory_00", "_poll_model_inventory"),
@@ -715,3 +731,33 @@ async def test_reconciliation_mutex_contention_retries_without_restarting_owner(
     assert calls == 2
     assert "service_reconciliation_retry" in caplog.text
     assert "resumed_from_checkpoint" in caplog.text
+
+
+def test_intake_provider_uses_complete_only_pin_reader(lifecycle, config, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import umi.competition_service as service
+
+    h = lifecycle
+    config = config.model_copy(
+        update={
+            "schema_": "umi-competition-service-config/3",
+            "recoverable_intake": h.intake.config,
+            "recoverable_service": host_config(h, tmp_path / "host"),
+        }
+    )
+
+    class SelectedProvider(Provider):
+        def __init__(self, chain_config, policy, *, retained_capture_blocks):
+            super().__init__(chain_config, policy)
+            self.retained_capture_blocks = retained_capture_blocks
+            self.retained_archive = h.provider.retained_archive
+            self.current_finalized_block = h.provider.current_finalized_block
+            self.policy = policy
+
+    monkeypatch.setattr(service, "HistoricalRegistrationProvider", SelectedProvider)
+    app = create_intake_app(config, h.intake.policy)
+    reader = Mock(return_value=frozenset())
+    monkeypatch.setattr(app.state.service_admission_host, "retained_registration_blocks", reader)
+    app.state.finality_providers[0].retained_capture_blocks()
+    reader.assert_called_once_with(complete_only=True)
