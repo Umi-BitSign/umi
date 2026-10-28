@@ -31,15 +31,16 @@ def _request_semantics(kind, value):
 def retain_request_binding(journal, kind, cohort, candidate):
     """Select exact old bytes through the native fresh conflict fence.
 
-    Only a new owner uses normalized semantics. Existing owners keep their exact
-    records and verification identities. Every other changed dependency follows the
-    original immutable put/conflict path; held ids are never read through or reset.
+    Normalize only comparisons. New and existing owners keep the original record
+    shape and verification identities, including unchanged-config older writers.
+    Every other changed dependency follows the original immutable put/conflict
+    path; held ids are never read through or reset.
     """
     expected = _request_semantics(kind, candidate)
     retained = journal.get(kind, cohort)
     if retained is None:
-        journal.put(kind, cohort, expected)
-        return expected
+        journal.put(kind, cohort, candidate)
+        return candidate
     if canonical_json_bytes(_request_semantics(kind, retained)) != canonical_json_bytes(expected):
         journal.put(kind, cohort, candidate)
         raise ValueError("request owner binding changed")

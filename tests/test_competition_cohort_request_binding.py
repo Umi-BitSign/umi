@@ -44,13 +44,22 @@ def test_native_legacy_record_and_bytes_survive_changed_deadline(
         assert reopened.get_raw(kind, "cohort") == raw
 
 
-def test_new_native_record_omits_only_deadline_and_preserves_other_dependencies(binding, tmp_path):
+def test_new_native_record_preserves_older_writer_bytes_and_deadline_compatibility(
+    binding, tmp_path
+):
     kind, expected = binding
     candidate = deepcopy(expected)
     intake_of(kind, candidate)["admission_deadlines"] = [{"cohort": "future"}]
     journal = RoundJournal(tmp_path / "owner", {"owner": "unchanged"})
-    assert retain_request_binding(journal, kind, "cohort", candidate) == expected
-    assert journal.get_raw(kind, "cohort") == canonical_json_bytes(expected)
+    assert retain_request_binding(journal, kind, "cohort", candidate) == candidate
+    original = canonical_json_bytes(candidate)
+    assert journal.get_raw(kind, "cohort") == original
+    # The pre-upgrade writer can retry exactly the same configured binding.
+    journal.put(kind, "cohort", candidate)
+    # After a deadline selection change, the compatibility reader retains the
+    # same original record rather than replacing it with a normalized schema.
+    assert retain_request_binding(journal, kind, "cohort", expected) == candidate
+    assert journal.get_raw(kind, "cohort") == original
 
 
 @pytest.mark.parametrize("dependency", ["authority", "directory", "other"])
