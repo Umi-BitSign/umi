@@ -13,6 +13,7 @@ from bisect import bisect_right
 from .competition_cohort_direct_model_owner import DirectModelUploadPending
 from .competition_cohort_direct_model_upload import SignedDirectModelUploadCompletion
 from .competition_cohort_participation import CohortParticipationRequest
+from .competition_cohort_participation_delivery import participation_retry_details
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .concurrency import run_owned_thread
 from .open_competition import digest
@@ -58,6 +59,7 @@ class ReservedParticipationWorker:
         self._completed = {}
         self._completion_after = {}
         self._completion_inventory = {}
+        self._lane_next = {}
         self._cohort_next = 0
 
     @staticmethod
@@ -90,10 +92,10 @@ class ReservedParticipationWorker:
                 raise ValueError("completed participation conflict held; repair required")
         # Snapshot only bounded identities; parse each uncached native record
         # under its own read, so a whole queue cannot block promotion COMMIT.
-        done, pending = 0, []
+        done, pending = set(), []
         for upload in ready:
             if upload in reused:
-                done += 1
+                done.add(upload)
                 continue
             value = owner.journal.get(_READY, upload)
             if (
@@ -113,7 +115,7 @@ class ReservedParticipationWorker:
                     or not _hex32(completed.get("record_sha256"))
                 ):
                     raise ValueError("retained participation completion needs repair")
-                done += 1
+                done.add(upload)
                 reused.add(upload)
             else:
                 pending.append(upload)
@@ -180,10 +182,10 @@ class ReservedParticipationWorker:
             raise ValueError("retained participation request identity differs")
         return request
 
-    def _report(self, cohort, done, total, *, stage, error=None):
+    def _progress(self, cohort, done, total, *, stage, scope, error=None):
         pending = None if total is None else total - done
-        samples = self._samples.get(cohort, []) if stage == "ready_reserved_participation" else []
-        elapsed = time.monotonic() - self._started.setdefault(cohort, time.monotonic())
+        samples = self._samples.get((cohort, scope), [])
+        elapsed = time.monotonic() - self._started.setdefault((cohort, scope), time.monotonic())
         eta = (
             0
             if pending == 0
@@ -194,6 +196,7 @@ class ReservedParticipationWorker:
         value = {
             "cohort_sha256": cohort,
             "stage": stage,
+            "scope": scope,
             "status": "retrying" if error else "completed" if pending == 0 else "running",
             "completed": done,
             "total": total,
@@ -205,31 +208,55 @@ class ReservedParticipationWorker:
                 if pending and not samples and error is None
                 else None
             ),
-            "eta_basis": "blocked_or_retrying"
+            "eta_basis": "completed"
+            if pending == 0
+            else "blocked_or_retrying"
             if error
             else ("completed_requests_in_this_process" if samples else "planning_range"),
-            "eta_scope": "ready_reserved_participation_only",
+            "eta_scope": scope,
             "eta_assumptions": (
                 "registration and original evidence available; "
                 "excludes payload verification and certification"
             ),
             "eta_samples": len(samples),
             "stalled_or_retrying": error is not None,
-            "error_type": error,
-            "repair_required": error == "ValueError"
-            or bool(error and error.endswith("RepairRequired")),
-            "reason_code": (
-                "retained_participation_metadata_repair_required"
-                if error == "ValueError"
-                else "reserved_participation_retrying"
-                if error
-                else None
-            ),
-            "unit": "ready_requests",
+            "error_type": None,
+            "repair_required": False,
+            "reason_code": None,
+            "unit": "ready_request_checkpoints",
+            **(error or {}),
         }
+        return value
+
+    def _report(self, cohort, done, total, *, stage, error=None, scope=None, **details):
+        value = self._progress(
+            cohort,
+            done,
+            total,
+            stage=stage,
+            error=error,
+            scope=scope or "completed_upload_receipts_in_current_poll",
+        )
+        value.update(details)
         PUBLIC_COHORT_PROGRESS.record("reserved_participation", value)
         _LOG.info("reserved_model_participation %s", canonical_json_bytes(value).decode("ascii"))
         return value
+
+    def _batch(self, cohort, selected, historical):
+        """Share the configured allowance; batch one alternates both queues."""
+        lanes = []
+        for scope, pending in (("selected", selected), ("historical", historical)):
+            split = bisect_right(pending, self._after.get((cohort, scope), ""))
+            lanes.append(pending[split:] + pending[:split])
+        lane = self._lane_next.get(cohort, 0)
+        batch = []
+        for _ in range(min(self.batch_size, len(selected) + len(historical))):
+            if not lanes[lane]:
+                lane = 1 - lane
+            batch.append((("selected", "historical")[lane], lanes[lane].pop(0)))
+            lane = 1 - lane
+        self._lane_next[cohort] = lane
+        return batch
 
     async def poll_once(self):
         # Rotate cohorts as well as requests; one provider outage cannot consume
@@ -240,19 +267,78 @@ class ReservedParticipationWorker:
         owner = self.owners.owners[cohort]
         phase = None if self.owners.intake_phase is None else self.owners.intake_phase(cohort)
         try:
-            fence, done, pending, recoveries = await run_owned_thread(self._inventory, owner)
+            selection, done, pending, recoveries = await run_owned_thread(self._inventory, owner)
         except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
             return self._report(
-                cohort, 0, None, stage="selection_pending", error=type(error).__name__
+                cohort,
+                0,
+                None,
+                stage="selection_pending",
+                scope="selected_ready_participation_checkpoints",
+                error=participation_retry_details(error, stage="ready_inventory"),
             )
-        total = done + len(pending)
-        if fence is None and not total and not recoveries:
+        excluded = frozenset() if selection is None else selection[1]
+        selected = [] if selection is None else [key for key in pending if key not in excluded]
+        historical = pending if selection is None else [key for key in pending if key in excluded]
+        selected_done = 0 if selection is None else len(done - excluded)
+        historical_done = len(done) - selected_done
+        selected_total = None if selection is None else selected_done + len(selected)
+        historical_total = historical_done + len(historical)
+        queue_total = len(done) + len(pending)
+        selected_scope = "selected_ready_participation_checkpoints"
+        historical_scope = (
+            "unclassified_ready_receipt_checkpoints"
+            if selection is None
+            else "historical_ready_receipt_checkpoints"
+        )
+        errors = {"selected": None, "historical": None}
+        skipped = 0
+
+        def publish():
+            historical_progress = self._progress(
+                cohort,
+                historical_done,
+                historical_total,
+                stage="historical_receipt_recovery",
+                scope=historical_scope,
+                error=errors["historical"],
+            )
+            historical_progress["excluded_without_receipt_this_poll"] = skipped
+            if historical_done < historical_total:
+                # Excluded queue entries may have no native receipt at all.
+                # Completion timings cannot estimate that unresolved population.
+                historical_progress.update(
+                    eta_seconds=None,
+                    planning_eta_seconds=None,
+                    eta_basis=(
+                        "blocked_or_retrying"
+                        if errors["historical"]
+                        else "prior_receipt_existence_unknown"
+                    ),
+                    eta_assumptions=(
+                        "historical checkpoints include excluded requests without receipts"
+                    ),
+                )
+            error = errors["selected"]
+            if selection is None and error is None:
+                error = {
+                    "error_type": "owner_selection_unobserved",
+                    "reason_code": "owner_selection_unobserved",
+                    "error_stage": "selection",
+                }
             return self._report(
-                cohort, 0, None, stage="selection_pending", error="owner_selection_unobserved"
+                cohort,
+                selected_done,
+                selected_total,
+                stage="selection_pending" if selection is None else "ready_reserved_participation",
+                scope=selected_scope,
+                error=error,
+                queue_completed=len(done),
+                queue_total=queue_total,
+                historical_recovery=historical_progress,
             )
-        self._report(cohort, done, total, stage="ready_reserved_participation")
-        split = bisect_right(pending, self._after.get(cohort, ""))
-        pending = pending[split:] + pending[:split]
+
+        publish()
         last_error = None
         recovered = 0
         split = bisect_right([key for key, _ in recoveries], self._completion_after.get(cohort, ""))
@@ -262,7 +348,7 @@ class ReservedParticipationWorker:
             try:
                 if phase is not None and phase != "intake":
                     continue
-                await run_owned_thread(self._eligible, owner, upload, fence)
+                await run_owned_thread(self._eligible, owner, upload, selection)
                 signed = SignedDirectModelUploadCompletion.model_validate_json(
                     canonical_json_bytes(
                         await run_owned_thread(owner.journal.get, "direct-completion", key)
@@ -278,7 +364,9 @@ class ReservedParticipationWorker:
             except _UnselectedReservation:
                 continue
             except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
-                last_error = type(error).__name__
+                last_error = participation_retry_details(
+                    error, stage="completed_upload_receipt_recovery"
+                )
         if recoveries:
             recovery_report = self._report(
                 cohort,
@@ -289,15 +377,15 @@ class ReservedParticipationWorker:
             )
             if not pending:
                 return recovery_report
-        for upload in pending[: self.batch_size]:
-            self._after[cohort] = upload
+        for lane, upload in self._batch(cohort, selected, historical):
+            self._after[(cohort, lane)] = upload
             started = time.monotonic()
             try:
 
                 def guard(upload=upload):
                     if phase is not None and phase != "intake":
                         raise _UnselectedReservation("cohort intake has advanced")
-                    self._eligible(owner, upload, fence)
+                    self._eligible(owner, upload, selection)
 
                 request = await run_owned_thread(self._request, owner, upload)
                 receipt = await self.delivery.retain(
@@ -314,19 +402,22 @@ class ReservedParticipationWorker:
                         "record_sha256": receipt["record_sha256"],
                     },
                 )
-                done += 1
-                samples = self._samples.setdefault(cohort, [])
+                done.add(upload)
+                if lane == "selected":
+                    selected_done += 1
+                else:
+                    historical_done += 1
+                scope = selected_scope if lane == "selected" else historical_scope
+                samples = self._samples.setdefault((cohort, scope), [])
                 samples.append(time.monotonic() - started)
                 del samples[:-32]
             except _UnselectedReservation:
-                total -= 1
+                skipped += 1
             except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
                 # No terminal hold: our verification, review, registration or
                 # archival outage cannot disqualify a timely signed upload.
-                last_error = type(error).__name__
-            self._report(
-                cohort, done, total, stage="ready_reserved_participation", error=last_error
-            )
-        return self._report(
-            cohort, done, total, stage="ready_reserved_participation", error=last_error
-        )
+                errors[lane] = participation_retry_details(
+                    error, stage="participation_continuation"
+                )
+            publish()
+        return publish()

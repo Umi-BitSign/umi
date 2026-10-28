@@ -720,6 +720,29 @@ and native verification rules. Each independent owner establishes its own result
 Current history, finality, authority, signature creation and chain selection keep
 their native checks. A stored object alone does not establish valid miner work.
 
+Recovery history exports authenticate the committed prefix once within the
+owning SQLite snapshot. The export carries those exact checked certificates and
+derived tip forward, checks the separately supplied genesis quorum and repeated
+phase evidence, and excludes any pending signing reservation. Reopening still
+checks retained canonical bytes, sequence, signatures and pending ordering;
+there is no recovery-store shortcut based on a previously seen database path.
+
+The benchmark order host retains its signed-phase review under
+`<order-queue-directory>/selection-history-verification` (or the configured
+account-private native verification root). Its distinct
+`order_selection_signed_history` scope binds the immutable queue configuration,
+full signed history, policy and lineage, resource bounds and qualified verifier
+semantics. First review runs in an owned worker thread; unchanged waiting-phase
+polls and restarts reuse it. Every poll still obtains current history and owned
+finality, checks configured cohort authority and finalized height, and considers
+the current phase. Selection rechecks the source before using that same result.
+This is only the existing signed-phase check: original decision-input replay,
+order review, conflict holds, signatures and delivery retain their own checks.
+Missing or damaged completed receipts emit scoped repair diagnostics. These
+private additive receipts change neither signed bytes nor journal/startup
+schemas; older supported readers ignore them. Install through the owner's
+supported source-selection path; miners need no upload-client or protocol change.
+
 The first package read imports its exact native envelope and original object bytes
 into a private immutable snapshot. Subsequent reads compare the actual package and
 object file identities and metadata; unchanged payloads need no repeated hashing
@@ -3717,10 +3740,27 @@ completion path and reads provider metadata, not model payloads. A provider
 restart that requires a new miner signature still needs the original client.
 Existing verified reservations are discovered before the next long payload
 stream; retained participation evidence can finish after replacement or phase
-advancement. The cached progress API exposes this work under
-`components.reserved_participation`, with counts, elapsed time and an ETA scoped
-to continuation. That ETA excludes remaining byte verification and independent
-certification.
+advancement. Selected ready requests and historical receipt recovery have
+separate bounded, rotating allowances; an excluded historical backlog cannot
+consume the selected-request allowance. Historical recovery still checks for an
+existing native receipt before applying the current selection fence, so an old
+committed request can finish its original evidence preservation.
+
+The cached progress API exposes this work under `components.reserved_participation`.
+During the ready-participation stage, its top-level counts and ETA describe
+selected ready requests; nested
+`historical_recovery` describes the separate receipt-recovery scope, with its own
+elapsed time, samples and ETA. `queue_completed`/`queue_total` count all retained
+readiness/completion checkpoints and are not counts of newly admitted miners.
+An unavailable selection keeps the selected denominator unknown while historical
+receipt recovery can continue. Probing an excluded request does not reduce the
+selected denominator. Retried work reports its stage, typed underlying cause and
+SQLite error code/name when applicable, without publishing exception text.
+Provider upload-completion receipt recovery remains a distinct top-level
+`completed_upload_receipt_recovery` substage, with its own
+`completed_upload_receipts_in_current_poll` counts and ETA. Those numbers do not
+describe selected participation. These estimates exclude remaining byte
+verification and independent certification.
 Retaining participation does not grant its admission certificate or model-artifact
 acceptance; the ordinary independent certification and roster-sealing checks
 still apply. Select this owner implementation through the supported admission

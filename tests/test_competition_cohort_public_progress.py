@@ -89,6 +89,93 @@ def test_reserved_participation_ages_elapsed_and_withdraws_overdue_eta(monkeypat
     assert overdue["planning_eta_seconds"] is None
 
 
+def test_participation_scopes_and_typed_retries_survive_public_projection(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "reserved_participation",
+        dict(
+            cohort_sha256=C,
+            status="completed",
+            completed=2,
+            total=2,
+            scope="selected_ready_participation_checkpoints",
+            queue_completed=9,
+            queue_total=231,
+            historical_recovery=dict(
+                stage="historical_receipt_recovery",
+                status="retrying",
+                scope="historical_ready_receipt_checkpoints",
+                completed=7,
+                total=229,
+                elapsed_seconds=5,
+                eta_seconds=None,
+                planning_eta_seconds=[1, 30],
+                error_type="ParticipationUnavailable",
+                error_stage="evidence_preservation",
+                cause_type="OperationalError",
+                reason_code="participation_evidence_unavailable",
+                sqlite_errorcode=5,
+                sqlite_errorname="SQLITE_BUSY",
+                repair_required=False,
+                excluded_without_receipt_this_poll=1,
+                private_detail="secret URL",
+                nested_private={"path": "secret"},
+                unit={"private": "secret"},
+            ),
+        ),
+    )
+    now[0] = 20
+    result = state.snapshot(C)["components"]["reserved_participation"]
+    assert (result["completed"], result["total"]) == (2, 2)
+    assert (result["queue_completed"], result["queue_total"]) == (9, 231)
+    historical = result["historical_recovery"]
+    assert (historical["completed"], historical["total"]) == (7, 229)
+    assert historical["elapsed_seconds"] == 15
+    assert historical["planning_eta_seconds"] == [0, 20]
+    assert historical["error_stage"] == "evidence_preservation"
+    assert historical["cause_type"] == "OperationalError"
+    assert historical["sqlite_errorcode"] == 5
+    assert historical["sqlite_errorname"] == "SQLITE_BUSY"
+    assert "unit" not in historical and "secret" not in str(result)
+    historical["completed"] = 99
+    assert (
+        state.snapshot(C)["components"]["reserved_participation"]["historical_recovery"][
+            "completed"
+        ]
+        == 7
+    )
+    now[0] = 41
+    overdue = state.snapshot(C)["components"]["reserved_participation"]["historical_recovery"]
+    assert overdue["planning_eta_seconds"] is None
+    assert overdue["stalled_or_retrying"]
+
+
+def test_selected_participation_measured_eta_ages_without_new_work(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    state = CohortProgressSnapshots()
+    state.record(
+        "reserved_participation",
+        dict(
+            cohort_sha256=C,
+            status="running",
+            completed=1,
+            total=3,
+            elapsed_seconds=5,
+            eta_seconds=30,
+            eta_basis="completed_requests_in_this_process",
+        ),
+    )
+    now[0] = 20
+    value = state.snapshot(C)["components"]["reserved_participation"]
+    assert value["eta_seconds"] == 20 and value["elapsed_seconds"] == 15
+    now[0] = 41
+    value = state.snapshot(C)["components"]["reserved_participation"]
+    assert value["eta_seconds"] is None and value["eta_basis"] == "forecast_overdue"
+
+
 def test_certification_planning_range_counts_down_on_public_reads(monkeypatch):
     now = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])

@@ -487,6 +487,9 @@ status before claiming certification. A timely issued reservation remains
 eligible while server-side preservation, review or registration is pending,
 including after new intake closes; those waits do not expire it. Incomplete
 uploads still need their remaining bytes or the original client's recovery.
+The progress API reports selected ready participation requests separately from
+historical receipt recovery. Queue checkpoints and completed recovery work do
+not by themselves mean that new miners have been admitted or certified.
 
 Direct R2 transfers retry temporary network failures, throttling and expired
 capabilities. If R2 loses a multipart upload before completion, the client

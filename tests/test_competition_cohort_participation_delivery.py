@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,8 +14,10 @@ from umi.competition_cohort_intake_records import read_participation
 from umi.competition_cohort_participation_delivery import (
     ParticipationDelivery,
     ParticipationUnavailable,
+    participation_retry_details,
 )
 from umi.competition_execution import execution_boundary
+from umi.competition_store import AdmissionCapacityError
 from umi.open_competition import digest
 from umi.protocol import canonical_json_bytes
 
@@ -295,3 +298,56 @@ async def test_late_reservation_does_not_gain_admission_from_continuation(delive
     assert case.intake.receipt(case.signed) is None
     assert _records(case) == ()
     case.archive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "receipt_lookup",
+        "payload_prerequisite",
+        "registration_capture",
+        "native_retention",
+        "evidence_preservation",
+    ],
+)
+async def test_retry_wrappers_preserve_boundary_and_original_cause(
+    delivery_case, monkeypatch, stage
+):
+    case = delivery_case
+    cause = sqlite3.OperationalError("private provider URL and local path")
+    cause.sqlite_errorcode, cause.sqlite_errorname = sqlite3.SQLITE_BUSY, "SQLITE_BUSY"
+    if stage == "receipt_lookup":
+        monkeypatch.setattr(case.intake, "receipt", Mock(side_effect=cause))
+    elif stage == "payload_prerequisite":
+        case.models.require_payload.side_effect = cause
+    elif stage == "registration_capture":
+        case.capture.side_effect = cause
+    elif stage == "native_retention":
+        monkeypatch.setattr(case.intake, "retain", Mock(side_effect=cause))
+    else:
+        case.archive.side_effect = cause
+    with pytest.raises(ParticipationUnavailable) as raised:
+        await _delivery(case).retain(case.signed)
+    assert raised.value.__cause__ is cause
+    details = participation_retry_details(raised.value)
+    assert details["error_stage"] == stage
+    assert details["error_type"] == "ParticipationUnavailable"
+    assert details["cause_type"] == "OperationalError"
+    assert details["sqlite_errorcode"] == sqlite3.SQLITE_BUSY
+    assert details["sqlite_errorname"] == "SQLITE_BUSY"
+    assert "private provider" not in str(details)
+
+
+@pytest.mark.parametrize("cause_type,repair", [(AdmissionCapacityError, False), (ValueError, True)])
+def test_nested_retry_classifies_capacity_and_metadata_separately(cause_type, repair):
+    cause = cause_type("private retained diagnostic")
+    intermediate = OSError("private service diagnostic")
+    intermediate.__cause__ = cause
+    error = ParticipationUnavailable("retry unchanged", stage="native_retention")
+    error.__cause__ = intermediate
+    details = participation_retry_details(error)
+    assert details["repair_required"] is repair
+    assert details["cause_type"] == cause_type.__name__
+    assert details["reason_code"] == "participation_retention_unavailable"
+    assert details["error_stage"] == "native_retention"
+    assert "private" not in str(details)

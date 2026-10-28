@@ -187,6 +187,8 @@ class CohortRecoveryStore:
     def _load(
         self,
         cohort: str,
+        *,
+        committed: list[SignedCohortRecoveryTransition] | None = None,
     ) -> tuple[_Binding, CohortRecoveryState, CohortRecoveryTransition | None]:
         row = self.db.execute(
             "SELECT substr(body,1,524289) FROM cohort_recovery_bindings WHERE cohort=?", (cohort,)
@@ -237,6 +239,8 @@ class CohortRecoveryStore:
                 if signed.transition != transition:
                     raise ValueError("cohort decision differs from its certificate")
                 state = apply_recovery_transition(state, signed, binding.authority, binding.policy)
+                if committed is not None:
+                    committed.append(signed)
         return binding, state, pending
 
     def status(self, cohort: str) -> tuple[CohortRecoveryState, CohortRecoveryTransition | None]:
@@ -467,28 +471,35 @@ class CohortRecoveryStore:
         """
         if not self.db.in_transaction:
             raise ValueError("cohort history read requires an owned transaction")
-        binding, state, _ = self._load(cohort)
-        records = self.db.execute(
-            "SELECT substr(certificate,1,65537) FROM cohort_recovery_decisions "
-            "WHERE cohort=? AND certificate IS NOT NULL ORDER BY sequence",
-            (cohort,),
+        committed: list[SignedCohortRecoveryTransition] = []
+        binding, state, _ = self._load(cohort, committed=committed)
+        # The same snapshot has authenticated admission and every committed
+        # transition, including canonical bytes, sequence and pending ordering.
+        # Only the separately supplied genesis signatures remain untrusted.
+        published = _PublishedGenesis.model_validate_json(
+            canonical_json_bytes(
+                _PublishedGenesis(genesis=binding.genesis, signatures=genesis_signatures)
+            )
         )
+        verify_recovery_quorum(published.genesis, published.signatures, binding.policy)
+        seen = set()
+        for signed in committed:
+            decision = signed.transition
+            identity = (decision.phase, decision.operation, decision.evidence_sha256)
+            if identity in seen:
+                raise ValueError("recovery history applies the same phase evidence twice")
+            seen.add(identity)
         history = CohortRecoveryHistory(
             schema="umi-cohort-recovery-history/1",
             plan=binding.plan,
             authority=binding.authority,
             genesis=binding.genesis,
-            genesis_signatures=genesis_signatures,
-            transitions=tuple(
-                _decode(SignedCohortRecoveryTransition, raw, 64 * 1024) for (raw,) in records
-            ),
+            genesis_signatures=published.signatures,
+            transitions=tuple(committed),
         )
-        verify_cohort_history(
-            history,
-            binding.policy,
-            expected_tip_sha256=state.tip_sha256,
-            current_block=state.observed_at_block,
-        )
+        last = committed[-1].transition if committed else binding.genesis
+        if digest(last) != state.tip_sha256:
+            raise ValueError("recovery history is not the selected current tip")
         return history
 
     def reserve(
