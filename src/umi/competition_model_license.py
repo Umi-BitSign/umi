@@ -117,11 +117,16 @@ def verify_cohort_model_terms(submission, consent, history, policy, *, current_b
     scope check is shared by admission, retained replay and signing preflight.
     """
     bundle = submission.model_bundle
-    if submission.accepted_terms_sha256 != model_contribution_terms(bundle, policy):
+    body = (
+        None
+        if bundle is None or bundle.license_adoption is None
+        else verify_model_license_adoption(bundle, policy)
+    )
+    terms = policy.contribution_terms_sha256 if body is None else body.noncommercial_terms_sha256
+    if submission.accepted_terms_sha256 != terms:
         raise ValueError("submission has not accepted its exact model contribution terms")
-    if bundle is None or bundle.license_adoption is None:
+    if body is None:
         return None
-    body = verify_model_license_adoption(bundle, policy)
     authority, plan = history.authority.authority, history.plan
     if (
         submission.track != "model"

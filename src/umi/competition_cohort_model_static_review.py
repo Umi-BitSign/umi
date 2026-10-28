@@ -18,7 +18,7 @@ from pydantic import Field, model_validator
 
 from .competition_artifacts import _artifact, _directory, verify_preserved_bundle
 from .competition_cohort_model_acceptance import ModelArtifactReviewInputs
-from .competition_model_license import model_contribution_terms, verify_model_license_adoption
+from .competition_model_license import verify_model_license_adoption
 from .open_competition import CompetitionPolicy, ModelBundle, digest
 from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 
@@ -187,7 +187,11 @@ def _review_from_documents(
         "schema": "umi-standing-model-artifact-rights-decision/1",
         "review_policy_sha256": review_policy_sha256,
         "competition_policy_sha256": digest(policy),
-        "contribution_terms_sha256": model_contribution_terms(bundle, policy),
+        "contribution_terms_sha256": (
+            policy.contribution_terms_sha256
+            if license_adoption is None
+            else license_adoption.noncommercial_terms_sha256
+        ),
         "standing_approval_record_sha256": standing.standing_approval_record_sha256,
         "approved_by": standing.approved_by,
         "approved_at_utc": standing.approved_at_utc,
