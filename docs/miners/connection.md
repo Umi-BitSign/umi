@@ -472,8 +472,22 @@ amendments that make a previously mixed cohort model-only. Updating the client
 does not reopen intake or enable an upload route; the cohort's authenticated
 history selects those rules. It signs additional transport
 declarations using the same wallet; do not edit or re-sign the original request.
-Admission review follows byte delivery, so an uploaded payload alone does not
-mean the model has been admitted.
+The direct R2 reservation already retains your complete signed participation
+request, including consent. After the complete payload passes verification and
+the standing rights review, an owner with autonomous reservation continuation
+finishes native participation and its evidence preservation without another
+client request. No new signature or reupload is needed. The official client's
+unchanged retries remain supported and return the same retained receipt. Keep
+the client and original files available for unfinished transfers or provider
+recovery; this owner-side feature does not update an installed client.
+
+Completed delivery, verification and a participation receipt are separate from
+independent admission and model-artifact certification. Check the admission
+status before claiming certification. A timely issued reservation remains
+eligible while server-side preservation, review or registration is pending,
+including after new intake closes; those waits do not expire it. Incomplete
+uploads still need their remaining bytes or the original client's recovery.
+
 Direct R2 transfers retry temporary network failures, throttling and expired
 capabilities. If R2 loses a multipart upload before completion, the client
 authenticates a replacement upload and retries with the original signed request.

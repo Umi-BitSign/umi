@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import sqlite3
 import time
 from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
@@ -95,6 +96,10 @@ class DirectModelUploadPending(OSError):
 
 class DirectModelProviderUnavailable(DirectModelUploadPending):
     """Provider generation and completed object are both absent; signed restart needed."""
+
+
+class DirectModelSelectionChanged(DirectModelUploadPending):
+    """Concurrent issued metadata needs a fresh bounded scheduling projection."""
 
 
 class DirectModelUploadOwnerConfig(StrictProtocolModel):
@@ -289,6 +294,7 @@ class DirectModelUploadOwner:
         repair_poll_cursor: bool = False,
         selection_context=None,
         selection_authority=None,
+        participation_ready=None,
     ) -> None:
         self.config = DirectModelUploadOwnerConfig.model_validate_json(canonical_json_bytes(config))
         if not callable(authorize) or not callable(sign):
@@ -297,10 +303,12 @@ class DirectModelUploadOwner:
         self.policy = policy
         self.selection_context = selection_context
         self.selection_authority = selection_authority
+        self.participation_ready = participation_ready
         # Diagnostics only; admission and signed historical consumers continue
         # to use their exact retained artifacts. Refreshed before each poll.
         self._selection_holds = {}
         self._selection_hold_fence = None
+        self._continuation_selection = None
         self.new_attempt_id = new_attempt_id or (lambda: secrets.token_hex(32))
         self._mutex = asyncio.Lock()
         self._verification_mutex = asyncio.Lock()
@@ -1546,57 +1554,78 @@ class DirectModelUploadOwner:
 
     def _poll_projection(self):
         """Select issued requests before hashing; count source bytes once."""
+        for _ in range(2):
+            result = self._poll_projection_once()
+            if result is not None:
+                return result
+        raise DirectModelSelectionChanged("direct model selection changed; retry metadata")
+
+    def _poll_projection_once(self):
         cohort = self.config.cohort_sha256
         context = (
             nullcontext((None, frozenset()))
             if self.selection_context is None
             else self.selection_context(cohort)
         )
-        with context as (deadline, permitted), self.journal.read_transaction() as db:
-            selection = select_issued_model_uploads(
-                self, cohort, deadline=deadline, permitted=permitted, db=db
-            )
-            keys = self.journal.keys("direct-object", db=db)
-            holds = {
-                upload: "direct_model_submission_superseded" for upload in selection.superseded
-            } | {upload: "direct_model_reservation_after_cutoff" for upload in selection.ineligible}
-            selected = pending = superseded = ineligible = source_bytes = remaining_bytes = 0
-            pending_sources = {}
-            for key in keys:
-                reservation = self._reservation_by_digest(key, db=db).reservation
-                upload = reservation.payload.upload_sha256
-                if upload not in selection.issued:
-                    raise ValueError("completed upload lacks its original issued request")
-                if upload in selection.superseded:
-                    superseded += 1
-                elif upload in selection.ineligible:
-                    ineligible += 1
-                else:
-                    selected += 1
-                    source_bytes += reservation.payload.total_bytes
-                    if (
-                        self.journal.get("direct-verification", key, db=db) is None
-                        and self.journal.get("direct-verification-hold", key, db=db) is None
-                    ):
-                        pending += 1
-                        remaining_bytes += reservation.payload.total_bytes
-                        pending_sources[key] = reservation.payload.total_bytes
-            return (
-                keys,
-                holds,
-                (self.journal.selection_fence(db), None if deadline is None else digest(deadline)),
-                {
-                    "objects_selected": selected,
-                    "objects_superseded": superseded,
-                    "objects_ineligible": ineligible,
-                    "selected_objects_pending_verification": pending,
-                    "selected_source_bytes_total": source_bytes,
-                    "selected_source_bytes_remaining": remaining_bytes,
-                    "selection_count_scope": "latest_eligible_issued_per_hotkey_poll_snapshot",
-                    "selection_refresh_required": False,
-                },
-                pending_sources,
-            )
+        with context as (deadline, permitted):
+            with self.journal.read_transaction() as db:
+                selection_fence = self.journal.selection_fence(db)
+            deadline_sha256 = None if deadline is None else digest(deadline)
+        selection = select_issued_model_uploads(
+            self, cohort, deadline=deadline, permitted=permitted
+        )
+        keys = self.journal.keys("direct-object")
+        holds = {
+            upload: "direct_model_submission_superseded" for upload in selection.superseded
+        } | {upload: "direct_model_reservation_after_cutoff" for upload in selection.ineligible}
+        selected = pending = superseded = ineligible = source_bytes = remaining_bytes = 0
+        pending_sources = {}
+        verified_candidates = []
+        for key in keys:
+            signed = self._reservation_by_digest(key)
+            reservation = signed.reservation
+            upload = reservation.payload.upload_sha256
+            if upload not in selection.issued:
+                with self.journal.read_transaction() as db:
+                    if self.journal.selection_fence(db) != selection_fence:
+                        return None
+                raise ValueError("completed upload lacks its original issued request")
+            verified = self.journal.get("direct-verification", key) is not None
+            if verified and self.participation_ready is not None:
+                verified_candidates.append((key, signed, upload in holds))
+            if upload in selection.superseded:
+                superseded += 1
+            elif upload in selection.ineligible:
+                ineligible += 1
+            else:
+                selected += 1
+                source_bytes += reservation.payload.total_bytes
+                if not verified and self.journal.get("direct-verification-hold", key) is None:
+                    pending += 1
+                    remaining_bytes += reservation.payload.total_bytes
+                    pending_sources[key] = reservation.payload.total_bytes
+        with self.journal.read_transaction() as db:
+            if self.journal.selection_fence(db) != selection_fence:
+                return None
+        if not self._selection_authority_current((selection_fence, deadline_sha256)):
+            return None
+        return (
+            keys,
+            holds,
+            (selection_fence, deadline_sha256),
+            {
+                "objects_selected": selected,
+                "objects_superseded": superseded,
+                "objects_ineligible": ineligible,
+                "selected_objects_pending_verification": pending,
+                "selected_source_bytes_total": source_bytes,
+                "selected_source_bytes_remaining": remaining_bytes,
+                "selection_count_scope": "latest_eligible_issued_per_hotkey_poll_snapshot",
+                "selection_refresh_required": False,
+            },
+            pending_sources,
+            verified_candidates,
+        )
 
     def _selection_authority_current(self, selection_fence):
         return self.selection_authority is None or (
@@ -1645,6 +1674,7 @@ class DirectModelUploadOwner:
         _at(now_unix_ms)
         ready = pending = retrying = failed = reviews_ready = reviews_held = 0
         completed = terminal = 0
+        continuation_retrying = 0
         cleaned = retained_for_cleanup = cleanup_examined = 0
         last_error = last_retry_error = ""
         examined = 0
@@ -1658,6 +1688,7 @@ class DirectModelUploadOwner:
             selection_fence,
             selection_counts,
             pending_sources,
+            verified_candidates,
         ) = await run_owned_thread(self._poll_projection)
         self._selection_holds = selection_holds
         self._selection_hold_fence = selection_fence
@@ -1667,6 +1698,50 @@ class DirectModelUploadOwner:
             if size is not None:
                 selection_counts["selected_objects_pending_verification"] -= 1
                 selection_counts["selected_source_bytes_remaining"] -= size
+
+        async def queue_participation(reservation):
+            nonlocal continuation_retrying, last_retry_error
+            if self.participation_ready is not None:
+                try:
+                    await run_owned_thread(self.participation_ready, self, reservation)
+                except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
+                    # Readiness metadata failure never invalidates verified
+                    # model bytes or becomes a miner's terminal review hold.
+                    continuation_retrying += 1
+                    last_retry_error = type(error).__name__
+
+        # Backfill already-verified predecessors before the first long stream.
+        # Reuse the existing inventory and durable review-file identities; the
+        # ordinary item loop consumes these results rather than checking twice.
+        prechecked_reviews = {}
+        for key, reservation, excluded in verified_candidates:
+            model = reservation.reservation.payload.model_sha256
+            try:
+                if excluded:
+                    # A formerly retained participation may still need its
+                    # original archive after a replacement was issued. The
+                    # shared path resumes that receipt but cannot newly admit
+                    # an obsolete upload past its selection guard.
+                    await queue_participation(reservation)
+                    continue
+                reviewed = self.config.standing_review_policy is None
+                if self.config.admission_reviews_directory is not None:
+                    reviewed = await run_owned_thread(
+                        reviewed_file_ready,
+                        self.journal,
+                        Path(self.config.admission_reviews_directory) / (model + ".json"),
+                        model,
+                    )
+                prechecked_reviews[key] = reviewed
+                if reviewed:
+                    await queue_participation(reservation)
+            except (OSError, ValueError) as error:
+                prechecked_reviews[key] = error
+        # A separate continuation poll must not call an undiscovered pre-upgrade
+        # ready queue complete while this bounded backfill is still running.
+        self._continuation_selection = (
+            None if continuation_retrying else (selection_fence, frozenset(selection_holds))
+        )
 
         def publish(position=None, reservation=None, model=None, stage="metadata_inventory"):
             if report is None:
@@ -1727,12 +1802,18 @@ class DirectModelUploadOwner:
             reviewed = self.config.standing_review_policy is None
             if not excluded and self.config.admission_reviews_directory is not None:
                 try:
-                    reviewed = await run_owned_thread(
-                        reviewed_file_ready,
-                        self.journal,
-                        Path(self.config.admission_reviews_directory) / (model_sha256 + ".json"),
-                        model_sha256,
-                    )
+                    if reservation_sha256 in prechecked_reviews:
+                        reviewed = prechecked_reviews[reservation_sha256]
+                        if isinstance(reviewed, Exception):
+                            raise reviewed
+                    else:
+                        reviewed = await run_owned_thread(
+                            reviewed_file_ready,
+                            self.journal,
+                            Path(self.config.admission_reviews_directory)
+                            / (model_sha256 + ".json"),
+                            model_sha256,
+                        )
                     if reviewed:
                         reviews_ready += 1
                 except (OSError, ValueError) as error:
@@ -1744,6 +1825,8 @@ class DirectModelUploadOwner:
                 ready += 1
             if not excluded and verified and reviewed:
                 completed += 1
+                if reservation_sha256 not in prechecked_reviews:
+                    await queue_participation(reservation)
                 continue
             if not excluded:
                 review_hold = await run_owned_thread(self._current_review_hold, reservation)
@@ -1902,6 +1985,8 @@ class DirectModelUploadOwner:
                 failed += 1
                 retrying += 1
                 last_error = last_retry_error = type(error).__name__
+            else:
+                await queue_participation(reservation)
         result = {
             "status": "direct_model_upload_poll",
             "objects_verified": ready,
@@ -1915,6 +2000,7 @@ class DirectModelUploadOwner:
             "object_count_status": "complete",
             "object_count_scope": _OBJECT_COUNT_SCOPE,
             "objects_attempted": examined,
+            "participation_enqueue_retrying": continuation_retrying,
             "objects_failed": failed,
             "reviews_ready": reviews_ready,
             "reviews_held": reviews_held,
@@ -1970,7 +2056,15 @@ class DirectModelUploadOwners:
 
     def _pending(self, cohort):
         report = self._reports.get(cohort)
-        return None if report is None else report["objects_pending"] + report["objects_retrying"]
+        return (
+            None
+            if report is None
+            else (
+                report["objects_pending"]
+                + report["objects_retrying"]
+                + report.get("participation_enqueue_retrying", 0)
+            )
+        )
 
     def _select(self):
         # Unknown owners get an ordinary poll, never a separate journal scan.

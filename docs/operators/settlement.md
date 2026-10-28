@@ -3704,6 +3704,43 @@ entire stream, every declared file, and the license/provenance documents. A
 model cannot enter participation or artifact acceptance before those checks and
 the standing review complete.
 
+The issued direct reservation retains the complete signed participation request,
+including the miner's consent. A service-owned continuation uses that exact
+request after payload verification and standing review, then follows the native
+participation, registration and evidence-preservation path. It runs independently
+of client polling and resumes retained work after restart. The original client's
+participation retry remains idempotent; continuation needs neither a new miner
+signature nor a second upload. Existing byte and review receipts are reused.
+The same lane reconciles an already signed upload-completion intent when the
+provider finished but the owner lost its object receipt. It reuses the original
+completion path and reads provider metadata, not model payloads. A provider
+restart that requires a new miner signature still needs the original client.
+Existing verified reservations are discovered before the next long payload
+stream; retained participation evidence can finish after replacement or phase
+advancement. The cached progress API exposes this work under
+`components.reserved_participation`, with counts, elapsed time and an ETA scoped
+to continuation. That ETA excludes remaining byte verification and independent
+certification.
+Retaining participation does not grant its admission certificate or model-artifact
+acceptance; the ordinary independent certification and roster-sealing checks
+still apply. Select this owner implementation through the supported admission
+host update path; source publication alone does not establish deployment.
+The existing owner configuration and signed journal bindings remain unchanged;
+new readiness/completion records are additive metadata within the existing
+capacity. Current clients and older readers continue to use their original
+participation protocol. Source selection does not publish a new client release.
+
+Timely issued reservations do not expire while the server is preserving bytes,
+reviewing rights or obtaining registration evidence. This continuation adds no
+abandonment timer. A genuinely unfinished upload or required client-signed
+provider restart remains pending; bounded terminal treatment needs an explicit
+retained authority and must exclude server-blocked time. The challenge request-tail
+clock, provider capability expiry and rejected-object cleanup interval cannot
+expire intake eligibility. A replacement that has not entered participation
+does not remove an earlier admitted model. Once newer participation is retained,
+the native seal selects it and requires its acceptance rather than silently
+falling back to the earlier model.
+
 Before any source hash or static review, the direct owner selects the latest
 actually issued, authenticated model submission sequence for each hotkey in the
 cohort. Selection and the accepted-upload drain share the same bounded metadata

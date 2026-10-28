@@ -15,14 +15,16 @@ from pydantic import ValidationError
 from .competition_chain import RegistrationCapture
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_intake import CohortAdmissionClosed, CohortIntake, history_tip
-from .competition_cohort_intake_records import read_participation
 from .competition_cohort_participation import CohortAdmissionStatus, CohortParticipationRequest
+from .competition_cohort_participation_delivery import (
+    ParticipationDelivery,
+    ParticipationUnavailable,
+)
 from .competition_cohort_participation_status import participation_status
 from .competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from .competition_cohort_readiness import intake_readiness
 from .competition_cohort_recovery import cohort_service_pool, cohort_tracks
 from .competition_execution import ExecutionBoundary
-from .competition_store import AdmissionCapacityError
 from .concurrency import run_owned_thread
 from .open_competition import Hotkey, Track, digest
 
@@ -52,6 +54,14 @@ def cohort_routes(
         raise ValueError("cohort capture timeout must be between 1 and 3600 seconds")
     router = APIRouter()
     queue = CohortAdmissionQueue(intake)
+    participation = ParticipationDelivery(
+        intake,
+        capture,
+        archive=archive,
+        models=models,
+        capture_timeout_seconds=capture_timeout_seconds,
+        queue=queue,
+    )
 
     def allowed(cohort: str):
         if cohort not in intake.bindings:
@@ -213,28 +223,6 @@ def cohort_routes(
             ) from error
         return value.model_dump(mode="json", by_alias=True)
 
-    async def preserve(signed, receipt):
-        # Production supplies its owned archive provider. Generic rehearsal
-        # routers may omit it; those records stay pending without proof bytes.
-        if archive is not None:
-            cohort = signed.consent.consent.cohort_sha256
-            consent = digest(signed.consent.consent)
-            try:
-                try:
-                    await run_owned_thread(queue.evidence, cohort, consent)
-                except FileNotFoundError:
-                    raw = await run_owned_thread(queue.record, cohort, consent)
-                    original = read_participation(raw).observation
-                    evidence, metadata = await archive(original)
-                    await run_owned_thread(
-                        queue.attach_evidence, cohort, consent, evidence, metadata
-                    )
-            except (ValueError, OSError, sqlite3.Error) as error:
-                raise HTTPException(
-                    503, "admission evidence unavailable; retry unchanged"
-                ) from error
-        return receipt
-
     @router.post("/v1/competition/cohorts/{cohort}/participation")
     async def participate(cohort: str, request: Request):
         allowed(cohort)
@@ -260,40 +248,16 @@ def cohort_routes(
         if signed.consent.consent.cohort_sha256 != cohort:
             raise HTTPException(409, "consent belongs to another cohort")
         try:
-            prior = await run_owned_thread(intake.receipt, signed)
-        except (ValueError, OSError, sqlite3.Error) as error:
-            raise HTTPException(
-                503, "retained cohort intake unavailable; retry unchanged"
-            ) from error
-        if prior is not None:
-            return await preserve(signed, prior)
-        try:
-            current = await asyncio.wait_for(capture(), timeout=capture_timeout_seconds)
-        except Exception as error:
-            raise HTTPException(
-                503, "registration observation unavailable; retry unchanged"
-            ) from error
-        try:
-            if models is not None:
-                await run_owned_thread(models.require_payload, signed)
-            receipt = await run_owned_thread(
-                partial(
-                    intake.retain,
-                    signed,
-                    current,
-                    reservation_provider=getattr(models, "admission_reservation", None),
-                )
-            )
+            return await participation.retain(signed)
         except CohortAdmissionClosed as error:
             raise HTTPException(
                 409,
                 "cohort intake is closed for new submissions",
                 headers={"X-UMI-Reason-Code": "cohort_intake_closed"},
             ) from error
-        except (AdmissionCapacityError, OSError, sqlite3.Error) as error:
-            raise HTTPException(503, "cohort intake unavailable; retry unchanged") from error
+        except ParticipationUnavailable as error:
+            raise HTTPException(503, str(error)) from error
         except ValueError as error:
             raise HTTPException(409, "cohort intake or submission is not eligible") from error
-        return await preserve(signed, receipt)
 
     return router

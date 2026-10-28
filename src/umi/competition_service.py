@@ -341,6 +341,11 @@ def _create_intake_app(
     background_collection_timeout = (
         max(240, config.chain.collection_timeout_seconds) if provider_factory is None else None
     )
+    registration_wait_seconds = (
+        config.chain.collection_timeout_seconds
+        if background_collection_timeout is None
+        else background_collection_timeout
+    ) + 1
     finality_cache = VerifiedRegistrationCache(
         provider,
         policy,
@@ -365,6 +370,7 @@ def _create_intake_app(
             finality_cache.collect_for_cohort_recovery,
             provider.retained_archive,
             provider=provider,
+            capture_timeout_seconds=registration_wait_seconds,
             capture_at_least=lambda block: finality_cache.collect_for_cohort_recovery(
                 minimum_block=block
             ),
@@ -402,11 +408,6 @@ def _create_intake_app(
         # warms up. Missing fresh evidence keeps admission explicitly unverified.
         return (await finality_cache.cached(wait_for_inflight=False)).snapshot
 
-    registration_wait_seconds = (
-        config.chain.collection_timeout_seconds
-        if background_collection_timeout is None
-        else background_collection_timeout
-    ) + 1
     app = create_app(
         store,
         current_snapshot,

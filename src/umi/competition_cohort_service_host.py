@@ -27,6 +27,7 @@ from .competition_cohort_admission_host import AdmissionOwnerConfig, run_admissi
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_direct_model_owner import (
+    DirectModelSelectionChanged,
     DirectModelUploadOwner,
     DirectModelUploadOwnerConfig,
     DirectModelUploadOwners,
@@ -58,12 +59,17 @@ from .competition_cohort_model_upload_delivery import ModelUploadDelivery
 from .competition_cohort_model_upload_replay import ContinuedModelUploadPayloads
 from .competition_cohort_order_host import OrderHostConfig
 from .competition_cohort_order_signer import CohortOrderHistory
+from .competition_cohort_participation_delivery import ParticipationDelivery
 from .competition_cohort_preparation_owner import CohortPreparation
 from .competition_cohort_public_progress import PUBLIC_COHORT_SCOPE
 from .competition_cohort_recovery import (
     ModelRewardCohortAuthority,
     cohort_model_delivery,
     verify_recovery_authority,
+)
+from .competition_cohort_reserved_participation import (
+    ReservedParticipationWorker,
+    queue_ready_participation,
 )
 from .competition_cohort_service_api import ServiceWorkAdmissionAPI, prepared_service_roster
 from .competition_cohort_service_queue import ServiceWorkQueue, ServiceWorkQueueConfig
@@ -596,6 +602,7 @@ class ServiceAdmissionHost:
         *,
         provider=None,
         capture_at_least: Callable[[int], Awaitable[RegistrationCapture]] | None = None,
+        capture_timeout_seconds: float = 120,
     ):
         self.config = ServiceAdmissionHostConfig.model_validate_json(canonical_json_bytes(config))
         c, policy = self.config, intake.policy
@@ -726,6 +733,7 @@ class ServiceAdmissionHost:
                     policy=policy,
                     selection_context=intake.direct_upload_selection_context,
                     selection_authority=intake.direct_upload_selection_authority,
+                    participation_ready=queue_ready_participation,
                 )
             self.direct_uploads = DirectModelUploadOwners(
                 owners,
@@ -810,6 +818,20 @@ class ServiceAdmissionHost:
                 acceptances=self.models.owner,
                 legacy_payloads=self.legacy_payloads,
             )
+        self.reserved_participation = (
+            ReservedParticipationWorker(
+                self.direct_uploads,
+                ParticipationDelivery(
+                    intake,
+                    capture,
+                    archive=archive,
+                    models=self.payloads,
+                    capture_timeout_seconds=capture_timeout_seconds,
+                ),
+            )
+            if self.direct_uploads is not None
+            else None
+        )
         if c.model_review_peers:
             groups = {identity(e.hotkey): e.control_group for e in policy.evaluators}
             if self.models is None or any(
@@ -907,6 +929,10 @@ class ServiceAdmissionHost:
         authorize_memory(None, None, "intake")
         return await self.models.poll_once()
 
+    async def _poll_reserved_participation(self):
+        authorize_memory(None, None, "intake")
+        return await self.reserved_participation.poll_once()
+
     async def _poll_model_inventory(self, cohorts=None):
         authorize_memory(None, None, "intake")
         return await self.models.report_inventory_once(cohorts)
@@ -916,6 +942,11 @@ class ServiceAdmissionHost:
         inventory = None if self.models is None else await self._poll_model_inventory()
         legacy = None if self.uploads is None else await self._poll_legacy_uploads()
         direct = None if self.direct_uploads is None else await self._poll_direct_uploads()
+        participation = (
+            None
+            if self.reserved_participation is None
+            else await self._poll_reserved_participation()
+        )
         if legacy is not None and direct is not None:
             uploads = {"status": "model_payloads_polled", "legacy": legacy, "direct": direct}
         else:
@@ -927,6 +958,7 @@ class ServiceAdmissionHost:
             "model_inventory": inventory,
             "model_acceptance": models,
             "model_delivery": uploads,
+            "reserved_participation": participation,
         }
 
     async def _poll_catalogs(self) -> dict:
@@ -1132,6 +1164,8 @@ class ServiceAdmissionHost:
             callbacks.append(("legacy_uploads", self._poll_legacy_uploads))
         if intake_enabled and self.direct_uploads is not None:
             callbacks.append(("direct_uploads", self._poll_direct_uploads))
+        if intake_enabled and getattr(self, "reserved_participation", None) is not None:
+            callbacks.append(("reserved_participation", self._poll_reserved_participation))
         if intake_enabled and self.models is not None:
             callbacks.append(("models", self._poll_models))
             cohorts = tuple(binding.cohort_sha256 for binding in self.intake.config.cohorts)
@@ -1164,20 +1198,28 @@ class ServiceAdmissionHost:
             started = time.monotonic()
             try:
                 report = {**await callback(), "component": component}
-            except PrivateStateBusyError:
+            except (PrivateStateBusyError, DirectModelSelectionChanged) as error:
                 # A nonblocking journal mutex can be held by a concurrent
                 # request. Keep this reconciliation owner and its checkpoints;
                 # retry on the normal poll, without restarting all other work.
                 report = {
                     "status": "service_reconciliation_retry",
                     "component": component,
-                    "reason_code": "private_state_busy",
+                    "reason_code": (
+                        "direct_model_selection_changed"
+                        if isinstance(error, DirectModelSelectionChanged)
+                        else "private_state_busy"
+                    ),
                     "completed": 0,
                     "total": 1,
                     "elapsed_seconds": round(time.monotonic() - started, 3),
                     "stalled_or_retrying": True,
                     "eta_seconds": None,
-                    "eta_basis": "waiting_for_private_state_mutex",
+                    "eta_basis": (
+                        "retrying_current_issued_selection"
+                        if isinstance(error, DirectModelSelectionChanged)
+                        else "waiting_for_private_state_mutex"
+                    ),
                     "retry_seconds": self.config.poll_seconds,
                     "certification_authority": False,
                 }
