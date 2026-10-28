@@ -34,6 +34,17 @@ class CompetitionSubmissionError(RuntimeError):
         super().__init__(reason_code)
 
 
+def intake_rejection(response, fallback):
+    """Expose the fixed terminal cutoff reason without trusting response bodies."""
+    reason = (
+        "cohort_intake_closed"
+        if response.status_code == 409
+        and response.headers.get("X-UMI-Reason-Code") == "cohort_intake_closed"
+        else fallback
+    )
+    return CompetitionSubmissionError(reason, status_code=response.status_code)
+
+
 class AdmissionReceipt(StrictProtocolModel):
     schema_: Literal["umi-competition-admission/2"] = Field(alias="schema")
     policy_sha256: Hex32
@@ -161,9 +172,7 @@ async def post_intake_document(
             ) as response,
         ):
             if response.status_code != 200:
-                raise CompetitionSubmissionError(
-                    "intake_rejected_or_unavailable", status_code=response.status_code
-                )
+                raise intake_rejection(response, "intake_rejected_or_unavailable")
             if response.headers.get("content-type", "").split(";", 1)[0].strip() != (
                 "application/json"
             ):

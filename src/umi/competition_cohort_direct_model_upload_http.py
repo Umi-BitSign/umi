@@ -26,6 +26,7 @@ from .competition_cohort_direct_model_upload import (
     SignedDirectModelUploadPartRequest,
     SignedDirectModelUploadRestartRequest,
 )
+from .competition_cohort_intake import CohortAdmissionClosed
 from .concurrency import run_owned_thread
 from .open_competition import digest
 
@@ -102,6 +103,12 @@ def direct_model_upload_routes(
             if value.request.consent.consent.cohort_sha256 != cohort:
                 raise ValueError("direct model upload belongs to another cohort")
             return await owner.reserve(value.request, value.payload, now_unix_ms=now_unix_ms())
+        except CohortAdmissionClosed as error:
+            raise HTTPException(
+                409,
+                "cohort intake is closed for new submissions",
+                headers={"X-UMI-Reason-Code": "cohort_intake_closed"},
+            ) from error
         except DirectModelUploadPending as error:
             raise HTTPException(
                 503, "direct model upload creation pending; retry unchanged"
@@ -179,6 +186,20 @@ def direct_model_upload_routes(
             raise HTTPException(422, "invalid direct model upload restart") from error
         except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error) as error:
             raise HTTPException(503, "direct model upload restart unavailable") from error
+
+    @router.get("/v1/competition/cohorts/{cohort}/direct-model-uploads/by-upload/{upload_sha256}")
+    async def upload_status(cohort: str, upload_sha256: str):
+        owner = owner_for(cohort)
+        try:
+            if not _hex32(upload_sha256):
+                raise FileNotFoundError("direct model upload is unavailable")
+            return await run_owned_thread(owner.status_by_upload, upload_sha256)
+        except (DirectModelAttemptRepairRequired, DirectModelMetadataCapacityPending) as error:
+            raise _metadata_pending(error) from error
+        except FileNotFoundError as error:
+            raise HTTPException(404, "direct model upload not found") from error
+        except (ValueError, OSError, RuntimeError, sqlite3.Error) as error:
+            raise HTTPException(503, "direct model upload status unavailable") from error
 
     @router.get("/v1/competition/cohorts/{cohort}/direct-model-uploads/{reservation}")
     async def status(cohort: str, reservation: str):

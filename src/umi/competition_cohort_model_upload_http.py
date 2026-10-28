@@ -5,6 +5,7 @@ import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request
 
+from .competition_cohort_intake import CohortAdmissionClosed
 from .competition_cohort_model_upload import CHUNK_BYTES, CohortModelUploads, ModelUploadChunk
 from .competition_cohort_model_upload_delivery import ModelUploadDelivery
 from .competition_cohort_participation import CohortParticipationRequest
@@ -71,6 +72,12 @@ def model_upload_routes(
                 key = await run_owned_thread(owner.reserve, signed, current)
             stage = "status"
             return await delivery.status(key)
+        except CohortAdmissionClosed as error:
+            raise HTTPException(
+                409,
+                "cohort intake is closed for new submissions",
+                headers={"X-UMI-Reason-Code": "cohort_intake_closed"},
+            ) from error
         except asyncio.TimeoutError as error:
             report_admission_failure("model_delivery", stage, error)
             raise HTTPException(503, "model delivery unavailable; retry unchanged") from error

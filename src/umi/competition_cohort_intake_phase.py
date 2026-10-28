@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 
 from .competition_chain import RegistrationCapture
+from .competition_cohort_admission_deadline import PendingReservedAdmissions
 from .competition_cohort_availability import (
     CohortAvailabilityObservation,
     CohortServiceAvailability,
@@ -214,6 +215,7 @@ class CohortIntakePhaseObserver:
                 # Both records commit together; a crash cannot strand an
                 # irreversible fence without its availability evidence.
                 try:
+                    self.intake.require_admission_uploads_drained(db, history)
                     seal = _build_intake_seal_from_participations(
                         history,
                         self.intake.policy,
@@ -233,7 +235,11 @@ class CohortIntakePhaseObserver:
                         self.intake._records(db, history, track="model"),
                         report=self._certification_report,
                     )
-                except (EmptyCohortIntake, PendingModelArtifacts) as error:
+                except (
+                    EmptyCohortIntake,
+                    PendingModelArtifacts,
+                    PendingReservedAdmissions,
+                ) as error:
                     _LOG.info(
                         "cohort_intake_wait %s",
                         json.dumps(
@@ -241,7 +247,9 @@ class CohortIntakePhaseObserver:
                                 "schema": "umi-cohort-intake-wait/1",
                                 "cohort_sha256": cohort,
                                 "reason_code": (
-                                    "selected_model_artifact_acceptance_pending"
+                                    "accepted_upload_participation_pending"
+                                    if isinstance(error, PendingReservedAdmissions)
+                                    else "selected_model_artifact_acceptance_pending"
                                     if isinstance(error, PendingModelArtifacts)
                                     else "empty_selected_roster"
                                 ),

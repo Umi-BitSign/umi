@@ -20,11 +20,18 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .canonical_reuse import canonical_json_reuse
 from .competition_assignment_reuse import AssignmentVerificationReuse
 from .competition_chain import RegistrationCapture
+from .competition_cohort_admission_deadline import (
+    OperatorAdmissionDeadline,
+    PendingReservedAdmissions,
+    reservation_precedes_deadline,
+    retain_deadline,
+    retained_deadline,
+)
 from .competition_cohort_capacity import MAX_AGGREGATE_EVIDENCE_BYTES
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
 from .competition_cohort_history import CohortRecoveryHistory
@@ -70,6 +77,17 @@ class CohortIntakeConfig(StrictProtocolModel):
     directory: Annotated[str, Field(min_length=1, max_length=4096)]
     cohorts: Annotated[tuple[CohortIntakeBinding, ...], Field(min_length=1, max_length=512)]
 
+    admission_deadlines: Annotated[
+        tuple[OperatorAdmissionDeadline, ...], Field(max_length=512)
+    ] = ()
+
+    @model_serializer(mode="wrap")
+    def preserve_original_config(self, handler):
+        value = handler(self)
+        if not self.admission_deadlines:
+            value.pop("admission_deadlines", None)
+        return value
+
     @model_validator(mode="after")
     def ordered(self):
         path = Path(self.directory)
@@ -78,11 +96,18 @@ class CohortIntakeConfig(StrictProtocolModel):
         ids = tuple(item.cohort_sha256 for item in self.cohorts)
         if ids != tuple(sorted(set(ids))):
             raise ValueError("cohort intake bindings must be unique and sorted")
+        deadlines = tuple(v.cohort_sha256 for v in self.admission_deadlines)
+        if deadlines != tuple(sorted(set(deadlines))) or not set(deadlines) <= set(ids):
+            raise ValueError("admission deadlines require unique configured cohorts")
         return self
 
 
 class CohortIntakeFenced(OSError):
     """This generation is frozen while its certified closure is being published."""
+
+
+class CohortAdmissionClosed(CohortIntakeFenced):
+    """The local operator cutoff permanently rejects new participation."""
 
 
 def history_tip(history: CohortRecoveryHistory) -> str:
@@ -92,10 +117,17 @@ def history_tip(history: CohortRecoveryHistory) -> str:
 def cohort_intake_bytes(db) -> int:
     """Count consent and optional admission evidence under one shared allowance."""
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    return sum(
+    reservation_bytes = (
+        144 * db.execute("SELECT COUNT(*) FROM cohort_admission_reservations").fetchone()[0]
+        if "cohort_admission_reservations" in tables
+        else 0
+    )
+    return reservation_bytes + sum(
         db.execute(f"SELECT COALESCE(SUM(length(body)),0) FROM {name}").fetchone()[0]
         for name in (
             "cohort_consents",
+            "cohort_admission_deadlines",
+            "cohort_admission_drain_snapshots",
             "cohort_admission_artifacts",
             "cohort_admission_votes",
             "cohort_admission_certificates",
@@ -168,6 +200,9 @@ class CohortIntake:
     ):
         if initialize and read_only:
             raise ValueError("read-only cohort intake cannot initialize or migrate state")
+        self._admission_drain_progress = {}
+        self._admission_deadlines = {}
+        self.pending_admission_uploads = None
         self._read_only = read_only
         self.config = CohortIntakeConfig.model_validate_json(canonical_json_bytes(config))
         self.policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
@@ -186,11 +221,45 @@ class CohortIntake:
         self.bindings = {item.cohort_sha256: item.authority_sha256 for item in config.cohorts}
         if self.directory.resolve() != self.directory:
             raise ValueError("cohort intake state must not traverse symlinks")
+        fresh_state = initialize and not (self.directory / "intake.sqlite3").exists()
         if initialize:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self._connection(prefer_history=read_only):
-            pass
+        with self._connection(prefer_history=read_only) as (db, store):
+            if not read_only and not fresh_state:
+                for selection in self.config.admission_deadlines:
+                    retain_deadline(db, selection, store.published_history(selection.cohort_sha256))
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='cohort_admission_deadlines'"
+            ).fetchone():
+                for cohort, raw in db.execute("SELECT cohort,body FROM cohort_admission_deadlines"):
+                    self._admission_deadlines[cohort] = (
+                        OperatorAdmissionDeadline.model_validate_json(raw)
+                    )
         self._initialize = False
+
+    def admission_status(self, cohort):
+        """Cached scheduling metadata only: no RPC, payload or database reads."""
+        deadline = self._admission_deadlines.get(cohort)
+        if deadline is None:
+            return None
+        now = time.time_ns() // 1_000_000
+        closed = now >= deadline.close_new_admissions_at_unix_ms
+        return {
+            "stage": "new_submissions_closed" if closed else "accepting_new_submissions",
+            "new_admissions_open": not closed,
+            "close_new_admissions_at_unix_ms": deadline.close_new_admissions_at_unix_ms,
+            "accepted_uploads_may_finish": True,
+            "accepted_uploads": self._admission_drain_progress.get(cohort),
+            "completed": int(closed),
+            "total": 1,
+            "percent": 100 if closed else 0,
+            "elapsed_seconds": max(0, now - deadline.close_new_admissions_at_unix_ms) / 1000,
+            "eta_seconds": max(0, deadline.close_new_admissions_at_unix_ms - now) / 1000,
+            "eta_basis": "retained_operator_wallclock_deadline",
+            "eta_scope": "new_admissions_only",
+            "stalled_or_retrying": False,
+        }
 
     def _directory(self):
         info = self.directory.lstat()
@@ -244,7 +313,9 @@ class CohortIntake:
         return canonical_json_bytes(
             {
                 "policy_sha256": digest(self.policy),
-                "config": self.config.model_dump(mode="json", by_alias=True),
+                "config": self.config.model_dump(
+                    mode="json", by_alias=True, exclude={"admission_deadlines"}
+                ),
                 "tracks": list(self.tracks),
             }
         )
@@ -368,6 +439,15 @@ class CohortIntake:
                     db.execute("""CREATE TABLE IF NOT EXISTS cohort_intake_seals (
                         cohort TEXT NOT NULL, tip TEXT NOT NULL, body BLOB NOT NULL,
                         PRIMARY KEY(cohort,tip))""")
+                    db.execute(
+                        "CREATE TABLE IF NOT EXISTS cohort_admission_deadlines "
+                        "(cohort TEXT PRIMARY KEY, body BLOB NOT NULL)"
+                    )
+                    db.execute(
+                        "CREATE TABLE IF NOT EXISTS cohort_admission_reservations "
+                        "(request TEXT PRIMARY KEY, cohort TEXT NOT NULL, "
+                        "admitted_ms INTEGER NOT NULL)"
+                    )
                     store = CohortRecoveryStore(db)
                     parent = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                     try:
@@ -465,6 +545,10 @@ class CohortIntake:
                     # Retain the closure input before publishing its referencing history.
                     store.retain_source(cohort, closure_input)
             state = store.publish_history(history, self.policy, current_block=current_block)
+            for selection in self.config.admission_deadlines:
+                if selection.cohort_sha256 == cohort:
+                    retain_deadline(db, selection, history)
+                    self._admission_deadlines[cohort] = selection
             # Retried publication fills any inputs lost after history adoption.
             # Native phase observation refuses missing inputs in the meantime.
             for evidence in decision_inputs or ():
@@ -587,7 +671,67 @@ class CohortIntake:
             ).fetchone()
             return None if prior is None else self._receipt(prior[0], store, request)
 
-    def retain(self, request: CohortParticipationRequest, capture: RegistrationCapture):
+    def require_new_admission(self, db, history, request):
+        """Authorize a new delivery, or finish the exact retained authorization."""
+        cohort = digest(history.plan)
+        deadline = retained_deadline(db, cohort)
+        now = time.time_ns() // 1_000_000
+        key = digest(request)
+        prior = db.execute(
+            "SELECT cohort,admitted_ms FROM cohort_admission_reservations WHERE request=?", (key,)
+        ).fetchone()
+        if prior is not None:
+            if prior[0] != cohort or (
+                deadline is not None and prior[1] >= deadline.close_new_admissions_at_unix_ms
+            ):
+                raise CohortAdmissionClosed(
+                    "retained admission authorization differs from the operator deadline"
+                )
+            return
+        if deadline is not None and now >= deadline.close_new_admissions_at_unix_ms:
+            raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
+        if (
+            db.execute("SELECT COUNT(*) FROM cohort_admission_reservations").fetchone()[0]
+            >= self.capacity.maximum_records
+            or cohort_intake_bytes(db) + 144 > self.capacity.maximum_bytes
+        ):
+            raise AdmissionCapacityError("admission reservation metadata capacity exhausted")
+        db.execute("INSERT INTO cohort_admission_reservations VALUES (?,?,?)", (key, cohort, now))
+
+    def _require_retained_admission(
+        self, db, history, request, reservation, reservation_provider=None
+    ):
+        cohort = digest(history.plan)
+        deadline = retained_deadline(db, cohort)
+        if (
+            deadline is None
+            or time.time_ns() // 1_000_000 < deadline.close_new_admissions_at_unix_ms
+        ):
+            return
+        prior = db.execute(
+            "SELECT cohort,admitted_ms FROM cohort_admission_reservations WHERE request=?",
+            (digest(request),),
+        ).fetchone()
+        if (
+            prior is not None
+            and prior[0] == cohort
+            and prior[1] < deadline.close_new_admissions_at_unix_ms
+        ):
+            return
+        if reservation is None and reservation_provider is not None:
+            reservation = reservation_provider(request)
+        if reservation is None:
+            raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
+        reservation_precedes_deadline(reservation, request, deadline, self.policy)
+
+    def retain(
+        self,
+        request: CohortParticipationRequest,
+        capture: RegistrationCapture,
+        *,
+        reservation=None,
+        reservation_provider=None,
+    ):
         request = CohortParticipationRequest.model_validate_json(canonical_json_bytes(request))
         cohort = request.consent.consent.cohort_sha256
         self._allowed(cohort)
@@ -603,6 +747,9 @@ class CohortIntake:
             if prior is not None:
                 return self._receipt(prior[0], store, request)
             history = store.published_history(cohort)
+            self._require_retained_admission(
+                db, history, request, reservation, reservation_provider
+            )
             _, pending = store.status(cohort)
             if pending is not None and pending.is_policy_adoption:
                 kind = (
@@ -806,6 +953,28 @@ class CohortIntake:
             history = store.published_history(cohort)
             return self._seal(db, history, history_tip(history) if tip is None else tip)
 
+    def require_admission_uploads_drained(self, db, history):
+        """The payload owner resolves accepted reservations before roster freeze."""
+        cohort = digest(history.plan)
+        deadline = self._admission_deadlines.get(cohort)
+        if deadline is None or "model" not in self.tracks:
+            return
+        if time.time_ns() // 1_000_000 < deadline.close_new_admissions_at_unix_ms:
+            raise PendingReservedAdmissions({"completed": 0, "total": 1, "pending": 1})
+        inventory = (
+            {
+                "completed": 0,
+                "total": 1,
+                "pending": 1,
+                "reason_code": "admission_upload_owner_unavailable",
+            }
+            if self.pending_admission_uploads is None
+            else self.pending_admission_uploads(cohort, db, deadline)
+        )
+        self._admission_drain_progress[cohort] = dict(inventory)
+        if inventory["pending"]:
+            raise PendingReservedAdmissions(inventory)
+
     def seal(
         self,
         cohort: str,
@@ -828,6 +997,7 @@ class CohortIntake:
                 return prior
             if history_tip(history) != expected_tip_sha256:
                 raise ValueError("intake history changed before sealing; retry current generation")
+            self.require_admission_uploads_drained(db, history)
             result = build_intake_seal(
                 history,
                 self.policy,

@@ -24,6 +24,7 @@ from typing_extensions import Self
 
 from .competition_cohort_direct_model_attempts import (
     DirectModelAttemptJournal,
+    attempt_index_key,
 )
 from .competition_cohort_direct_model_attempts import (
     DirectModelUploadIntent as _DirectModelUploadIntent,
@@ -733,6 +734,18 @@ class DirectModelUploadOwner:
             else hold
         )
 
+    def status_by_upload(self, upload_sha256: str) -> DirectModelUploadStatus:
+        """Recover the existing latest reservation through bounded owner metadata."""
+        if self.journal.get("direct-request", upload_sha256) is None:
+            raise FileNotFoundError("direct model upload is unavailable")
+        attempt = self._latest_attempt(upload_sha256)
+        reservation = None if attempt is None else self._signed_reservation(attempt)
+        if reservation is None:
+            raise DirectModelUploadPending("direct model reservation is incomplete")
+        if reservation.reservation.payload.upload_sha256 != upload_sha256:
+            raise ValueError("direct model upload index differs")
+        return self.status(digest(reservation.reservation))
+
     def status(self, reservation_sha256: str) -> DirectModelUploadStatus:
         reservation = self._reservation_by_digest(reservation_sha256)
         verification_raw = self.journal.get("direct-verification", reservation_sha256)
@@ -804,6 +817,37 @@ class DirectModelUploadOwner:
                 ) from error
             if review.model_sha256 != submission.model_revision:
                 raise ValueError("direct model review differs from its request")
+
+    def admission_reservation(self, request):
+        """Return original retained issuer evidence, even after a provider restart."""
+        upload_sha256, _ = self._request(request)
+        if self.journal.get("direct-request", upload_sha256) != request.model_dump(
+            mode="json", by_alias=True
+        ):
+            raise DirectModelUploadPending("exact direct reservation is unavailable")
+        current = self._latest_attempt(upload_sha256)
+        if current is None:
+            raise DirectModelUploadPending("original direct reservation is incomplete")
+        # Each generation retains both an index and intent, together exceeding
+        # 256 bytes. Enforce the selected durable metadata ceiling before walking
+        # historical generations; the retired per-upload attempt count is not
+        # a lifetime cutoff.
+        if current.generation > self.config.maximum_metadata_bytes // 256:
+            raise ValueError("original reservation generation exceeds its metadata bound")
+        # An early provider-create failure may have no signed reservation. Keep
+        # the earliest actually issued generation, not merely generation one.
+        for generation in range(1, current.generation + 1):
+            index = self.journal.get(
+                "direct-attempt-index", attempt_index_key(upload_sha256, generation)
+            )
+            if index is None:
+                raise DirectModelUploadPending("original direct reservation needs repair")
+            raw = self.journal.get("direct-reservation", index["attempt_id"])
+            if raw is not None:
+                return SignedDirectModelUploadReservation.model_validate_json(
+                    canonical_json_bytes(raw)
+                )
+        raise DirectModelUploadPending("original direct reservation is incomplete")
 
     def review_artifact(
         self, request: CohortParticipationRequest
@@ -1653,6 +1697,9 @@ class DirectModelUploadOwners:
         except KeyError as error:
             raise DirectModelUploadPending("direct model cohort is unavailable") from error
         owner.require_payload(request)
+
+    def admission_reservation(self, request):
+        return self.owners[request.consent.consent.cohort_sha256].admission_reservation(request)
 
     def review_artifact(
         self, request: CohortParticipationRequest

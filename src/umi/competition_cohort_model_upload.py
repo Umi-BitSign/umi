@@ -200,6 +200,7 @@ def _authorized_model_delivery(intake, request, capture, *, mechanism=None):
             expected_tip_sha256=history_tip(history),
             current_block=execution_boundary(capture).block,
         )
+        intake.require_new_admission(db, history, request)
         yield request, key, sub
 
 

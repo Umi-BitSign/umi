@@ -22,6 +22,7 @@ import httpx
 from pydantic import Field, model_serializer, model_validator
 
 from .competition_chain import RegistrationCapture
+from .competition_cohort_admission_drain import DirectAdmissionDrain
 from .competition_cohort_admission_host import AdmissionOwnerConfig, run_admission_owner
 from .competition_cohort_admission_queue import CohortAdmissionQueue
 from .competition_cohort_coordinator import CohortDecisionInput, replay_cohort_decisions
@@ -31,7 +32,7 @@ from .competition_cohort_direct_model_owner import (
     DirectModelUploadOwners,
 )
 from .competition_cohort_dispatch_host import ServiceDispatchConfig
-from .competition_cohort_intake import CohortIntake, history_tip
+from .competition_cohort_intake import CohortAdmissionClosed, CohortIntake, history_tip
 from .competition_cohort_legacy_model_admission import LegacyModelAdmissionPayloads
 from .competition_cohort_legacy_model_selection import (
     LegacyModelStorageSelections,
@@ -88,6 +89,23 @@ from .r2_multipart import R2MultipartClient, r2_connection_scope
 from .r2_sigv4 import R2SigV4, load_r2_credentials
 
 logger = logging.getLogger(__name__)
+
+
+async def _authorize_direct_model_delivery(intake, request, capture):
+    """Reject closed new reservations before collecting registration evidence."""
+    status = intake.admission_status(request.consent.consent.cohort_sha256)
+    if status is not None and not status["new_admissions_open"]:
+        raise CohortAdmissionClosed("new cohort admissions are closed by the operator deadline")
+    observed = await capture()
+    await run_owned_thread(
+        partial(
+            authorize_model_delivery,
+            intake,
+            request,
+            observed,
+            mechanism="direct_r2_multipart_v1",
+        )
+    )
 
 
 class _SharedFreshFinality:
@@ -247,6 +265,11 @@ class CohortModelPayloadRouter:
         self._payload_owner(mechanism, request.consent.consent.cohort_sha256).require_payload(
             request
         )
+
+    def admission_reservation(self, request):
+        if self._mechanism(request) != "direct_r2_multipart_v1":
+            return None
+        return self.direct.admission_reservation(request)
 
     def review_artifact(self, request):
         if self._mechanism(request) != "direct_r2_multipart_v1":
@@ -660,16 +683,7 @@ class ServiceAdmissionHost:
             direct_signer_key = load_named_hotkey(Path(direct.owner_key_file), direct.owner_hotkey)
 
             async def authorize(request):
-                observed = await capture()
-                await run_owned_thread(
-                    partial(
-                        authorize_model_delivery,
-                        intake,
-                        request,
-                        observed,
-                        mechanism="direct_r2_multipart_v1",
-                    )
-                )
+                await _authorize_direct_model_delivery(intake, request, capture)
 
             async def sign(body):
                 return await run_owned_thread(sign_object, body, direct_signer_key)
@@ -707,6 +721,7 @@ class ServiceAdmissionHost:
                     policy=policy,
                 )
             self.direct_uploads = DirectModelUploadOwners(owners)
+            intake.pending_admission_uploads = DirectAdmissionDrain(self.direct_uploads)
         self.preparation = CohortPreparation(
             CohortAdmissionQueue(intake), promotion, runtime_adoption=c.runtime_adoption
         )

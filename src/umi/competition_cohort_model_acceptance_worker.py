@@ -392,6 +392,10 @@ class ModelAcceptanceWorker:
         )
         priority_entries = {}
         provider_retry_due = {}
+        # One extra pending record distinguishes a blocked singleton from an
+        # item with a different successor, even when the processing batch is 1.
+        # Reuse the ordinary bounded scan; this is not another database query.
+        priority_limit = min(max(self.batch_size, 2 if self.priority_cohorts else 1), 16)
         for binding in probe_order:
             cohort = binding.cohort_sha256
             # A diagnostic scheduling hint never suppresses the native scan.
@@ -402,7 +406,7 @@ class ModelAcceptanceWorker:
                     partial(
                         self.owner.pending_latest_entries,
                         cohort,
-                        limit=min(self.batch_size, 16),
+                        limit=priority_limit,
                         offset=0 if due else self._priority_offsets.get(cohort, 0),
                     )
                 )
@@ -423,7 +427,7 @@ class ModelAcceptanceWorker:
                         partial(
                             self.owner.pending_latest_entries,
                             cohort,
-                            limit=min(self.batch_size, 16),
+                            limit=priority_limit,
                             offset=0,
                         )
                     )
@@ -532,9 +536,11 @@ class ModelAcceptanceWorker:
                     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                         pending += 1
                         error_type = type(error).__name__
-                        if cohort == preferred:
-                            # An unavailable oldest item must not waste a whole
-                            # priority quantum before another cohort can run.
+                        if cohort == preferred and len(priority or ()) <= 1:
+                            # A blocked singleton yields immediately. If the
+                            # scan already found a different pending item, keep
+                            # the remaining foreground attempts for it instead
+                            # of making it wait for a full background transfer.
                             self._priority_attempts = _PRIORITY_ATTEMPTS
                         if (contended or priority_dispatch) and priority:
                             deferred = self._provider_retries.get(cohort)
