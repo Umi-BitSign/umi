@@ -188,14 +188,20 @@ summary without exposing confidential or personal material.
 
 ### Training data and research-model licensing
 
-The authoritative [UMI Training Data and Model Licensing Policy](../../UMI%20Rights%20Review%20Sign-Language%20Datasets%20and%20Public%20Model%20Weights.pdf),
-dated October 22, 2026, is the recorded legal assessment for these decisions.
-Its PDF SHA-256 is
-`9f6694015a84f453ef8298afac4fd9c5dedfc741e74eb0ac3b6833f045b83502`.
-Sam selected conditional licensing from C7 onward: permitted NC training data
-or inherited NC checkpoints require the NC route for that model; other models
-retain the original terms. This supersedes the review's universal-NC clause and
-the earlier blanket C8 proposal. This section does not identify sources,
+The current [UMI Training Data and Model Licensing Policy](../../UMI%20Rights%20Review%20Sign-Language%20Datasets%20and%20Public%20Model%20Weights.pdf)
+incorporates conditional licensing from C7 onward, revised October 28, 2026;
+its legal assessment and source records retain their October 22 date. Permitted
+NC training data or inherited NC checkpoints require the NC route for that
+model; compatible permissive models retain their original terms and license.
+Existing C7 submissions need no relicensing, re-signing or resubmission because
+of this update. A new or replacement NC model uses fresh model-bound consent.
+The same two-track rule applies to C8 and later cohorts.
+
+The [LaTeX source and rebuild instructions](../legal/README.md) accompany the
+PDF. The signed NC supplement and training-rights contract retain the original
+review hash; the linked historical PDF remains available for verification.
+Updating the current review does not rewrite those signed bytes, prior
+submissions or the baseline license. This section does not identify sources,
 references or clips used in any cohort evaluation.
 
 For an NC-trained model, the [supplemental terms](../MODEL_CONTRIBUTION_TERMS_NC_V1.md)
@@ -212,7 +218,7 @@ to NC by sharing a cohort or baseline with an NC model.
 | FLEURS-ASL | Allowed. Attribute FLEURS-ASL and FLORES, retain their license notices and reproduce the responsible-use requests: blur faces in publicity, no reidentification and no deepfakes. The review records the position supporting a mixed NC-SA model; the requested Google confirmation does not suspend its ruling. |
 | 2M-Flores-ASL, FSboard and Taskmaster-1 | Allowed. Retain the attribution and license entries from the reference model's `NOTICE`. |
 | UMI consented data | Allowed under the UMI contributor consent. Attribute "UMI contributors" without identifying individual contributors. |
-| ChicagoFSWild and ChicagoFSWild+ | Separately approved by the operator for **train splits only**, disclosed in provenance. Do not train on their dev/test splits. This is the operator's specific training ruling, not a claim that the PDF lists these datasets or supplies a new publisher license. |
+| ChicagoFSWild and ChicagoFSWild+ | Separately approved by the operator for **train splits only**, disclosed in provenance. Do not train on their dev/test splits. The updated review records this specific operator ruling; it does not supply a new publisher license or override an additional access contract. |
 | ASL STEM Wiki | Pending permission. The review explicitly requires Microsoft's written permission to be recorded before training is permitted; the NC research-model label alone does not satisfy its bespoke contract. |
 
 For other sources, classify the terms attached to the copy actually acquired:
