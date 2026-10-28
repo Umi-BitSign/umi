@@ -7,7 +7,9 @@
   "preview_urls": false,
   "vars": {
     "METADATA_ENDPOINT": "https://91287420c3cb985d6d726f4ddd730b18.r2.cloudflarestorage.com",
-    "METADATA_BUCKET": "umi-model-artifacts"
+    "METADATA_BUCKET": "umi-model-artifacts",
+    "PROOF_ENDPOINT": "https://91287420c3cb985d6d726f4ddd730b18.r2.cloudflarestorage.com",
+    "PROOF_BUCKET": "umi-cohort-evidence"
   },
   "routes": [
     {
@@ -29,6 +31,10 @@
     {
       "binding": "ARTIFACTS",
       "bucket_name": "umi-model-artifacts"
+    },
+    {
+      "binding": "PROOF_EVIDENCE",
+      "bucket_name": "umi-cohort-evidence"
     }
   ]
 }
