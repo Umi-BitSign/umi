@@ -15,7 +15,8 @@ import time
 from .competition_verification_rules import runtime_identity
 from .protocol import canonical_json_bytes, sha256_hex
 
-logger = logging.getLogger(__name__)
+# Supported hosts enable this progress logger before opening native journals.
+logger = logging.getLogger("umi.competition.progress")
 ABI = "umi-native-reservation-validation/1"
 CHUNK_SIZE = 4096
 PREFIX = "round_reservation_validation"

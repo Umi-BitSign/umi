@@ -1343,7 +1343,7 @@ def test_serve_intake_uses_one_loopback_worker_without_proxy_trust(config, polic
 @pytest.mark.parametrize("name", ["umi.competition_cohort_lifecycle", "umi.competition.progress"])
 @pytest.mark.parametrize("construction_fails", [False, True])
 def test_serve_intake_enables_lifecycle_observation_logger(
-    config, policy, monkeypatch, name, construction_fails
+    config, policy, monkeypatch, capsys, name, construction_fails
 ):
     target = logging.getLogger(name)
     before = (tuple(target.handlers), target.level, target.propagate)
@@ -1367,6 +1367,10 @@ def test_serve_intake_enables_lifecycle_observation_logger(
                 target.propagate,
             )
         )
+        if name == "umi.competition.progress":
+            from umi.competition_round_reservation_checkpoint import progress
+
+            progress("running", completed=1, total=4)
         if construction_fails:
             raise ValueError("construction failed after startup logging")
         return object()
@@ -1388,6 +1392,14 @@ def test_serve_intake_enables_lifecycle_observation_logger(
     assert level == logging.INFO
     assert propagate is False
     assert (tuple(target.handlers), target.level, target.propagate) == before
+    if name == "umi.competition.progress":
+        emitted = capsys.readouterr().err
+        assert "round_journal_progress" in emitted
+        assert "'stage': 'reservation_validation'" in emitted
+        assert "'completed_records': 1" in emitted
+        assert "'total_records': 4" in emitted
+        assert "'percent': 25.0" in emitted
+        assert "'eta_basis':" in emitted
 
 
 async def test_client_verified_service_retries_without_personal_credentials(config, policy):
