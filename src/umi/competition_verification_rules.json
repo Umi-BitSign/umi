@@ -556,7 +556,7 @@
     "competition_successor_publisher.py": "f735462a080670fa7fc3672378caa870c55fbebc75b882aecb09bd899954dd0d",
     "competition_successor_publisher_cli.py": "f1359032f60fe86b1d9c5a426e466402fc9e29b5d1c02e051bd3a7e3c4fc683e",
     "competition_suite_reference_qa.py": "48a4cb75666c25f804483018adc44992329f38f09d4498abbcdeffb2e6d1912e",
-    "competition_suite_selection.py": "777ea348dfd09067ebd985d593a23585583a36515748a03f5642e62d8b91635a",
+    "competition_suite_selection.py": "0fbb55502fb243a98b6b3086f39560c5c3b00ab14fab7842e11b70164278624c",
     "competition_supervisor.py": "d2d5be5a433b5352ad3e91dddb910608ecabf82f8f1602cc49898476e484a589",
     "competition_supervisor_adapters.py": "9890e4447df05269700c82efa1e738deb244d9b13495dfad6a0745b4adf152ce",
     "competition_supervisor_cli.py": "15686f5fd666f7170e16ef3232997180b2a68a044e7d94c8c0ef3758659c8510",
