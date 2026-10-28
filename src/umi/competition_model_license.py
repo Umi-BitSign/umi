@@ -6,6 +6,9 @@ consents are unchanged. A license declaration alone grants no new permission.
 """
 
 from functools import lru_cache
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from .competition_cohort_recovery import verify_recovery_authority, verify_recovery_quorum
 from .open_competition import (
@@ -15,7 +18,61 @@ from .open_competition import (
     SignedModelLicenseTermsAdoption,
     digest,
 )
-from .protocol import canonical_json_bytes
+from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
+
+
+class ModelLicenseOperatorDecision(StrictProtocolModel):
+    """Retained operator input; quorum signatures authenticate its use later."""
+
+    schema_: Literal["umi-model-licensing-operator-decision/1"] = Field(alias="schema")
+    approved_by: Annotated[str, Field(min_length=1, max_length=256)]
+    recorded_at_utc: Annotated[
+        str, Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+    ]
+    source_message_sha256: Hex32
+    scope: Literal["cohorts_7_and_later"]
+    license_id: Literal["CC-BY-NC-SA-4.0"]
+    noncommercial_terms_sha256: Hex32
+    training_rights_policy_sha256: Hex32
+    permissive_terms_unchanged: Literal[True]
+    require_fresh_nc_consent: Literal[True]
+    reason: Annotated[str, Field(min_length=8, max_length=1024)]
+
+
+def default_model_license_proposal(*, policy, authority, decision):
+    """Add an unsigned NC route to each new authority's existing signing batch.
+
+    ``authority`` is the proposed body, not an authenticated selection. Both it
+    and this proposal must receive their independent configured quorum before
+    assembly/publication. Existing signed authorities are never rewritten.
+    """
+    from .competition_model_training_rights import (
+        CONDITIONAL_TRAINING_RIGHTS_SHA256,
+        NC_CONTRIBUTION_TERMS_SHA256,
+    )
+
+    decision = ModelLicenseOperatorDecision.model_validate_json(canonical_json_bytes(decision))
+    if (
+        authority.policy_sha256 != digest(policy)
+        or decision.noncommercial_terms_sha256 != NC_CONTRIBUTION_TERMS_SHA256
+        or decision.training_rights_policy_sha256 != CONDITIONAL_TRAINING_RIGHTS_SHA256
+        or decision.source_message_sha256 == "0" * 64
+    ):
+        raise ValueError("model licensing decision differs from supported conditional rights")
+    return ModelLicenseTermsAdoption(
+        schema="umi-model-license-terms-adoption/1",
+        policy_sha256=digest(policy),
+        authority_sha256=digest(authority),
+        cohort_sha256s=authority.cohort_sha256s,
+        first_cohort_sequence=7,
+        original_terms_sha256=policy.contribution_terms_sha256,
+        noncommercial_terms_sha256=decision.noncommercial_terms_sha256,
+        training_rights_policy_sha256=decision.training_rights_policy_sha256,
+        operator_decision_sha256=digest(decision),
+        license_id=decision.license_id,
+        issued_at_block=authority.issued_at_block,
+        reason=decision.reason,
+    )
 
 
 @lru_cache(maxsize=128)
