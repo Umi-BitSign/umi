@@ -75,9 +75,10 @@ def private_path(value: str) -> str:
 Directory = Annotated[str, Field(min_length=1, max_length=4096), AfterValidator(private_path)]
 
 
-def ensure_private_directory(path: Path) -> None:
+def ensure_private_directory(path: Path, *, create: bool = True) -> None:
     private_path(str(path))
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if create:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("evaluator directory must be owned and private")

@@ -42,6 +42,7 @@ from .competition_cohort_request_export import RequestReviewExporter
 from .competition_cohort_request_files import RequestCompletionFiles
 from .competition_cohort_request_inventory import RequestInventoryCutoff
 from .competition_cohort_request_phase import NativeRequestProgressSource
+from .competition_cohort_request_preflight import preflight_request_owner
 from .competition_cohort_request_publication import CohortRequestSettlementPublisher
 from .competition_cohort_request_readiness import LiveRequestPhaseObserver
 from .competition_cohort_request_start import RequestStartConfig, SeriesRequestStart
@@ -434,6 +435,15 @@ class LifecycleHost:
     def _request_source(self, cohort):
         authorize_memory("requests_source", cohort, "requests")
         c = self.config
+        journal_root = self.root / cohort / "requests"
+        journal_binding = {
+            "schema": "umi-cohort-request-owner/1",
+            "series": digest(self.service.config.series),
+            "cohort": cohort,
+        }
+        preflight_request_owner(
+            journal_root, journal_binding, cohort, maximum_bytes=c.maximum_state_bytes
+        )
         prepared = read_private_model(
             Path(c.sources.round_directory) / (cohort + ".json"),
             PreparedCohortRound,
@@ -467,12 +477,8 @@ class LifecycleHost:
         if scoring_policy_hash(transport) != terms.transport_policy_sha256:
             raise ValueError("request owner transport differs from selected service terms")
         journal = RoundJournal(
-            self.root / cohort / "requests",
-            {
-                "schema": "umi-cohort-request-owner/1",
-                "series": digest(self.service.config.series),
-                "cohort": cohort,
-            },
+            journal_root,
+            journal_binding,
             maximum_rounds=65536,
             maximum_bytes=c.maximum_state_bytes,
         )
