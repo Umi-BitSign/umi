@@ -268,3 +268,49 @@ async def test_missing_original_runtime_does_not_select_replacement_or_smaller_r
     assert host.queue.journal.get("order_host_roster", r.cohort) is None
     o.files.publish(digest(r.h.order.runtime), lambda _: canonical_json_bytes(r.h.order.runtime))
     assert await host.select(r.cohort) == len(r.h.batch["roster"].participants)
+
+
+async def test_enabled_host_gets_normal_quorum_on_explicit_sampling_orders(owner):
+    o, r = owner, owner.network.r
+    o.service.config.orders = o.service.config.orders.model_copy(
+        update={"share_paired_incumbent": True}
+    )
+    host = o.host()
+    count = await host.select(r.cohort)
+    report = await host.worker.poll_once()
+    assert report["retry_count"] == 0
+    assert report["deliveries_acknowledged"] == count * len(r.h.order.evaluators)
+    for order in host._retained_orders(r.cohort):
+        expected = order.submission.submission.track == "model"
+        assert (order.incumbent_observation_mode is not None) is expected
+        assert order.schema_.endswith("/2" if expected else "/1")
+        for who in order.evaluators:
+            assigned = r.inbox(who).assignment(order_slot(order))
+            assert assigned.certificate.order == order
+
+
+async def test_enabling_sampling_preserves_partially_selected_original_orders(owner, monkeypatch):
+    o, r = owner, owner.network.r
+    host = o.host()
+    select, saved = host.queue.select, []
+
+    def interrupted(*args):
+        if saved:
+            raise OSError("disk temporarily full")
+        saved.append(select(*args))
+        return saved[-1]
+
+    monkeypatch.setattr(host.queue, "select", interrupted)
+    with pytest.raises(OSError):
+        await host.select(r.cohort)
+    original = canonical_json_bytes(host.queue.intent(saved[0]))
+    o.service.config.orders = o.service.config.orders.model_copy(
+        update={"share_paired_incumbent": True}
+    )
+    resumed = o.host()
+    assert await resumed.select(r.cohort) == len(r.h.batch["roster"].participants)
+    assert canonical_json_bytes(resumed.queue.intent(saved[0])) == original
+    assert resumed.queue.intent(saved[0]).order.incumbent_observation_mode is None
+    for order in resumed._retained_orders(r.cohort):
+        if order_slot(order) != saved[0] and order.submission.submission.track == "model":
+            assert order.incumbent_observation_mode == "first_reserved_per_scope/1"

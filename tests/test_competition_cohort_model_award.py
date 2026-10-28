@@ -42,6 +42,8 @@ pytestmark = pytest.mark.parametrize("receipt_scenario", ["model-awards"], indir
 @pytest.fixture
 async def model_case(receipt_scenario, tmp_path, runtime, request):
     mode, count = getattr(request, "param", ("equal", 1))
+    shared_incumbents = mode.startswith("shared-")
+    mode = mode.removeprefix("shared-")
     source = tmp_path / "model-source"
     s = setup_scenario(receipt_scenario, source, runtime, baseline_entry=mode == "baseline")
     names = (
@@ -130,7 +132,9 @@ async def model_case(receipt_scenario, tmp_path, runtime, request):
                 steps.append(step.model_copy(update={"execution": execution}))
             artifacts.append(a.model_copy(update={"steps": tuple(steps)}))
         scenario["artifacts"] = tuple(artifacts)
-    b = await closure_fixture(s, tmp_path / "execution", prepared=b)
+    b = await closure_fixture(
+        s, tmp_path / "execution", prepared=b, shared_incumbents=shared_incumbents
+    )
     signable = b
     if mode == "tail":
         from .cohort_request_closure_fixture import build
@@ -596,4 +600,70 @@ async def test_full_model_pool_retained_and_independently_replayed_after_lost_re
             maximum_promotion_bytes=1_000_000,
         )
         == result
+    )
+
+
+@pytest.mark.parametrize("model_case", [("shared-proportional", 2)], indirect=True)
+async def test_shared_baseline_closure_quality_award_and_reward_replay(model_case, tmp_path):
+    import shutil
+
+    from umi.competition_cohort_request_terminal import (
+        SharedRequestExecutionArchive,
+        parse_request_execution_archive,
+    )
+    from umi.competition_cohort_reward_allocation import retain_reward_allocation
+    from umi.competition_cohort_reward_certification import replay_reward_allocation
+    from umi.competition_round_journal import RoundJournal
+    from umi.competition_store import CompetitionStore
+    from umi.private_files import publish_private_model
+
+    b, review, benchmark, acceptances, archive = model_case
+    archives = [
+        parse_request_execution_archive(b["objects"][t.terminal.execution_archive_sha256])
+        for t in b["terminals"].values()
+    ]
+    assert len(archives) == 4
+    assert sum(isinstance(a, SharedRequestExecutionArchive) for a in archives) == 2
+    # Every evaluator retains one original baseline source, then observes only
+    # the next candidate. Real journal and signing paths produced all artifacts.
+    for evaluator in b["orders"][0].order.evaluators:
+        first = b["owners"][(digest(b["orders"][0]), identity(evaluator))]
+        second = b["owners"][(digest(b["orders"][1]), identity(evaluator))]
+        assert first.journal.path == second.journal.path
+        with first.journal.read_transaction() as db:
+            attempts = db.execute("SELECT COUNT(*) FROM records WHERE kind='attempt'").fetchone()[0]
+        assert attempts == 3 * len(b["suite"].cases)
+    sr, service = service_boundary(model_case, 0)
+    store = CompetitionStore(tmp_path / "shared-reward-store", b["policy"])
+    shutil.copytree(archive, store.directory / "model-reward-artifacts")
+    for acceptance in acceptances:
+        publish_private_model(
+            store.directory
+            / "model-reward-acceptances"
+            / digest(b["history"].plan)
+            / (acceptance.acceptance.submission_sha256 + ".json"),
+            acceptance,
+        )
+    journal = RoundJournal(tmp_path / "shared-reward-owner", {"scope": "shared-award-test"})
+    allocation = retain_reward_allocation(
+        journal, store, service, sr, benchmark, review, maximum_promotion_bytes=1_000_000
+    )
+    original = canonical_json_bytes(allocation)
+    replayed = replay_reward_allocation(
+        allocation, store, service, sr, benchmark, reviewer(b), maximum_promotion_bytes=1_000_000
+    )
+    assert canonical_json_bytes(replayed) == original
+    assert allocation.model_award == award(model_case)
+    assert sum(item.raw_weight for item in allocation.recipients) + allocation.burn_weight == 65535
+    assert (
+        retain_reward_allocation(
+            RoundJournal(journal.root, {"scope": "shared-award-test"}),
+            store,
+            service,
+            sr,
+            benchmark,
+            reviewer(b),
+            maximum_promotion_bytes=1_000_000,
+        )
+        == allocation
     )

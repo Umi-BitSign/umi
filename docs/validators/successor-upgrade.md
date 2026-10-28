@@ -1906,6 +1906,26 @@ Signed policy, plans, clocks, cutoff evidence and directory bindings remain the
 same. Changing a completion-file budget makes its private verification cache
 miss and requires native replay of the retained originals.
 
+Shared baseline execution is a reader-first upgrade. Keep order-host and
+evaluator `share_paired_incumbent` omitted until every selected order signer,
+request owner, reviewer, settlement and native reward reader can consume `/2`
+orders/jobs and shared execution/archive/partial evidence. The order host obtains
+the ordinary independent quorum on an explicit `first_reserved_per_scope/1`
+sampling choice before dispatch. A config flag or source-maintenance manifest
+alone cannot grant that authority. Existing selected `/1` orders and completed
+work remain exact; an interrupted roster resumes each original selection.
+
+Verify the actual installed release selection for full native consumers before
+enabling new order emission. The upload protocol and model inference entrypoint
+stay compatible; standalone uploaders and followers consuming only approved
+weight rows do not parse this evidence. Existing journal paths, signed cohort
+clocks, runtime authorizations and baseline bundles stay bound to their originals.
+See [recoverable execution](../operators/evaluation.md) for durable source retention,
+repair, progress fields and rollback limits. Disabling new order emission retains
+reading and resumption of selected `/2` jobs; a disabled evaluator holds new `/2`
+work rather than silently choosing independent samples. Do not downgrade a reader
+after shared evidence has been retained. A source merge is not installed adoption.
+
 Before changing services, validate every selected configuration with the target
 runtime, compare the complete path's explicit budgets, and qualify its peak
 memory and disk use with the configured replay concurrency. Run the native

@@ -18,6 +18,7 @@ from .competition_cohort_evaluation import (
 from .competition_cohort_execution import (
     RecoverableExecutionEvidence,
     RecoverableExecutionObservation,
+    RecoverableSharedIncumbentEvidence,
     recoverable_execution_observations,
     run_record_from_observation,
 )
@@ -38,7 +39,9 @@ from .open_competition import (
 from .protocol import StrictProtocolModel, canonical_json_bytes
 
 RecoverableObservationEvidence = Annotated[
-    RecoverableExecutionEvidence | RecoverableEndpointPairedEvidence,
+    RecoverableExecutionEvidence
+    | RecoverableSharedIncumbentEvidence
+    | RecoverableEndpointPairedEvidence,
     Field(discriminator="schema_"),
 ]
 

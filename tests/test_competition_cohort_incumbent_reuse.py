@@ -32,7 +32,9 @@ from .test_competition_cohort_executor import signed_order
 async def other_assignment(e):
     b = e.r.h.batch
     m = b["scenarios"][1]
-    signed = signed_order(m)
+    signed = signed_order(
+        m, incumbent_observation_mode=e.assignment.certificate.order.incumbent_observation_mode
+    )
     p = next(
         p for p in b["roster"].participants if p.record.request.signed_submission == m["signed"]
     )
@@ -367,3 +369,20 @@ async def test_shared_source_survives_native_terminal_export_and_offline_replay(
             opened_at_block=opened,
             completed_by_block=closed,
         )
+
+
+async def test_local_config_cannot_reinterpret_original_signed_model_order(execution):
+    e = execution
+    if e.job.mode != "paired_model":
+        pytest.skip("model sampling authority only")
+    assert e.assignment.certificate.order.incumbent_observation_mode is None
+    executor = e.executor(share_paired_incumbent=True)
+    for _ in range(step_count(e.job)):
+        e.r.h.block += 1
+        await executor.advance(e.assignment)
+    assignment, _, _ = await other_assignment(e)
+    for _ in range(step_count(e.job)):
+        e.r.h.block += 1
+        await executor.advance(assignment)
+    assert len(e.calls) == 2 * step_count(e.job)
+    assert executor.journal.journal.get("incumbent_source", incumbent_scope(e.job)) is None

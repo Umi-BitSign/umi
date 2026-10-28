@@ -79,11 +79,14 @@ def job(a):
     return a.incumbent.job if isinstance(a, RecoverableEndpointPairedEvidence) else a.job
 
 
-def order(s):
+def order(s, *, incumbent_observation_mode=None):
     entries = artifacts(s)
     first = job(entries[0])
     body = RecoverableEvaluationOrder(
-        schema="umi-recoverable-evaluation-order/1",
+        schema="umi-recoverable-evaluation-order/2"
+        if incumbent_observation_mode
+        else "umi-recoverable-evaluation-order/1",
+        incumbent_observation_mode=incumbent_observation_mode,
         **{
             k: getattr(first, k)
             for k in (

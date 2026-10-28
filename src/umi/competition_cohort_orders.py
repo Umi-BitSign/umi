@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer, model_validator
 
 from .competition_cohort_evaluation import (
     RecoverableEvaluationRound,
@@ -42,7 +42,10 @@ MAX_ORDER_BYTES = 16 * 1024**2
 
 
 class RecoverableEvaluationOrder(StrictProtocolModel):
-    schema_: Literal["umi-recoverable-evaluation-order/1"] = Field(alias="schema")
+    schema_: Literal["umi-recoverable-evaluation-order/1", "umi-recoverable-evaluation-order/2"] = (
+        Field(alias="schema")
+    )
+    incumbent_observation_mode: Literal["first_reserved_per_scope/1"] | None = None
     round: RecoverableEvaluationRound
     preparation_closure_sha256: Hex32
     submission: SignedSubmission
@@ -51,6 +54,24 @@ class RecoverableEvaluationOrder(StrictProtocolModel):
     cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
     evaluators: Annotated[tuple[Hotkey, ...], Field(min_length=1, max_length=64)]
     chain_submission_authorized: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def preserve_original_order(self, handler):
+        value = handler(self)
+        if self.incumbent_observation_mode is None:
+            value.pop("incumbent_observation_mode", None)
+        return value
+
+    @model_validator(mode="after")
+    def explicit_sampling_authority(self):
+        if (self.schema_ == "umi-recoverable-evaluation-order/2") != (
+            self.incumbent_observation_mode is not None
+        ) or (
+            self.incumbent_observation_mode is not None
+            and self.submission.submission.track != "model"
+        ):
+            raise ValueError("shared incumbent sampling requires an explicit model order version 2")
+        return self
 
 
 class SignedRecoverableEvaluationOrder(StrictProtocolModel):
@@ -66,7 +87,10 @@ def recoverable_order_job(
     if identity(evaluator) not in {identity(k) for k in order.evaluators}:
         raise ValueError("evaluator is not assigned by the recoverable order")
     return RecoverableExecutionJob(
-        schema="umi-recoverable-execution-job/1",
+        schema="umi-recoverable-execution-job/2"
+        if order.incumbent_observation_mode is not None
+        else "umi-recoverable-execution-job/1",
+        incumbent_observation_mode=order.incumbent_observation_mode,
         mode="paired_model"
         if order.submission.submission.track == "model"
         else "endpoint_incumbent",

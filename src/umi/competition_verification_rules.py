@@ -16,12 +16,21 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 VERIFICATION_SEMANTICS = "umi-native-request-verification/1"
+# Additive wire formats use distinct native namespaces. A qualified /1 verdict
+# remains true for unchanged /1 bytes; never invalidate all completed work just
+# because a new, previously unaccepted evidence format becomes readable.
+VERIFICATION_EXTENSIONS = {
+    "archived_execution_shared_incumbent_v2": "umi-native-shared-incumbent/2",
+    "shared_incumbent_source_terminal_v2": "umi-native-shared-incumbent/2",
+    "shared_incumbent_source_participant_v2": "umi-native-shared-incumbent/2",
+}
 
 
 def verify_dependency_manifest(directory: Path, manifest: dict) -> str:
     if (
         manifest.get("schema") != "umi-native-verification-dependencies/1"
         or manifest.get("abi") != VERIFICATION_SEMANTICS
+        or manifest.get("extensions") != VERIFICATION_EXTENSIONS
         or not manifest.get("sources")
         or not manifest.get("compatibility_basis")
         or not manifest.get("external_distributions")

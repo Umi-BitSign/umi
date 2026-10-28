@@ -209,10 +209,7 @@ class CohortExecutor(CohortExecutionAuthority):
             )
 
     async def _first_unfinished(self, job):
-        for index in range(step_count(job)):
-            if await run_owned_thread(self.journal.step, job, index) is None:
-                return index
-        return None
+        return await run_owned_thread(self.journal.first_unfinished, job)
 
     async def advance_batch(
         self, assignment: CohortExecutionAssignment
@@ -236,6 +233,7 @@ class CohortExecutor(CohortExecutionAuthority):
                 return await self.advance(assignment)
             total = step_count(job)
             restored = await self._journal_progress(job, self.journal.checkpoint_count, job)
+            reused = await self._journal_progress(job, self.journal.reused_checkpoint_count, job)
             with TransferProgress(
                 "model_pair_execution",
                 total,
@@ -249,8 +247,17 @@ class CohortExecutor(CohortExecutionAuthority):
                 # finite scheduling batch, not a new deadline or protocol gate.
                 for _ in range(total - restored + 1):
                     result = await self.advance(assignment)
-                    if progress.completed < total:
-                        progress.advance(1)
+                    completed = await self._journal_progress(
+                        job, self.journal.checkpoint_count, job
+                    )
+                    current_reused = await self._journal_progress(
+                        job, self.journal.reused_checkpoint_count, job
+                    )
+                    if current_reused > reused:
+                        progress.advance(current_reused - reused, restored=True)
+                        reused = current_reused
+                    if completed > progress.completed:
+                        progress.advance(completed - progress.completed)
                     if result is not None:
                         return result
                 raise RuntimeError("paired execution batch did not finish its retained steps")
@@ -285,7 +292,7 @@ class CohortExecutor(CohortExecutionAuthority):
                 assignment, self.journal.retain, assignment, source, started.block
             )
             shared = await self._journal_progress(
-                job, self.journal.reuse_endpoint_incumbent, slot, job, started
+                job, self.journal.reuse_incumbent, slot, job, started
             )
             if shared is not None:
                 return shared

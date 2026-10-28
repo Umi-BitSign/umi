@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_serializer, model_validator
 from typing_extensions import Self
 
 from .competition_cohort_evaluation import (
@@ -49,7 +49,10 @@ from .protocol import Hex32, StrictProtocolModel, canonical_json_bytes
 class RecoverableExecutionJob(StrictProtocolModel):
     """Reference-free inputs, with an immutable certified preparation binding."""
 
-    schema_: Literal["umi-recoverable-execution-job/1"] = Field(alias="schema")
+    schema_: Literal["umi-recoverable-execution-job/1", "umi-recoverable-execution-job/2"] = Field(
+        alias="schema"
+    )
+    incumbent_observation_mode: Literal["first_reserved_per_scope/1"] | None = None
     mode: Literal["paired_model", "endpoint_incumbent"]
     round: RecoverableEvaluationRound
     preparation_closure_sha256: Hex32
@@ -59,8 +62,19 @@ class RecoverableExecutionJob(StrictProtocolModel):
     evaluator_hotkey: Hotkey
     cases: Annotated[tuple[ExecutionCase, ...], Field(min_length=3, max_length=2048)]
 
+    @model_serializer(mode="wrap")
+    def preserve_original_job(self, handler):
+        value = handler(self)
+        if self.incumbent_observation_mode is None:
+            value.pop("incumbent_observation_mode", None)
+        return value
+
     @model_validator(mode="after")
     def assignment_shape(self) -> Self:
+        if (self.schema_ == "umi-recoverable-execution-job/2") != (
+            self.incumbent_observation_mode is not None
+        ) or (self.incumbent_observation_mode is not None and self.mode != "paired_model"):
+            raise ValueError("shared incumbent sampling requires an explicit model job version 2")
         expected_track = "model" if self.mode == "paired_model" else "endpoint"
         if self.submission.submission.track != expected_track:
             raise ValueError("recoverable execution mode differs from submission track")
@@ -74,6 +88,124 @@ class RecoverableExecutionEvidence(StrictProtocolModel):
     job: RecoverableExecutionJob
     steps: Annotated[tuple[ExecutionStep, ...], Field(min_length=3, max_length=4096)]
     chain_submission_authorized: Literal[False] = False
+
+
+class RecoverableSharedIncumbentEvidence(StrictProtocolModel):
+    """Candidate observations plus one explicitly borrowed original baseline.
+
+    The source remains ordinary /1 evidence. Its original boundaries are not
+    consumer invocation times, and its failures are shared without reselection.
+    """
+
+    schema_: Literal["umi-recoverable-execution-evidence/2"] = Field(alias="schema")
+    job: RecoverableExecutionJob
+    steps: Annotated[tuple[ExecutionStep, ...], Field(min_length=6, max_length=4096)]
+    incumbent_source: RecoverableExecutionEvidence
+    source_assignment_json: Annotated[str, Field(min_length=1, max_length=16 * 1024**2)]
+    consumer_assignment_json: Annotated[str, Field(min_length=1, max_length=16 * 1024**2)]
+    source_reserved_at: ExecutionBoundary
+    reuse_observed_at: ExecutionBoundary
+    chain_submission_authorized: Literal[False] = False
+
+
+RecoverableModelExecutionEvidence = Annotated[
+    RecoverableExecutionEvidence | RecoverableSharedIncumbentEvidence,
+    Field(discriminator="schema_"),
+]
+EXECUTION_EVIDENCE = TypeAdapter(RecoverableModelExecutionEvidence)
+
+
+def paired_incumbent_scope(job: RecoverableExecutionJob) -> str:
+    if job.mode != "paired_model":
+        raise ValueError("shared model incumbent requires a paired model job")
+    # The round binds suite, authority, runtime authorization and policy. The
+    # runner passes no entrant-dependent inputs or seed to baseline inference.
+    return digest(
+        dict(
+            schema="umi-paired-incumbent-scope/1",
+            incumbent_observation_mode=job.incumbent_observation_mode,
+            round=digest(job.round),
+            preparation=job.preparation_closure_sha256,
+            model=digest(job.incumbent),
+            runtime=digest(job.runtime),
+            evaluator=identity(job.evaluator_hotkey),
+            cases=[case.model_dump(mode="json", by_alias=True) for case in job.cases],
+        )
+    )
+
+
+def replay_shared_incumbent_steps(
+    job,
+    steps,
+    source,
+    source_reserved_at,
+    reuse_observed_at,
+    policy,
+    *,
+    started_after,
+    finished_by,
+    verified_source_outputs=None,
+):
+    """Replay two authentic timelines; never invent consumer baseline attempts.
+
+    Archive consumers pass their independently cached native source verdict.
+    This internal result is never accepted from evidence or network input.
+    """
+    if paired_incumbent_scope(job) != paired_incumbent_scope(source.job) or digest(job) == digest(
+        source.job
+    ):
+        raise ValueError("shared incumbent differs from its exact source scope")
+    if (
+        job.incumbent_observation_mode is None
+        or source.job.incumbent_observation_mode != job.incumbent_observation_mode
+    ):
+        raise ValueError("shared incumbent requires both prospective signed order capabilities")
+    source_outputs = verified_source_outputs
+    if source_outputs is None:
+        source_outputs = replay_execution_steps(
+            source.job,
+            source.steps,
+            policy,
+            started_after=started_after,
+            finished_by=finished_by,
+        )
+    _ordered(source_reserved_at, None, started_after=started_after, finished_by=finished_by)
+    _ordered(
+        source.steps[0].started,
+        source_reserved_at,
+        started_after=started_after,
+        finished_by=finished_by,
+    )
+    _ordered(
+        reuse_observed_at,
+        source.steps[-1].finished,
+        started_after=started_after,
+        finished_by=finished_by,
+    )
+    steps = tuple(steps)
+    if len(steps) != 2 * len(job.cases):
+        raise ValueError("shared execution omits assigned case observations")
+    previous = reuse_observed_at
+    candidate = []
+    authorization = prepared_runtime_authorization(job.round, policy)
+    for index, case in enumerate(job.cases):
+        own, borrowed = steps[2 * index : 2 * index + 2]
+        if borrowed != source.steps[2 * index + 1]:
+            raise ValueError("shared incumbent changed its original observation")
+        if (
+            own.role != "candidate"
+            or own.execution.output.case_id != case.case_id
+            or own.execution.video_sha256 != case.video_sha256
+            or own.execution.model_sha256 != job.submission.submission.model_revision
+            or own.execution.runtime_sha256 != digest(job.runtime)
+        ):
+            raise ValueError("shared execution changed its candidate assignment")
+        validate_case_execution(own.execution, policy, runtime_authorization=authorization)
+        for boundary in (own.started, own.finished):
+            _ordered(boundary, previous, started_after=started_after, finished_by=finished_by)
+            previous = boundary
+        candidate.append(own.execution.output)
+    return {"candidate": candidate, "incumbent": source_outputs["incumbent"]}
 
 
 @dataclass(frozen=True)
@@ -173,7 +305,7 @@ def recoverable_execution_observations(
     proofs. Reviewers must authenticate those sources independently. Missing
     records cannot become failures or certified voids through this function.
     """
-    evidence = RecoverableExecutionEvidence.model_validate_json(canonical_json_bytes(evidence))
+    evidence = EXECUTION_EVIDENCE.validate_json(canonical_json_bytes(evidence))
     policy = CompetitionPolicy.model_validate_json(canonical_json_bytes(policy))
     suite = EvaluationSuite.model_validate_json(canonical_json_bytes(suite))
     job = evidence.job
@@ -215,19 +347,57 @@ def recoverable_execution_observations(
     validate_bundle_policy(job.incumbent, policy)
     if job.mode == "paired_model":
         validate_bundle_policy(job.submission.submission.model_bundle, policy)
-    outputs = replay_execution_steps(
-        job,
-        evidence.steps,
-        policy,
-        started_after=preparation.observed_at_block,
-        finished_by=requests.observed_at_block,
+    interval = dict(
+        started_after=preparation.observed_at_block, finished_by=requests.observed_at_block
     )
+    if isinstance(evidence, RecoverableSharedIncumbentEvidence):
+        # The embedded compatibility path has the same source authentication as
+        # archive/closure readers. Its source is never merely an unsigned job.
+        from .competition_cohort_execution_journal import CohortExecutionAssignment
+        from .competition_cohort_order_queue import check_delivery_receipt
+        from .competition_cohort_orders import recoverable_order_job, verify_recoverable_order
+
+        for encoded, expected_job in (
+            (evidence.source_assignment_json, evidence.incumbent_source.job),
+            (evidence.consumer_assignment_json, job),
+        ):
+            assignment = CohortExecutionAssignment.model_validate_json(encoded)
+            if canonical_json_bytes(assignment) != encoded.encode():
+                raise ValueError("shared incumbent assignment is not canonical")
+            receipt = check_delivery_receipt(assignment.certificate, assignment.delivery)
+            assigned_job = recoverable_order_job(
+                assignment.certificate.order, receipt.receipt.evaluator_hotkey
+            )
+            if assigned_job != expected_job or assigned_job.incumbent_observation_mode is None:
+                raise ValueError("shared incumbent signed assignment differs from its observations")
+            participant = assignment.participant
+            verify_recoverable_order(
+                assignment.certificate,
+                policy,
+                participant.consent,
+                participant.admission,
+                participant.admission_snapshot,
+                history,
+                expected_tip_sha256=expected_tip_sha256,
+                current_block=current_block,
+            )
+        outputs = replay_shared_incumbent_steps(
+            job,
+            evidence.steps,
+            evidence.incumbent_source,
+            evidence.source_reserved_at,
+            evidence.reuse_observed_at,
+            policy,
+            **interval,
+        )
+    else:
+        outputs = replay_execution_steps(job, evidence.steps, policy, **interval)
     return RecoverableExecutionObservation(
         job=job,
         candidate=tuple(outputs["candidate"]),
         incumbent=tuple(outputs["incumbent"]),
-        started_block=evidence.steps[0].started.block,
-        finished_block=evidence.steps[-1].finished.block,
+        started_block=min(step.started.block for step in evidence.steps),
+        finished_block=max(step.finished.block for step in evidence.steps),
         requests_closed_at_block=requests.observed_at_block,
         evidence_sha256=digest(evidence),
     )

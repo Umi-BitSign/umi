@@ -50,6 +50,8 @@ _FIELDS = (
     "rest_clock",
     "cutover_unix_ms",
     "exported_executions",
+    "exported_inferences",
+    "reused_incumbent_observations",
     "exported_comparisons",
     "delivered_orders",
     "delivered_order_executions",

@@ -231,7 +231,9 @@ Every submission still retains its own evidence and consumes journal capacity.
 The original execution boundaries and outputs remain unchanged. A failed or
 interrupted baseline attempt holds the other consumers; changing miner identity
 cannot trigger another attempt. Reuse never crosses rounds or evaluators.
-Model-contribution jobs retain their existing candidate/incumbent execution order.
+Legacy model-contribution jobs retain their candidate/incumbent execution order.
+Recoverable model jobs may use the explicit shared-observation mode below after
+all selected consumers support its versioned evidence.
 
 Completed historical evidence remains readable after this update. An old round
 with execution attempts but no shared reservation cannot acquire one retroactively;
@@ -619,12 +621,70 @@ jobs retain capacity; a single-slot worker alternates priority with ordinary
 work. An unavailable source remains pending and cannot authorize a different
 source or fabricate a result.
 
+For recoverable model jobs, first update every selected order signer, evaluator,
+export/request owner, independent reviewer and native settlement/reward reader.
+Then select `share_paired_incumbent: true` in both the order-host and evaluator
+execution configurations through the supported signed host path. The order host
+issues new `umi-recoverable-evaluation-order/2` bodies with the explicit
+`incumbent_observation_mode: "first_reserved_per_scope/1"` choice. The ordinary
+independent quorum signs that choice together with the exact original round,
+preparation closure, baseline, suite, runtime, ordered clips and evaluators before
+any dispatch or source reservation. No additional manual approval stage is needed.
+A local execution flag or a source update alone cannot authorize shared sampling.
+
+Every already-selected `/1` order, including an interrupted partial roster,
+keeps its exact signed bytes and ordinary execution semantics. Omitted new config
+fields preserve existing configuration and journal identity. Embedded and archived
+`/2` evidence independently authenticate both signed source and consumer orders;
+unsigned job projections do not authorize sharing. The original policy, suite,
+runtime adoption and signed cohort clocks remain unchanged.
+
+The model-upload protocol and miner inference entrypoint are unchanged. Publish
+the matching supported release selection for full native order/evidence readers,
+and verify their installed adoption. Standalone uploaders and followers that only
+consume approved weight rows do not need the new execution parser; distinguish
+these from validators that independently replay native evidence. A source merge
+alone does not establish rollout.
+
+The first unstarted assignment reserves one source before inference. That source
+executes its ordinary complete candidate/baseline pair. Later unstarted jobs with
+exactly the same round, preparation, baseline bundle, runtime/profile, evaluator
+and ordered clips reuse its original baseline outputs and execute their own
+candidate only. The round includes the suite, signed authority and policy
+bindings. The sandbox passes no entrant-specific argument or random seed to the
+baseline; sharing one observation does not claim that unconstrained stochastic
+reruns would be identical. Failures remain failures, and an unfinished source
+holds its consumers. Started legacy jobs keep their original recovery path and
+cannot be retroactively selected as the source.
+
+Shared evidence, execution archives and partial manifests use `/2`, explicitly
+referencing the original signed source terminal and the original reservation and
+reuse observations. Readers authenticate the source assignment and participation,
+retain its original boundaries, and validate the consumer candidate timeline
+separately. No new consumer baseline attempt or inference receipt is invented.
+Source terminals and all their referenced objects must remain durable in R2
+through certification/reward replay and restoration. A missing known source
+requires repair, never a replacement inference or a more favorable source.
+
+Ordinary `/1` evidence and successful verification receipts keep their original
+bytes and semantics. A separate native verification extension identifies the new
+reader. The export owner's `/2` private checkpoint also binds the shared source,
+so restart and unchanged polling reuse completed verification. Counts expose
+`exported_inferences` and `reused_incumbent_observations` separately; the existing
+`exported_executions` field counts satisfied observation slots. The
+`incumbent_observation_reuse` progress event records avoided invocations and its
+completed status. Disabling new order emission preserves reading and resumption of
+already selected `/2` jobs. An evaluator with emission disabled holds a new `/2`
+job until enabled; it must not silently choose independent sampling. Existing
+reserved sources and consumers continue their exact retained recovery paths. Do
+not downgrade any consumer that may read `/2` evidence.
+
 With an explicit boot-disk model cache, CPU model evaluation retains a bounded
 set of model archives under the existing shared allocation and filesystem reserves. It
 finishes a paired assignment's case/role steps before rotating to another model,
 keeping candidate and reference bytes resident when they fit. Each step still
-uses its original authority checks, inference deadline and durable result; paired
-model observations are never borrowed from another assignment. The original
+uses its original authority checks, inference deadline and durable result.
+Candidate observations are never borrowed from another assignment. The original
 `archive` slot and interrupted transfers stay in place across upgrades. The idle
 `standby` slot and managed parallel slots may be evicted when a pair cannot fit;
 concurrent jobs share the reference where possible. Unrelated cache entries are
