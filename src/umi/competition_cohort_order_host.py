@@ -20,9 +20,11 @@ from .competition_cohort_order_queue import CohortOrderQueue, CohortOrderQueueCo
 from .competition_cohort_order_signer import CohortOrderParticipant, order_slot
 from .competition_cohort_order_worker import CohortOrderWorker
 from .competition_cohort_orders import RecoverableEvaluationOrder
+from .competition_cohort_recovery import CohortRecoveryState, CohortRecoveryTransition
 from .competition_cohort_settlement_delivery import SettlementEvidenceFiles
 from .competition_execution import ExecutionCase, execution_boundary
 from .competition_runner import OFFLINE_RUNTIME, OfflineCpuRuntime
+from .competition_verification_reuse import VerificationReuse, verified_replay
 from .competition_work_progress import progress_items
 from .concurrency import await_owned_task, run_owned_thread, wait_for_owned
 from .open_competition import EvaluationSuite, ModelBundle, digest, identity, validate_suite_profile
@@ -51,6 +53,29 @@ class OrderHostConfig(StrictProtocolModel):
 class _Selection(StrictProtocolModel):
     round_sha256: Hex32
     slots: Annotated[tuple[Hex32, ...], Field(min_length=1, max_length=512)]
+
+
+class _SelectionHistoryReview(StrictProtocolModel):
+    """Private signed-history result, never an order or live phase authority."""
+
+    state: CohortRecoveryState
+    preparation: CohortRecoveryTransition | None
+
+
+@verified_replay("order_selection_signed_history", _SelectionHistoryReview)
+def _selection_history(history, policy):
+    observed = (
+        history.transitions[-1].transition.observed_at_block
+        if history.transitions
+        else history.genesis.admitted_at_block
+    )
+    view = verify_cohort_history(
+        history, policy, expected_tip_sha256=history_tip(history), current_block=observed
+    )
+    return _SelectionHistoryReview(
+        state=view.state,
+        preparation=next((c for c in view.closed_phases if c.phase == "preparation"), None),
+    )
 
 
 class _Reviewers:
@@ -93,6 +118,15 @@ class CohortOrderHost:
         if len({groups[identity(k)] for k in c.queue.reviewers}) < policy.required_evaluator_groups:
             raise ValueError("benchmark execution cannot form the policy evaluator quorum")
         self.queue = CohortOrderQueue(c.queue, policy)
+        self.history_verification = VerificationReuse(
+            Path(c.queue.directory) / "selection-history-verification",
+            owner={
+                "kind": "cohort_order_selection_history/1",
+                "queue": c.queue.model_dump(
+                    mode="json", by_alias=True, exclude={"maximum_orders", "maximum_bytes"}
+                ),
+            },
+        )
         self.service, self.last_reports, self.selected = service, {}, {}
         self.files = SettlementEvidenceFiles(
             Path(service.config.lifecycle.sources.objects_directory)
@@ -120,16 +154,27 @@ class CohortOrderHost:
             operation_timeout_seconds=c.operation_timeout_seconds,
         )
 
-    def _select(self, prepared, source, capture):
+    def _history_review(self, cohort, source, block):
+        with canonical_json_reuse(), self.history_verification.selected():
+            history = source.history
+            if digest(history.plan) != cohort or self.queue.cohorts.get(cohort) != digest(
+                history.authority.authority
+            ):
+                raise ValueError("benchmark history differs from its configured cohort authority")
+            reviewed = _selection_history(history, self.queue.policy)
+            if reviewed.state.tip_sha256 != history_tip(history):
+                raise ValueError("recovery history is not the selected current tip")
+            if type(block) is not int or not reviewed.state.observed_at_block <= block <= 2**53 - 1:
+                raise ValueError("recovery history is ahead of the owned finalized observation")
+            return reviewed
+
+    def _select(self, prepared, source, capture, reviewed):
         round_ = prepared.roster.round
         cohort = round_.cohort_sha256
         policy = self.queue.policy
-        view = verify_cohort_history(
-            source.history,
-            policy,
-            expected_tip_sha256=history_tip(source.history),
-            current_block=execution_boundary(capture).block,
-        )
+        preparation = reviewed.preparation
+        if preparation is None:
+            raise ValueError("cohort phase has no certified closure: preparation")
         suite = EvaluationSuite.model_validate_json(self.files(round_.suite_sha256))
         validate_suite_profile(suite, policy)
         if suite.policy_sha256 != digest(policy):
@@ -166,7 +211,7 @@ class CohortOrderHost:
             order = RecoverableEvaluationOrder(
                 schema="umi-recoverable-evaluation-order/1",
                 round=round_,
-                preparation_closure_sha256=digest(view.closure("preparation")),
+                preparation_closure_sha256=digest(preparation),
                 submission=record.request.signed_submission,
                 incumbent=incumbent,
                 runtime=runtime,
@@ -249,12 +294,7 @@ class CohortOrderHost:
         finality = getattr(self.service, "finality", self.service.provider)
         capture = await wait_for_owned(finality.collect(), timeout=timeout)
         block = execution_boundary(capture).block
-        view = verify_cohort_history(
-            source.history,
-            self.queue.policy,
-            expected_tip_sha256=history_tip(source.history),
-            current_block=block,
-        )
+        view = await run_owned_thread(self._history_review, cohort, source, block)
         if view.state.phase != "requests":
             return 0
         prepared = await run_owned_thread(
@@ -267,7 +307,9 @@ class CohortOrderHost:
         )
         if await wait_for_owned(self.service.history(cohort), timeout=timeout) != source:
             raise OSError("benchmark authority changed before order selection")
-        self.selected[cohort] = await run_owned_thread(self._select, prepared, source, capture)
+        self.selected[cohort] = await run_owned_thread(
+            self._select, prepared, source, capture, view
+        )
         return self.selected[cohort]
 
     def report(self, name, result):

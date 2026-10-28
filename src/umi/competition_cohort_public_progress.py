@@ -65,6 +65,12 @@ _FIELDS = (
     "certificates_per_second",
     "submission_sha256",
     "error_type",
+    "error_stage",
+    "cause_type",
+    "sqlite_errorcode",
+    "sqlite_errorname",
+    "queue_completed",
+    "queue_total",
     "scope",
     "unit",
     "work_id",
@@ -115,6 +121,79 @@ _FIELDS = (
 )
 
 
+_HISTORICAL_PROGRESS_FIELDS = (
+    "stage",
+    "status",
+    "scope",
+    "unit",
+    "completed",
+    "total",
+    "percent",
+    "elapsed_seconds",
+    "eta_seconds",
+    "planning_eta_seconds",
+    "eta_basis",
+    "eta_scope",
+    "eta_assumptions",
+    "eta_samples",
+    "stalled_or_retrying",
+    "repair_required",
+    "error_type",
+    "error_stage",
+    "cause_type",
+    "reason_code",
+    "sqlite_errorcode",
+    "sqlite_errorname",
+    "excluded_without_receipt_this_poll",
+)
+
+
+def _historical_progress(body):
+    if type(body) is not dict:
+        return {}
+    result = {}
+    for key in _HISTORICAL_PROGRESS_FIELDS:
+        if key not in body:
+            continue
+        value = body.get(key)
+        if key == "planning_eta_seconds":
+            if value is None or (
+                type(value) is list
+                and len(value) == 2
+                and all(type(item) in (int, float) for item in value)
+            ):
+                result[key] = value
+        elif value is None or type(value) in (str, bool, int, float):
+            result[key] = value
+    return result
+
+
+def _age_participation(value, age):
+    if value.get("status") not in {"running", "retrying"}:
+        return
+    value["elapsed_seconds"] = round(value.get("elapsed_seconds", 0) + age, 3)
+    eta = value.get("eta_seconds")
+    if type(eta) in (int, float):
+        if age > eta:
+            value["eta_seconds"] = None
+            value["eta_basis"] = "forecast_overdue"
+            value["stalled_or_retrying"] = True
+        else:
+            value["eta_seconds"] = round(max(0.0, eta - age), 3)
+    planning = value.get("planning_eta_seconds")
+    if (
+        isinstance(planning, list)
+        and len(planning) == 2
+        and all(type(item) in (int, float) for item in planning)
+    ):
+        if age > planning[1]:
+            value["planning_eta_seconds"] = None
+            value["eta_basis"] = "planning_range_exceeded_retrying"
+            value["stalled_or_retrying"] = True
+        else:
+            value["planning_eta_seconds"] = [round(max(0.0, item - age), 1) for item in planning]
+
+
 def is_cached_cohort_progress_request(method, path):
     """Select only the fixed cache-only GET route, never another public read."""
     prefix, suffix = "/v1/competition/cohorts/", "/progress"
@@ -154,6 +233,8 @@ class CohortProgressSnapshots:
             return
         now = time.monotonic()
         public = {key: body[key] for key in _FIELDS if key in body}
+        if kind == "reserved_participation" and "historical_recovery" in body:
+            public["historical_recovery"] = _historical_progress(body["historical_recovery"])
         if kind == "execution_workers":
             from .competition_cohort_execution_work import MAX_STAGES, public_stage
 
@@ -268,17 +349,16 @@ class CohortProgressSnapshots:
 
                     for worker in value["workers"]:
                         worker["stages"] = [aged_stage(s, age) for s in worker["stages"]]
-                if (
-                    kind in {"acceptance", "reserved_participation"}
-                    and value.get("status") == "running"
-                ) or kind in {
+                if kind == "reserved_participation":
+                    _age_participation(value, age)
+                    if "historical_recovery" in value:
+                        _age_participation(value["historical_recovery"], age)
+                if (kind == "acceptance" and value.get("status") == "running") or kind in {
                     "certification",
                     "intake_certification",
                 }:
                     if kind == "acceptance":
                         value["elapsed_seconds"] = round(age, 3)
-                    elif kind == "reserved_participation":
-                        value["elapsed_seconds"] = round(value.get("elapsed_seconds", 0) + age, 3)
                     planning = value.get("planning_eta_seconds")
                     if (
                         isinstance(planning, list)

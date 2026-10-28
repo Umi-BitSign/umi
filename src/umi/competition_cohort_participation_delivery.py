@@ -1,6 +1,7 @@
 """One idempotent participation path for HTTP retries and retained consent."""
 
 import asyncio
+import re
 import sqlite3
 from contextlib import nullcontext
 from functools import partial
@@ -15,6 +16,67 @@ from .open_competition import digest
 
 class ParticipationUnavailable(OSError):
     """The exact signed participation can resume after its owner is ready."""
+
+    def __init__(self, message, *, stage):
+        super().__init__(message)
+        self.stage = stage
+        self.reason_code = _UNAVAILABLE_REASONS[stage]
+
+
+_UNAVAILABLE_REASONS = {
+    "receipt_lookup": "participation_receipt_unavailable",
+    "payload_prerequisite": "participation_payload_prerequisite_unavailable",
+    "registration_capture": "participation_registration_unavailable",
+    "native_retention": "participation_retention_unavailable",
+    "evidence_preservation": "participation_evidence_unavailable",
+}
+
+
+def participation_retry_details(error, *, stage=None):
+    """Expose bounded diagnostic identities, never exception text or arguments."""
+    chain, seen = [], set()
+    current = error
+    while current is not None and id(current) not in seen and len(chain) < 8:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__
+
+    def name(value):
+        kind = type(value).__name__
+        return kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", kind) else "Exception"
+
+    repair = any(
+        (isinstance(item, ValueError) and not isinstance(item, AdmissionCapacityError))
+        or name(item).endswith("RepairRequired")
+        for item in chain
+    )
+    wrapped = next((item for item in chain if isinstance(item, ParticipationUnavailable)), None)
+    details = {
+        "error_type": name(error),
+        "cause_type": name(chain[-1]),
+        "error_stage": stage if wrapped is None else wrapped.stage,
+        "reason_code": (
+            wrapped.reason_code
+            if wrapped is not None
+            else "retained_participation_metadata_repair_required"
+            if repair
+            else "reserved_participation_retrying"
+        ),
+        "repair_required": repair,
+    }
+    for item in chain:
+        if not isinstance(item, sqlite3.Error):
+            continue
+        code, label = (
+            getattr(item, "sqlite_errorcode", None),
+            getattr(item, "sqlite_errorname", None),
+        )
+        if type(code) is int and 0 <= code <= 2**31 - 1:
+            details["sqlite_errorcode"] = code
+        if isinstance(label, str) and re.fullmatch(r"SQLITE_[A-Z0-9_]{1,64}", label):
+            details["sqlite_errorname"] = label
+        break
+    return details
 
 
 class ParticipationDelivery:
@@ -37,7 +99,7 @@ class ParticipationDelivery:
             prior = await run_owned_thread(self.intake.receipt, signed)
         except (ValueError, OSError, sqlite3.Error) as error:
             raise ParticipationUnavailable(
-                "retained cohort intake unavailable; retry unchanged"
+                "retained cohort intake unavailable; retry unchanged", stage="receipt_lookup"
             ) from error
         if prior is None:
             if before_retain is not None:
@@ -47,7 +109,7 @@ class ParticipationDelivery:
                     await run_owned_thread(self.models.require_payload, signed)
             except (OSError, sqlite3.Error) as error:
                 raise ParticipationUnavailable(
-                    "cohort intake unavailable; retry unchanged"
+                    "cohort intake unavailable; retry unchanged", stage="payload_prerequisite"
                 ) from error
             try:
                 current = await asyncio.wait_for(
@@ -55,7 +117,8 @@ class ParticipationDelivery:
                 )
             except Exception as error:
                 raise ParticipationUnavailable(
-                    "registration observation unavailable; retry unchanged"
+                    "registration observation unavailable; retry unchanged",
+                    stage="registration_capture",
                 ) from error
             try:
                 # The direct owner supplies its issuance lock. Capture and
@@ -78,7 +141,7 @@ class ParticipationDelivery:
                 raise
             except (AdmissionCapacityError, OSError, sqlite3.Error) as error:
                 raise ParticipationUnavailable(
-                    "cohort intake unavailable; retry unchanged"
+                    "cohort intake unavailable; retry unchanged", stage="native_retention"
                 ) from error
         await self._preserve(signed)
         return prior
@@ -102,5 +165,5 @@ class ParticipationDelivery:
                 )
         except (ValueError, OSError, sqlite3.Error) as error:
             raise ParticipationUnavailable(
-                "admission evidence unavailable; retry unchanged"
+                "admission evidence unavailable; retry unchanged", stage="evidence_preservation"
             ) from error

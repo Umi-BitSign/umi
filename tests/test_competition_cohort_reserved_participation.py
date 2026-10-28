@@ -1,6 +1,7 @@
 """Real direct-upload journals feed the native participation continuation lane."""
 
 import asyncio
+import sqlite3
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,6 +17,7 @@ from umi.competition_cohort_direct_model_upload import (
     SignedDirectModelUploadRestartRequest,
 )
 from umi.competition_cohort_model_acceptance import ModelArtifactReviewInputs
+from umi.competition_cohort_participation_delivery import ParticipationUnavailable
 from umi.competition_cohort_public_progress import PUBLIC_COHORT_PROGRESS
 from umi.competition_cohort_reserved_participation import (
     ReservedParticipationWorker,
@@ -118,7 +120,7 @@ async def test_preupgrade_ready_reservation_backfills_without_payload_reads(dire
     assert view["components"]["reserved_participation"]["percent"] == 100
     assert (
         view["components"]["reserved_participation"]["eta_scope"]
-        == "ready_reserved_participation_only"
+        == "selected_ready_participation_checkpoints"
     )
 
 
@@ -538,3 +540,112 @@ async def test_projection_rechecks_deadline_authority_after_snapshot_release(dir
     direct.owner.selection_authority = lambda cohort: "dd" * 32
     with pytest.raises(DirectModelSelectionChanged):
         await asyncio.to_thread(direct.owner._poll_projection)
+
+
+async def _ready_with_historical_predecessors(direct):
+    owner = direct.owner
+    owner.participation_ready = queue_ready_participation
+    keys = await complete_poll_uploads(direct)
+    for key in keys:
+        await owner.verify(key, now_unix_ms=NOW + 2)
+    await owner.poll_once(now_unix_ms=NOW + 3)
+    uploads = owner.journal.keys("direct-participation-ready")
+    owner._continuation_selection = (owner._continuation_selection[0], frozenset(uploads[:-1]))
+    return uploads
+
+
+async def test_selected_work_does_not_wait_for_historical_queue_or_inherit_its_total(direct):
+    uploads = await _ready_with_historical_predecessors(direct)
+    worker, delivery = _worker(direct.owner)
+    first = await worker.poll_once()
+    assert [digest(call.args[0]) for call in delivery.retain.await_args_list] == [
+        uploads[-1],
+        uploads[0],
+    ]
+    assert (first["completed"], first["total"]) == (1, 1)
+    assert (first["queue_completed"], first["queue_total"]) == (1, 3)
+    history = first["historical_recovery"]
+    assert (history["completed"], history["total"], history["eta_samples"]) == (0, 2, 0)
+    assert history["excluded_without_receipt_this_poll"] == 1
+    assert history["eta_seconds"] is None
+    assert first["eta_samples"] == 1
+    second = await worker.poll_once()
+    assert (second["completed"], second["total"]) == (1, 1)
+    assert second["historical_recovery"]["total"] == 2
+    assert second["historical_recovery"]["excluded_without_receipt_this_poll"] == 2
+    assert delivery.retain.await_count == 4
+    # No synthetic completion is written for an excluded request without a receipt.
+    assert direct.owner.journal.get("direct-participation-completed", uploads[0]) is None
+
+
+async def test_batch_one_alternates_selected_failures_and_historical_receipt_recovery(direct):
+    uploads = await _ready_with_historical_predecessors(direct)
+    calls = []
+
+    async def retain(request, *, before_retain, admission_lock):
+        upload = digest(request)
+        calls.append(upload)
+        if upload == uploads[-1]:
+            before_retain()
+            raise OSError("selected registration temporarily unavailable")
+        # Model an existing native receipt: the shared delivery test exercises
+        # this recovery against the real intake and evidence journal.
+        return {"record_sha256": "c1" * 32}
+
+    worker, _ = _worker(direct.owner, AsyncMock(side_effect=retain))
+    worker.batch_size = 1
+    results = [await worker.poll_once() for _ in range(4)]
+    assert calls == [uploads[-1], uploads[0], uploads[-1], uploads[1]]
+    assert all((r["completed"], r["total"]) == (0, 1) for r in results)
+    assert results[-1]["eta_samples"] == 0
+    assert results[-1]["historical_recovery"]["eta_samples"] == 2
+    assert results[-1]["historical_recovery"]["completed"] == 2
+
+
+async def test_unknown_selection_keeps_receipt_recovery_and_unknown_selected_denominator(direct):
+    direct.owner.participation_ready = queue_ready_participation
+    await _complete(direct)
+    await direct.owner.poll_once(now_unix_ms=NOW + 3)
+    direct.owner._continuation_selection = None
+    delivery = AsyncMock(return_value={"record_sha256": "c1" * 32})
+    worker, _ = _worker(direct.owner, delivery)
+    result = await worker.poll_once()
+    assert result["total"] is None
+    assert (result["queue_completed"], result["queue_total"]) == (1, 1)
+    assert result["historical_recovery"]["scope"] == "unclassified_ready_receipt_checkpoints"
+    assert result["historical_recovery"]["completed"] == 1
+    delivery.assert_awaited_once()
+
+
+@pytest.mark.parametrize("repair", [False, True])
+async def test_worker_and_public_progress_preserve_typed_retry_cause_without_private_text(
+    direct, repair
+):
+    direct.owner.participation_ready = queue_ready_participation
+    await _complete(direct)
+    await direct.owner.poll_once(now_unix_ms=NOW + 3)
+    cause = (
+        ValueError("private /path https://secret.invalid")
+        if repair
+        else sqlite3.OperationalError("private /path https://secret.invalid")
+    )
+    if not repair:
+        cause.sqlite_errorcode, cause.sqlite_errorname = sqlite3.SQLITE_BUSY, "SQLITE_BUSY"
+    error = ParticipationUnavailable("private wrapper text", stage="evidence_preservation")
+    error.__cause__ = cause
+    worker, _ = _worker(direct.owner, AsyncMock(side_effect=error))
+    result = await worker.poll_once()
+    public = PUBLIC_COHORT_PROGRESS.snapshot(direct.owner.config.cohort_sha256)["components"][
+        "reserved_participation"
+    ]
+    for value in (result, public):
+        assert value["error_type"] == "ParticipationUnavailable"
+        assert value["cause_type"] == type(cause).__name__
+        assert value["error_stage"] == "evidence_preservation"
+        assert value["reason_code"] == "participation_evidence_unavailable"
+        assert value["repair_required"] is repair
+        if not repair:
+            assert value["sqlite_errorcode"] == sqlite3.SQLITE_BUSY
+            assert value["sqlite_errorname"] == "SQLITE_BUSY"
+        assert "secret.invalid" not in str(value)
+        assert "private wrapper" not in str(value)

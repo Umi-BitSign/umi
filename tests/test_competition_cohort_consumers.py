@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from collections import Counter
 from fractions import Fraction
 
 import pytest
@@ -24,6 +26,7 @@ from umi.competition_cohort_recovery import (
     admit_recoverable_cohort,
     propose_recovery_transition,
 )
+from umi.competition_cohort_recovery_store import CohortRecoveryStore
 from umi.open_competition import (
     EvaluationRound,
     digest,
@@ -504,3 +507,146 @@ def test_store_exports_only_committed_decisions_with_certified_genesis(ledger, r
     )
     with pytest.raises(ValueError):
         ledger.export_history(cohort, genesis_signatures=signatures(genesis, ("Charlie",)))
+
+
+@pytest.mark.parametrize("committed_count", [0, 2])
+def test_history_export_checks_each_committed_prefix_once(
+    ledger, recovery, policy, tmp_path, monkeypatch, committed_count
+):
+    from umi import competition_cohort_recovery as native
+
+    plan, authority, _ = recovery
+    cohort = digest(plan)
+    genesis, _ = admit_recoverable_cohort(plan, authority, policy, admitted_at_block=160)
+    committed = []
+    for i in range(committed_count):
+        decision = ledger.reserve(
+            cohort,
+            phase="intake",
+            operation="extend",
+            observed_at_block=300 + i,
+            evidence_sha256=f"{i + 1:064x}",
+        )
+        signed = signed_transition(decision)
+        ledger.commit(signed)
+        committed.append(signed)
+    pending = ledger.reserve(
+        cohort,
+        phase="intake",
+        operation="extend",
+        observed_at_block=400,
+        evidence_sha256="ab" * 32,
+    )
+    observed = Counter()
+    verify = native.verify_signature
+    genesis_signatures = signatures(genesis)
+
+    def counted(body, signature):
+        observed[digest(body)] += 1
+        return verify(body, signature)
+
+    monkeypatch.setattr(native, "verify_signature", counted)
+    with sqlite3.connect(tmp_path / "recovery.sqlite3") as db:
+        reopened = CohortRecoveryStore(db)
+        history = reopened.export_history(cohort, genesis_signatures=genesis_signatures)
+    assert history.transitions == tuple(committed)
+    assert observed[digest(genesis)] == 2
+    assert observed[digest(authority.authority)] == 2 * (1 + committed_count)
+    assert all(observed[digest(item.transition)] == 2 for item in committed)
+    assert observed[digest(pending)] == 0
+    assert canonical_json_bytes(history) == canonical_json_bytes(
+        CohortRecoveryHistory(
+            schema="umi-cohort-recovery-history/1",
+            plan=plan,
+            authority=authority,
+            genesis=genesis,
+            genesis_signatures=genesis_signatures,
+            transitions=tuple(committed),
+        )
+    )
+
+
+def test_history_export_rejects_duplicate_evidence_in_legacy_table(ledger, recovery, policy):
+    from umi.competition_cohort_recovery_store import _decision_key
+
+    plan, authority, _ = recovery
+    cohort = digest(plan)
+    genesis, _ = admit_recoverable_cohort(plan, authority, policy, admitted_at_block=160)
+    decision = ledger.reserve(
+        cohort,
+        phase="intake",
+        operation="extend",
+        observed_at_block=300,
+        evidence_sha256="ab" * 32,
+    )
+    state = ledger.commit(signed_transition(decision))
+    repeated = propose_recovery_transition(
+        state,
+        authority.authority,
+        operation="extend",
+        observed_at_block=301,
+        evidence_sha256=decision.evidence_sha256,
+    )
+    # Retained layouts are not assumed to enforce today's UNIQUE declaration.
+    ledger.db.execute("ALTER TABLE cohort_recovery_decisions RENAME TO old_decisions")
+    ledger.db.execute("CREATE TABLE cohort_recovery_decisions AS SELECT * FROM old_decisions")
+    ledger.db.execute(
+        "INSERT INTO cohort_recovery_decisions VALUES (?,?,?,?,?)",
+        (
+            cohort,
+            repeated.sequence,
+            _decision_key(cohort, repeated.phase, repeated.operation, repeated.evidence_sha256),
+            canonical_json_bytes(repeated),
+            canonical_json_bytes(signed_transition(repeated)),
+        ),
+    )
+    ledger.db.commit()
+    with pytest.raises(ValueError, match="same phase evidence twice"):
+        ledger.export_history(cohort, genesis_signatures=signatures(genesis))
+
+
+@pytest.mark.parametrize("corruption", ["canonical", "certificate", "signature", "after_pending"])
+def test_history_export_rejects_corrupt_prefix_after_reopen(
+    ledger, recovery, policy, tmp_path, corruption
+):
+    plan, authority, _ = recovery
+    cohort = digest(plan)
+    genesis, _ = admit_recoverable_cohort(plan, authority, policy, admitted_at_block=160)
+    decision = ledger.reserve(
+        cohort,
+        phase="intake",
+        operation="extend",
+        observed_at_block=300,
+        evidence_sha256="ab" * 32,
+    )
+    signed = signed_transition(decision)
+    state = ledger.commit(signed)
+    if corruption == "canonical":
+        ledger.db.execute(
+            "UPDATE cohort_recovery_decisions SET body=?", (b" " + canonical_json_bytes(decision),)
+        )
+    elif corruption == "certificate":
+        changed = signed.model_copy(
+            update={"transition": decision.model_copy(update={"evidence_sha256": "cd" * 32})}
+        )
+        ledger.db.execute(
+            "UPDATE cohort_recovery_decisions SET certificate=?", (canonical_json_bytes(changed),)
+        )
+    elif corruption == "signature":
+        changed = signed.model_copy(update={"signatures": signatures(decision, ("Charlie",))})
+        ledger.db.execute(
+            "UPDATE cohort_recovery_decisions SET certificate=?", (canonical_json_bytes(changed),)
+        )
+    else:
+        later = propose_recovery_transition(
+            state,
+            authority.authority,
+            operation="extend",
+            observed_at_block=301,
+            evidence_sha256="cd" * 32,
+        )
+        ledger.commit(signed_transition(later))
+        ledger.db.execute("UPDATE cohort_recovery_decisions SET certificate=NULL WHERE sequence=1")
+    ledger.db.commit()
+    with sqlite3.connect(tmp_path / "recovery.sqlite3") as db, pytest.raises(ValueError):
+        CohortRecoveryStore(db).export_history(cohort, genesis_signatures=signatures(genesis))

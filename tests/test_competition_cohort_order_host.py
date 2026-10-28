@@ -5,6 +5,8 @@ signature, selection and delivery receipt uses the native implementation.
 """
 
 import json
+import logging
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -151,6 +153,146 @@ async def test_complete_roster_selected_and_delivered_without_manual_orders(owne
     assert await resumed.select(r.cohort) == count
     assert (await resumed.worker.poll_once())["retry_count"] == 0
     assert (len(r.h.calls), len(r.receipt_calls), o.prepared_reads) == calls
+
+
+async def test_waiting_history_reuses_native_result_after_restart_off_event_loop(
+    owner, monkeypatch
+):
+    from umi import competition_cohort_order_host as native
+
+    o, r = owner, owner.network.r
+    initial = r.h.source
+    r.h.source = initial.model_copy(
+        update={
+            "history": initial.history.model_copy(update={"transitions": ()}),
+            "decisions": (),
+        }
+    )
+    calls = []
+    verify = native.verify_cohort_history
+    event_thread = threading.get_ident()
+
+    def counted(*args, **kwargs):
+        calls.append(threading.get_ident())
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(native, "verify_cohort_history", counted)
+    host = o.host()
+    assert await host.select(r.cohort) == 0
+    assert await host.select(r.cohort) == 0
+    assert await o.host().select(r.cohort) == 0
+    assert len(calls) == 1 and calls[0] != event_thread
+    assert o.prepared_reads == 0
+    # A receipt cannot stand in for fresh current history or owned finality.
+    r.h.fail_collect = True
+    with pytest.raises(OSError, match="provider unavailable"):
+        await host.select(r.cohort)
+    r.h.fail_collect = False
+    r.h.block = initial.history.genesis.admitted_at_block - 1
+    with pytest.raises(ValueError, match="owned finalized"):
+        await host.select(r.cohort)
+    assert len(calls) == 1
+    r.h.block = 400
+    r.h.source = initial
+    assert await host.select(r.cohort) == len(r.h.batch["roster"].participants)
+    assert len(calls) == 2  # The changed signed history receives its own first review.
+
+
+@pytest.mark.parametrize("change", ["signature", "policy", "authority", "runtime"])
+async def test_order_history_reuse_binds_changed_dependencies(owner, monkeypatch, change):
+    from umi import competition_cohort_order_host as native
+
+    o, r = owner, owner.network.r
+    host = o.host()
+    source = r.h.source
+    calls = []
+    verify = native.verify_cohort_history
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(native, "verify_cohort_history", counted)
+    host._history_review(r.cohort, source, r.h.block)
+    if change == "signature":
+        signatures = source.history.genesis_signatures
+        changed = signatures[0].model_copy(update={"signature": "00" * 64})
+        source = source.model_copy(
+            update={
+                "history": source.history.model_copy(
+                    update={"genesis_signatures": (changed, *signatures[1:])}
+                )
+            }
+        )
+    elif change == "policy":
+        host.queue.policy = host.queue.policy.model_copy(
+            update={"valid_through_block": host.queue.policy.valid_through_block + 1}
+        )
+    elif change == "authority":
+        host.queue.cohorts[r.cohort] = "ff" * 32
+    else:
+        host.history_verification.runtime = "changed-native-semantics"
+    if change == "runtime":
+        host._history_review(r.cohort, source, r.h.block)
+        assert len(calls) == 2
+    else:
+        with pytest.raises(ValueError):
+            host._history_review(r.cohort, source, r.h.block)
+        assert len(calls) == (1 if change == "authority" else 2)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+async def test_order_history_receipt_damage_reports_scoped_repair(
+    owner, monkeypatch, caplog, damage
+):
+    from umi import competition_cohort_order_host as native
+
+    o, r = owner, owner.network.r
+    host = o.host()
+    original = host._history_review(r.cohort, r.h.source, r.h.block)
+    (path,) = host.history_verification.directory.glob("*.json")
+    if damage == "missing":
+        path.unlink()
+    else:
+        path.write_bytes(b"{}")
+    calls = []
+    verify = native.verify_cohort_history
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(native, "verify_cohort_history", counted)
+    with caplog.at_level(logging.INFO, logger="umi.competition.progress"):
+        resumed = o.host()
+        assert resumed._history_review(r.cohort, r.h.source, r.h.block) == original
+    assert calls == [1]
+    assert '"state":"repair_required"' in caplog.text
+    assert '"stage":"order_selection_signed_history"' in caplog.text
+    assert o.host()._history_review(r.cohort, r.h.source, r.h.block) == original
+    assert calls == [1]
+
+
+async def test_order_history_owner_scope_does_not_borrow_another_queues_result(owner, monkeypatch):
+    from umi import competition_cohort_order_host as native
+
+    o, r = owner, owner.network.r
+    first = o.host()
+    first._history_review(r.cohort, r.h.source, r.h.block)
+    queue = o.service.config.orders.queue.model_copy(update={"directory": str(o.shared_queue)})
+    o.service.config.orders = o.service.config.orders.model_copy(update={"queue": queue})
+    calls = []
+    verify = native.verify_cohort_history
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(native, "verify_cohort_history", counted)
+    second = o.host()
+    second._history_review(r.cohort, r.h.source, r.h.block)
+    assert calls == [1]
+    assert second.history_verification.owner != first.history_verification.owner
 
 
 async def test_retained_roster_returns_verified_orders_and_rejects_later_tampering(owner):
