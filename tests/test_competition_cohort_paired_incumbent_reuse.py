@@ -270,6 +270,23 @@ async def test_embedded_shared_observation_authenticates_original_source_assignm
         observe(scenario, changed)
 
 
+async def test_embedded_shared_observation_authenticates_consumer_assignment(execution):
+    import json
+
+    e = execution
+    paired(e)
+    await finish(e, e.assignment)
+    assignment, _, scenario = await other_assignment(e)
+    evidence = await finish(e, assignment)
+    original = json.loads(evidence.consumer_assignment_json)
+    original["certificate"]["signatures"] = []
+    changed = evidence.model_copy(
+        update={"consumer_assignment_json": canonical_json_bytes(original).decode()}
+    )
+    with pytest.raises(ValueError):
+        observe(scenario, changed)
+
+
 async def test_shared_partial_restart_reuses_verdict_and_missing_source_requires_repair(
     execution, tmp_path, monkeypatch
 ):

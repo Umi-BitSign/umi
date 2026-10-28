@@ -568,6 +568,15 @@ parent bindings, current phase and quorum signatures remain separate checks.
 Model acceptance uses the already decoded indexed intake record without decoding
 it a second time; its native participation and certificate review remain required.
 
+Intake work prioritizes the earliest unfinished cohort even while its automatic
+progression is held. Under contention, four oldest-cohort attempts are followed
+by one background opportunity, with later cohorts rotating fairly. Current
+verification or promotion drains at its existing safe item boundary; a priority
+change never interrupts a full-object hash or repeats completed work. Cached
+public progress names the owner and stage currently using the worker and the
+cohort waiting for it. Queue-wait ETA remains unknown until there is a measured
+basis; API polling only reads this cached state.
+
 Paid scheduling pages omit work with a retained terminal before reconstructing
 its admission. This presence check only avoids redispatch: full queue reads,
 sealing, terminal verification and interrupted-export recovery still authenticate
