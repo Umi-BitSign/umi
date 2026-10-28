@@ -5044,6 +5044,17 @@ or proof that request initialization completed. Select the qualified admission
 owner source through its existing supervisor update path, preserving its state
 directories and cohort bindings.
 
+Request observation and delivery owners exclude independently authenticated
+intake deadlines from their immutable semantic binding. A deadline addition or
+removal preserves an existing unheld owner's exact original binding and native
+verification namespace, including legacy records that contain that field. All
+other cohort, authority, state-path, roster, catalog and transport dependencies
+must still match. Observation/publication owner selection and completed receipts
+remain in place; no new signing or configuration field is needed. Select this
+compatibility reader through the admission owner's supported source update path.
+It prevents new deadline-only conflicts but does not clear an existing hold or
+skip historical output restoration.
+
 ### Holding automatic cohort progression during a release
 
 The admission host accepts `recoverable_service.lifecycle.automatic_progression_hold_cohorts`

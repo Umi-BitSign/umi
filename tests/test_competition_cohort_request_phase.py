@@ -766,6 +766,138 @@ def test_damaged_request_verification_selection_requires_repair(request_owner):
     assert h.source._verification_reuse is None
 
 
+@pytest.mark.parametrize("receipt_scenario", ["standing"], indirect=True)
+@pytest.mark.parametrize("observe_first", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+async def test_legacy_deadline_change_preserves_typed_verification_owner_and_receipts(
+    request_owner, tmp_path, monkeypatch, observe_first, shared
+):
+    from copy import deepcopy
+
+    from umi import competition_cohort_request_closure as closure_module
+    from umi.competition_cohort_intake import CohortIntake
+    from umi.competition_cohort_request_publication import CohortRequestSettlementPublisher
+    from umi.competition_verification_reuse import _identity
+    from umi.protocol import canonical_json_bytes
+
+    from .test_competition_cohort_admission_deadline import selection_for
+
+    h = request_owner
+    if shared:
+        monkeypatch.setenv("UMI_NATIVE_VERIFICATION_DIRECTORY", str(tmp_path / "shared"))
+    else:
+        monkeypatch.delenv("UMI_NATIVE_VERIFICATION_DIRECTORY", raising=False)
+    original_deadline = selection_for(h.intake, {"intake_history": h.intake.history(h.cohort)})
+    original_config = h.intake.config.model_copy(
+        update={"admission_deadlines": (original_deadline,)}
+    )
+    h.intake = CohortIntake(original_config, h.intake.policy, eligible_tracks=h.intake.tracks)
+    h.sources = h.sources.model_copy(update={"intake": original_config})
+    # Seed exact pre-upgrade records through the native writer, before this
+    # isolated legacy owner performs any work. Production state is never edited.
+    legacy_binding = deepcopy(h.source._verification_owner["binding"])
+    legacy_binding["intake"] = original_config.model_dump(mode="json", by_alias=True)
+    journal = RoundJournal(tmp_path / "legacy-owner", {"cohort": h.cohort})
+    journal.put("request_phase_binding", h.cohort, legacy_binding)
+    handoff = tmp_path / "legacy-handoff"
+    legacy_delivery = {
+        "sources": h.sources.model_dump(mode="json", by_alias=True),
+        "history_directory": str(handoff),
+    }
+    journal.put("request_delivery_binding", h.cohort, legacy_delivery)
+    external = h.source.external
+
+    def reopen():
+        return NativeRequestProgressSource(
+            h.intake,
+            RoundJournal(journal.root, {"cohort": h.cohort}),
+            roster=h.b["roster"],
+            catalogs=(h.c.assignment.catalog,),
+            queues=(h.c.queue,),
+            transport=h.b["transport"],
+            orders=lambda: h.b["orders"],
+            terminals=lambda order, who: h.b["terminals"].get((digest(order), identity(who))),
+            objects=external,
+            maximum_sample_gap_blocks=300,
+        )
+
+    h.reopen = reopen
+    h.source = reopen()
+    expected_observation_owner = _identity(
+        {
+            "kind": "request_observation",
+            "journal": str(journal.root),
+            "binding": legacy_binding,
+            "policy": digest(h.intake.policy),
+        }
+    )
+    assert _identity(h.source._verification_owner) == expected_observation_owner
+    checks = []
+    native = closure_module.read_request_terminal
+
+    def counted(*args, **kwargs):
+        checks.append(1)
+        return native(*args, **kwargs)
+
+    monkeypatch.setattr(closure_module, "read_request_terminal", counted)
+
+    async def proof(observation):
+        pass
+
+    def publication(decisions):
+        return CohortRequestSettlementPublisher(
+            h.source,
+            h.provider.collect,
+            decisions,
+            proof,
+            sources=h.sources,
+            history_directory=handoff,
+        )
+
+    if observe_first:
+        h.window()
+    with request_controller(h, tmp_path, publication) as control:
+        if not observe_first:
+            h.window()
+        await control.reopen().tick()
+        selected = control.publisher.verification_reuse
+        if observe_first:
+            assert selected.owner == expected_observation_owner
+        else:
+            assert selected.owner == _identity(
+                {
+                    "kind": "request_publication",
+                    "journal": control.publisher.objects.binding,
+                    "cohort": h.cohort,
+                    "sources": h.sources,
+                }
+            )
+        receipt_bytes = {p: p.read_bytes() for p in selected.directory.glob("*.json")}
+        assert receipt_bytes
+        checked = len(checks)
+        # The request-owner compatibility is independent of live deadline
+        # retention: use the supported current config with no deadline selection
+        # to model a restart whose retained selection remains in the intake DB.
+        current_config = original_config.model_copy(update={"admission_deadlines": ()})
+        h.intake = CohortIntake(current_config, h.intake.policy, eligible_tracks=h.intake.tracks)
+        h.sources = h.sources.model_copy(update={"intake": current_config})
+        h.source = reopen()
+        restarted = publication(control.decision)
+        assert restarted.verification_reuse.owner == selected.owner
+        assert restarted.verification_reuse.directory == selected.directory
+        assert _identity(h.source._verification_owner) == expected_observation_owner
+        await restarted(h.intake.history(h.cohort))
+        assert len(checks) == checked
+        assert all(p.read_bytes() == raw for p, raw in receipt_bytes.items())
+        assert journal.get_raw("request_phase_binding", h.cohort) == canonical_json_bytes(
+            legacy_binding
+        )
+        assert journal.get_raw("request_delivery_binding", h.cohort) == canonical_json_bytes(
+            legacy_delivery
+        )
+        assert h.intake.config.admission_deadlines == ()
+
+
 async def test_counted_publication_forecasts_use_exact_export_and_survive_retry(
     request_owner, tmp_path, monkeypatch
 ):
