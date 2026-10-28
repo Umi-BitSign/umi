@@ -351,6 +351,8 @@ def _original(load_original: Callable[[str], bytes], key: str, *, maximum=MAX_OR
 
 
 def _verify_participant(authenticated, entry, load_original):
+    from .competition_model_license import verify_cohort_model_terms
+
     policy, history = authenticated.policy, authenticated.original_history
     request = _canonical(
         _original(load_original, entry.request_raw_sha256, maximum=4 * 1024**2),
@@ -358,12 +360,14 @@ def _verify_participant(authenticated, entry, load_original):
         4 * 1024**2,
     )
     sub, consent = request.signed_submission.submission, request.consent.consent
+    verify_cohort_model_terms(
+        sub, consent, history, policy, current_block=authenticated.legacy.captured_at_block
+    )
     if (
         digest(request) != entry.request_sha256
         or sub.track != "model"
         or sub.model_revision != entry.model_sha256
         or sub.policy_sha256 != digest(policy)
-        or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or consent.cohort_sha256 != digest(history.plan)
         or consent.authority_sha256 != digest(history.authority.authority)
         or not history.authority.authority.issued_at_block

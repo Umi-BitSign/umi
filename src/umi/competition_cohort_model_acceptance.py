@@ -122,7 +122,16 @@ class ModelAcceptanceIntent(StrictProtocolModel):
 
 
 def verify_model_acceptance_body(a, record, history, policy, *, maximum_block):
+    from .competition_model_license import verify_cohort_model_terms
+
     sub, admission = record.request.signed_submission.submission, record.proposed_admission
+    verify_cohort_model_terms(
+        sub,
+        record.request.consent.consent,
+        history,
+        policy,
+        current_block=maximum_block,
+    )
     authority = history.authority.authority
     direct = a.direct_artifact
     if (

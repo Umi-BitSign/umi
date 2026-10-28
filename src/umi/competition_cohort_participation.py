@@ -16,6 +16,7 @@ from typing_extensions import Self
 
 from .competition_cohort_history import CohortRecoveryHistory, verify_cohort_history
 from .competition_cohort_recovery import Block, cohort_tracks, verify_recovery_quorum
+from .competition_model_license import verify_cohort_model_terms
 from .open_competition import (
     CompetitionPolicy,
     Hotkey,
@@ -137,6 +138,7 @@ def admit_recovery_participant(
     if view.state.phase != "intake" or current_block < view.state.not_before_block:
         raise ValueError("cohort intake is not open")
     sub, body = signed.submission, consent.consent
+    verify_cohort_model_terms(sub, body, history, policy, current_block=current_block)
     if (
         sub.policy_sha256 != digest(policy)
         or (
@@ -145,7 +147,6 @@ def admit_recovery_participant(
                 history.plan, ("endpoint", "model"), adoption=view.state.model_delivery_adoption
             )
         )
-        or sub.accepted_terms_sha256 != policy.contribution_terms_sha256
         or body.cohort_sha256 != view.state.cohort_sha256
         or body.authority_sha256 != view.state.authority_sha256
         or body.submission_sha256 != digest(sub)
